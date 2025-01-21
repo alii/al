@@ -556,10 +556,7 @@ export class Parser {
           type: "OrExpression",
           expression: primary,
           errorBinding,
-          handler: {
-            type: "BlockExpression",
-            body: this.parseBlock(),
-          },
+          handler: this.parseBlock(),
         };
       } else {
         // Otherwise, parse an expression fallback

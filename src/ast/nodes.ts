@@ -103,11 +103,6 @@ export interface ExportStatement {
   declaration: Statement;
 }
 
-export interface BlockExpression {
-  type: "BlockExpression";
-  body: Statement[];
-}
-
 export interface IfStatement {
   type: "IfStatement";
   condition: Expression;
@@ -216,7 +211,7 @@ export interface OrExpression {
   type: "OrExpression";
   expression: Expression;
   errorBinding?: Identifier;
-  handler: BlockExpression;
+  handler: Statement[];
 }
 
 export interface OrExpressionFallback {
@@ -241,7 +236,6 @@ export type Expression =
   | Identifier
   | BinaryExpression
   | UnaryExpression
-  | BlockExpression
   | FunctionCall
   | PropertyAccess
   | StructInitialization

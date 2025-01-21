@@ -3,7 +3,6 @@ import type {
   ArrayIndexExpression,
   AssertStatement,
   BinaryExpression,
-  BlockExpression,
   BooleanLiteral,
   BreakStatement,
   ConstStatement,
@@ -88,8 +87,6 @@ export class JSGenerator {
         return this.generateEnumDeclaration(statement);
       case "ExpressionStatement":
         return this.generateExpression(statement.expression) + ";";
-      case "BlockExpression":
-        return this.generateBlockExpression(statement);
       default:
         throw new Error("Unsupported statement type: " + statement.type);
     }
@@ -275,8 +272,6 @@ ${variantDefs}
         return this.generateBinaryExpression(expression);
       case "UnaryExpression":
         return this.generateUnaryExpression(expression);
-      case "BlockExpression":
-        return this.generateBlockExpression(expression as BlockExpression);
       case "FunctionCall":
         return this.generateFunctionCall(expression);
       case "PropertyAccess":
@@ -330,16 +325,6 @@ ${variantDefs}
     return `${expression.operator}${this.generateExpression(
       expression.expression
     )}`;
-  }
-
-  private generateBlockExpression(expression: BlockExpression): string {
-    const statementsJs = expression.body
-      .map((stmt) => this.generateStatement(stmt))
-      .join("\n");
-
-    return `(() => {
-${statementsJs}
-})()`;
   }
 
   private generateFunctionCall(expression: FunctionCall): string {
@@ -453,7 +438,7 @@ ${statementsJs}
   private generateOrExpression(expression: OrExpression): string {
     const { expression: tryExpr, errorBinding, handler } = expression;
     const tryValue = this.generateExpression(tryExpr);
-    const handlerBody = this.generateBlockExpression(handler);
+    const handlerBody = this.generateStatements(handler);
 
     if (errorBinding) {
       return `(() => {
