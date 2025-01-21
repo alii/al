@@ -198,8 +198,9 @@ ${this.indent}throw new Error(${this.generateExpression(message)});
     // For comptime declarations, we evaluate at compile time and inline the result
     if (isComptime) {
       // For now, we'll generate code that evaluates the expression immediately
-      return `${this.getIndent()}const ${identifier.name} = (() => {
-  // Comptime evaluation
+      return `${this.getIndent()}const ${
+        identifier.name
+      } = /* comptime */ (() => {
   return ${this.generateExpression(init)};
 })();`;
     }

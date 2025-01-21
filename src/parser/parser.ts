@@ -285,13 +285,6 @@ export class Parser {
   }
 
   private parseFunctionParameter(): FunctionParameter {
-    let isComptime = false;
-
-    if (this.current.kind === TokenKind.KW_COMPTIME) {
-      isComptime = true;
-      this.advance(); // consume 'comptime'
-    }
-
     const identifier = this.parseIdentifier();
 
     // Parse type annotation - must have a colon before type
