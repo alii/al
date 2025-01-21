@@ -20,3 +20,5 @@ fn fibonacci(n int) int {
 
 comptime fib := fibonacci(10) // this will be evaluated at compile time
 println(fib)
+
+println(ct_hello_world())
