@@ -15,25 +15,19 @@ export function compile(source: string): string {
   const parser = new Parser(tokens, source);
   const ast = parser.parseProgram();
 
-  // First pass: collect all comptime functions and evaluate comptime declarations
   const interpreter = new ComptimeInterpreter();
   const transformedAst = evaluateComptime(ast, interpreter);
 
-  // Build call graph & find reachable functions
-  const { functionMap, callGraph } = buildFunctionCallMap(transformedAst);
+  const callGraph = buildFunctionCallMap(transformedAst);
 
-  // Track functions that are needed at runtime (not just comptime)
   const runtimeEntryPoints = new Set<string>();
 
-  // Add functions that are called at runtime (not in comptime declarations)
   for (const stmt of transformedAst) {
     if (stmt.type === "ExpressionStatement") {
-      // Direct function calls in the program are runtime calls
       walkExpressionForCalls(stmt.expression, (name) =>
         runtimeEntryPoints.add(name)
       );
     } else if (stmt.type === "FunctionStatement") {
-      // If a function contains comptime declarations, we need it at runtime
       const hasComptimeDeclarations = stmt.body.some(
         (s) => s.type === "DeclarationStatement" && s.isComptime
       );
@@ -48,12 +42,10 @@ export function compile(source: string): string {
     Array.from(runtimeEntryPoints)
   );
 
-  // Filter out any function statements not needed at runtime
   const prunedAst = transformedAst.filter((stmt) => {
     if (stmt.type === "FunctionStatement") {
       return reachableFunctions.has(stmt.identifier.name);
     }
-    // Keep everything else
     return true;
   });
 
@@ -65,14 +57,12 @@ function evaluateComptime(
   statements: Statement[],
   interpreter: ComptimeInterpreter
 ): Statement[] {
-  // First pass: register all functions that might be used in comptime
   for (const stmt of statements) {
     if (stmt.type === "FunctionStatement") {
       interpreter.registerFunction(stmt);
     }
   }
 
-  // Second pass: recursively evaluate comptime declarations
   return statements.map((stmt) => transformStatement(stmt, interpreter));
 }
 
@@ -88,10 +78,8 @@ function transformStatement(
       };
     case "DeclarationStatement":
       if (stmt.isComptime) {
-        // Evaluate the comptime expression
         const value = interpreter.evaluate(stmt.init);
 
-        // Transform the declaration to use the computed value
         const transformedInit: Expression = (() => {
           if (typeof value === "number") {
             return { type: "NumberLiteral", value: value.toString() };
@@ -102,7 +90,6 @@ function transformStatement(
           } else if (value === null) {
             return { type: "NoneExpression" };
           } else {
-            // Fallback for other types - convert to string
             return { type: "StringLiteral", value: String(value) };
           }
         })();
@@ -111,7 +98,7 @@ function transformStatement(
           type: "DeclarationStatement",
           identifier: stmt.identifier,
           init: transformedInit,
-          isComptime: false, // No longer needs comptime evaluation
+          isComptime: false,
         } as DeclarationStatement;
       }
       return stmt;
@@ -136,7 +123,6 @@ function transformStatement(
   }
 }
 
-// Helper to collect function calls from an expression
 function walkExpressionForCalls(
   expr: Expression,
   onCall: (name: string) => void
@@ -146,7 +132,6 @@ function walkExpressionForCalls(
       if (expr.callee.type === "Identifier") {
         onCall(expr.callee.name);
       }
-      // Also check arguments
       for (const arg of expr.arguments) {
         walkExpressionForCalls(arg, onCall);
       }

@@ -190,7 +190,6 @@ ${this.indent}throw new Error(${this.generateExpression(message)});
     statement: DeclarationStatement
   ): string {
     const { identifier, init } = statement;
-    // Comptime declarations are now pre-evaluated, so we can just generate them as normal declarations
     return `${this.getIndent()}let ${
       identifier.name
     } = ${this.generateExpression(init)};`;
@@ -208,24 +207,10 @@ ${this.indent}throw new Error(${this.generateExpression(message)});
     const { identifier, variants } = statement;
     const enumName = identifier.name;
 
-    // Generate variant classes and "constructors" inside the enum class
-    // in a way that DOES NOT define the same static property again.
-    //
-    // For example, if the variant is "C(value)", we do:
-    //   static C_class = class { constructor(value) { this.value = value; } };
-    //   static C(value) { return new MyEnum.C_class(value); }
-    //
-    // If the variant is "A" (no payload), we do:
-    //   static A_class = class { constructor() {} };
-    //   static A = new MyEnum.A_class();
-
     const variantDefs = variants
       .map((variant) => {
         const variantName = variant.name.name;
 
-        // If this variant has a payload, define a class with constructor(value)
-        // and a static method that returns a new instance.
-        // If it has no payload, define a class with an empty constructor, plus a single static instance.
         if (variant.payload) {
           return `
   static ${variantName}_class = class {
@@ -248,7 +233,6 @@ ${this.indent}throw new Error(${this.generateExpression(message)});
       })
       .join("\n");
 
-    // Put them together into a "class MyEnum { ... }"
     return `class ${enumName} {
 ${variantDefs}
 }`;

@@ -1,21 +1,17 @@
-import type { Expression, FunctionStatement, Statement } from "../ast/nodes";
+import type { Expression, Statement } from "../ast/nodes";
 
 /**
  * This function scans through an array of statements (the entire AST)
- * to build a map of functionName -> the FunctionStatement node,
- * plus a map of functionName -> a Set of function names it calls.
+ * and returns a map of functionName -> a Set of function names it calls.
  */
-export function buildFunctionCallMap(statements: Statement[]): {
-  functionMap: Map<string, FunctionStatement>;
-  callGraph: Map<string, Set<string>>;
-} {
-  const functionMap = new Map<string, FunctionStatement>();
+export function buildFunctionCallMap(
+  statements: Statement[]
+): Map<string, Set<string>> {
   const callGraph = new Map<string, Set<string>>();
 
   // 1) Collect all functions
   for (const stmt of statements) {
     if (stmt.type === "FunctionStatement") {
-      functionMap.set(stmt.identifier.name, stmt);
       callGraph.set(stmt.identifier.name, new Set());
     }
   }
@@ -32,7 +28,7 @@ export function buildFunctionCallMap(statements: Statement[]): {
     }
   }
 
-  return { functionMap, callGraph };
+  return callGraph;
 }
 
 /**

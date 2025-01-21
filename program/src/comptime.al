@@ -6,7 +6,7 @@
 
 fn ct_hello_world() {
     comptime age := 10 * 10
-    println(age)
+    return age + 10
 }
 
 // Here's an example of calculating fibonacci at compile time.
