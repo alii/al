@@ -50,24 +50,72 @@ function walkStatementsForCalls(
         walkStatementsForCalls(stmt.body, onCall);
         break;
       case "IfStatement":
+        // Check condition expression
+        walkExpressionForCalls(stmt.condition, onCall);
+        // Check both branches
         walkStatementsForCalls(stmt.then, onCall);
         if (stmt.else) {
           walkStatementsForCalls(stmt.else, onCall);
         }
         break;
       case "ForStatement":
+        walkStatementsForCalls(stmt.body, onCall);
+        break;
       case "ForInStatement":
+        // Check the iterator expression
+        walkExpressionForCalls(stmt.iterator, onCall);
         walkStatementsForCalls(stmt.body, onCall);
         break;
       case "DeclarationStatement":
-        // Potentially walk the init expression
         walkExpressionForCalls(stmt.init, onCall);
         break;
       case "ExpressionStatement":
         walkExpressionForCalls(stmt.expression, onCall);
         break;
-      // ... Handle other statement types that can contain sub-expressions ...
+      case "ReturnStatement":
+        if (stmt.expression) {
+          walkExpressionForCalls(stmt.expression, onCall);
+        }
+        break;
+      case "ThrowStatement":
+        walkExpressionForCalls(stmt.expression, onCall);
+        break;
+      case "AssertStatement":
+        walkExpressionForCalls(stmt.expression, onCall);
+        walkExpressionForCalls(stmt.message, onCall);
+        break;
+      case "ExportStatement":
+        walkStatementsForCalls([stmt.declaration], onCall);
+        break;
+      case "ConstStatement":
+        walkExpressionForCalls(stmt.init, onCall);
+        break;
+      case "StructDeclaration":
+        // Check field initializers if any
+        for (const field of stmt.fields) {
+          if (field.init) {
+            walkExpressionForCalls(field.init, onCall);
+          }
+        }
+        break;
+      case "BreakStatement":
+      case "ContinueStatement":
+        // These don't contain any expressions to check
+        break;
+      case "EnumDeclaration":
+        // No expressions to check in enum declarations
+        break;
       default:
+        // If it's an expression used as a statement, check it
+        if ((stmt as Expression).type) {
+          walkExpressionForCalls(stmt as Expression, onCall);
+        } else {
+          console.warn(
+            `Unhandled statement type in walkStatementsForCalls: ${
+              (stmt as any).type
+            }`
+          );
+        }
         break;
     }
   }
@@ -82,11 +130,14 @@ function walkExpressionForCalls(
 ) {
   switch (expr.type) {
     case "FunctionCall":
-      // If the callee is an Identifier, we have a direct function call
+      // Direct function calls with identifier
       if (expr.callee.type === "Identifier") {
         onCall(expr.callee.name);
+      } else {
+        // Handle complex callee expressions (e.g., property access)
+        walkExpressionForCalls(expr.callee, onCall);
       }
-      // Also check arguments
+      // Check all arguments
       for (const arg of expr.arguments) {
         walkExpressionForCalls(arg, onCall);
       }
@@ -99,14 +150,14 @@ function walkExpressionForCalls(
       walkExpressionForCalls(expr.expression, onCall);
       break;
     case "StructInitialization":
-      // Each field init can contain expressions
+      // Check field initializers
       for (const field of expr.fields) {
         walkExpressionForCalls(field.init, onCall);
       }
       break;
     case "ArrayExpression":
-      for (const e of expr.elements) {
-        walkExpressionForCalls(e, onCall);
+      for (const element of expr.elements) {
+        walkExpressionForCalls(element, onCall);
       }
       break;
     case "ArrayIndexExpression":
@@ -118,16 +169,41 @@ function walkExpressionForCalls(
       walkExpressionForCalls(expr.end, onCall);
       break;
     case "PropertyAccess":
-      // property access might have a left expression
       walkExpressionForCalls(expr.left, onCall);
+      // The right side is always an identifier, no need to walk
       break;
     case "OrExpression":
-      // The "or" expression might have a handler body or fallback
-      // This can be complicated if it's a function call, but let's omit details for brevity
+      walkExpressionForCalls(expr.expression, onCall);
+      // Walk the handler statements
+      walkStatementsForCalls(expr.handler, onCall);
       break;
-    // ... handle other expression types as needed ...
+    case "OrExpressionFallback":
+      walkExpressionForCalls(expr.expression, onCall);
+      walkExpressionForCalls(expr.fallback, onCall);
+      break;
+    case "MatchExpression":
+      walkExpressionForCalls(expr.expression, onCall);
+      // Check all case bodies
+      for (const matchCase of expr.cases) {
+        walkExpressionForCalls(matchCase.body, onCall);
+      }
+      break;
+    case "TypeIdentifier":
+      // No function calls in type identifiers
+      break;
+    case "StringLiteral":
+    case "NumberLiteral":
+    case "BooleanLiteral":
+    case "NoneExpression":
+    case "Identifier":
+      // These are leaf nodes with no function calls
+      break;
     default:
-      // StringLiteral, NumberLiteral, BooleanLiteral, Identifier, NoneExpression, etc.
+      console.warn(
+        `Unhandled expression type in walkExpressionForCalls: ${
+          (expr as any).type
+        }`
+      );
       break;
   }
 }
