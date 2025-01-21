@@ -1,5 +1,4 @@
 import type {
-  BlockExpression,
   EnumVariant,
   Expression,
   FunctionParameter,
@@ -306,7 +305,6 @@ export class Parser {
       type: "FunctionParameter",
       identifier,
       typeAnnotation,
-      isComptime,
     };
   }
 
@@ -394,6 +392,7 @@ export class Parser {
 
   private parseReturnStatement(): Statement {
     this.eat(TokenKind.KW_RETURN);
+
     // Possibly parse an expression if not semicolon (or some other pattern)
     if (
       this.current.kind !== TokenKind.PUNC_SEMICOLON &&
@@ -409,18 +408,18 @@ export class Parser {
   private parseIfStatement(): Statement {
     this.eat(TokenKind.KW_IF);
     const condition = this.parseExpression();
-    const thenBlock = this.parseBlockStatementOrSingle();
+    const thenBlock = this.parseBlock();
 
-    let elseBlock: BlockExpression | undefined;
+    let elseBlock: Statement[] | undefined;
     if (this.match(TokenKind.KW_ELSE)) {
-      elseBlock = this.parseBlockStatementOrSingle();
+      elseBlock = this.parseBlock();
     }
 
     return {
       type: "IfStatement",
       condition,
-      then: [thenBlock],
-      else: elseBlock && [elseBlock],
+      then: thenBlock,
+      else: elseBlock,
     };
   }
 
@@ -436,28 +435,18 @@ export class Parser {
       const identifier = this.parseIdentifier();
       this.eat(TokenKind.KW_IN);
       const iterator = this.parseExpression();
-      const body = this.parseBlock();
+
       return {
         type: "ForInStatement",
         identifier,
         iterator,
-        body: [
-          {
-            type: "BlockExpression",
-            body: this.parseBlock(),
-          },
-        ],
+        body: this.parseBlock(),
       };
     } else {
       // for { ... }
       return {
         type: "ForStatement",
-        body: [
-          {
-            type: "BlockExpression",
-            body: this.parseBlock(),
-          },
-        ],
+        body: this.parseBlock(),
       };
     }
   }
@@ -555,7 +544,7 @@ export class Parser {
   //---------------------------------------------------------------------------
 
   /**
-   * Handles "expr or err { block }" or "expr or expr"
+   * Handles "expr or err { block }" or "expr or expr" or "expr"
    */
   private parseExpression(): Expression {
     const primary = this.parseAssignmentExpression();
@@ -1134,18 +1123,5 @@ export class Parser {
     this.eat(TokenKind.PUNC_CLOSE_BRACE);
 
     return statements;
-  }
-
-  private parseBlockStatementOrSingle(): BlockExpression {
-    // If next token is a brace, parse a full block. Otherwise parse a single statement and wrap it.
-    if (this.current.kind === TokenKind.PUNC_OPEN_BRACE) {
-      return { type: "BlockExpression", body: this.parseBlock() };
-    } else {
-      const single = this.parseStatement();
-      return {
-        type: "BlockExpression",
-        body: [single],
-      };
-    }
   }
 }

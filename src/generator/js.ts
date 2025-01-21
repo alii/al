@@ -46,7 +46,6 @@ export class JSGenerator {
   generateRoot(statements: Statement[]): string {
     return `
       const println = console.log;
-      ${this.generateIsCompileTimeValue()}
       ${this.generateStatements(statements)}
     `;
   }
@@ -97,53 +96,15 @@ export class JSGenerator {
   }
 
   private generateFunctionStatement(statement: FunctionStatement): string {
-    const { identifier, params, body, returnType, throwType } = statement;
-    const jsDoc = this.generateJSDoc(returnType, throwType);
+    const { identifier, params, body } = statement;
 
-    // Add comptime parameter validation
-    const comptimeChecks = params
-      .filter((p) => p.isComptime)
-      .map(
-        (p) => `
-  // Validate comptime parameter ${p.identifier.name}
-  if (!isCompileTimeValue(${p.identifier.name})) {
-    throw new Error("Parameter ${p.identifier.name} must be a compile-time constant");
-  }`
-      )
-      .join("");
+    const functionBody = this.generateStatements(body);
 
-    const functionBody = comptimeChecks + "\n" + this.generateStatements(body);
+    const paramsString = params.map((p) => p.identifier.name).join(", ");
 
-    return `${jsDoc}function ${identifier.name}(${params
-      .map((p) => p.identifier.name)
-      .join(", ")}) {
-${this.indent}${functionBody}
+    return `function ${identifier.name}(${paramsString}) {
+  ${this.indent}${functionBody}
 }`;
-  }
-
-  private generateJSDoc(
-    returnType?: TypeIdentifier,
-    throwType?: TypeIdentifier
-  ): string {
-    const parts: string[] = [];
-
-    if (returnType) {
-      let type = returnType.identifier.name;
-      if (returnType.isArray) {
-        type = `Array<${type}>`;
-      }
-      if (returnType.isOption) {
-        type = `${type} | null`;
-      }
-      parts.push(`@returns {${type}}`);
-    }
-
-    if (throwType) {
-      parts.push(`@throws {${throwType.identifier.name}}`);
-    }
-
-    if (parts.length === 0) return "";
-    return `/**\n * ${parts.join("\n * ")}\n */\n`;
   }
 
   private generateReturnStatement(statement: ReturnStatement): string {
@@ -518,18 +479,5 @@ ${statementsJs}
   }
 })()`;
     }
-  }
-
-  // Helper function to check if a value is compile-time constant
-  private generateIsCompileTimeValue(): string {
-    return `
-function isCompileTimeValue(value) {
-  // For now, just check if it's a literal number, string, or boolean
-  return typeof value === "number" || 
-         typeof value === "string" || 
-         typeof value === "boolean" ||
-         value === null ||
-         value === undefined;
-}`;
   }
 }

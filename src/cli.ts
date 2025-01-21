@@ -1,6 +1,6 @@
 import { Command } from "commander";
-import { readFileSync } from "fs";
-import { Compiler } from "./compiler";
+import { readFileSync, writeFileSync } from "fs";
+import { compile } from "./compiler";
 
 const program = new Command();
 
@@ -15,8 +15,7 @@ program
   .argument("<entrypoint>", "The entrypoint file to compile")
   .action((entrypoint: string) => {
     try {
-      const source = readFileSync(entrypoint, "utf-8");
-      const result = new Compiler().compile(source);
+      const result = compile(readFileSync(entrypoint, "utf-8"));
       console.log(result);
     } catch (error) {
       console.error("Error:", error instanceof Error ? error.message : error);
@@ -30,12 +29,13 @@ program
   .argument("<entrypoint>", "The entrypoint file to run")
   .action((entrypoint: string) => {
     try {
-      const source = readFileSync(entrypoint, "utf-8");
-      const result = new Compiler().compile(source);
+      const result = compile(readFileSync(entrypoint, "utf-8"));
+
+      writeFileSync("output.js", result);
 
       eval(result);
     } catch (error) {
-      console.error("Error:", error instanceof Error ? error.message : error);
+      console.error(error);
       process.exit(1);
     }
   });

@@ -46,7 +46,6 @@ export interface FunctionParameter {
   type: "FunctionParameter";
   identifier: Identifier;
   typeAnnotation?: TypeIdentifier;
-  isComptime?: boolean;
 }
 
 export interface FunctionStatement {
