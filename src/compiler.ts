@@ -22,9 +22,20 @@ export function compile(source: string): string {
   // Build call graph & find reachable functions
   const { functionMap, callGraph } = buildFunctionCallMap(transformedAst);
 
-  // For now, consider "main" as the entry point
-  // TODO: Consider making this configurable or detecting exported functions
+  // Consider both "main" and any functions used in comptime declarations as entry points
   const entryPoints = ["main"];
+
+  // Add any functions referenced in comptime declarations
+  for (const stmt of transformedAst) {
+    if (stmt.type === "DeclarationStatement" && stmt.isComptime) {
+      // If this is a comptime declaration, its init expression might call functions
+      // that need to be included in the output
+      const initFunctionCalls = new Set<string>();
+      walkExpressionForCalls(stmt.init, (name) => initFunctionCalls.add(name));
+      entryPoints.push(...initFunctionCalls);
+    }
+  }
+
   const reachableFunctions = findReachableFunctions(callGraph, entryPoints);
 
   // Filter out any function statements not in reachableFunctions
@@ -112,5 +123,31 @@ function transformStatement(
       };
     default:
       return stmt;
+  }
+}
+
+// Helper to collect function calls from an expression
+function walkExpressionForCalls(
+  expr: Expression,
+  onCall: (name: string) => void
+) {
+  switch (expr.type) {
+    case "FunctionCall":
+      if (expr.callee.type === "Identifier") {
+        onCall(expr.callee.name);
+      }
+      // Also check arguments
+      for (const arg of expr.arguments) {
+        walkExpressionForCalls(arg, onCall);
+      }
+      break;
+    case "BinaryExpression":
+      walkExpressionForCalls(expr.left, onCall);
+      walkExpressionForCalls(expr.right, onCall);
+      break;
+    case "UnaryExpression":
+      walkExpressionForCalls(expr.expression, onCall);
+      break;
+    // Add other cases as needed
   }
 }
