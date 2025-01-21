@@ -22,23 +22,33 @@ export function compile(source: string): string {
   // Build call graph & find reachable functions
   const { functionMap, callGraph } = buildFunctionCallMap(transformedAst);
 
-  // Consider both "main" and any functions used in comptime declarations as entry points
-  const entryPoints = ["main"];
+  // Track functions that are needed at runtime (not just comptime)
+  const runtimeEntryPoints = new Set<string>();
 
-  // Add any functions referenced in comptime declarations
+  // Add functions that are called at runtime (not in comptime declarations)
   for (const stmt of transformedAst) {
-    if (stmt.type === "DeclarationStatement" && stmt.isComptime) {
-      // If this is a comptime declaration, its init expression might call functions
-      // that need to be included in the output
-      const initFunctionCalls = new Set<string>();
-      walkExpressionForCalls(stmt.init, (name) => initFunctionCalls.add(name));
-      entryPoints.push(...initFunctionCalls);
+    if (stmt.type === "ExpressionStatement") {
+      // Direct function calls in the program are runtime calls
+      walkExpressionForCalls(stmt.expression, (name) =>
+        runtimeEntryPoints.add(name)
+      );
+    } else if (stmt.type === "FunctionStatement") {
+      // If a function contains comptime declarations, we need it at runtime
+      const hasComptimeDeclarations = stmt.body.some(
+        (s) => s.type === "DeclarationStatement" && s.isComptime
+      );
+      if (hasComptimeDeclarations) {
+        runtimeEntryPoints.add(stmt.identifier.name);
+      }
     }
   }
 
-  const reachableFunctions = findReachableFunctions(callGraph, entryPoints);
+  const reachableFunctions = findReachableFunctions(
+    callGraph,
+    Array.from(runtimeEntryPoints)
+  );
 
-  // Filter out any function statements not in reachableFunctions
+  // Filter out any function statements not needed at runtime
   const prunedAst = transformedAst.filter((stmt) => {
     if (stmt.type === "FunctionStatement") {
       return reachableFunctions.has(stmt.identifier.name);
@@ -148,6 +158,22 @@ function walkExpressionForCalls(
     case "UnaryExpression":
       walkExpressionForCalls(expr.expression, onCall);
       break;
-    // Add other cases as needed
+    case "PropertyAccess":
+      walkExpressionForCalls(expr.left, onCall);
+      break;
+    case "ArrayExpression":
+      for (const element of expr.elements) {
+        walkExpressionForCalls(element, onCall);
+      }
+      break;
+    case "ArrayIndexExpression":
+      walkExpressionForCalls(expr.array, onCall);
+      walkExpressionForCalls(expr.index, onCall);
+      break;
+    case "StructInitialization":
+      for (const field of expr.fields) {
+        walkExpressionForCalls(field.init, onCall);
+      }
+      break;
   }
 }
