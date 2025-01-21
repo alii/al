@@ -46,6 +46,7 @@ export interface FunctionParameter {
   type: "FunctionParameter";
   identifier: Identifier;
   typeAnnotation?: TypeIdentifier;
+  isComptime?: boolean;
 }
 
 export interface FunctionStatement {
@@ -171,6 +172,7 @@ export interface DeclarationStatement {
   type: "DeclarationStatement";
   identifier: Identifier;
   init: Expression;
+  isComptime?: boolean;
 }
 
 export interface EnumVariant {

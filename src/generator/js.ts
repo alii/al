@@ -46,6 +46,7 @@ export class JSGenerator {
   generateRoot(statements: Statement[]): string {
     return `
       const println = console.log;
+      ${this.generateIsCompileTimeValue()}
       ${this.generateStatements(statements)}
     `;
   }
@@ -99,7 +100,19 @@ export class JSGenerator {
     const { identifier, params, body, returnType, throwType } = statement;
     const jsDoc = this.generateJSDoc(returnType, throwType);
 
-    const functionBody = this.generateStatements(body);
+    // Add comptime parameter validation
+    const comptimeChecks = params
+      .filter((p) => p.isComptime)
+      .map(
+        (p) => `
+  // Validate comptime parameter ${p.identifier.name}
+  if (!isCompileTimeValue(${p.identifier.name})) {
+    throw new Error("Parameter ${p.identifier.name} must be a compile-time constant");
+  }`
+      )
+      .join("");
+
+    const functionBody = comptimeChecks + "\n" + this.generateStatements(body);
 
     return `${jsDoc}function ${identifier.name}(${params
       .map((p) => p.identifier.name)
@@ -220,7 +233,14 @@ ${this.indent}throw new Error(${this.generateExpression(message)});
   private generateDeclarationStatement(
     statement: DeclarationStatement
   ): string {
-    const { identifier, init } = statement;
+    const { identifier, init, isComptime } = statement;
+    // For comptime declarations, we evaluate at compile time and inline the result
+    if (isComptime) {
+      // For now, we'll just generate the same code but mark it with a comment
+      return `${this.getIndent()}let ${
+        identifier.name
+      } = /* comptime */ ${this.generateExpression(init)};`;
+    }
     return `${this.getIndent()}let ${
       identifier.name
     } = ${this.generateExpression(init)};`;
@@ -238,14 +258,14 @@ ${this.indent}throw new Error(${this.generateExpression(message)});
     const { identifier, variants } = statement;
     const enumName = identifier.name;
 
-    // Generate variant classes and “constructors” inside the enum class
+    // Generate variant classes and "constructors" inside the enum class
     // in a way that DOES NOT define the same static property again.
     //
-    // For example, if the variant is “C(value)”, we do:
+    // For example, if the variant is "C(value)", we do:
     //   static C_class = class { constructor(value) { this.value = value; } };
     //   static C(value) { return new MyEnum.C_class(value); }
     //
-    // If the variant is “A” (no payload), we do:
+    // If the variant is "A" (no payload), we do:
     //   static A_class = class { constructor() {} };
     //   static A = new MyEnum.A_class();
 
@@ -278,7 +298,7 @@ ${this.indent}throw new Error(${this.generateExpression(message)});
       })
       .join("\n");
 
-    // Put them together into a “class MyEnum { ... }”
+    // Put them together into a "class MyEnum { ... }"
     return `class ${enumName} {
 ${variantDefs}
 }`;
@@ -497,5 +517,18 @@ ${statementsJs}
   }
 })()`;
     }
+  }
+
+  // Helper function to check if a value is compile-time constant
+  private generateIsCompileTimeValue(): string {
+    return `
+function isCompileTimeValue(value) {
+  // For now, just check if it's a literal number, string, or boolean
+  return typeof value === "number" || 
+         typeof value === "string" || 
+         typeof value === "boolean" ||
+         value === null ||
+         value === undefined;
+}`;
   }
 }

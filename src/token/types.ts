@@ -22,6 +22,7 @@ export enum TokenKind {
   KW_ENUM = "KW_ENUM",
   KW_MATCH = "KW_MATCH",
   KW_AS = "KW_AS",
+  KW_COMPTIME = "KW_COMPTIME",
 
   // Punctuation
   PUNC_ARROW = "PUNC_ARROW",
@@ -89,6 +90,7 @@ export function tokenKindToString(kind: TokenKind): string {
     [TokenKind.KW_ENUM]: "enum",
     [TokenKind.KW_MATCH]: "match",
     [TokenKind.KW_AS]: "as",
+    [TokenKind.KW_COMPTIME]: "comptime",
     [TokenKind.PUNC_ARROW]: "=>",
     [TokenKind.PUNC_DOTDOT]: "..",
     [TokenKind.PUNC_OPEN_PAREN]: "(",
@@ -159,4 +161,5 @@ export const KEYWORDS: Record<string, TokenKind> = {
   enum: TokenKind.KW_ENUM,
   match: TokenKind.KW_MATCH,
   as: TokenKind.KW_AS,
+  comptime: TokenKind.KW_COMPTIME,
 };

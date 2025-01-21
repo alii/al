@@ -191,25 +191,29 @@ export class Parser {
     const savedIndex = this.index;
     const savedToken = this.current;
 
+    // Check for comptime keyword
+    let isComptime = false;
+    if (this.current.kind === TokenKind.KW_COMPTIME) {
+      isComptime = true;
+      this.advance(); // consume 'comptime'
+    }
+
     const id = this.parseIdentifier();
 
-    // In some languages, we might see "identifier :=" or "identifier ="
-    // We'll check for a special token, e.g. PUNC_COLON_EQUALS or something similar.
     if (this.match(TokenKind.PUNC_COLON_EQUALS)) {
-      // It's a short-hand declaration
       const init = this.parseExpression();
       return {
         type: "DeclarationStatement",
         identifier: id,
         init,
+        isComptime, // Set comptime flag
       };
     }
 
-    // Not a short-hand declaration, revert and parse as expression
+    // Not a declaration, revert and parse as expression
     this.index = savedIndex;
     this.current = savedToken;
     const expr = this.parseExpression();
-
     return {
       type: "ExpressionStatement",
       expression: expr,
@@ -278,9 +282,14 @@ export class Parser {
   }
 
   private parseFunctionParameter(): FunctionParameter {
-    const identifier = this.parseIdentifier();
+    let isComptime = false;
 
-    // Optional type
+    if (this.current.kind === TokenKind.KW_COMPTIME) {
+      isComptime = true;
+      this.advance(); // consume 'comptime'
+    }
+
+    const identifier = this.parseIdentifier();
     let typeAnnotation: TypeIdentifier | undefined;
     if (this.current.kind === TokenKind.IDENTIFIER) {
       typeAnnotation = this.parseTypeIdentifier();
@@ -290,6 +299,7 @@ export class Parser {
       type: "FunctionParameter",
       identifier,
       typeAnnotation,
+      isComptime,
     };
   }
 
