@@ -43,10 +43,8 @@ export class JSGenerator {
   }
 
   generateRoot(statements: Statement[]): string {
-    return `
-      const println = console.log;
-      ${this.generateStatements(statements)}
-    `;
+    return `const println = console.log;
+${this.generateStatements(statements)}`;
   }
 
   private generateStatements(statements: Statement[]): string {

@@ -1,3 +1,7 @@
+import {
+  buildFunctionCallMap,
+  findReachableFunctions,
+} from "./analysis/reachability";
 import type { DeclarationStatement, Expression, Statement } from "./ast/nodes";
 import { JSGenerator } from "./generator/js";
 import { ComptimeInterpreter } from "./interpreter/comptime";
@@ -15,8 +19,25 @@ export function compile(source: string): string {
   const interpreter = new ComptimeInterpreter();
   const transformedAst = evaluateComptime(ast, interpreter);
 
+  // Build call graph & find reachable functions
+  const { functionMap, callGraph } = buildFunctionCallMap(transformedAst);
+
+  // For now, consider "main" as the entry point
+  // TODO: Consider making this configurable or detecting exported functions
+  const entryPoints = ["main"];
+  const reachableFunctions = findReachableFunctions(callGraph, entryPoints);
+
+  // Filter out any function statements not in reachableFunctions
+  const prunedAst = transformedAst.filter((stmt) => {
+    if (stmt.type === "FunctionStatement") {
+      return reachableFunctions.has(stmt.identifier.name);
+    }
+    // Keep everything else
+    return true;
+  });
+
   const generator = new JSGenerator();
-  return generator.generateRoot(transformedAst);
+  return generator.generateRoot(prunedAst);
 }
 
 function evaluateComptime(
