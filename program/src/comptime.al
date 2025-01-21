@@ -18,5 +18,5 @@ fn fibonacci(n int) int {
     return fibonacci(n - 1) + fibonacci(n - 2)
 }
 
-comptime fib := fibonacci(10) // this will be evaluated at compile time
+comptime fib := fibonacci(30) // this will be evaluated at compile time
 println(fib)
