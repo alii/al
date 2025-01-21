@@ -236,10 +236,11 @@ ${this.indent}throw new Error(${this.generateExpression(message)});
     const { identifier, init, isComptime } = statement;
     // For comptime declarations, we evaluate at compile time and inline the result
     if (isComptime) {
-      // For now, we'll just generate the same code but mark it with a comment
-      return `${this.getIndent()}let ${
-        identifier.name
-      } = /* comptime */ ${this.generateExpression(init)};`;
+      // For now, we'll generate code that evaluates the expression immediately
+      return `${this.getIndent()}const ${identifier.name} = (() => {
+  // Comptime evaluation
+  return ${this.generateExpression(init)};
+})();`;
     }
     return `${this.getIndent()}let ${
       identifier.name

@@ -9,16 +9,6 @@ fn ct_hello_world() {
     println(age)
 }
 
-// It also works with function arguments
-
-fn ct_hello_world_with_arg(comptime arg int) {
-    comptime age := arg * 10
-    println(age)
-}
-
-// We've marked this `10` as comptime, so it will be evaluated at compile time.
-ct_hello_world_with_arg(comptime 10)
-
 // Here's an example of calculating fibonacci at compile time.
 fn fibonacci(n int) int {
     if n <= 1 {

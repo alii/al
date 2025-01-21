@@ -173,6 +173,10 @@ export class Parser {
       case TokenKind.KW_FROM:
         return this.parseImportStatement();
 
+      // Add explicit handling for comptime declarations
+      case TokenKind.KW_COMPTIME:
+        return this.parsePossibleDeclarationOrExpression();
+
       // If we get an identifier, check if it might be a declaration like:
       //   myVar := expression
       case TokenKind.IDENTIFIER:
@@ -290,7 +294,10 @@ export class Parser {
     }
 
     const identifier = this.parseIdentifier();
+
+    // Parse type annotation - must have a colon before type
     let typeAnnotation: TypeIdentifier | undefined;
+    // For function parameters, we don't require a colon - the type comes right after
     if (this.current.kind === TokenKind.IDENTIFIER) {
       typeAnnotation = this.parseTypeIdentifier();
     }
@@ -1075,19 +1082,26 @@ export class Parser {
   //---------------------------------------------------------------------------
 
   private parseTypeIdentifier(): TypeIdentifier {
-    // e.g. MyType, or MyType[], or maybe ?MyType for optional.
     const identifier = this.parseIdentifier();
     let isArray = false;
+    let isOption = false;
+
+    // Check for array type with []
     if (this.match(TokenKind.PUNC_OPEN_BRACKET)) {
       this.eat(TokenKind.PUNC_CLOSE_BRACKET);
       isArray = true;
     }
-    // For now, ignore option (?) logic or do so if needed in your language.
+
+    // Check for optional type with ?
+    if (this.match(TokenKind.PUNC_QUESTION)) {
+      isOption = true;
+    }
+
     return {
       type: "TypeIdentifier",
       identifier,
       isArray,
-      isOption: false,
+      isOption,
     };
   }
 
