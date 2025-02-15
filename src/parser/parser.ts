@@ -965,16 +965,9 @@ export class Parser {
       this.error("Expected identifier at start of match variant pattern");
     }
 
-    let patternNode: Identifier | PropertyAccess = this.parseIdentifier();
-
-    while (this.match(TokenKind.PUNC_DOT)) {
-      const right = this.parseIdentifier();
-      patternNode = {
-        type: "PropertyAccess",
-        left: patternNode,
-        right,
-      };
-    }
+    const enumName = this.parseIdentifier();
+    this.eat(TokenKind.PUNC_DOT);
+    const variantName = this.parseIdentifier();
 
     // Optionally something like (binding)
     let binding: Identifier | undefined;
@@ -990,7 +983,8 @@ export class Parser {
 
     return {
       type: "MatchPattern",
-      enumPath: [patternNode],
+      enum: enumName,
+      variant: variantName,
       binding,
     };
   }

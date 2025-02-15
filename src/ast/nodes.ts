@@ -5,7 +5,7 @@ export interface Identifier {
 
 export interface TypeIdentifier {
   type: "TypeIdentifier";
-  identifier: Identifier;
+  identifier: Identifier | PropertyAccess;
   isArray: boolean;
   isOption: boolean;
 }
@@ -183,7 +183,8 @@ export interface EnumDeclaration {
 
 export interface MatchPattern {
   type: "MatchPattern";
-  enumPath: (Identifier | PropertyAccess)[];
+  enum: Identifier;
+  variant: Identifier;
   binding?: Identifier;
 }
 

@@ -5,8 +5,11 @@
 // comptime is a keyword that you can use to mark a block of code that should be evaluated at compile time.
 
 fn ct_hello_world() {
-    comptime age := 10 * 10
-    return age + 10
+    comptime a := 2 * 2
+    comptime b := 3 * 10
+    comptime result := a * b
+
+    return result
 }
 
 // Here's an example of calculating fibonacci at compile time.

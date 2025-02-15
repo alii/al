@@ -4,6 +4,7 @@ import type {
   FunctionCall,
   FunctionStatement,
   Identifier,
+  MatchExpression,
   Statement,
   UnaryExpression,
 } from "../ast/nodes";
@@ -50,6 +51,8 @@ export class ComptimeInterpreter {
         return this.evaluateUnaryExpression(expr);
       case "FunctionCall":
         return this.evaluateFunctionCall(expr);
+      case "MatchExpression":
+        return this.evaluateMatchExpression(expr);
       default:
         throw new Error(`Unsupported comptime expression type: ${expr.type}`);
     }
@@ -69,6 +72,25 @@ export class ComptimeInterpreter {
     this.context.variables.set(name, value);
   }
 
+  private evaluateMatchExpression(expr: MatchExpression): any {
+    /*
+      match value {
+        MyEnum.COOL => "cool",
+        MyEnum.NOT_COOL => "not cool",
+      }
+    */
+
+    throw new Error("evaluateMatchExpression() not implemented");
+
+    // // `value` is the value of the variable we're matching on
+    // const value = this.evaluate(expr.expression);
+
+    // for (const c of expr.cases) {
+    //   const pattern = c.pattern;
+
+    //   return pattern.enum.type;
+    // }
+  }
   /**
    * Evaluate a binary expression
    */

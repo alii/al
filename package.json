@@ -12,6 +12,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "alistair": "^1.13.0",
     "commander": "^13.1.0"
   },
   "devDependencies": {

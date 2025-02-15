@@ -33,18 +33,14 @@ import type {
   TypeIdentifier,
   UnaryExpression,
 } from "../ast/nodes";
+import { js } from "./util";
 
 export class JSGenerator {
-  private indentLevel: number = 0;
-  private readonly indent = "  ";
-
-  private getIndent(): string {
-    return this.indent.repeat(this.indentLevel);
-  }
-
   generateRoot(statements: Statement[]): string {
-    return `const println = console.log;
-${this.generateStatements(statements)}`;
+    return js`
+      const println = console.log;
+      ${this.generateStatements(statements)}
+    `;
   }
 
   private generateStatements(statements: Statement[]): string {
@@ -97,45 +93,48 @@ ${this.generateStatements(statements)}`;
 
     const paramsString = params.map((p) => p.identifier.name).join(", ");
 
-    return `function ${identifier.name}(${paramsString}) {
-  ${this.indent}${functionBody}
-}`;
+    return js`
+      function ${identifier.name}(${paramsString}) {
+        ${functionBody}
+      }
+    `;
   }
 
   private generateReturnStatement(statement: ReturnStatement): string {
     const { expression } = statement;
-    return `${this.getIndent()}return${
+    return `return${
       expression ? " " + this.generateExpression(expression) : ""
     };`;
   }
 
   private generateConstStatement(statement: ConstStatement): string {
     const { identifier, init } = statement;
-    return `${this.getIndent()}const ${
-      identifier.name
-    } = ${this.generateExpression(init)};`;
+    return `const ${identifier.name} = ${this.generateExpression(init)};`;
   }
 
   private generateStructDeclaration(statement: StructDeclaration): string {
     const { identifier, fields } = statement;
+
     const fieldInits = fields
       .map((field) => {
         const defaultValue = field.init
           ? ` = ${this.generateExpression(field.init)}`
           : "";
-        return `${this.indent}${field.identifier.name}${defaultValue}`;
+        return `${field.identifier.name}${defaultValue}`;
       })
       .join("\n");
 
-    return `class ${identifier.name} {
-${fieldInits}
+    return js`
+      class ${identifier.name} {
+        ${fieldInits}
 
-${this.indent}constructor(init) {
-${this.indent}${this.indent}${fields
-      .map((f) => `this.${f.identifier.name} = init.${f.identifier.name}`)
-      .join(";\n" + this.indent.repeat(2))};
-${this.indent}}
-}`;
+        constructor(init) {
+          ${fields
+            .map((f) => `this.${f.identifier.name} = init.${f.identifier.name}`)
+            .join(";\n")};
+        }
+      }
+    `;
   }
 
   private generateImportDeclaration(statement: ImportDeclaration): string {
@@ -181,18 +180,19 @@ ${this.generateStatements(body)}
 
   private generateAssertStatement(statement: AssertStatement): string {
     const { expression, message } = statement;
-    return `if (!${this.generateExpression(expression)}) {
-${this.indent}throw new Error(${this.generateExpression(message)});
-}`;
+
+    return js`
+      if (!${this.generateExpression(expression)}) {
+        throw new Error(${this.generateExpression(message)});
+      }
+    `;
   }
 
   private generateDeclarationStatement(
     statement: DeclarationStatement
   ): string {
     const { identifier, init } = statement;
-    return `${this.getIndent()}let ${
-      identifier.name
-    } = ${this.generateExpression(init)};`;
+    return `let ${identifier.name} = ${this.generateExpression(init)};`;
   }
 
   private generateBreakStatement(_: BreakStatement): string {
@@ -212,30 +212,31 @@ ${this.indent}throw new Error(${this.generateExpression(message)});
         const variantName = variant.name.name;
 
         if (variant.payload) {
-          return `
-  static ${variantName}_class = class {
-    constructor(value) {
-      this.value = value;
-    }
-  };
+          return js`
+            static ${variantName}_class = class {
+              constructor(value) {
+                this.value = value;
+              }
+            };
 
-  static ${variantName}(value) {
-    return new ${enumName}.${variantName}_class(value);
-  }
-`;
+            static ${variantName}(value) {
+              return new ${enumName}.${variantName}_class(value);
+            }
+          `;
         } else {
-          return `
-  static ${variantName}_class = class ${variantName} {};
-
-  static ${variantName} = new ${enumName}.${variantName}_class();
-`;
+          return js`
+            static ${variantName}_class = class ${variantName} {};
+            static ${variantName} = new ${enumName}.${variantName}_class();
+          `;
         }
       })
       .join("\n");
 
-    return `class ${enumName} {
-${variantDefs}
-}`;
+    return js`
+      class ${enumName} {
+        ${variantDefs}
+      }
+    `;
   }
 
   private generateExpression(expression: Expression): string {
@@ -318,7 +319,7 @@ ${variantDefs}
   private generatePropertyAccess(expression: PropertyAccess): string {
     return `${this.generateExpression(
       expression.left
-    )}.${this.generateExpression(expression.right)}`;
+    )}.${this.generateIdentifier(expression.right)}`;
   }
 
   private generateStructInitialization(
@@ -329,11 +330,9 @@ ${variantDefs}
         (field) =>
           `${field.identifier.name}: ${this.generateExpression(field.init)}`
       )
-      .join(",\n" + this.getIndent());
+      .join(",\n");
 
-    return `new ${
-      expression.identifier.name
-    }({\n${this.getIndent()}${fields}\n})`;
+    return `new ${expression.identifier.name}({\n${fields}\n})`;
   }
 
   private generateArrayExpression(expression: ArrayExpression): string {
@@ -359,7 +358,8 @@ ${variantDefs}
   }
 
   private generateTypeIdentifier(identifier: TypeIdentifier): string {
-    let type = identifier.identifier.name;
+    let type = this.generateExpression(identifier.identifier);
+
     if (identifier.isArray) {
       type = `Array<${type}>`;
     }
@@ -369,52 +369,103 @@ ${variantDefs}
     return type;
   }
 
+  // static {
+  //   const lol = new JSGenerator().generateExpression({
+  //     type: "PropertyAccess",
+  //     left: {
+  //       type: "PropertyAccess",
+  //       left: {
+  //         type: "FunctionCall",
+  //         callee: {
+  //           type: "Identifier",
+  //           name: "lego",
+  //         },
+  //         arguments: [
+  //           {
+  //             type: "MatchExpression",
+  //             expression: {
+  //               type: "Identifier",
+  //               name: "x",
+  //             },
+  //             cases: [
+  //               {
+  //                 type: "MatchCase",
+  //                 pattern: {
+  //                   type: "MatchPattern",
+  //                   enum: {
+  //                     type: "Identifier",
+  //                     name: "Wow",
+  //                   },
+  //                   variant: {
+  //                     type: "Identifier",
+  //                     name: "A",
+  //                   },
+  //                 },
+  //                 body: {
+  //                   type: "Identifier",
+  //                   name: "x",
+  //                 },
+  //               },
+  //             ],
+  //           },
+  //         ],
+  //       },
+  //       right: {
+  //         type: "Identifier",
+  //         name: "A",
+  //       },
+  //     },
+  //     right: {
+  //       type: "Identifier",
+  //       name: "G",
+  //     },
+  //   });
+
+  //   throw lol;
+  // }
+
   private generateMatchExpression(expression: MatchExpression): string {
     const { expression: matchExpr, cases } = expression;
     const valueRef = this.generateExpression(matchExpr);
 
     const caseClauses = cases
       .map(({ pattern, body }) => {
-        /**
-         * Example: if pattern.enumPath is [MyEnum, A], then
-         * fullPath => "MyEnum.A", and className => "MyEnum.A".
-         */
-        const fullPath = pattern.enumPath
-          .map((node) => this.generateExpression(node))
-          .join(".");
+        const fullPath = this.generatePropertyAccess({
+          type: "PropertyAccess",
+          left: pattern.enum,
+          right: pattern.variant,
+        });
 
-        // We grab the last piece of the pattern to see if there's a payload.
-        const last = pattern.enumPath[pattern.enumPath.length - 1];
-        const variantName =
-          last.type === "Identifier" ? last.name : last.right.name; // if last is a PropertyAccess
-        /**
-         * The class is now a static member of the enum, so we use the full path
-         * to reference it (e.g. MyEnum.A)
-         */
-        const enumName = this.generateExpression(pattern.enumPath[0]);
-        const className = `${enumName}_class`;
+        const className = `${fullPath}_class`;
 
         if (pattern.binding) {
           // Variant has a payload => use instanceof check,
           // then pull out the value from the variant's "this.value".
           const binding = `const ${pattern.binding.name} = ${valueRef}.value;`;
-          return `if (${valueRef} instanceof ${className}) {
-  ${binding}
-  return ${this.generateExpression(body)};
-}`;
+
+          return js`
+            if (${valueRef} instanceof ${className}) {
+              ${binding}
+              return ${this.generateExpression(body)};
+            }
+          `;
         } else {
           // No payload => typically a single static instance => use direct equality
-          return `if (${valueRef} === ${fullPath}) {
-  return ${this.generateExpression(body)};
-}`;
+          return js`
+            if (${valueRef} === ${fullPath}) {
+              return ${this.generateExpression(body)};
+            }
+          `;
         }
       })
       .join(" else ");
 
-    return `(() => {
-  ${caseClauses}
-  throw new Error("No match case found");
-})()`;
+    return js`
+      (() => {
+        ${caseClauses}
+        throw new Error("No match case found");
+      })()
+    `;
   }
 
   private generateOrExpression(expression: OrExpression): string {
@@ -423,21 +474,25 @@ ${variantDefs}
     const handlerBody = this.generateStatements(handler);
 
     if (errorBinding) {
-      return `(() => {
-  try {
-    return ${tryValue};
-  } catch (${errorBinding.name}) {
-    ${handlerBody}
-  }
-})()`;
+      return js`
+        (() => {
+          try {
+            return ${tryValue};
+          } catch (${errorBinding.name}) {
+            ${handlerBody}
+          }
+        })()
+      `;
     } else {
-      return `(() => {
-  try {
-    return ${tryValue};
-  } catch (e) {
-    ${handlerBody}
-  }
-})()`;
+      return js`
+        (() => {
+          try {
+            return ${tryValue};
+          } catch (e) {
+            ${handlerBody}
+          }
+        })()
+      `;
     }
   }
 }
