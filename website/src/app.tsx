@@ -207,6 +207,12 @@ export function App({ examples }: { examples: RenderedExample[] }) {
           </li>
           <li>
             <span className="text-black dark:text-white font-medium">
+              Tail call optimization
+            </span>{" "}
+            — recursive functions won't blow the stack
+          </li>
+          <li>
+            <span className="text-black dark:text-white font-medium">
               Familiar syntax
             </span>{" "}
             — if you know C, Go, or Rust, you'll feel at home

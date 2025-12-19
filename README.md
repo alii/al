@@ -10,6 +10,7 @@ A small, expressive programming language.
 - **Pattern matching** — match on values, enums, and literal payloads
 - **Structs and enums** — define data with structs, model variants with enums that carry payloads
 - **First-class functions** — pass functions around, store them, return them
+- **Tail call optimization** — recursive functions won't blow the stack
 - **Familiar syntax** — if you know C, Go, or Rust, you'll feel at home
 
 ## Install
