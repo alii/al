@@ -955,6 +955,57 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			c.compile_expr(call.arguments[0])!
 			c.emit(.to_string)
 		}
+		'read_file' {
+			if call.arguments.len != 1 {
+				return error('read_file expects 1 argument (path)')
+			}
+			c.compile_expr(call.arguments[0])!
+			c.emit(.file_read)
+		}
+		'write_file' {
+			if call.arguments.len != 2 {
+				return error('write_file expects 2 arguments (path, content)')
+			}
+			c.compile_expr(call.arguments[0])!
+			c.compile_expr(call.arguments[1])!
+			c.emit(.file_write)
+		}
+		'tcp_listen' {
+			if call.arguments.len != 1 {
+				return error('tcp_listen expects 1 argument (port)')
+			}
+			c.compile_expr(call.arguments[0])!
+			c.emit(.tcp_listen)
+		}
+		'tcp_accept' {
+			if call.arguments.len != 1 {
+				return error('tcp_accept expects 1 argument (listener)')
+			}
+			c.compile_expr(call.arguments[0])!
+			c.emit(.tcp_accept)
+		}
+		'tcp_read' {
+			if call.arguments.len != 1 {
+				return error('tcp_read expects 1 argument (socket)')
+			}
+			c.compile_expr(call.arguments[0])!
+			c.emit(.tcp_read)
+		}
+		'tcp_write' {
+			if call.arguments.len != 2 {
+				return error('tcp_write expects 2 arguments (socket, data)')
+			}
+			c.compile_expr(call.arguments[0])!
+			c.compile_expr(call.arguments[1])!
+			c.emit(.tcp_write)
+		}
+		'tcp_close' {
+			if call.arguments.len != 1 {
+				return error('tcp_close expects 1 argument (socket)')
+			}
+			c.compile_expr(call.arguments[0])!
+			c.emit(.tcp_close)
+		}
 		else {
 			return error('Unknown function: ${call.identifier.name}')
 		}

@@ -134,6 +134,7 @@ fn main() {
 				execute:       fn (cmd cli.Command) ! {
 					entrypoint := cmd.args[0]
 					debug_printer := cmd.flags.get_bool('debug-printer')!
+					io_enabled := cmd.flags.get_bool('experimental-shitty-io')!
 
 					file := os.read_file(entrypoint)!
 
@@ -159,7 +160,7 @@ fn main() {
 
 					program := bytecode.compile(result.ast)!
 
-					mut v := vm.new_vm(program)
+					mut v := vm.new_vm_with_options(program, io_enabled)
 					run_result := v.run()!
 
 					if run_result !is bytecode.NoneValue {
