@@ -12,12 +12,11 @@ fn loop() {
     println(request)
 
     body = 'Hello from AL!'
-    response = 'HTTP/1.1 200 OK\r\nContent-Length: ' + inspect(14) + '\r\nConnection: close\r\n\r\n' + body
+    response = 'HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\n${body}'
 
     tcp_write(conn, response)
     tcp_close(conn)
 
-    // Loop forever
     loop()
 }
 

@@ -213,6 +213,50 @@ fn (mut vm VM) execute() !bytecode.Value {
 					return error('Cannot call non-function')
 				}
 			}
+			.tail_call {
+				arity := instr.operand
+				callee := vm.pop()!
+
+				if callee is bytecode.ClosureValue {
+					func := vm.program.functions[callee.func_idx]
+
+					if arity != func.arity {
+						return error('Expected ${func.arity} arguments, got ${arity}')
+					}
+
+					// Collect arguments from stack
+					mut args := []bytecode.Value{cap: arity}
+					for _ in 0 .. arity {
+						args << vm.pop()!
+					}
+
+					// Get current frame
+					mut current_frame := &vm.frames[vm.frames.len - 1]
+					base := current_frame.base_slot
+
+					// Clear current frame's stack slots
+					for vm.stack.len > base {
+						vm.stack.pop()
+					}
+
+					// Push arguments back (in reverse since we popped them)
+					for i := arity - 1; i >= 0; i-- {
+						vm.stack << args[i]
+					}
+
+					// Fill remaining locals with none
+					for _ in arity .. func.locals {
+						vm.stack << bytecode.NoneValue{}
+					}
+
+					// Reuse the frame with new function
+					current_frame.func = func
+					current_frame.ip = 0
+					current_frame.captures = callee.captures
+				} else {
+					return error('Cannot call non-function')
+				}
+			}
 			.ret {
 				ret_val := vm.pop()!
 				old_frame := vm.frames.pop()

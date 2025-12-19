@@ -402,6 +402,9 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			c.emit(.make_range)
 		}
 		ast.FunctionExpression {
+			if id := expr.identifier {
+				c.get_or_create_local(id.name)
+			}
 			c.compile_function(expr)!
 		}
 		ast.FunctionCallExpression {
@@ -418,8 +421,12 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 				c.compile_expr_with_hint(arg, expected_type)!
 			}
 
-			if idx := c.locals[expr.identifier.name] {
-				c.emit_arg(.push_local, idx)
+			if access := c.resolve_variable(expr.identifier.name) {
+				if access.is_local {
+					c.emit_arg(.push_local, access.index)
+				} else if access.is_capture {
+					c.emit_arg(.push_capture, access.index)
+				}
 				c.emit_arg(.call, expr.arguments.len)
 			} else {
 				c.compile_builtin_call(expr)!
@@ -720,6 +727,15 @@ fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
 
 	// Compile function body (this may populate c.captures)
 	c.compile_expr(func.body)!
+
+	// Tail call optimization: if the last instruction is a call, convert to tail_call
+	if c.program.code.len > 0 {
+		last_idx := c.program.code.len - 1
+		if c.program.code[last_idx].op == .call {
+			c.program.code[last_idx] = op_arg(.tail_call, c.program.code[last_idx].operand)
+		}
+	}
+
 	c.emit(.ret)
 
 	c.program.code[jump_over] = op_arg(.jump, c.current_addr())
