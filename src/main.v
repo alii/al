@@ -125,6 +125,11 @@ fn main() {
 						name:        'debug-printer'
 						description: 'Print the parsed program before execution starts'
 					},
+					cli.Flag{
+						flag:        .bool
+						name:        'experimental-shitty-io'
+						description: 'Enable experimental blocking I/O (file and network)'
+					},
 				]
 				execute:       fn (cmd cli.Command) ! {
 					entrypoint := cmd.args[0]
