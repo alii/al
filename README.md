@@ -2,6 +2,16 @@
 
 A small, expressive programming language.
 
+## Features
+
+- **No null or undefined** — optional values are explicit with `?` types
+- **No panics** — errors are values, handled with `or` or propagated with `!`
+- **Everything is an expression** — if/else, match, and blocks all return values
+- **Pattern matching** — match on values, enums, and literal payloads
+- **Structs and enums** — define data with structs, model variants with enums that carry payloads
+- **First-class functions** — pass functions around, store them, return them
+- **Familiar syntax** — if you know C, Go, or Rust, you'll feel at home
+
 ## Install
 
 ```bash

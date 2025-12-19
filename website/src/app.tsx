@@ -164,17 +164,62 @@ export function App({ examples }: { examples: RenderedExample[] }) {
       </header>
 
       <section className="mb-16">
+        <h2 className="text-lg font-bold mb-4">Features</h2>
+        <ul className="text-sm text-neutral-600 dark:text-neutral-400 space-y-2 list-none">
+          <li>
+            <span className="text-black dark:text-white font-medium">
+              No null or undefined
+            </span>{" "}
+            — optional values are explicit with{" "}
+            <code className="text-black dark:text-white">?</code> types
+          </li>
+          <li>
+            <span className="text-black dark:text-white font-medium">
+              No panics
+            </span>{" "}
+            — errors are values, handled with{" "}
+            <code className="text-black dark:text-white">or</code> or propagated
+            with <code className="text-black dark:text-white">!</code>
+          </li>
+          <li>
+            <span className="text-black dark:text-white font-medium">
+              Everything is an expression
+            </span>{" "}
+            — if/else, match, and blocks all return values
+          </li>
+          <li>
+            <span className="text-black dark:text-white font-medium">
+              Pattern matching
+            </span>{" "}
+            — match on values, enums, and literal payloads
+          </li>
+          <li>
+            <span className="text-black dark:text-white font-medium">
+              Structs and enums
+            </span>{" "}
+            — model your data with structs and tagged unions
+          </li>
+          <li>
+            <span className="text-black dark:text-white font-medium">
+              First-class functions
+            </span>{" "}
+            — pass them around, store them, return them
+          </li>
+          <li>
+            <span className="text-black dark:text-white font-medium">
+              Familiar syntax
+            </span>{" "}
+            — if you know C, Go, or Rust, you'll feel at home
+          </li>
+        </ul>
+      </section>
+
+      <section className="mb-16">
         <h2 className="text-lg font-bold mb-4">How it works</h2>
-        <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-3">
+        <p className="text-sm text-neutral-600 dark:text-neutral-400">
           AL compiles to bytecode and runs on a stack-based virtual machine. The
           compiler is written in V, producing a single native binary with no
           dependencies.
-        </p>
-        <p className="text-sm text-neutral-600 dark:text-neutral-400">
-          The VM supports closures, tagged enums with pattern matching,
-          first-class functions, and a unified error handling model where both
-          optional values and errors are handled with the same{" "}
-          <code className="text-black dark:text-white">or</code> syntax.
         </p>
       </section>
 
