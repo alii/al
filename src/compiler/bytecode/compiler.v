@@ -402,9 +402,6 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			c.emit(.make_range)
 		}
 		ast.FunctionExpression {
-			if id := expr.identifier {
-				c.get_or_create_local(id.name)
-			}
 			c.compile_function(expr)!
 		}
 		ast.FunctionCallExpression {
@@ -712,15 +709,9 @@ fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
 	c.captures = {}
 	c.capture_names = []
 
-	// Collect parameter types for function signature
-	mut param_types := []string{}
+	// Parameters are locals
 	for param in func.params {
 		c.get_or_create_local(param.identifier.name)
-		if typ := param.typ {
-			param_types << typ.identifier.name
-		} else {
-			param_types << ''
-		}
 	}
 
 	func_start := c.current_addr()
@@ -740,22 +731,12 @@ fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
 
 	c.program.code[jump_over] = op_arg(.jump, c.current_addr())
 
-	// Save capture info before restoring state
 	captured_names := c.capture_names.clone()
 	capture_count := captured_names.len
 
 	func_idx := c.program.functions.len
-	mut name := '__anon__'
-	if id := func.identifier {
-		name = id.name
-		// Store function signature for type inference
-		c.functions[name] = FuncSig{
-			name:        name
-			param_types: param_types
-		}
-	}
 	c.program.functions << Function{
-		name:          name
+		name:          '<anonymous>'
 		arity:         func.params.len
 		locals:        c.local_count
 		capture_count: capture_count
@@ -785,12 +766,6 @@ fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
 	}
 
 	c.emit_arg(.make_closure, func_idx)
-
-	if id := func.identifier {
-		idx := c.get_or_create_local(id.name)
-		c.emit_arg(.store_local, idx)
-		c.emit(.push_none)
-	}
 }
 
 fn (mut c Compiler) compile_match(m ast.MatchExpression) ! {

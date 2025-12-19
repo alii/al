@@ -733,18 +733,9 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 	}
 }
 
-// Function expression: fn name(params) ReturnType { body }
+// Function expression: fn(params) ReturnType { body }
 fn (mut p Parser) parse_function_expression() !ast.Expression {
 	p.eat(.kw_function)!
-
-	// Optional name (for anonymous functions)
-	mut identifier := ?ast.Identifier(none)
-	if p.current_token.kind == .identifier {
-		name := p.eat_token_literal(.identifier, 'Expected function name')!
-		identifier = ast.Identifier{
-			name: name
-		}
-	}
 
 	// Parameters
 	params := p.parse_parameters()!
@@ -768,7 +759,6 @@ fn (mut p Parser) parse_function_expression() !ast.Expression {
 	body := p.parse_block_expression()!
 
 	return ast.FunctionExpression{
-		identifier:  identifier
 		params:      params
 		return_type: return_type
 		error_type:  error_type

@@ -133,11 +133,7 @@ fn print_expression(expr ast.Expression, level int) string {
 			'error ${print_expression(expr.expression, level)}'
 		}
 		ast.FunctionExpression {
-			mut s := 'fn '
-			if id := expr.identifier {
-				s += id.name
-			}
-			s += '('
+			mut s := 'fn('
 			for i, param in expr.params {
 				if i > 0 {
 					s += ', '

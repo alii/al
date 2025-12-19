@@ -82,7 +82,6 @@ pub mut:
 
 pub struct FunctionExpression {
 pub mut:
-	identifier  ?Identifier
 	return_type ?TypeIdentifier
 	error_type  ?TypeIdentifier
 	params      []FunctionParameter
