@@ -35,6 +35,7 @@ pub enum Op {
 	jump_if_false // conditional jump: jump_if_false <addr>
 	jump_if_true  // conditional jump: jump_if_true <addr>
 	call          // call function: call <arity>
+	tail_call     // tail call (reuses stack frame): tail_call <arity>
 	ret           // return top of stack
 
 	// Data structures
