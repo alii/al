@@ -1,6 +1,7 @@
-module ast
+module typed_ast
 
 import compiler.token
+import compiler.type_def { Type }
 
 pub struct Span {
 pub:
@@ -115,9 +116,10 @@ pub:
 
 pub struct OrExpression {
 pub:
-	expression Expression
-	receiver   ?Identifier
-	body       Expression
+	expression    Expression
+	receiver      ?Identifier
+	body          Expression
+	resolved_type Type
 }
 
 pub struct ErrorExpression {
@@ -127,7 +129,8 @@ pub:
 
 pub struct PropagateExpression {
 pub:
-	expression Expression
+	expression    Expression
+	resolved_type Type
 }
 
 pub struct BinaryExpression {
