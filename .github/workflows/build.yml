@@ -111,14 +111,13 @@ jobs:
       - name: Update VERSION file
         run: echo "${{ needs.check-changes.outputs.version }}" > VERSION
 
-      - name: Build (Debug)
-        run: v -o al_debug .
-
-      - name: Run Tests (Debug)
-        run: ./al_debug run program/src/all_language_features.al
-
       - name: Build (Production)
-        run: v -prod -o al .
+        run: |
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            v -cc gcc -cflags "-O2" -o al .
+          else
+            v -prod -o al .
+          fi
 
       - name: Run Tests
         run: ./al run program/src/all_language_features.al
