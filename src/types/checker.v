@@ -325,34 +325,43 @@ fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
 }
 
 fn (mut c TypeChecker) check_block(block ast.BlockExpression) (typed_ast.BlockExpression, Type) {
-	mut typed_body := []typed_ast.Node{}
-	mut statement_indices := []int{}
+	mut typed_body := []typed_ast.BlockItem{}
 	mut last_type := t_none()
 
 	for i, node in block.body {
-		typed_node, typ := c.check_node(node)
-		typed_body << typed_node
-		last_type = typ
+		is_stmt := node is ast.Statement
+		if is_stmt {
+			stmt := node as ast.Statement
+			typed_node, typ := c.check_statement(stmt)
+			typed_stmt := typed_node as typed_ast.Statement
+			typed_body << typed_ast.BlockItem{
+				is_statement: true
+				statement:    typed_stmt
+			}
+			last_type = typ
+		} else {
+			expr := node as ast.Expression
+			typed_expr, typ := c.check_expr(expr)
+			typed_body << typed_ast.BlockItem{
+				is_statement: false
+				expression:   typed_expr
+			}
+			last_type = typ
 
-		// Track which indices are statements for the compiler
-		if node is ast.Statement {
-			statement_indices << i
-		}
-
-		// For all expressions except the last one (which is the return value),
-		// check that non-None values are consumed (statements always return None)
-		is_last := i == block.body.len - 1
-		if !is_last && node is ast.Expression && !types_equal(typ, t_none()) {
-			node_span := ast.node_span(node)
-			c.error_at_span("Expression of type '${type_to_string(typ)}' must be consumed. Assign it to a variable or use '${type_to_string(typ)} =' to discard",
-				node_span)
+			// For all expressions except the last one (which is the return value),
+			// check that non-None values are consumed
+			is_last := i == block.body.len - 1
+			if !is_last && !types_equal(typ, t_none()) {
+				node_span := ast.node_span(node)
+				c.error_at_span("Expression of type '${type_to_string(typ)}' must be consumed. Assign it to a variable or use '${type_to_string(typ)} =' to discard",
+					node_span)
+			}
 		}
 	}
 
 	return typed_ast.BlockExpression{
-		body:              typed_body
-		statement_indices: statement_indices
-		span:              block.span
+		body: typed_body
+		span: block.span
 	}, last_type
 }
 

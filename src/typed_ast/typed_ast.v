@@ -282,11 +282,17 @@ pub:
 	span       Span @[required]
 }
 
+pub struct BlockItem {
+pub:
+	is_statement bool
+	statement    Statement
+	expression   Expression
+}
+
 pub struct BlockExpression {
 pub:
-	body              []Node
-	statement_indices []int // indices of body elements that are statements
-	span              Span @[required]
+	body []BlockItem
+	span Span @[required]
 }
 
 pub struct AssertExpression {
