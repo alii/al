@@ -130,6 +130,10 @@ fn (mut c Compiler) resolve_variable(name string) ?VarAccess {
 	return none
 }
 
+fn is_statement(node typed_ast.Node) bool {
+	return node is typed_ast.Statement
+}
+
 fn (mut c Compiler) compile_node(node typed_ast.Node) ! {
 	match node {
 		typed_ast.Statement { c.compile_statement(node)! }
@@ -228,22 +232,16 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				c.compile_node(node)!
 				c.in_tail_position = false
 				// only pop after expressions, not statements (statements don't push)
-				if !is_last {
-					match node {
-						typed_ast.Expression { c.emit(.pop) }
-						typed_ast.Statement {}
-					}
+				if !is_last && !is_statement(node) {
+					c.emit(.pop)
 				}
 			}
 
 			// push none if block was empty or last item was a statement
 			if expr.body.len == 0 {
 				c.emit(.push_none)
-			} else {
-				match expr.body[expr.body.len - 1] {
-					typed_ast.Statement { c.emit(.push_none) }
-					typed_ast.Expression {}
-				}
+			} else if is_statement(expr.body[expr.body.len - 1]) {
+				c.emit(.push_none)
 			}
 		}
 		typed_ast.NumberLiteral {
