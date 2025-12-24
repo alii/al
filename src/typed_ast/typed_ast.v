@@ -284,8 +284,9 @@ pub:
 
 pub struct BlockExpression {
 pub:
-	body []Node
-	span Span @[required]
+	body              []Node
+	statement_indices []int // indices of body elements that are statements
+	span              Span @[required]
 }
 
 pub struct AssertExpression {

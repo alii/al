@@ -326,12 +326,18 @@ fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
 
 fn (mut c TypeChecker) check_block(block ast.BlockExpression) (typed_ast.BlockExpression, Type) {
 	mut typed_body := []typed_ast.Node{}
+	mut statement_indices := []int{}
 	mut last_type := t_none()
 
 	for i, node in block.body {
 		typed_node, typ := c.check_node(node)
 		typed_body << typed_node
 		last_type = typ
+
+		// Track which indices are statements for the compiler
+		if node is ast.Statement {
+			statement_indices << i
+		}
 
 		// For all expressions except the last one (which is the return value),
 		// check that non-None values are consumed (statements always return None)
@@ -344,8 +350,9 @@ fn (mut c TypeChecker) check_block(block ast.BlockExpression) (typed_ast.BlockEx
 	}
 
 	return typed_ast.BlockExpression{
-		body: typed_body
-		span: block.span
+		body:              typed_body
+		statement_indices: statement_indices
+		span:              block.span
 	}, last_type
 }
 

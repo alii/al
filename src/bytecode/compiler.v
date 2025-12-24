@@ -130,10 +130,6 @@ fn (mut c Compiler) resolve_variable(name string) ?VarAccess {
 	return none
 }
 
-fn is_statement(node typed_ast.Node) bool {
-	return node is typed_ast.Statement
-}
-
 fn (mut c Compiler) compile_node(node typed_ast.Node) ! {
 	match node {
 		typed_ast.Statement { c.compile_statement(node)! }
@@ -226,13 +222,15 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 
 	match expr {
 		typed_ast.BlockExpression {
+			last_idx := expr.body.len - 1
 			for i, node in expr.body {
-				is_last := i == expr.body.len - 1
+				is_last := i == last_idx
 				c.in_tail_position = is_tail && is_last
 				c.compile_node(node)!
 				c.in_tail_position = false
 				// only pop after expressions, not statements (statements don't push)
-				if !is_last && !is_statement(node) {
+				// use pre-computed statement_indices to avoid runtime type checks
+				if !is_last && i !in expr.statement_indices {
 					c.emit(.pop)
 				}
 			}
@@ -240,7 +238,7 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			// push none if block was empty or last item was a statement
 			if expr.body.len == 0 {
 				c.emit(.push_none)
-			} else if is_statement(expr.body[expr.body.len - 1]) {
+			} else if last_idx in expr.statement_indices {
 				c.emit(.push_none)
 			}
 		}
