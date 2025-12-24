@@ -141,37 +141,26 @@ fn (mut c Compiler) compile_statement(stmt typed_ast.Statement) ! {
 			c.current_binding = old_binding
 
 			c.emit_arg(.store_local, idx)
-			c.emit(.push_none)
 		}
 		typed_ast.ConstBinding {
 			c.compile_expr(stmt.init)!
 			idx := c.get_or_create_local(stmt.identifier.name)
 			c.emit_arg(.store_local, idx)
-			c.emit(.push_none)
 		}
 		typed_ast.TypePatternBinding {
 			c.compile_expr(stmt.init)!
 			c.emit(.pop)
-			c.emit(.push_none)
 		}
 		typed_ast.FunctionDeclaration {
 			c.compile_function_common(stmt.identifier.name, stmt.params, stmt.body)!
 			idx := c.get_or_create_local(stmt.identifier.name)
 			c.emit_arg(.store_local, idx)
-			c.emit(.push_none)
 		}
-		typed_ast.StructDeclaration {
-			c.emit(.push_none)
-		}
-		typed_ast.EnumDeclaration {
-			c.emit(.push_none)
-		}
-		typed_ast.ImportDeclaration {
-			c.emit(.push_none)
-		}
+		typed_ast.StructDeclaration {}
+		typed_ast.EnumDeclaration {}
+		typed_ast.ImportDeclaration {}
 		typed_ast.ExportDeclaration {
 			c.compile_statement(stmt.declaration)!
-			// ExportDeclaration wraps another statement which already pushes None
 		}
 	}
 }
@@ -236,14 +225,16 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 					c.compile_expr(item.expression)!
 				}
 				c.in_tail_position = false
-				// pop after every item except the last (statements now also push None)
-				if !is_last {
+				// only pop after expressions, not statements (statements don't push)
+				if !is_last && !item.is_statement {
 					c.emit(.pop)
 				}
 			}
 
-			// push none if block was empty
+			// push none if block was empty or last item was a statement
 			if expr.body.len == 0 {
+				c.emit(.push_none)
+			} else if expr.body[last_idx].is_statement {
 				c.emit(.push_none)
 			}
 		}
