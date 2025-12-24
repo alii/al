@@ -355,4 +355,4 @@ pub type Expression = ArrayExpression
 	| UnaryExpression
 	| WildcardPattern
 
-pub type Node = Statement | Expression
+// Note: Node type removed - use BlockItem in BlockExpression instead

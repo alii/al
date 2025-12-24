@@ -332,8 +332,7 @@ fn (mut c TypeChecker) check_block(block ast.BlockExpression) (typed_ast.BlockEx
 		is_stmt := node is ast.Statement
 		if is_stmt {
 			stmt := node as ast.Statement
-			typed_node, typ := c.check_statement(stmt)
-			typed_stmt := typed_node as typed_ast.Statement
+			typed_stmt, typ := c.check_statement(stmt)
 			typed_body << typed_ast.BlockItem{
 				is_statement: true
 				statement:    typed_stmt
@@ -365,19 +364,7 @@ fn (mut c TypeChecker) check_block(block ast.BlockExpression) (typed_ast.BlockEx
 	}, last_type
 }
 
-fn (mut c TypeChecker) check_node(node ast.Node) (typed_ast.Node, Type) {
-	match node {
-		ast.Statement {
-			return c.check_statement(node)
-		}
-		ast.Expression {
-			expr, typ := c.check_expr(node)
-			return typed_ast.Node(expr), typ
-		}
-	}
-}
-
-fn (mut c TypeChecker) check_statement(stmt ast.Statement) (typed_ast.Node, Type) {
+fn (mut c TypeChecker) check_statement(stmt ast.Statement) (typed_ast.Statement, Type) {
 	match stmt {
 		ast.VariableBinding {
 			return c.check_variable_binding(stmt)
@@ -410,16 +397,15 @@ fn (mut c TypeChecker) check_statement(stmt ast.Statement) (typed_ast.Node, Type
 				})
 				span:       stmt.span
 			})
-			return typed_ast.Node(s), t_none()
+			return s, t_none()
 		}
 		ast.ExportDeclaration {
-			typed_inner, typ := c.check_statement(stmt.declaration)
-			inner_stmt := typed_inner as typed_ast.Statement
+			inner_stmt, typ := c.check_statement(stmt.declaration)
 			s := typed_ast.Statement(typed_ast.ExportDeclaration{
 				declaration: inner_stmt
 				span:        convert_span(stmt.span)
 			})
-			return typed_ast.Node(s), typ
+			return s, typ
 		}
 	}
 }
@@ -658,7 +644,7 @@ fn (mut c TypeChecker) check_binding_type(name string, name_span Span, annotatio
 	}
 }
 
-fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_ast.Node, Type) {
+fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_ast.Statement, Type) {
 	if expr.init is ast.FunctionExpression {
 		func_expr := expr.init as ast.FunctionExpression
 
@@ -742,10 +728,10 @@ fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_a
 		span:       convert_span(expr.span)
 	})
 
-	return typed_ast.Node(stmt), t_none()
+	return stmt, t_none()
 }
 
-fn (mut c TypeChecker) check_const_binding(expr ast.ConstBinding) (typed_ast.Node, Type) {
+fn (mut c TypeChecker) check_const_binding(expr ast.ConstBinding) (typed_ast.Statement, Type) {
 	if c.in_function {
 		c.error_at_span("'const' declarations are only allowed at the top level, not inside functions",
 			expr.span)
@@ -764,7 +750,7 @@ fn (mut c TypeChecker) check_const_binding(expr ast.ConstBinding) (typed_ast.Nod
 		span:       convert_span(expr.span)
 	})
 
-	return typed_ast.Node(stmt), t_none()
+	return stmt, t_none()
 }
 
 fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) (typed_ast.Expression, Type) {
@@ -924,7 +910,7 @@ fn (mut c TypeChecker) check_unary(expr ast.UnaryExpression) (typed_ast.Expressi
 	}, result_type
 }
 
-fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) (typed_ast.Node, Type) {
+fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) (typed_ast.Statement, Type) {
 	if c.in_function {
 		c.error_at_span('Named function declarations are only allowed at the top level. Use an anonymous function instead: callback = fn() { ... }',
 			expr.identifier.span)
@@ -1071,7 +1057,7 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 		span:        convert_span(expr.span)
 	})
 
-	return typed_ast.Node(stmt), t_none()
+	return stmt, t_none()
 }
 
 fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (typed_ast.Expression, Type) {
@@ -1202,7 +1188,7 @@ fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (t
 	}, final_func_type
 }
 
-fn (mut c TypeChecker) check_type_pattern_binding(expr ast.TypePatternBinding) (typed_ast.Node, Type) {
+fn (mut c TypeChecker) check_type_pattern_binding(expr ast.TypePatternBinding) (typed_ast.Statement, Type) {
 	typed_init, init_type := c.check_expr(expr.init)
 
 	if expected := c.resolve_type_identifier(expr.typ) {
@@ -1217,7 +1203,7 @@ fn (mut c TypeChecker) check_type_pattern_binding(expr ast.TypePatternBinding) (
 		init: typed_init
 		span: convert_span(expr.span)
 	})
-	return typed_ast.Node(stmt), t_none()
+	return stmt, t_none()
 }
 
 fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Expression, Type) {
@@ -1539,7 +1525,7 @@ fn (mut c TypeChecker) check_array_index(expr ast.ArrayIndexExpression) (typed_a
 	}, t_option(element_type)
 }
 
-fn (mut c TypeChecker) check_struct_decl(stmt ast.StructDeclaration) (typed_ast.Node, Type) {
+fn (mut c TypeChecker) check_struct_decl(stmt ast.StructDeclaration) (typed_ast.Statement, Type) {
 	if c.in_function {
 		c.error_at_span('Struct definitions are only allowed at the top level', stmt.span)
 	}
@@ -1588,7 +1574,7 @@ fn (mut c TypeChecker) check_struct_decl(stmt ast.StructDeclaration) (typed_ast.
 		span:       convert_span(stmt.span)
 	})
 
-	return typed_ast.Node(s), t_none()
+	return s, t_none()
 }
 
 fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) (typed_ast.Expression, Type) {
@@ -1645,7 +1631,7 @@ fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) (typed_a
 	}, struct_type
 }
 
-fn (mut c TypeChecker) check_enum_decl(stmt ast.EnumDeclaration) (typed_ast.Node, Type) {
+fn (mut c TypeChecker) check_enum_decl(stmt ast.EnumDeclaration) (typed_ast.Statement, Type) {
 	if c.in_function {
 		c.error_at_span('Enum definitions are only allowed at the top level', stmt.span)
 	}
@@ -1692,7 +1678,7 @@ fn (mut c TypeChecker) check_enum_decl(stmt ast.EnumDeclaration) (typed_ast.Node
 		span:       convert_span(stmt.span)
 	})
 
-	return typed_ast.Node(s), t_none()
+	return s, t_none()
 }
 
 fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) (typed_ast.Expression, Type) {
