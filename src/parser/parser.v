@@ -790,26 +790,21 @@ fn (mut p Parser) parse_grouped_or_tuple() !ast.Expression {
 	start := p.current_span()
 	p.eat(.punc_open_paren)!
 
-	// Empty parens are not allowed (no unit type)
 	if p.current_token.kind == .punc_close_paren {
 		return error('Empty tuple () is not allowed. Use `none` instead.')
 	}
 
 	first := p.parse_expression()!
 
-	// Check what comes after the first expression
 	if p.current_token.kind == .punc_close_paren {
-		// (expr) - just grouping
 		p.eat(.punc_close_paren)!
 		return first
 	}
 
 	if p.current_token.kind == .punc_comma {
-		// It's a tuple
 		p.eat(.punc_comma)!
 		mut elements := [first]
 
-		// (expr,) is a 1-tuple
 		if p.current_token.kind == .punc_close_paren {
 			p.eat(.punc_close_paren)!
 			return ast.TupleExpression{
@@ -818,7 +813,6 @@ fn (mut p Parser) parse_grouped_or_tuple() !ast.Expression {
 			}
 		}
 
-		// Parse remaining elements
 		for p.current_token.kind != .punc_close_paren && p.current_token.kind != .eof {
 			elements << p.parse_expression()!
 
@@ -1402,8 +1396,6 @@ fn (mut p Parser) parse_const_binding() !ast.Statement {
 }
 
 fn (p Parser) is_tuple_destructuring() bool {
-	// Look ahead past the tuple to see if it's followed by =
-	// We need to count parentheses to find the closing )
 	mut depth := 0
 	mut i := p.index
 
@@ -1414,7 +1406,6 @@ fn (p Parser) is_tuple_destructuring() bool {
 		} else if tok.kind == .punc_close_paren {
 			depth--
 			if depth == 0 {
-				// Check if next token is =
 				if i + 1 < p.tokens.len && p.tokens[i + 1].kind == .punc_equals {
 					return true
 				}
@@ -1440,9 +1431,7 @@ fn (mut p Parser) parse_tuple_destructuring() !ast.Statement {
 		if p.current_token.kind == .identifier {
 			name := p.eat_token_literal(.identifier, 'Expected identifier')!
 
-			// Check if it's uppercase (type consumption) or lowercase (binding)
 			if name.len > 0 && name[0] >= `A` && name[0] <= `Z` {
-				// Type consumption pattern
 				patterns << ast.TypeIdentifier{
 					identifier: ast.Identifier{
 						name: name
@@ -1451,7 +1440,6 @@ fn (mut p Parser) parse_tuple_destructuring() !ast.Statement {
 					span:       pattern_span
 				}
 			} else {
-				// Variable binding pattern
 				patterns << ast.Identifier{
 					name: name
 					span: pattern_span
@@ -1592,11 +1580,9 @@ fn (mut p Parser) parse_dot_expression(left ast.Expression) !ast.Expression {
 
 	span := p.current_span()
 
-	// Handle tuple index access: tuple.0, tuple.1, etc.
 	if p.current_token.kind == .literal_number {
 		num_str := p.eat_token_literal(.literal_number, 'Expected tuple index')!
 
-		// Handle float-like numbers (e.g., "0.1") as chained tuple access
 		if num_str.contains('.') {
 			parts := num_str.split('.')
 			mut result := ast.Expression(ast.PropertyAccessExpression{

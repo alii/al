@@ -160,18 +160,15 @@ fn (mut c Compiler) compile_statement(stmt typed_ast.Statement) ! {
 		}
 		typed_ast.TupleDestructuringBinding {
 			c.compile_expr(stmt.init)!
-			// Extract each element from the tuple and bind/discard
 			for i, pattern in stmt.patterns {
 				if pattern is typed_ast.Identifier {
-					// Variable binding - extract element and store
 					c.emit(.dup)
 					c.emit_arg(.tuple_index, i)
 					idx := c.get_or_create_local(pattern.name)
 					c.emit_arg(.store_local, idx)
 				}
-				// TypeIdentifier patterns are consumed (type checked but discarded)
 			}
-			c.emit(.pop) // pop the tuple
+			c.emit(.pop)
 		}
 		typed_ast.FunctionDeclaration {
 			c.compile_function_common(stmt.identifier.name, stmt.params, stmt.body)!
@@ -611,7 +608,6 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 
 				return error("Cannot call '${call.identifier.name}' as a method. AL does not have methods - use '${call.identifier.name}(...)' as a regular function call instead.")
 			} else if expr.right is typed_ast.NumberLiteral {
-				// Tuple index access: tuple.0, tuple.1, etc.
 				num := expr.right as typed_ast.NumberLiteral
 				index := num.value.int()
 				c.emit_arg(.tuple_index, index)
@@ -987,11 +983,9 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			continue
 		}
 
-		// Handle tuple patterns like (a, b), (1, name), etc.
 		if arm.pattern is typed_ast.TupleExpression {
 			tup := arm.pattern as typed_ast.TupleExpression
 
-			// First check: verify it's a tuple of the right length (tuples are arrays at runtime)
 			c.emit(.dup)
 			c.emit(.array_len)
 			c.emit_arg(.push_const, c.add_constant(tup.elements.len))
@@ -1000,12 +994,10 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			next_arm := c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
 
-			// Check literal patterns and collect bindings
 			mut literal_checks := []int{}
 			for i, elem in tup.elements {
 				if elem is typed_ast.NumberLiteral || elem is typed_ast.StringLiteral
 					|| elem is typed_ast.BooleanLiteral {
-					// Literal pattern - need to check equality
 					c.emit(.dup)
 					c.emit_arg(.tuple_index, i)
 					c.compile_expr(elem)!
@@ -1015,7 +1007,6 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 				}
 			}
 
-			// Bind identifier patterns
 			for i, elem in tup.elements {
 				if elem is typed_ast.Identifier {
 					c.emit(.dup)
@@ -1033,7 +1024,6 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			end_jumps << c.current_addr()
 			c.emit_arg(.jump, 0)
 
-			// Patch all jump targets to next arm
 			next_arm_addr := c.current_addr()
 			c.program.code[next_arm] = op_arg(.jump_if_false, next_arm_addr)
 			for check_addr in literal_checks {

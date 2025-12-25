@@ -288,7 +288,6 @@ fn (mut vm VM) execute() !bytecode.Value {
 				vm.stack << bytecode.Value(arr)
 			}
 			.make_tuple {
-				// Tuples are arrays at runtime
 				len := instr.operand
 				mut arr := unsafe { []bytecode.Value{len: len} }
 				for i := len - 1; i >= 0; i-- {
@@ -297,7 +296,6 @@ fn (mut vm VM) execute() !bytecode.Value {
 				vm.stack << bytecode.Value(arr)
 			}
 			.tuple_index {
-				// Get element at compile-time known index
 				tuple_val := vm.pop()!
 				if tuple_val is []bytecode.Value {
 					idx := instr.operand

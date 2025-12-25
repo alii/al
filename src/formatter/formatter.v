@@ -418,7 +418,6 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 				}
 				f.format_expr(elem)
 			}
-			// Trailing comma for 1-tuples to distinguish from grouping
 			if expr.elements.len == 1 {
 				f.emit(',')
 			}

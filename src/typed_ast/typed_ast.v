@@ -96,7 +96,7 @@ pub:
 
 pub struct TupleDestructuringBinding {
 pub:
-	patterns []Expression // Each is either Identifier (bind) or TypeIdentifier (consume)
+	patterns []Expression
 	init     Expression
 	span     Span @[required]
 }

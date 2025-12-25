@@ -418,8 +418,6 @@ fn (mut s Scanner) scan_identifier(from u8) token.Token {
 	return s.new_token(.identifier, result)
 }
 
-// Scans a number literal. Handles floats but is careful about dots
-// to support chained tuple/property access like `tuple.0.1.2`
 fn (mut s Scanner) scan_number(from u8) token.Token {
 	mut result := from.ascii_str()
 	mut has_dot := false
@@ -429,8 +427,6 @@ fn (mut s Scanner) scan_number(from u8) token.Token {
 		next := s.peek_char()
 
 		if next == `.` && has_dot {
-			// Second dot encountered - backtrack to return just the integer
-			// This allows `a.0.1` to scan as `a`, `.`, `0`, `.`, `1`
 			for _ in 0 .. chars_after_dot + 1 {
 				result = result[..result.len - 1]
 				s.decr_pos()

@@ -1294,7 +1294,6 @@ fn (mut c TypeChecker) check_tuple_destructuring(expr ast.TupleDestructuringBind
 		}
 
 		if pattern is ast.Identifier {
-			// Variable binding pattern (lowercase name)
 			loc := c.def_loc_from_span(pattern.name, pattern.span)
 			c.env.define_at(pattern.name, elem_type, loc)
 			c.record_type(pattern.name, elem_type, pattern.span)
@@ -1303,7 +1302,6 @@ fn (mut c TypeChecker) check_tuple_destructuring(expr ast.TupleDestructuringBind
 				span: convert_span(pattern.span)
 			}
 		} else if pattern is ast.TypeIdentifier {
-			// Type consumption pattern (uppercase name) - verify type matches but don't bind
 			if expected := c.resolve_type_identifier(pattern) {
 				if !types_equal(elem_type, expected) {
 					c.error_at_span("Type mismatch in destructuring: expected '${type_to_string(expected)}', got '${type_to_string(elem_type)}'",
@@ -1914,7 +1912,6 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 		}, right_type
 	}
 
-	// Tuple index access: tuple.0, tuple.1, etc.
 	if expr.right is ast.NumberLiteral {
 		num_lit := expr.right as ast.NumberLiteral
 		typed_right := typed_ast.NumberLiteral{
@@ -2246,7 +2243,6 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 		}, subject_type
 	}
 
-	// Tuple pattern: (a, b, c) or (1, name) with literal matching
 	if pattern is ast.TupleExpression {
 		tuple_type := if subject_type is TypeTuple {
 			subject_type
@@ -2273,7 +2269,6 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 			}
 
 			if elem is ast.Identifier {
-				// Named binding: bind to element type
 				c.env.define(elem.name, elem_type)
 				c.record_type(elem.name, elem_type, elem.span)
 				typed_elements << typed_ast.Identifier{
@@ -2281,7 +2276,6 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 					span: convert_span(elem.span)
 				}
 			} else {
-				// Literal or nested pattern - must match the value
 				typed_elem, _ := c.check_pattern(elem, elem_type)
 				typed_elements << typed_elem
 			}
