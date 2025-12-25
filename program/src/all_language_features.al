@@ -264,7 +264,7 @@ println(apply_twice(5, fn(n) { n + 1 }))
 // Tuple literals
 pair = (42, 'hello')
 triple = (true, 100, 'world')
-single = (42,)
+single = (42)
 
 // Tuple access
 println(pair.0)

@@ -597,7 +597,7 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 			p.parse_identifier_or_call()!
 		}
 		.punc_open_paren {
-			p.parse_grouped_or_tuple()!
+			p.parse_tuple()!
 		}
 		.kw_none {
 			span := p.current_span()
@@ -786,7 +786,7 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 	}
 }
 
-fn (mut p Parser) parse_grouped_or_tuple() !ast.Expression {
+fn (mut p Parser) parse_tuple() !ast.Expression {
 	start := p.current_span()
 	p.eat(.punc_open_paren)!
 
@@ -794,43 +794,22 @@ fn (mut p Parser) parse_grouped_or_tuple() !ast.Expression {
 		return error('Empty tuple () is not allowed. Use `none` instead.')
 	}
 
-	first := p.parse_expression()!
+	mut elements := []ast.Expression{}
+	elements << p.parse_expression()!
 
-	if p.current_token.kind == .punc_close_paren {
-		p.eat(.punc_close_paren)!
-		return first
-	}
-
-	if p.current_token.kind == .punc_comma {
+	for p.current_token.kind == .punc_comma {
 		p.eat(.punc_comma)!
-		mut elements := [first]
-
 		if p.current_token.kind == .punc_close_paren {
-			p.eat(.punc_close_paren)!
-			return ast.TupleExpression{
-				elements: elements
-				span:     p.span_from(start)
-			}
+			break
 		}
-
-		for p.current_token.kind != .punc_close_paren && p.current_token.kind != .eof {
-			elements << p.parse_expression()!
-
-			if p.current_token.kind == .punc_comma {
-				p.eat(.punc_comma)!
-			} else {
-				break
-			}
-		}
-
-		p.eat(.punc_close_paren)!
-		return ast.TupleExpression{
-			elements: elements
-			span:     p.span_from(start)
-		}
+		elements << p.parse_expression()!
 	}
 
-	return error("Expected ')' or ',' after expression in parentheses")
+	p.eat(.punc_close_paren)!
+	return ast.TupleExpression{
+		elements: elements
+		span:     p.span_from(start)
+	}
 }
 
 fn (mut p Parser) parse_if_expression() !ast.Expression {
