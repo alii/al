@@ -418,9 +418,6 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 				}
 				f.format_expr(elem)
 			}
-			if expr.elements.len == 1 {
-				f.emit(',')
-			}
 			f.emit(')')
 		}
 		ast.ArrayIndexExpression {
