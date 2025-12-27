@@ -12,4 +12,6 @@ I have aliased cat to be `bat`, which when piping with STDIN will add a "STDIN" 
 
 When deciding between n+1 implementations of a feature or fix, prefer the one that is more idiomatic and correct. Working on a programming language is something that has a lot of prior art. Generally consider what is more idiomatic and correct over what is more clever, "fun", or "efficient" unless efficiency is the main concern of the code path. As a rule of thumb, "effort" to achieve an implementation is not a worry here. Do not worry about things "getting complicated" or "big" - if you find yourself adding TODO comments, consider removing them and continuing with the full, correct implementation.
 
+Take immense care when perfoming huge refactors. Maintain a long, clear, detailed TODO list. Consider writing it to a file so you never lose track, even during compactions. As an example, we recently merged the checker into the compiler. You could have maintained a todo list for every single error message that existed in the checker first, and made sure they all existed in the refactored version. This is the level of attention and care required.
+
 Never add Claude or Anthropic branding to commit messages, issue bodies, PR titles, PR descriptions, etc.

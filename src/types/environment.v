@@ -9,6 +9,19 @@ pub:
 	end_col int
 }
 
+pub struct TypePosition {
+pub:
+	line      int
+	column    int
+	end_col   int
+	name      string
+	type_info Type
+	def_line  int // definition location (0 if unknown)
+	def_col   int
+	def_end   int
+	doc       ?string
+}
+
 pub struct TypeEnv {
 mut:
 	scopes       []map[string]Type

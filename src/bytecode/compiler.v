@@ -9,6 +9,7 @@ import type_def {
 	TypeEnum,
 	TypeFunction,
 	TypeStruct,
+	is_numeric,
 	t_array,
 	t_bool,
 	t_float,
@@ -18,8 +19,9 @@ import type_def {
 	t_tuple,
 	t_var,
 	type_to_string,
+	types_equal,
 }
-import types { TypeEnv, TypePosition, check }
+import types { TypeEnv, TypePosition }
 
 struct Scope {
 	locals map[string]int
@@ -111,6 +113,185 @@ fn (mut c Compiler) register_builtins() {
 		params: [t_string(), t_string()]
 		ret:    t_array(t_string())
 	})
+}
+
+// Error helpers for type checking
+fn (mut c Compiler) error_at_span(message string, s span.Span) {
+	c.diagnostics << diagnostic.error_at(s.start_line, s.start_column, message)
+}
+
+fn (mut c Compiler) warning_at_span(message string, s span.Span) {
+	c.diagnostics << diagnostic.warning_at(s.start_line, s.start_column, message)
+}
+
+fn (mut c Compiler) expect_type(actual Type, expected Type, s span.Span, context string) bool {
+	if types_equal(actual, expected) {
+		return true
+	}
+	// TypeVar matches any concrete type
+	if expected is type_def.TypeVar {
+		return true
+	}
+	if expected is type_def.TypeResult {
+		if types_equal(actual, expected.success) {
+			return true
+		}
+	}
+	if expected is type_def.TypeOption {
+		if types_equal(actual, expected.inner) {
+			return true
+		}
+		if types_equal(actual, t_none()) {
+			return true
+		}
+	}
+	c.error_at_span("Type mismatch ${context}: expected '${type_to_string(expected)}', got '${type_to_string(actual)}'",
+		s)
+	return false
+}
+
+fn (mut c Compiler) record_type(name string, typ Type, s span.Span, doc ?string) {
+	mut def_line := 0
+	mut def_col := 0
+	mut def_end := 0
+	if def_loc := c.env.lookup_definition(name) {
+		def_line = def_loc.line
+		def_col = def_loc.column
+		def_end = def_loc.end_col
+	}
+
+	c.type_positions << TypePosition{
+		line:      s.start_line
+		column:    s.start_column
+		end_col:   s.end_column
+		name:      name
+		type_info: typ
+		def_line:  def_line
+		def_col:   def_col
+		def_end:   def_end
+		doc:       doc
+	}
+}
+
+fn (mut c Compiler) infer_type_args(expected Type, actual Type, mut subs map[string]Type, s span.Span) {
+	match expected {
+		type_def.TypeVar {
+			if existing := subs[expected.name] {
+				if !types_equal(existing, actual) {
+					c.error_at_span("Conflicting types for type parameter '${expected.name}': expected '${type_to_string(existing)}', got '${type_to_string(actual)}'",
+						s)
+				}
+			} else {
+				subs[expected.name] = actual
+			}
+		}
+		type_def.TypeArray {
+			if actual is type_def.TypeArray {
+				c.infer_type_args(expected.element, actual.element, mut subs, s)
+			}
+		}
+		type_def.TypeOption {
+			if actual is type_def.TypeOption {
+				c.infer_type_args(expected.inner, actual.inner, mut subs, s)
+			}
+		}
+		type_def.TypeTuple {
+			if actual is type_def.TypeTuple {
+				if expected.elements.len == actual.elements.len {
+					for i, exp_elem in expected.elements {
+						c.infer_type_args(exp_elem, actual.elements[i], mut subs, s)
+					}
+				}
+			}
+		}
+		type_def.TypeResult {
+			if actual is type_def.TypeResult {
+				c.infer_type_args(expected.success, actual.success, mut subs, s)
+				c.infer_type_args(expected.error, actual.error, mut subs, s)
+			}
+		}
+		TypeStruct {
+			if actual is TypeStruct {
+				for field_name, field_type in expected.fields {
+					if actual_field := actual.fields[field_name] {
+						c.infer_type_args(field_type, actual_field, mut subs, s)
+					}
+				}
+			}
+		}
+		else {}
+	}
+}
+
+fn (c Compiler) find_similar_name(name string) ?string {
+	all_names := c.env.all_names()
+	mut best_match := ''
+	mut best_distance := 3 // max distance threshold
+
+	for candidate in all_names {
+		dist := levenshtein_distance(name, candidate)
+		if dist < best_distance {
+			best_distance = dist
+			best_match = candidate
+		}
+	}
+
+	if best_match.len > 0 {
+		return best_match
+	}
+	return none
+}
+
+fn levenshtein_distance(a string, b string) int {
+	if a.len == 0 {
+		return b.len
+	}
+	if b.len == 0 {
+		return a.len
+	}
+
+	mut prev := []int{len: b.len + 1, init: index}
+	mut curr := []int{len: b.len + 1}
+
+	for i := 1; i <= a.len; i++ {
+		curr[0] = i
+		for j := 1; j <= b.len; j++ {
+			cost := if a[i - 1] == b[j - 1] { 0 } else { 1 }
+			deletion := prev[j] + 1
+			insertion := curr[j - 1] + 1
+			substitution := prev[j - 1] + cost
+
+			mut min_val := deletion
+			if insertion < min_val {
+				min_val = insertion
+			}
+			if substitution < min_val {
+				min_val = substitution
+			}
+			curr[j] = min_val
+		}
+
+		prev = curr.clone()
+		curr = []int{len: b.len + 1}
+	}
+
+	return prev[b.len]
+}
+
+fn (c Compiler) check_binary_operand_types(left Type, right Type) bool {
+	// if either is a TypeVar, they're compatible (TypeVar will be resolved later)
+	if left is type_def.TypeVar || right is type_def.TypeVar {
+		return true
+	}
+	return types_equal(left, right)
+}
+
+fn (c Compiler) infer_binary_result_type(left Type, right Type) Type {
+	// Prefer concrete type over TypeVar
+	if left is type_def.TypeVar {
+		return right
+	}
+	return left
 }
 
 fn span_key(s span.Span) string {
@@ -206,40 +387,12 @@ pub:
 }
 
 pub fn compile(expr ast.Expression, fl Flags) CompileResult {
-	// Run type checking first
-	block_expr := if expr is ast.BlockExpression {
-		expr
-	} else {
-		ast.BlockExpression{
-			body: [ast.Node(expr)]
-			span: span.point_span(0, 0)
-		}
-	}
-	check_result := check(block_expr)
-
-	// If type checking failed, return early with errors
-	if !check_result.success {
-		return CompileResult{
-			program:        Program{
-				constants: []
-				functions: []
-				code:      []
-				entry:     0
-			}
-			diagnostics:    check_result.diagnostics
-			success:        false
-			env:            check_result.env
-			program_type:   check_result.program_type
-			type_positions: check_result.type_positions
-		}
-	}
-
-	// Use the type-checked environment for bytecode compilation
+	// Create a fresh compiler with its own type environment
 	mut c := Compiler{
 		flags:            fl
-		env:              check_result.env
-		diagnostics:      check_result.diagnostics
-		type_positions:   check_result.type_positions
+		env:              types.new_env()
+		diagnostics:      []
+		type_positions:   []
 		program:          Program{
 			constants: []
 			functions: []
@@ -253,6 +406,9 @@ pub fn compile(expr ast.Expression, fl Flags) CompileResult {
 		captures:         {}
 		capture_names:    []
 	}
+
+	// Register built-in functions and types
+	c.register_builtins()
 
 	main_start := c.program.code.len
 
@@ -284,7 +440,7 @@ pub fn compile(expr ast.Expression, fl Flags) CompileResult {
 		diagnostics:    c.diagnostics
 		success:        !diagnostic.has_errors(c.diagnostics)
 		env:            c.env
-		program_type:   check_result.program_type
+		program_type:   t_none() // TODO: compute from last expression
 		type_positions: c.type_positions
 	}
 }
@@ -374,15 +530,34 @@ fn (mut c Compiler) compile_statement(stmt ast.Statement) ! {
 			old_binding := c.current_binding
 			c.current_binding = stmt.identifier.name
 			type_hint := if t := stmt.typ { c.resolve_type_identifier(t) } else { none }
-			c.compile_expr(stmt.init, type_hint)!
+			expr_type := c.compile_expr(stmt.init, type_hint)!
 			c.current_binding = old_binding
+
+			// Validate type annotation matches expression type
+			if th := type_hint {
+				c.expect_type(expr_type, th, stmt.init.span, 'in variable binding')
+			}
+
+			// Register the variable type in the environment
+			final_type := type_hint or { expr_type }
+			c.env.define(stmt.identifier.name, final_type)
 
 			c.emit_arg(.store_local, idx)
 		}
 		ast.ConstBinding {
 			type_hint := if t := stmt.typ { c.resolve_type_identifier(t) } else { none }
-			c.compile_expr(stmt.init, type_hint)!
+			expr_type := c.compile_expr(stmt.init, type_hint)!
 			idx := c.get_or_create_local(stmt.identifier.name)
+
+			// Validate type annotation matches expression type
+			if th := type_hint {
+				c.expect_type(expr_type, th, stmt.init.span, 'in constant binding')
+			}
+
+			// Register the constant type in the environment
+			final_type := type_hint or { expr_type }
+			c.env.define(stmt.identifier.name, final_type)
+
 			c.emit_arg(.store_local, idx)
 		}
 		ast.TypePatternBinding {
@@ -541,9 +716,18 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) !Type {
 					c.emit(.push_self)
 				}
 				// Look up the type from the environment
-				return c.env.lookup(expr.name) or { t_none() }
+				typ := c.env.lookup(expr.name) or { t_none() }
+				c.record_type(expr.name, typ, expr.span, c.env.lookup_doc(expr.name))
+				return typ
 			} else {
-				return error('Undefined variable: ${expr.name}')
+				// Unknown identifier - emit error with "did you mean" suggestion
+				if suggestion := c.find_similar_name(expr.name) {
+					c.error_at_span("Unknown identifier '${expr.name}'. Did you mean '${suggestion}'?",
+						expr.span)
+				} else {
+					c.error_at_span("Unknown identifier '${expr.name}'", expr.span)
+				}
+				return t_none()
 			}
 		}
 		ast.BinaryExpression {
@@ -571,54 +755,98 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) !Type {
 			}
 
 			left_type := c.compile_expr(expr.left, none)!
-			c.compile_expr(expr.right, none)!
+			right_type := c.compile_expr(expr.right, none)!
+			op_str := expr.op.kind.str()
+
 			match expr.op.kind {
 				.punc_plus {
 					c.emit(.add)
-					// String concatenation returns String, arithmetic returns the operand type
-					if type_def.is_numeric(left_type) {
-						return left_type
+					// String concatenation
+					if types_equal(left_type, t_string()) && types_equal(right_type, t_string()) {
+						return t_string()
 					}
-					return t_string()
+					// String + TypeVar or TypeVar + String: infer as String
+					if types_equal(left_type, t_string()) && right_type is type_def.TypeVar {
+						return t_string()
+					}
+					if left_type is type_def.TypeVar && types_equal(right_type, t_string()) {
+						return t_string()
+					}
+					// Mixed string + concrete non-string: suggest interpolation
+					if types_equal(left_type, t_string()) || types_equal(right_type, t_string()) {
+						c.error_at_span("Cannot concatenate '${type_to_string(left_type)}' with '${type_to_string(right_type)}': use string interpolation instead",
+							expr.span)
+						return t_string()
+					}
+					// Numeric addition (or TypeVar that will be inferred as numeric)
+					if !is_numeric(left_type) && left_type !is type_def.TypeVar {
+						c.error_at_span("Left operand of '${op_str}' must be numeric, got '${type_to_string(left_type)}'",
+							expr.span)
+						return t_int()
+					}
+					if !is_numeric(right_type) && right_type !is type_def.TypeVar {
+						c.error_at_span("Right operand of '${op_str}' must be numeric, got '${type_to_string(right_type)}'",
+							expr.span)
+						return t_int()
+					}
+					if !c.check_binary_operand_types(left_type, right_type) {
+						c.error_at_span("Cannot apply '${op_str}' to '${type_to_string(left_type)}' and '${type_to_string(right_type)}': operands must have the same type",
+							expr.span)
+					}
+					return c.infer_binary_result_type(left_type, right_type)
 				}
-				.punc_minus {
-					c.emit(.sub)
-					return left_type
+				.punc_minus, .punc_mul, .punc_div, .punc_mod {
+					match expr.op.kind {
+						.punc_minus { c.emit(.sub) }
+						.punc_mul { c.emit(.mul) }
+						.punc_div { c.emit(.div) }
+						.punc_mod { c.emit(.mod) }
+						else {}
+					}
+					// Allow TypeVar (will be inferred as numeric later)
+					if !is_numeric(left_type) && left_type !is type_def.TypeVar {
+						c.error_at_span("Left operand of '${op_str}' must be numeric, got '${type_to_string(left_type)}'",
+							expr.span)
+						return t_int()
+					}
+					if !is_numeric(right_type) && right_type !is type_def.TypeVar {
+						c.error_at_span("Right operand of '${op_str}' must be numeric, got '${type_to_string(right_type)}'",
+							expr.span)
+						return t_int()
+					}
+					if !c.check_binary_operand_types(left_type, right_type) {
+						c.error_at_span("Cannot apply '${op_str}' to '${type_to_string(left_type)}' and '${type_to_string(right_type)}': operands must have the same type",
+							expr.span)
+					}
+					return c.infer_binary_result_type(left_type, right_type)
 				}
-				.punc_mul {
-					c.emit(.mul)
-					return left_type
-				}
-				.punc_div {
-					c.emit(.div)
-					return left_type
-				}
-				.punc_mod {
-					c.emit(.mod)
-					return left_type
-				}
-				.punc_equals_comparator {
-					c.emit(.eq)
+				.punc_lt, .punc_gt, .punc_lte, .punc_gte {
+					match expr.op.kind {
+						.punc_lt { c.emit(.lt) }
+						.punc_gt { c.emit(.gt) }
+						.punc_lte { c.emit(.lte) }
+						.punc_gte { c.emit(.gte) }
+						else {}
+					}
+					// Allow TypeVar (will be inferred as numeric later)
+					left_ok := is_numeric(left_type) || left_type is type_def.TypeVar
+					right_ok := is_numeric(right_type) || right_type is type_def.TypeVar
+					if !left_ok || !right_ok {
+						c.error_at_span("Cannot compare '${type_to_string(left_type)}' with '${type_to_string(right_type)}': operator '${op_str}' requires numeric operands",
+							expr.span)
+					}
 					return t_bool()
 				}
-				.punc_not_equal {
-					c.emit(.neq)
-					return t_bool()
-				}
-				.punc_lt {
-					c.emit(.lt)
-					return t_bool()
-				}
-				.punc_gt {
-					c.emit(.gt)
-					return t_bool()
-				}
-				.punc_lte {
-					c.emit(.lte)
-					return t_bool()
-				}
-				.punc_gte {
-					c.emit(.gte)
+				.punc_equals_comparator, .punc_not_equal {
+					if expr.op.kind == .punc_equals_comparator {
+						c.emit(.eq)
+					} else {
+						c.emit(.neq)
+					}
+					if !c.check_binary_operand_types(left_type, right_type) {
+						c.error_at_span('Cannot compare ${type_to_string(left_type)} with ${type_to_string(right_type)}',
+							expr.span)
+					}
 					return t_bool()
 				}
 				else {
@@ -676,12 +904,23 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) !Type {
 		}
 		ast.ArrayExpression {
 			has_spread := expr.elements.any(it is ast.SpreadElement)
-			mut elem_type := t_none()
+
+			// Determine element type from hint if available
+			mut elem_type := if h := hint {
+				if h is type_def.TypeArray {
+					h.element
+				} else {
+					t_none()
+				}
+			} else {
+				t_none()
+			}
 
 			if !has_spread {
 				for elem in expr.elements {
 					if elem is ast.Expression {
-						elem_type = c.compile_expr(elem, none)!
+						// Use element hint for better type inference
+						elem_type = c.compile_expr(elem, elem_type)!
 					}
 				}
 				c.emit_arg(.make_array, expr.elements.len)
@@ -775,12 +1014,29 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) !Type {
 			if h := hint {
 				if h is TypeEnum {
 					if expr.identifier.name in h.variants {
+						// Validate enum variant argument count
+						payload_types := h.variants[expr.identifier.name] or { []Type{} }
+						if payload_types.len > 0 {
+							if expr.arguments.len != payload_types.len {
+								c.error_at_span("Enum variant '${expr.identifier.name}' expects ${payload_types.len} argument(s), got ${expr.arguments.len}",
+									expr.span)
+							}
+						} else if expr.arguments.len != 0 {
+							c.error_at_span("Enum variant '${expr.identifier.name}' expects no arguments, got ${expr.arguments.len}",
+								expr.span)
+						}
+
 						c.emit_arg(.push_const, c.add_constant(h.id))
 						c.emit_arg(.push_const, c.add_constant(h.name))
 						c.emit_arg(.push_const, c.add_constant(expr.identifier.name))
 						if expr.arguments.len > 0 {
-							for arg in expr.arguments {
-								c.compile_expr(arg, none)!
+							for i, arg in expr.arguments {
+								arg_hint := if i < payload_types.len {
+									payload_types[i]
+								} else {
+									none
+								}
+								c.compile_expr(arg, arg_hint)!
 							}
 							c.emit_arg(.make_enum_payload, expr.arguments.len)
 						} else {
@@ -793,13 +1049,28 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) !Type {
 
 			func_type := c.env.lookup_function(expr.identifier.name)
 
+			// Validate argument count
+			if ft := func_type {
+				if expr.arguments.len != ft.params.len {
+					c.error_at_span("Function '${expr.identifier.name}' expects ${ft.params.len} argument(s), got ${expr.arguments.len}",
+						expr.span)
+				}
+			}
+
 			for i, arg in expr.arguments {
 				param_hint := if ft := func_type {
 					if i < ft.params.len { ft.params[i] } else { none }
 				} else {
 					none
 				}
-				c.compile_expr(arg, param_hint)!
+				arg_type := c.compile_expr(arg, param_hint)!
+
+				// Validate argument type
+				if ft := func_type {
+					if i < ft.params.len {
+						c.expect_type(arg_type, ft.params[i], arg.span, "in argument ${i + 1} of '${expr.identifier.name}'")
+					}
+				}
 			}
 
 			if access := c.resolve_variable(expr.identifier.name) {
@@ -822,7 +1093,16 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) !Type {
 				}
 				return t_none()
 			} else {
-				return c.compile_builtin_call(expr)!
+				// Check if it's a builtin, otherwise report unknown function
+				return c.compile_builtin_call(expr) or {
+					if suggestion := c.find_similar_name(expr.identifier.name) {
+						c.error_at_span("'${expr.identifier.name}' is not defined. Did you mean '${suggestion}'?",
+							expr.span)
+					} else {
+						c.error_at_span("'${expr.identifier.name}' is not defined", expr.span)
+					}
+					return t_none()
+				}
 			}
 		}
 		ast.PropertyAccessExpression {
@@ -923,35 +1203,151 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) !Type {
 		ast.StructInitExpression {
 			struct_name := expr.identifier.name
 
-			struct_type := c.env.lookup_struct(struct_name) or {
-				return error('Unknown struct type: ${struct_name}')
+			mut struct_type := if struct_def := c.env.lookup_struct(struct_name) {
+				// Record type for struct name hover
+				doc := c.env.lookup_doc(struct_name)
+				c.record_type(struct_name, Type(struct_def), expr.identifier.span, doc)
+				struct_def
+			} else {
+				c.error_at_span("Unknown struct '${struct_name}'", expr.identifier.span)
+				TypeStruct{
+					name:   struct_name
+					fields: map[string]Type{}
+				}
 			}
 
-			mut provided := map[string]bool{}
+			// Handle explicit type arguments (e.g., Pair[Int, String]{...})
+			if expr.type_args.len > 0 {
+				if struct_type.type_params.len != expr.type_args.len {
+					c.error_at_span("Struct '${struct_name}' expects ${struct_type.type_params.len} type argument(s), got ${expr.type_args.len}",
+						expr.identifier.span)
+				} else {
+					mut resolved_args := []Type{}
+					for arg in expr.type_args {
+						if resolved := c.resolve_type_identifier(arg) {
+							resolved_args << resolved
+						} else {
+							c.error_at_span("Unknown type '${arg.identifier.name}'", arg.identifier.span)
+							resolved_args << t_none()
+						}
+					}
+
+					mut subs := map[string]Type{}
+					for i, param in struct_type.type_params {
+						subs[param] = resolved_args[i]
+					}
+					mut new_fields := map[string]Type{}
+					for field_name, field_type in struct_type.fields {
+						new_fields[field_name] = type_def.substitute(field_type, subs)
+					}
+					struct_type = TypeStruct{
+						id:          struct_type.id
+						name:        struct_type.name
+						type_params: struct_type.type_params
+						type_args:   resolved_args
+						fields:      new_fields
+					}
+				}
+			} else if struct_type.type_params.len > 0 {
+				// Infer type parameters from field values
+				mut subs := map[string]Type{}
+
+				for field in expr.fields {
+					if expected_type := struct_type.fields[field.identifier.name] {
+						// Emit field name constant before the value
+						name_idx := c.add_constant(field.identifier.name)
+						c.emit_arg(.push_const, name_idx)
+						actual_type := c.compile_expr(field.init, expected_type)!
+						c.infer_type_args(expected_type, actual_type, mut subs, field.init.span)
+					}
+				}
+
+				mut resolved_args := []Type{}
+				for param in struct_type.type_params {
+					if inferred := subs[param] {
+						resolved_args << inferred
+					} else {
+						c.error_at_span("Could not infer type parameter '${param}' for struct '${struct_name}'",
+							expr.identifier.span)
+						resolved_args << t_none()
+					}
+				}
+
+				mut new_fields := map[string]Type{}
+				for field_name, field_type in struct_type.fields {
+					new_fields[field_name] = type_def.substitute(field_type, subs)
+				}
+				struct_type = TypeStruct{
+					id:          struct_type.id
+					name:        struct_type.name
+					type_params: struct_type.type_params
+					type_args:   resolved_args
+					fields:      new_fields
+				}
+			}
+
+			mut provided_fields := map[string]bool{}
+
 			for field in expr.fields {
-				field_name := field.identifier.name
-				if field_name !in struct_type.fields {
-					return error('Unknown field "${field_name}" in struct ${struct_name}')
+				if field.identifier.name in provided_fields {
+					c.error_at_span("Duplicate field '${field.identifier.name}' in struct initializer",
+						field.identifier.span)
 				}
-				if field_name in provided {
-					return error('Duplicate field "${field_name}" in struct ${struct_name}')
+				provided_fields[field.identifier.name] = true
+
+				// For non-generic structs or with explicit type args, compile and check field values
+				if struct_type.type_params.len == 0 || expr.type_args.len > 0 {
+					// Emit field name constant before the value
+					name_idx := c.add_constant(field.identifier.name)
+					c.emit_arg(.push_const, name_idx)
+					actual_type := c.compile_expr(field.init, struct_type.fields[field.identifier.name] or {
+						t_none()
+					})!
+					if expected_type := struct_type.fields[field.identifier.name] {
+						// Record type for field name hover in struct literals
+						qualified_name := '${struct_name}.${field.identifier.name}'
+						field_doc := c.env.lookup_doc(qualified_name)
+						c.record_type(qualified_name, expected_type, field.identifier.span,
+							field_doc)
+
+						c.expect_type(actual_type, expected_type, field.init.span, "in field '${field.identifier.name}'")
+					} else {
+						available := struct_type.fields.keys().join(', ')
+						c.error_at_span("Struct '${struct_name}' has no field '${field.identifier.name}'. Available fields: ${available}",
+							field.identifier.span)
+					}
+				} else {
+					// For inferred generics, check field existence (values already compiled during inference)
+					if field.identifier.name !in struct_type.fields {
+						available := struct_type.fields.keys().join(', ')
+						c.error_at_span("Struct '${struct_name}' has no field '${field.identifier.name}'. Available fields: ${available}",
+							field.identifier.span)
+					} else {
+						// Record type for hover
+						if expected_type := struct_type.fields[field.identifier.name] {
+							qualified_name := '${struct_name}.${field.identifier.name}'
+							field_doc := c.env.lookup_doc(qualified_name)
+							c.record_type(qualified_name, expected_type, field.identifier.span,
+								field_doc)
+						}
+					}
 				}
-				provided[field_name] = true
 			}
 
+			mut missing_fields := []string{}
 			for field_name, _ in struct_type.fields {
-				if field_name !in provided {
-					return error('Missing field "${field_name}" in struct ${struct_name}')
+				if field_name !in provided_fields {
+					missing_fields << field_name
 				}
 			}
-
-			for field in expr.fields {
-				name_idx := c.add_constant(field.identifier.name)
-				c.emit_arg(.push_const, name_idx)
-				c.compile_expr(field.init, none)!
+			if missing_fields.len > 0 {
+				c.error_at_span("Missing required fields in '${struct_name}': ${missing_fields.join(', ')}",
+					expr.identifier.span)
 			}
+
+			// Emit struct creation bytecode
 			c.emit_arg(.push_const, c.add_constant(struct_type.id))
-			type_idx := c.add_constant(expr.identifier.name)
+			type_idx := c.add_constant(struct_name)
 			c.emit_arg(.push_const, type_idx)
 			c.emit_arg(.make_struct, expr.fields.len)
 			return struct_type
@@ -1048,8 +1444,17 @@ fn (mut c Compiler) compile_function_common(name ?string, params []ast.FunctionP
 	c.captures = {}
 	c.capture_names = []
 
-	for param in params {
+	// Build parameter types and register them in the type environment
+	c.env.push_scope()
+	for i, param in params {
 		c.get_or_create_local(param.identifier.name)
+		// Resolve parameter type and register it in the environment
+		pt := if t := param.typ {
+			c.resolve_type_identifier(t) or { t_var('P${i}') }
+		} else {
+			t_var('P${i}')
+		}
+		c.env.define(param.identifier.name, pt)
 	}
 
 	func_start := c.current_addr()
@@ -1065,6 +1470,9 @@ fn (mut c Compiler) compile_function_common(name ?string, params []ast.FunctionP
 	c.in_tail_position = old_tail
 	c.current_binding = old_binding
 	c.emit(.ret)
+
+	// Pop the function scope
+	c.env.pop_scope()
 
 	c.program.code[jump_over] = op_arg(.jump, c.current_addr())
 
