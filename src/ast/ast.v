@@ -54,6 +54,7 @@ pub:
 	is_array     bool
 	is_option    bool
 	is_function  bool
+	is_tuple     bool
 	identifier   Identifier
 	type_args    []TypeIdentifier
 	element_type ?&TypeIdentifier

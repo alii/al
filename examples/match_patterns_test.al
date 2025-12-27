@@ -316,6 +316,12 @@ test('quad tuple partial', 'first three match, last: 99', t5)
 // Deep Nesting
 // ============================================================================
 
+fn test2(t (String, Int)) {
+	//
+}
+
+test2(('hi', 2))
+
 deep1 = match (((true))) {
 	(((true))) -> 'deep true',
 	(((false))) -> 'deep false',

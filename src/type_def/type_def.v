@@ -67,8 +67,8 @@ pub:
 
 pub struct TypeResult {
 pub:
-	success Type // The T in T!E
-	error   Type // The E in T!E
+	success Type
+	error   Type
 }
 
 pub struct TypeTuple {
@@ -298,7 +298,7 @@ pub fn type_to_string(t Type) string {
 
 pub fn is_numeric(t Type) bool {
 	if t is TypeVar {
-		return true // TypeVar might be numeric, will be constrained later
+		return true
 	}
 	if t is TypePrimitive {
 		return t.kind == .t_int || t.kind == .t_float

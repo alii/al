@@ -590,6 +590,17 @@ fn (mut f Formatter) format_type(typ ast.TypeIdentifier) {
 			return
 		}
 	}
+	if typ.is_tuple {
+		f.emit('(')
+		for i, p in typ.param_types {
+			if i > 0 {
+				f.emit(', ')
+			}
+			f.format_type(p)
+		}
+		f.emit(')')
+		return
+	}
 	if typ.is_function {
 		f.emit('fn(')
 		for i, p in typ.param_types {

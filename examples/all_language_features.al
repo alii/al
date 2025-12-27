@@ -20,9 +20,14 @@ struct NetworkError {
 }
 
 struct Person {
+	/**
+	 * hi
+	 */
 	name String
 	age Int
 }
+
+p = Person{ name: 'Alice', age: 30 }
 
 struct Config {
 	debug Bool

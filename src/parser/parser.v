@@ -272,7 +272,6 @@ pub fn (mut p Parser) parse_program() ParseResult {
 }
 
 fn (mut p Parser) parse_node() !ast.Node {
-	// Try to parse as a statement first (keywords)
 	match p.current_token.kind {
 		.kw_const {
 			return ast.Node(p.parse_const_binding()!)
@@ -293,18 +292,16 @@ fn (mut p Parser) parse_node() !ast.Node {
 			return ast.Node(p.parse_export_declaration()!)
 		}
 		.punc_open_paren {
-			// Could be tuple destructuring: (a, b) = expr
 			if p.is_tuple_destructuring() {
 				return ast.Node(p.parse_tuple_destructuring()!)
 			}
 		}
 		.identifier {
-			// Check for binding patterns: identifier = or identifier Type =
 			if next := p.peek_next() {
 				if next.kind == .punc_equals {
 					return ast.Node(p.parse_binding()!)
 				}
-				// Check if it's an identifier followed by a type annotation
+
 				if p.is_type_start_at_next() {
 					return ast.Node(p.parse_binding()!)
 				}
@@ -312,7 +309,7 @@ fn (mut p Parser) parse_node() !ast.Node {
 		}
 		else {}
 	}
-	// Otherwise parse as expression
+
 	return ast.Node(p.parse_expression()!)
 }
 
@@ -541,8 +538,6 @@ fn (mut p Parser) parse_postfix_expression() !ast.Expression {
 				expr = p.parse_dot_expression(expr)!
 			}
 			.punc_open_bracket {
-				// only treat as array index if there's no whitespace before the bracket
-				// this allows `arr[0]` but not `arr [0]` or `x = 1\n[1, 2]`
 				if p.current_token.leading_trivia.len > 0 {
 					break
 				}
@@ -660,19 +655,15 @@ fn (mut p Parser) parse_identifier_or_call() !ast.Expression {
 	name := p.eat_token_literal(.identifier, 'Expected identifier')!
 
 	if p.current_token.kind == .punc_open_paren {
-		// Could be function call or struct init with type args like Box(Int){ ... }
-		// Save position and try to parse as type args first
 		saved_index := p.index
 		saved_token := p.current_token
 
 		if type_args := p.try_parse_type_args() {
-			// If next token is {, it's struct init with type args
 			if p.current_token.kind == .punc_open_brace {
 				return p.parse_struct_init_with_type_args(name, span, type_args)!
 			}
 		}
 
-		// Restore position and parse as function call
 		p.index = saved_index
 		p.current_token = saved_token
 		return p.parse_function_call_expression(name, span)!
@@ -741,10 +732,9 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 			spread_span := p.current_span()
 			p.eat(.punc_dotdot)!
 
-			// anonymous spread (.. followed by ] or , or else)
 			if p.current_token.kind in [.punc_close_bracket, .punc_comma, .kw_else] {
 				if p.current_token.kind == .kw_else {
-					p.advance() // skip the erroneous 'else' token
+					p.advance()
 				}
 				elements << ast.SpreadElement{
 					expression: none
@@ -755,7 +745,6 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 					p.add_error(err.msg())
 					p.synchronize()
 					if p.current_context() != .array {
-						// synchronize consumed the ] and popped context
 						return ast.ArrayExpression{
 							elements: elements
 							span:     span
@@ -777,7 +766,6 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 				p.add_error(err.msg())
 				p.synchronize()
 				if p.current_context() != .array {
-					// synchronize consumed the ] and popped context
 					return ast.ArrayExpression{
 						elements: elements
 						span:     span
@@ -958,7 +946,6 @@ fn (p Parser) extract_doc_comment() ?string {
 }
 
 fn (mut p Parser) parse_function() !ast.Node {
-	// Check if next token is identifier (declaration) or paren (expression)
 	if next := p.peek_next() {
 		if next.kind == .identifier {
 			return ast.Node(p.parse_function_declaration()!)
@@ -1080,7 +1067,8 @@ fn (mut p Parser) parse_parameter() !ast.FunctionParameter {
 	mut typ := ?ast.TypeIdentifier(none)
 
 	if p.current_token.kind == .identifier || p.current_token.kind == .punc_open_bracket
-		|| p.current_token.kind == .punc_question_mark || p.current_token.kind == .kw_function {
+		|| p.current_token.kind == .punc_question_mark || p.current_token.kind == .kw_function
+		|| p.current_token.kind == .punc_open_paren {
 		typ = p.parse_type_identifier()!
 	}
 
@@ -1134,6 +1122,31 @@ fn (mut p Parser) is_type_start_at_next() bool {
 	return false
 }
 
+fn (mut p Parser) parse_tuple_type() !ast.TypeIdentifier {
+	start_span := p.current_span()
+	p.eat(.punc_open_paren)!
+
+	mut params := []ast.TypeIdentifier{}
+
+	for p.current_token.kind != .punc_close_paren && p.current_token.kind != .eof {
+		params << p.parse_type_identifier()!
+
+		if p.current_token.kind == .punc_comma {
+			p.eat(.punc_comma)!
+		}
+	}
+
+	p.eat(.punc_close_paren)!
+	return ast.TypeIdentifier{
+		is_tuple:    true
+		param_types: params
+		identifier:  ast.Identifier{
+			span: start_span
+		}
+		span:        p.span_from(start_span)
+	}
+}
+
 fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 	mut is_option := false
 
@@ -1142,7 +1155,10 @@ fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 		p.eat(.punc_question_mark)!
 	}
 
-	// Array type: []T where T can itself be an array type
+	if p.current_token.kind == .punc_open_paren {
+		return p.parse_tuple_type()!
+	}
+
 	if p.current_token.kind == .punc_open_bracket {
 		start_span := p.current_span()
 		p.eat(.punc_open_bracket)!
@@ -1152,9 +1168,7 @@ fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 			is_option:    is_option
 			is_array:     true
 			element_type: &inner
-			identifier:   ast.Identifier{
-				span: start_span
-			}
+			identifier:   inner.identifier
 			span:         p.span_from(start_span)
 		}
 	}
@@ -1443,7 +1457,6 @@ fn (mut p Parser) parse_struct_init_expression(name string, name_span sp.Span) !
 	}
 }
 
-// Try to parse type args like (Int, String). Returns none if not valid type args.
 fn (mut p Parser) try_parse_type_args() ?[]ast.TypeIdentifier {
 	if p.current_token.kind != .punc_open_paren {
 		return none
@@ -1452,7 +1465,6 @@ fn (mut p Parser) try_parse_type_args() ?[]ast.TypeIdentifier {
 
 	mut type_args := []ast.TypeIdentifier{}
 	for p.current_token.kind != .punc_close_paren && p.current_token.kind != .eof {
-		// Type args should be type identifiers (uppercase or type syntax)
 		if !p.is_type_start() {
 			return none
 		}
@@ -1611,7 +1623,6 @@ fn (mut p Parser) parse_binding() !ast.Statement {
 	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected identifier')!
 
-	// Check for type annotation
 	mut typ := ?ast.TypeIdentifier(none)
 	if p.is_type_start() {
 		typ = p.parse_type_identifier()!
@@ -1620,7 +1631,6 @@ fn (mut p Parser) parse_binding() !ast.Statement {
 	p.eat(.punc_equals)!
 	init := p.parse_expression()!
 
-	// Uppercase name followed by = is a type pattern binding
 	if name.len > 0 && name[0] >= `A` && name[0] <= `Z` && typ == none {
 		return ast.TypePatternBinding{
 			typ:  ast.TypeIdentifier{
@@ -1651,7 +1661,6 @@ fn (mut p Parser) parse_export_declaration() !ast.Statement {
 	span := p.current_span()
 	p.eat(.kw_export)!
 
-	// Export must be followed by a statement (function, struct, enum, const, or binding)
 	decl := match p.current_token.kind {
 		.kw_function { p.parse_function_declaration()! }
 		.kw_struct { p.parse_struct_declaration()! }

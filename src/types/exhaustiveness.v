@@ -3,16 +3,18 @@ module types
 import ast
 import type_def { Type, TypeArray, TypeEnum, TypeNone, TypeOption, TypePrimitive, TypeResult, TypeStruct, TypeTuple }
 
-type Pat = PatWildcard | PatCtor | PatOr
+pub type Pat = PatWildcard | PatCtor | PatOr
 
-struct PatWildcard {}
+pub struct PatWildcard {}
 
-struct PatCtor {
+pub struct PatCtor {
+pub:
 	name string
 	args []Pat
 }
 
-struct PatOr {
+pub struct PatOr {
+pub:
 	patterns []Pat
 }
 
@@ -695,18 +697,13 @@ pub fn ast_pattern_to_pat(pattern ast.Expression, t Type) Pat {
 					args: []
 				}
 			}
-			// Boolean expressions as patterns (match true { !cond -> ... })
-			// Cannot statically determine coverage, so treat each as unique/non-overlapping.
-			// This means: no "unreachable pattern" warnings, and `else` is always required.
+
 			return PatCtor{
 				name: 'cond:${pattern.span.start_line}:${pattern.span.start_column}'
 				args: []
 			}
 		}
 		ast.BinaryExpression {
-			// Boolean expressions as patterns (match true { cond -> ... })
-			// Cannot statically determine coverage, so treat each as unique/non-overlapping.
-			// This means: no "unreachable pattern" warnings, and `else` is always required.
 			return PatCtor{
 				name: 'cond:${pattern.span.start_line}:${pattern.span.start_column}'
 				args: []

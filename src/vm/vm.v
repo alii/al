@@ -230,32 +230,26 @@ fn (mut vm VM) execute() !bytecode.Value {
 						return error('Expected ${func.arity} arguments, got ${arity}')
 					}
 
-					// Collect arguments from stack
 					mut args := []bytecode.Value{cap: arity}
 					for _ in 0 .. arity {
 						args << vm.pop()!
 					}
 
-					// Get current frame
 					mut current_frame := &vm.frames[vm.frames.len - 1]
 					base := current_frame.base_slot
 
-					// Clear current frame's stack slots
 					for vm.stack.len > base {
 						vm.stack.pop()
 					}
 
-					// Push arguments back (in reverse since we popped them)
 					for i := arity - 1; i >= 0; i-- {
 						vm.stack << args[i]
 					}
 
-					// Fill remaining locals with none
 					for _ in arity .. func.locals {
 						vm.stack << bytecode.NoneValue{}
 					}
 
-					// Reuse the frame with new function
 					current_frame.func = func
 					current_frame.func_idx = callee.func_idx
 					current_frame.ip = 0
@@ -280,7 +274,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 			}
 			.make_array {
 				len := instr.operand
-				// unsafe: we immediately write to every index, no uninitialized reads
+
 				mut arr := unsafe { []bytecode.Value{len: len} }
 				for i := len - 1; i >= 0; i-- {
 					arr[i] = vm.pop()!
@@ -333,15 +327,12 @@ fn (mut vm VM) execute() !bytecode.Value {
 						if idx_val >= 0 && idx_val < arr_val.len {
 							vm.stack << arr_val[idx_val]
 						} else {
-							// Out of bounds returns none (array indexing is optional)
 							vm.stack << bytecode.Value(bytecode.NoneValue{})
 						}
 					} else {
-						// Invalid index type returns none (type checker should catch this)
 						vm.stack << bytecode.Value(bytecode.NoneValue{})
 					}
 				} else {
-					// Non-array returns none (type checker should catch this)
 					vm.stack << bytecode.Value(bytecode.NoneValue{})
 				}
 			}
@@ -443,7 +434,6 @@ fn (mut vm VM) execute() !bytecode.Value {
 				func_idx := instr.operand
 				func := vm.program.functions[func_idx]
 
-				// unsafe: we immediately write to every index, no uninitialized reads
 				mut captures := unsafe { []bytecode.Value{len: func.capture_count} }
 				for i := func.capture_count - 1; i >= 0; i-- {
 					captures[i] = vm.pop()!
@@ -467,7 +457,6 @@ fn (mut vm VM) execute() !bytecode.Value {
 				}
 			}
 			.push_self {
-				// Push the currently-executing closure onto the stack
 				if vm.frames.len > 0 {
 					current_frame := vm.frames[vm.frames.len - 1]
 					vm.stack << bytecode.ClosureValue{
@@ -524,7 +513,6 @@ fn (mut vm VM) execute() !bytecode.Value {
 					payloads << vm.pop()!
 				}
 
-				// Reverse since we popped in reverse order
 				payloads.reverse_in_place()
 
 				variant_name_val := vm.pop()!
@@ -558,7 +546,6 @@ fn (mut vm VM) execute() !bytecode.Value {
 				}
 			}
 			.match_enum {
-				// Match variant only, ignore payload
 				variant_name := vm.pop()!
 				enum_name := vm.pop()!
 				type_id_val := vm.pop()!
@@ -928,18 +915,17 @@ fn (vm VM) values_equal(a bytecode.Value, b bytecode.Value) bool {
 		}
 		bytecode.EnumValue {
 			if b is bytecode.EnumValue {
-				// fast path: different hashes means definitely not equal
 				if a.hash != b.hash {
 					return false
 				}
-				// nominal check: must be same enum type
+
 				if a.type_id != b.type_id {
 					return false
 				}
 				if a.variant_name != b.variant_name {
 					return false
 				}
-				// fast path: both empty payloads
+
 				if a.payload.len == 0 && b.payload.len == 0 {
 					return true
 				}
@@ -956,19 +942,18 @@ fn (vm VM) values_equal(a bytecode.Value, b bytecode.Value) bool {
 		}
 		bytecode.StructValue {
 			if b is bytecode.StructValue {
-				// fast path: different hashes means definitely not equal
 				if a.hash != b.hash {
 					return false
 				}
-				// nominal check: must be same struct type
+
 				if a.type_id != b.type_id {
 					return false
 				}
-				// fast path: both empty structs
+
 				if a.fields.len == 0 && b.fields.len == 0 {
 					return true
 				}
-				// structural check: compare all fields (handles hash collisions)
+
 				if a.fields.len != b.fields.len {
 					return false
 				}

@@ -76,7 +76,6 @@ fn (mut s Scanner) collect_trivia() {
 	for s.state.get_pos() < s.input.len {
 		ch := s.peek_char()
 
-		// Collect whitespace (spaces, tabs)
 		if ch == ` ` || ch == `\t` {
 			start := s.state.get_pos()
 			for s.state.get_pos() < s.input.len {
@@ -94,7 +93,6 @@ fn (mut s Scanner) collect_trivia() {
 			continue
 		}
 
-		// Collect newlines
 		if ch == `\n` {
 			s.incr_pos()
 			s.pending_trivia << token.Trivia{
@@ -104,7 +102,6 @@ fn (mut s Scanner) collect_trivia() {
 			continue
 		}
 
-		// Collect line comments
 		if ch == `/` && s.state.get_pos() + 1 < s.input.len && s.input[s.state.get_pos() + 1] == `/` {
 			start := s.state.get_pos()
 			for s.state.get_pos() < s.input.len && s.peek_char() != `\n` {
@@ -118,21 +115,18 @@ fn (mut s Scanner) collect_trivia() {
 			continue
 		}
 
-		// Collect block comments /* */ and doc comments /** */
 		if ch == `/` && s.state.get_pos() + 1 < s.input.len && s.input[s.state.get_pos() + 1] == `*` {
 			start := s.state.get_pos()
-			s.incr_pos() // skip /
-			s.incr_pos() // skip *
+			s.incr_pos()
+			s.incr_pos()
 
-			// Doc comment if next char is * but NOT followed by /
-			// i.e., /** but not /**/ or /***/
 			is_doc := s.state.get_pos() < s.input.len && s.peek_char() == `*`
 				&& (s.state.get_pos() + 1 >= s.input.len || s.input[s.state.get_pos() + 1] != `/`)
 
 			for s.state.get_pos() + 1 < s.input.len {
 				if s.peek_char() == `*` && s.input[s.state.get_pos() + 1] == `/` {
-					s.incr_pos() // skip *
-					s.incr_pos() // skip /
+					s.incr_pos()
+					s.incr_pos()
 					break
 				}
 				s.incr_pos()
@@ -195,7 +189,6 @@ pub fn (mut s Scanner) scan_next() token.Token {
 		return s.new_token(.punc_arrow, none)
 	}
 
-	// Must do this check before checking for numbers
 	if ch == `.` && s.peek_char() == `.` {
 		s.incr_pos()
 		return s.new_token(.punc_dotdot, none)
@@ -223,7 +216,7 @@ pub fn (mut s Scanner) scan_next() token.Token {
 			expected_closing_quote := s.peek_char()
 			if expected_closing_quote != `\`` {
 				s.add_error("Character literals must be a single character and end with a backtick (got '${expected_closing_quote.ascii_str()}')")
-				// try to skip until we recover
+
 				for {
 					peek := s.peek_char()
 					if peek == 0 || peek == `\n` || peek == `\`` {
@@ -237,7 +230,6 @@ pub fn (mut s Scanner) scan_next() token.Token {
 				return s.new_token(.error, none)
 			}
 
-			// Skip the closing quote
 			s.incr_pos()
 
 			return s.new_token(.literal_char, next.ascii_str())
@@ -390,7 +382,6 @@ pub fn (mut s Scanner) scan_next() token.Token {
 		`"` {
 			s.add_error("Double quotes are not valid string delimiters. Use single quotes (') for strings or backticks (`) for character literals.")
 
-			// try to skip until we recover
 			for {
 				next := s.peek_char()
 				if next == 0 || next == `\n` {
@@ -445,7 +436,6 @@ fn (mut s Scanner) take_trivia() []token.Trivia {
 	return trivia
 }
 
-// scan_identifier scans until the next non-alphanumeric character
 fn (mut s Scanner) scan_identifier(from u8) token.Token {
 	mut result := from.ascii_str()
 
@@ -499,7 +489,7 @@ fn (mut s Scanner) scan_number(from u8) token.Token {
 
 fn (mut s Scanner) peek_char() u8 {
 	if s.state.get_pos() >= s.input.len {
-		return 0 // EOF
+		return 0
 	}
 	return s.input[s.state.get_pos()]
 }
@@ -586,7 +576,6 @@ fn (mut s Scanner) scan_escape_sequence() string {
 	}
 }
 
-// Scan content when inside an interpolated string
 fn (mut s Scanner) scan_interp_string_content() token.Token {
 	s.token_start_column = s.state.get_column()
 	s.token_start_line = s.state.get_line()

@@ -7,8 +7,8 @@ import json
 pub struct LspServer {
 mut:
 	running   bool
-	documents map[string]string           // uri -> content
-	type_info map[string][]TypeAtPosition // uri -> types at positions
+	documents map[string]string
+	type_info map[string][]TypeAtPosition
 }
 
 pub struct TypeAtPosition {
@@ -18,7 +18,7 @@ pub:
 	col_end   int
 	type_str  string
 	name      string
-	def_line  int // definition location (0 if unknown)
+	def_line  int
 	def_col   int
 	def_end   int
 	doc       ?string
@@ -136,9 +136,7 @@ fn (mut s LspServer) handle_message(content string) {
 		'initialize' {
 			s.handle_initialize(id)
 		}
-		'initialized', '$/setTrace', '$/cancelRequest' {
-			// Notifications, no response needed
-		}
+		'initialized', '$/setTrace', '$/cancelRequest' {}
 		'shutdown' {
 			s.handle_shutdown(id)
 		}

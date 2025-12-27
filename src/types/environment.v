@@ -16,7 +16,7 @@ pub:
 	end_col   int
 	name      string
 	type_info Type
-	def_line  int // definition location (0 if unknown)
+	def_line  int
 	def_col   int
 	def_end   int
 	doc       ?string
