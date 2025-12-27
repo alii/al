@@ -13,7 +13,6 @@ import bytecode
 import flags { Flags }
 import vm
 import diagnostic
-import types
 import repl
 import lsp
 
@@ -40,19 +39,6 @@ fn parse_source(file string, entrypoint string) !ParsedSource {
 		ast:         result.ast
 		diagnostics: result.diagnostics
 	}
-}
-
-fn check_source(program ast.BlockExpression, file string, entrypoint string) !types.CheckResult {
-	result := types.check(program)
-
-	if result.diagnostics.len > 0 {
-		diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
-		if !result.success {
-			exit(1)
-		}
-	}
-
-	return result
 }
 
 fn find_al_files(path string) ![]string {
@@ -155,7 +141,13 @@ fn main() {
 					entrypoint := cmd.args[0]
 					file := os.read_file(entrypoint)!
 					parsed := parse_source(file, entrypoint)!
-					check_source(parsed.ast, file, entrypoint)!
+					result := bytecode.compile(parsed.ast, Flags{})
+					if result.diagnostics.len > 0 {
+						diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
+						if !result.success {
+							exit(1)
+						}
+					}
 				}
 			},
 			cli.Command{
@@ -370,7 +362,6 @@ fn main() {
 
 					file := os.read_file(entrypoint)!
 					parsed := parse_source(file, entrypoint)!
-					checked := check_source(parsed.ast, file, entrypoint)!
 
 					if debug_printer {
 						println('')
@@ -380,10 +371,16 @@ fn main() {
 						println('')
 					}
 
-					program := bytecode.compile(parsed.ast, checked.env, checked.resolved_types,
-						fl)!
+					result := bytecode.compile(parsed.ast, fl)
 
-					mut v := vm.new_vm(program, fl)
+					if result.diagnostics.len > 0 {
+						diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
+						if !result.success {
+							exit(1)
+						}
+					}
+
+					mut v := vm.new_vm(result.program, fl)
 					run_result := v.run()!
 
 					if run_result !is bytecode.NoneValue {

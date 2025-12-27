@@ -2,19 +2,41 @@ module bytecode
 
 import flags { Flags }
 import ast
-import span { Span }
-import type_def { Type, TypeEnum, type_to_string }
-import types { TypeEnv }
+import diagnostic
+import span
+import type_def {
+	Type,
+	TypeEnum,
+	TypeFunction,
+	TypeStruct,
+	t_array,
+	t_bool,
+	t_float,
+	t_int,
+	t_none,
+	t_string,
+	t_tuple,
+	t_var,
+	type_to_string,
+}
+import types { TypeEnv, TypePosition, check }
 
 struct Scope {
 	locals map[string]int
 }
 
 struct Compiler {
-	flags          Flags
-	type_env       TypeEnv
-	resolved_types map[string]Type
+	flags Flags
 mut:
+	// Type checking state
+	env                    TypeEnv
+	diagnostics            []diagnostic.Diagnostic
+	in_function            bool
+	current_fn_return_type ?Type
+	param_subs             map[string]Type
+	type_positions         []TypePosition
+
+	// Bytecode generation state
 	program          Program
 	locals           map[string]int
 	outer_scopes     []Scope
@@ -26,19 +48,198 @@ mut:
 	in_tail_position bool
 }
 
-fn span_key(s Span) string {
+fn (mut c Compiler) register_builtins() {
+	a := t_var('a')
+
+	socket := TypeStruct{
+		name:   'Socket'
+		fields: map[string]Type{}
+	}
+	c.env.register_struct(socket)
+
+	c.env.register_function('println', TypeFunction{
+		params: [a]
+		ret:    t_none()
+	})
+
+	c.env.register_function('__stack_depth__', TypeFunction{
+		params: []
+		ret:    t_int()
+	})
+
+	c.env.register_function('inspect', TypeFunction{
+		params: [a]
+		ret:    t_string()
+	})
+
+	c.env.register_function('read_file', TypeFunction{
+		params: [t_string()]
+		ret:    t_string()
+	})
+
+	c.env.register_function('write_file', TypeFunction{
+		params: [t_string(), t_string()]
+		ret:    t_none()
+	})
+
+	c.env.register_function('tcp_listen', TypeFunction{
+		params: [t_int()]
+		ret:    Type(socket)
+	})
+
+	c.env.register_function('tcp_accept', TypeFunction{
+		params: [Type(socket)]
+		ret:    Type(socket)
+	})
+
+	c.env.register_function('tcp_read', TypeFunction{
+		params: [Type(socket)]
+		ret:    t_string()
+	})
+
+	c.env.register_function('tcp_write', TypeFunction{
+		params: [Type(socket), t_string()]
+		ret:    t_none()
+	})
+
+	c.env.register_function('tcp_close', TypeFunction{
+		params: [Type(socket)]
+		ret:    t_none()
+	})
+
+	c.env.register_function('str_split', TypeFunction{
+		params: [t_string(), t_string()]
+		ret:    t_array(t_string())
+	})
+}
+
+fn span_key(s span.Span) string {
 	return '${s.start_line}:${s.start_column}:${s.end_line}:${s.end_column}'
 }
 
-fn (c Compiler) get_resolved_type(s Span) ?Type {
-	return c.resolved_types[span_key(s)] or { return none }
+fn (c Compiler) get_resolved_type(s span.Span) ?Type {
+	// TODO: Once type checking is fully merged, this will use computed types directly
+	return none
 }
 
-pub fn compile(expr ast.Expression, type_env TypeEnv, resolved_types map[string]Type, fl Flags) !Program {
+fn (mut c Compiler) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
+	if t.is_array {
+		elem := t.element_type or { return none }
+		elem_type := c.resolve_type_identifier(*elem) or { return none }
+		return t_array(elem_type)
+	}
+
+	name := t.identifier.name
+
+	match name {
+		'Int' { return t_int() }
+		'Float' { return t_float() }
+		'String' { return t_string() }
+		'Bool' { return t_bool() }
+		'None' { return t_none() }
+		else {}
+	}
+
+	// Check for single-letter type variables
+	is_type_var := name.len == 1 && name[0] >= `A` && name[0] <= `Z`
+	if is_type_var {
+		return t_var(name)
+	}
+
+	return c.env.lookup_type(name)
+}
+
+fn (mut c Compiler) compile_struct_decl(stmt ast.StructDeclaration) {
+	mut type_params := []string{}
+	for tp in stmt.type_params {
+		type_params << tp.name
+	}
+
+	mut fields := map[string]Type{}
+	for field in stmt.fields {
+		if resolved := c.resolve_type_identifier(field.typ) {
+			fields[field.identifier.name] = resolved
+		}
+	}
+
+	struct_type := TypeStruct{
+		name:        stmt.identifier.name
+		type_params: type_params
+		fields:      fields
+	}
+	c.env.register_struct(struct_type)
+}
+
+fn (mut c Compiler) compile_enum_decl(stmt ast.EnumDeclaration) {
+	mut type_params := []string{}
+	for tp in stmt.type_params {
+		type_params << tp.name
+	}
+
+	mut variants := map[string][]Type{}
+	for variant in stmt.variants {
+		mut payload_types := []Type{}
+		for payload in variant.payload {
+			if resolved := c.resolve_type_identifier(payload) {
+				payload_types << resolved
+			}
+		}
+		variants[variant.identifier.name] = payload_types
+	}
+
+	enum_type := TypeEnum{
+		name:        stmt.identifier.name
+		type_params: type_params
+		variants:    variants
+	}
+	c.env.register_enum(enum_type)
+}
+
+pub struct CompileResult {
+pub:
+	program        Program
+	diagnostics    []diagnostic.Diagnostic
+	success        bool
+	env            TypeEnv
+	program_type   Type
+	type_positions []TypePosition
+}
+
+pub fn compile(expr ast.Expression, fl Flags) CompileResult {
+	// Run type checking first
+	block_expr := if expr is ast.BlockExpression {
+		expr
+	} else {
+		ast.BlockExpression{
+			body: [ast.Node(expr)]
+			span: span.point_span(0, 0)
+		}
+	}
+	check_result := check(block_expr)
+
+	// If type checking failed, return early with errors
+	if !check_result.success {
+		return CompileResult{
+			program:        Program{
+				constants: []
+				functions: []
+				code:      []
+				entry:     0
+			}
+			diagnostics:    check_result.diagnostics
+			success:        false
+			env:            check_result.env
+			program_type:   check_result.program_type
+			type_positions: check_result.type_positions
+		}
+	}
+
+	// Use the type-checked environment for bytecode compilation
 	mut c := Compiler{
 		flags:            fl
-		type_env:         type_env
-		resolved_types:   resolved_types
+		env:              check_result.env
+		diagnostics:      check_result.diagnostics
+		type_positions:   check_result.type_positions
 		program:          Program{
 			constants: []
 			functions: []
@@ -55,7 +256,17 @@ pub fn compile(expr ast.Expression, type_env TypeEnv, resolved_types map[string]
 
 	main_start := c.program.code.len
 
-	c.compile_expr(expr, none)!
+	c.compile_expr(expr, none) or {
+		c.diagnostics << diagnostic.error_at(0, 0, err.msg())
+		return CompileResult{
+			program:        c.program
+			diagnostics:    c.diagnostics
+			success:        false
+			env:            c.env
+			program_type:   Type(type_def.TypeNone{})
+			type_positions: c.type_positions
+		}
+	}
 	c.emit(.halt)
 
 	c.program.functions << Function{
@@ -68,7 +279,14 @@ pub fn compile(expr ast.Expression, type_env TypeEnv, resolved_types map[string]
 	}
 	c.program.entry = c.program.functions.len - 1
 
-	return c.program
+	return CompileResult{
+		program:        c.program
+		diagnostics:    c.diagnostics
+		success:        !diagnostic.has_errors(c.diagnostics)
+		env:            c.env
+		program_type:   check_result.program_type
+		type_positions: c.type_positions
+	}
 }
 
 fn (mut c Compiler) emit(o Op) {
@@ -155,14 +373,14 @@ fn (mut c Compiler) compile_statement(stmt ast.Statement) ! {
 
 			old_binding := c.current_binding
 			c.current_binding = stmt.identifier.name
-			type_hint := if t := stmt.typ { c.get_resolved_type(t.span) } else { none }
+			type_hint := if t := stmt.typ { c.resolve_type_identifier(t) } else { none }
 			c.compile_expr(stmt.init, type_hint)!
 			c.current_binding = old_binding
 
 			c.emit_arg(.store_local, idx)
 		}
 		ast.ConstBinding {
-			type_hint := if t := stmt.typ { c.get_resolved_type(t.span) } else { none }
+			type_hint := if t := stmt.typ { c.resolve_type_identifier(t) } else { none }
 			c.compile_expr(stmt.init, type_hint)!
 			idx := c.get_or_create_local(stmt.identifier.name)
 			c.emit_arg(.store_local, idx)
@@ -185,16 +403,37 @@ fn (mut c Compiler) compile_statement(stmt ast.Statement) ! {
 		}
 		ast.FunctionDeclaration {
 			ret_hint := if rt := stmt.return_type {
-				c.get_resolved_type(rt.span)
+				c.resolve_type_identifier(rt)
 			} else {
 				none
 			}
+
+			// Build and register the function type for type-aware compilation
+			mut param_types := []Type{}
+			for i, p in stmt.params {
+				pt := if t := p.typ {
+					c.resolve_type_identifier(t) or { t_var('P${i}') }
+				} else {
+					t_var('P${i}')
+				}
+				param_types << pt
+			}
+			ret_type := ret_hint or { t_var('R') }
+			c.env.register_function(stmt.identifier.name, TypeFunction{
+				params: param_types
+				ret:    ret_type
+			})
+
 			c.compile_function_common(stmt.identifier.name, stmt.params, stmt.body, ret_hint)!
 			idx := c.get_or_create_local(stmt.identifier.name)
 			c.emit_arg(.store_local, idx)
 		}
-		ast.StructDeclaration {}
-		ast.EnumDeclaration {}
+		ast.StructDeclaration {
+			c.compile_struct_decl(stmt)
+		}
+		ast.EnumDeclaration {
+			c.compile_enum_decl(stmt)
+		}
 		ast.ImportDeclaration {}
 		ast.ExportDeclaration {
 			c.compile_statement(stmt.declaration)!
@@ -202,21 +441,23 @@ fn (mut c Compiler) compile_statement(stmt ast.Statement) ! {
 	}
 }
 
-fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
+fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) !Type {
 	is_tail := c.in_tail_position
 	c.in_tail_position = false
 
 	match expr {
 		ast.BlockExpression {
+			mut last_type := t_none()
 			for i, node in expr.body {
 				is_last := i == expr.body.len - 1
 				c.in_tail_position = is_tail && is_last
 				if is_last {
 					if node is ast.Expression {
-						c.compile_expr(node, hint)!
+						last_type = c.compile_expr(node, hint)!
 					} else {
 						c.compile_node(node)!
 						c.emit(.push_none)
+						last_type = t_none()
 					}
 				} else {
 					c.compile_node(node)!
@@ -229,21 +470,25 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 			if expr.body.len == 0 {
 				c.emit(.push_none)
 			}
+			return last_type
 		}
 		ast.NumberLiteral {
 			if expr.value.contains('.') {
 				val := expr.value.f64()
 				idx := c.add_constant(val)
 				c.emit_arg(.push_const, idx)
+				return t_float()
 			} else {
 				val := expr.value.int()
 				idx := c.add_constant(val)
 				c.emit_arg(.push_const, idx)
+				return t_int()
 			}
 		}
 		ast.StringLiteral {
 			idx := c.add_constant(expr.value)
 			c.emit_arg(.push_const, idx)
+			return t_string()
 		}
 		ast.InterpolatedString {
 			if expr.parts.len == 0 {
@@ -259,6 +504,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 					c.emit(.str_concat)
 				}
 			}
+			return t_string()
 		}
 		ast.BooleanLiteral {
 			if expr.value {
@@ -266,9 +512,11 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 			} else {
 				c.emit(.push_false)
 			}
+			return t_bool()
 		}
 		ast.NoneExpression {
 			c.emit(.push_none)
+			return t_none()
 		}
 		ast.Identifier {
 			// Check if this is a shorthand enum variant like None when hint is Option
@@ -279,7 +527,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 						c.emit_arg(.push_const, c.add_constant(h.name))
 						c.emit_arg(.push_const, c.add_constant(expr.name))
 						c.emit(.make_enum)
-						return
+						return h
 					}
 				}
 			}
@@ -292,6 +540,8 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 				} else if access.is_self {
 					c.emit(.push_self)
 				}
+				// Look up the type from the environment
+				return c.env.lookup(expr.name) or { t_none() }
 			} else {
 				return error('Undefined variable: ${expr.name}')
 			}
@@ -306,7 +556,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 				c.emit(.pop)
 				c.compile_expr(expr.right, none)!
 				c.program.code[end_jump] = op_arg(.jump_if_false, c.current_addr())
-				return
+				return t_bool()
 			}
 			if expr.op.kind == .logical_or {
 				c.compile_expr(expr.left, none)!
@@ -317,44 +567,59 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 				c.emit(.pop)
 				c.compile_expr(expr.right, none)!
 				c.program.code[end_jump] = op_arg(.jump_if_true, c.current_addr())
-				return
+				return t_bool()
 			}
 
-			c.compile_expr(expr.left, none)!
+			left_type := c.compile_expr(expr.left, none)!
 			c.compile_expr(expr.right, none)!
 			match expr.op.kind {
 				.punc_plus {
 					c.emit(.add)
+					// String concatenation returns String, arithmetic returns the operand type
+					if type_def.is_numeric(left_type) {
+						return left_type
+					}
+					return t_string()
 				}
 				.punc_minus {
 					c.emit(.sub)
+					return left_type
 				}
 				.punc_mul {
 					c.emit(.mul)
+					return left_type
 				}
 				.punc_div {
 					c.emit(.div)
+					return left_type
 				}
 				.punc_mod {
 					c.emit(.mod)
+					return left_type
 				}
 				.punc_equals_comparator {
 					c.emit(.eq)
+					return t_bool()
 				}
 				.punc_not_equal {
 					c.emit(.neq)
+					return t_bool()
 				}
 				.punc_lt {
 					c.emit(.lt)
+					return t_bool()
 				}
 				.punc_gt {
 					c.emit(.gt)
+					return t_bool()
 				}
 				.punc_lte {
 					c.emit(.lte)
+					return t_bool()
 				}
 				.punc_gte {
 					c.emit(.gte)
+					return t_bool()
 				}
 				else {
 					return error('Unknown binary operator: ${expr.op.kind}')
@@ -362,13 +627,15 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 			}
 		}
 		ast.UnaryExpression {
-			c.compile_expr(expr.expression, none)!
+			operand_type := c.compile_expr(expr.expression, none)!
 			match expr.op.kind {
 				.punc_exclamation_mark {
 					c.emit(.not)
+					return t_bool()
 				}
 				.punc_minus {
 					c.emit(.neg)
+					return operand_type
 				}
 				else {
 					return error('Unknown unary operator: ${expr.op.kind}')
@@ -382,7 +649,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 			c.emit_arg(.jump_if_false, 0)
 
 			c.in_tail_position = is_tail
-			c.compile_expr(expr.body, hint)!
+			then_type := c.compile_expr(expr.body, hint)!
 			c.in_tail_position = false
 
 			end_jump := c.current_addr()
@@ -401,17 +668,20 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 
 			end_addr := c.current_addr()
 			c.program.code[end_jump] = op_arg(.jump, end_addr)
+			// Return then branch type (checker already unified them)
+			return then_type
 		}
 		ast.MatchExpression {
-			c.compile_match(expr, is_tail)!
+			return c.compile_match(expr, is_tail)!
 		}
 		ast.ArrayExpression {
 			has_spread := expr.elements.any(it is ast.SpreadElement)
+			mut elem_type := t_none()
 
 			if !has_spread {
 				for elem in expr.elements {
 					if elem is ast.Expression {
-						c.compile_expr(elem, none)!
+						elem_type = c.compile_expr(elem, none)!
 					}
 				}
 				c.emit_arg(.make_array, expr.elements.len)
@@ -427,7 +697,10 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 							return error('Spread in array literal missing expression')
 						}
 
-						c.compile_expr(inner, none)!
+						arr_type := c.compile_expr(inner, none)!
+						if arr_type is type_def.TypeArray {
+							elem_type = arr_type.element
+						}
 						if have_result {
 							c.emit(.array_concat)
 						} else {
@@ -442,7 +715,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 							}
 							arr_elem := expr.elements[j]
 							if arr_elem is ast.Expression {
-								c.compile_expr(arr_elem, none)!
+								elem_type = c.compile_expr(arr_elem, none)!
 							}
 							group_count++
 						}
@@ -460,32 +733,42 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 					c.emit_arg(.make_array, 0)
 				}
 			}
+			return t_array(elem_type)
 		}
 		ast.TupleExpression {
+			mut elem_types := []Type{}
 			for elem in expr.elements {
-				c.compile_expr(elem, none)!
+				elem_types << c.compile_expr(elem, none)!
 			}
 			c.emit_arg(.make_tuple, expr.elements.len)
+			return t_tuple(elem_types)
 		}
 		ast.ArrayIndexExpression {
-			c.compile_expr(expr.expression, none)!
+			arr_type := c.compile_expr(expr.expression, none)!
 			if expr.index is ast.RangeExpression {
 				range_idx := expr.index as ast.RangeExpression
 				c.compile_expr(range_idx.start, none)!
 				c.compile_expr(range_idx.end, none)!
 				c.emit(.array_slice)
+				return arr_type // slice returns same array type
 			} else {
 				c.compile_expr(expr.index, none)!
 				c.emit(.index)
+				// Return element type if array, otherwise the indexed type
+				if arr_type is type_def.TypeArray {
+					return arr_type.element
+				}
+				return t_none()
 			}
 		}
 		ast.RangeExpression {
 			c.compile_expr(expr.start, none)!
 			c.compile_expr(expr.end, none)!
 			c.emit(.make_range)
+			return t_array(t_int()) // Range is essentially [Int]
 		}
 		ast.FunctionExpression {
-			c.compile_function_expression(expr)!
+			return c.compile_function_expression(expr)!
 		}
 		ast.FunctionCallExpression {
 			// Check if this is a shorthand enum variant like Ok(value) when hint is an enum
@@ -503,12 +786,12 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 						} else {
 							c.emit(.make_enum)
 						}
-						return
+						return h
 					}
 				}
 			}
 
-			func_type := c.type_env.lookup_function(expr.identifier.name)
+			func_type := c.env.lookup_function(expr.identifier.name)
 
 			for i, arg in expr.arguments {
 				param_hint := if ft := func_type {
@@ -533,14 +816,19 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 				} else {
 					c.emit_arg(.call, expr.arguments.len)
 				}
+				// Return the function's return type
+				if ft := func_type {
+					return ft.ret
+				}
+				return t_none()
 			} else {
-				c.compile_builtin_call(expr)!
+				return c.compile_builtin_call(expr)!
 			}
 		}
 		ast.PropertyAccessExpression {
 			if expr.left is ast.Identifier {
 				left_id := expr.left as ast.Identifier
-				if enum_type := c.type_env.lookup_type(left_id.name) {
+				if enum_type := c.env.lookup_type(left_id.name) {
 					if enum_type is TypeEnum {
 						enum_name := left_id.name
 
@@ -591,12 +879,12 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 							c.emit_arg(.push_const, variant_idx)
 							c.emit(.make_enum)
 						}
-						return
+						return enum_type
 					}
 				}
 			}
 
-			c.compile_expr(expr.left, none)!
+			left_type := c.compile_expr(expr.left, none)!
 
 			if expr.right is ast.FunctionCallExpression {
 				call := expr.right as ast.FunctionCallExpression
@@ -610,17 +898,32 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 				num := expr.right as ast.NumberLiteral
 				index := num.value.int()
 				c.emit_arg(.tuple_index, index)
+				// Return tuple element type if available
+				if left_type is type_def.TypeTuple {
+					if index < left_type.elements.len {
+						return left_type.elements[index]
+					}
+				}
+				return t_none()
 			} else if expr.right is ast.Identifier {
 				id := expr.right as ast.Identifier
 
 				idx := c.add_constant(id.name)
 				c.emit_arg(.get_field, idx)
+				// Return struct field type if available
+				if left_type is TypeStruct {
+					if field_type := left_type.fields[id.name] {
+						return field_type
+					}
+				}
+				return t_none()
 			}
+			return t_none()
 		}
 		ast.StructInitExpression {
 			struct_name := expr.identifier.name
 
-			struct_type := c.type_env.lookup_struct(struct_name) or {
+			struct_type := c.env.lookup_struct(struct_name) or {
 				return error('Unknown struct type: ${struct_name}')
 			}
 
@@ -651,13 +954,18 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 			type_idx := c.add_constant(expr.identifier.name)
 			c.emit_arg(.push_const, type_idx)
 			c.emit_arg(.make_struct, expr.fields.len)
+			return struct_type
 		}
 		ast.ErrorExpression {
-			c.compile_expr(expr.expression, none)!
+			err_type := c.compile_expr(expr.expression, none)!
 			c.emit(.make_error)
+			return type_def.TypeResult{
+				success: t_none()
+				error:   err_type
+			}
 		}
 		ast.OrExpression {
-			c.compile_expr(expr.expression, none)!
+			result_type := c.compile_expr(expr.expression, none)!
 			c.emit(.dup)
 			c.emit(.is_failure)
 
@@ -679,6 +987,11 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 
 			c.program.code[not_failure_jump] = op_arg(.jump_if_false, c.current_addr())
 			c.program.code[end_jump] = op_arg(.jump, c.current_addr())
+			// Unwrap the success type from Result
+			if result_type is type_def.TypeResult {
+				return result_type.success
+			}
+			return result_type
 		}
 		else {
 			return error("Internal error: unhandled expression type '${expr.type_name()}'. This is a compiler bug.")
@@ -686,13 +999,30 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 	}
 }
 
-fn (mut c Compiler) compile_function_expression(func ast.FunctionExpression) ! {
+fn (mut c Compiler) compile_function_expression(func ast.FunctionExpression) !Type {
 	ret_hint := if rt := func.return_type {
-		c.get_resolved_type(rt.span)
+		c.resolve_type_identifier(rt)
 	} else {
 		none
 	}
+
+	// Build parameter types
+	mut param_types := []Type{}
+	for i, p in func.params {
+		pt := if t := p.typ {
+			c.resolve_type_identifier(t) or { t_var('P${i}') }
+		} else {
+			t_var('P${i}')
+		}
+		param_types << pt
+	}
+
 	c.compile_function_common(none, func.params, func.body, ret_hint)!
+
+	return TypeFunction{
+		params: param_types
+		ret:    ret_hint or { t_var('R') }
+	}
 }
 
 fn (mut c Compiler) compile_function_common(name ?string, params []ast.FunctionParameter, body ast.Expression, return_type ?Type) ! {
@@ -970,8 +1300,9 @@ fn (mut c Compiler) compile_pattern(pattern ast.Expression, mut fail_jumps []int
 	}
 }
 
-fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
+fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) !Type {
 	c.compile_expr(m.subject, none)!
+	mut result_type := t_none()
 
 	mut end_jumps := []int{}
 
@@ -990,7 +1321,7 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 			prop := arm.pattern as ast.PropertyAccessExpression
 			if prop.left is ast.Identifier {
 				left_id := prop.left as ast.Identifier
-				if enum_type := c.type_env.lookup_type(left_id.name) {
+				if enum_type := c.env.lookup_type(left_id.name) {
 					if enum_type is TypeEnum {
 						is_enum_pattern = true
 						enum_name = left_id.name
@@ -1015,7 +1346,7 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 		} else if arm.pattern is ast.FunctionCallExpression {
 			call := arm.pattern as ast.FunctionCallExpression
 			vname := call.identifier.name
-			if en := c.type_env.lookup_enum_by_variant(vname) {
+			if en := c.env.lookup_enum_by_variant(vname) {
 				is_enum_pattern = true
 				enum_name = en.name
 				enum_type_id = en.id
@@ -1030,7 +1361,7 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 			}
 		} else if arm.pattern is ast.Identifier {
 			vname := arm.pattern.name
-			if en := c.type_env.lookup_enum_by_variant(vname) {
+			if en := c.env.lookup_enum_by_variant(vname) {
 				is_enum_pattern = true
 				enum_name = en.name
 				enum_type_id = en.id
@@ -1070,7 +1401,7 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 
 					c.emit(.pop)
 					c.in_tail_position = is_tail
-					c.compile_expr(arm.body, none)!
+					result_type = c.compile_expr(arm.body, none)!
 					c.in_tail_position = false
 
 					end_jumps << c.current_addr()
@@ -1113,7 +1444,7 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 
 			c.emit(.pop)
 			c.in_tail_position = is_tail
-			c.compile_expr(arm.body, none)!
+			result_type = c.compile_expr(arm.body, none)!
 			c.in_tail_position = false
 
 			end_jumps << c.current_addr()
@@ -1130,7 +1461,7 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 
 		c.emit(.pop)
 		c.in_tail_position = is_tail
-		c.compile_expr(arm.body, none)!
+		result_type = c.compile_expr(arm.body, none)!
 		c.in_tail_position = false
 
 		end_jumps << c.current_addr()
@@ -1149,9 +1480,10 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 	for jump_addr in end_jumps {
 		c.program.code[jump_addr] = op_arg(.jump, end_addr)
 	}
+	return result_type
 }
 
-fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
+fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) !Type {
 	match call.identifier.name {
 		'println' {
 			if call.arguments.len != 1 {
@@ -1160,6 +1492,7 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			c.compile_expr(call.arguments[0], none)!
 			c.emit(.print)
 			c.emit(.push_none)
+			return t_none()
 		}
 		'inspect' {
 			if call.arguments.len != 1 {
@@ -1167,6 +1500,7 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			}
 			c.compile_expr(call.arguments[0], none)!
 			c.emit(.to_string)
+			return t_string()
 		}
 		'__stack_depth__' {
 			if !c.flags.expose_debug_builtins {
@@ -1176,6 +1510,7 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 				return error('__stack_depth__ expects 0 arguments')
 			}
 			c.emit(.stack_depth)
+			return t_int()
 		}
 		'read_file' {
 			if call.arguments.len != 1 {
@@ -1183,6 +1518,7 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			}
 			c.compile_expr(call.arguments[0], none)!
 			c.emit(.file_read)
+			return t_string()
 		}
 		'write_file' {
 			if call.arguments.len != 2 {
@@ -1191,6 +1527,7 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			c.compile_expr(call.arguments[0], none)!
 			c.compile_expr(call.arguments[1], none)!
 			c.emit(.file_write)
+			return t_none()
 		}
 		'tcp_listen' {
 			if call.arguments.len != 1 {
@@ -1198,6 +1535,8 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			}
 			c.compile_expr(call.arguments[0], none)!
 			c.emit(.tcp_listen)
+			// Socket type - look it up from the environment
+			return c.env.lookup_type('Socket') or { t_none() }
 		}
 		'tcp_accept' {
 			if call.arguments.len != 1 {
@@ -1205,6 +1544,7 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			}
 			c.compile_expr(call.arguments[0], none)!
 			c.emit(.tcp_accept)
+			return c.env.lookup_type('Socket') or { t_none() }
 		}
 		'tcp_read' {
 			if call.arguments.len != 1 {
@@ -1212,6 +1552,7 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			}
 			c.compile_expr(call.arguments[0], none)!
 			c.emit(.tcp_read)
+			return t_string()
 		}
 		'tcp_write' {
 			if call.arguments.len != 2 {
@@ -1220,6 +1561,7 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			c.compile_expr(call.arguments[0], none)!
 			c.compile_expr(call.arguments[1], none)!
 			c.emit(.tcp_write)
+			return t_none()
 		}
 		'tcp_close' {
 			if call.arguments.len != 1 {
@@ -1227,6 +1569,7 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			}
 			c.compile_expr(call.arguments[0], none)!
 			c.emit(.tcp_close)
+			return t_none()
 		}
 		'str_split' {
 			if call.arguments.len != 2 {
@@ -1235,6 +1578,7 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			c.compile_expr(call.arguments[0], none)!
 			c.compile_expr(call.arguments[1], none)!
 			c.emit(.str_split)
+			return t_array(t_string())
 		}
 		else {
 			return error('Unknown function: ${call.identifier.name}')
