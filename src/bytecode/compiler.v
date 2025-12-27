@@ -352,6 +352,10 @@ fn (mut c Compiler) compile_struct_decl(stmt ast.StructDeclaration) {
 }
 
 fn (mut c Compiler) compile_enum_decl(stmt ast.EnumDeclaration) {
+	if c.in_function {
+		c.error_at_span('Enum definitions are only allowed at the top level', stmt.span)
+	}
+
 	mut type_params := []string{}
 	for tp in stmt.type_params {
 		type_params << tp.name
@@ -359,12 +363,26 @@ fn (mut c Compiler) compile_enum_decl(stmt ast.EnumDeclaration) {
 
 	mut variants := map[string][]Type{}
 	for variant in stmt.variants {
+		if variant.identifier.name in variants {
+			c.error_at_span("Duplicate variant '${variant.identifier.name}' in enum '${stmt.identifier.name}'",
+				variant.identifier.span)
+			continue
+		}
+
 		mut payload_types := []Type{}
 		for payload in variant.payload {
 			if resolved := c.resolve_type_identifier(payload) {
 				payload_types << resolved
+			} else {
+				c.error_at_span("Unknown type '${payload.identifier.name}' in variant '${variant.identifier.name}'",
+					variant.identifier.span)
 			}
 		}
+
+		if doc := variant.doc {
+			c.env.store_doc('${stmt.identifier.name}.${variant.identifier.name}', doc)
+		}
+
 		variants[variant.identifier.name] = payload_types
 	}
 
@@ -373,7 +391,32 @@ fn (mut c Compiler) compile_enum_decl(stmt ast.EnumDeclaration) {
 		type_params: type_params
 		variants:    variants
 	}
-	c.env.register_enum(enum_type)
+
+	loc := types.DefinitionLocation{
+		line:    stmt.identifier.span.start_line
+		column:  stmt.identifier.span.start_column
+		end_col: stmt.identifier.span.end_column
+	}
+	registered_enum := c.env.register_enum_at(enum_type, loc)
+
+	if doc := stmt.doc {
+		c.env.store_doc(stmt.identifier.name, doc)
+	}
+
+	c.record_type(stmt.identifier.name, Type(registered_enum), stmt.identifier.span, stmt.doc)
+
+	for variant in stmt.variants {
+		qualified_name := '${stmt.identifier.name}.${variant.identifier.name}'
+		variant_loc := types.DefinitionLocation{
+			line:    variant.identifier.span.start_line
+			column:  variant.identifier.span.start_column
+			end_col: variant.identifier.span.end_column
+		}
+		c.env.store_definition(qualified_name, variant_loc)
+
+		c.record_type(qualified_name, Type(registered_enum), variant.identifier.span,
+			variant.doc)
+	}
 }
 
 pub struct CompileResult {
@@ -545,6 +588,10 @@ fn (mut c Compiler) compile_statement(stmt ast.Statement) ! {
 			c.emit_arg(.store_local, idx)
 		}
 		ast.ConstBinding {
+			if c.in_function {
+				c.error_at_span("'const' declarations are only allowed at the top level, not inside functions",
+					stmt.span)
+			}
 			type_hint := if t := stmt.typ { c.resolve_type_identifier(t) } else { none }
 			expr_type := c.compile_expr(stmt.init, type_hint)!
 			idx := c.get_or_create_local(stmt.identifier.name)
@@ -856,17 +903,25 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) !Type {
 		}
 		ast.UnaryExpression {
 			operand_type := c.compile_expr(expr.expression, none)!
+			op_str := expr.op.kind.str()
+
 			match expr.op.kind {
 				.punc_exclamation_mark {
+					c.expect_type(operand_type, t_bool(), expr.expression.span, "for operator '${op_str}'")
 					c.emit(.not)
 					return t_bool()
 				}
 				.punc_minus {
+					if !is_numeric(operand_type) {
+						c.error_at_span("Operator '${op_str}' requires a numeric operand, got '${type_to_string(operand_type)}'",
+							expr.expression.span)
+					}
 					c.emit(.neg)
 					return operand_type
 				}
 				else {
-					return error('Unknown unary operator: ${expr.op.kind}')
+					c.error_at_span('Unknown unary operator: ${expr.op.kind}', expr.span)
+					return t_none()
 				}
 			}
 		}
@@ -1036,7 +1091,12 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) !Type {
 								} else {
 									none
 								}
-								c.compile_expr(arg, arg_hint)!
+								arg_type := c.compile_expr(arg, arg_hint)!
+								// Validate argument type matches expected payload type
+								if i < payload_types.len {
+									c.expect_type(arg_type, payload_types[i], arg.span,
+										'in enum variant argument')
+								}
 							}
 							c.emit_arg(.make_enum_payload, expr.arguments.len)
 						} else {
@@ -1108,50 +1168,72 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) !Type {
 		ast.PropertyAccessExpression {
 			if expr.left is ast.Identifier {
 				left_id := expr.left as ast.Identifier
-				if enum_type := c.env.lookup_type(left_id.name) {
-					if enum_type is TypeEnum {
+				if looked_up := c.env.lookup_type(left_id.name) {
+					if looked_up is TypeEnum {
+						enum_type := looked_up
 						enum_name := left_id.name
 
-						if expr.right is ast.FunctionCallExpression {
+						// Record type for enum name hover
+						enum_doc := c.env.lookup_doc(enum_name)
+						c.record_type(enum_name, Type(enum_type), left_id.span, enum_doc)
+
+						variant_name, args, variant_span := if expr.right is ast.FunctionCallExpression {
 							call := expr.right as ast.FunctionCallExpression
-							variant_name := call.identifier.name
-
-							if variant_name !in enum_type.variants {
-								return error('Unknown variant "${variant_name}" in enum ${enum_name}')
-							}
-
-							payload_types := enum_type.variants[variant_name] or { []Type{} }
-							if payload_types.len > 0 {
-								if call.arguments.len != payload_types.len {
-									return error('Variant "${variant_name}" expects ${payload_types.len} payload argument(s)')
-								}
-
-								c.emit_arg(.push_const, c.add_constant(enum_type.id))
-								enum_idx := c.add_constant(enum_name)
-								c.emit_arg(.push_const, enum_idx)
-								variant_idx := c.add_constant(variant_name)
-								c.emit_arg(.push_const, variant_idx)
-								for arg in call.arguments {
-									c.compile_expr(arg, none)!
-								}
-								c.emit_arg(.make_enum_payload, call.arguments.len)
-							} else {
-								return error('Variant "${variant_name}" does not take a payload')
-							}
+							call.identifier.name, call.arguments, call.span
 						} else if expr.right is ast.Identifier {
-							variant_id := expr.right as ast.Identifier
-							variant_name := variant_id.name
+							r := expr.right as ast.Identifier
+							r.name, []ast.Expression{}, r.span
+						} else {
+							return c.compile_expr(expr.left, none)
+						}
 
-							if variant_name !in enum_type.variants {
-								return error('Unknown variant "${variant_name}" in enum ${enum_name}')
+						if variant_name !in enum_type.variants {
+							c.error_at_span("Enum '${enum_name}' has no variant '${variant_name}'",
+								variant_span)
+							return t_none()
+						}
+
+						// Record type for variant hover
+						variant_doc := c.env.lookup_doc('${enum_name}.${variant_name}')
+						c.record_type('${enum_name}.${variant_name}', Type(enum_type),
+							variant_span, variant_doc)
+
+						payload_types := enum_type.variants[variant_name] or { []Type{} }
+
+						if payload_types.len > 0 {
+							if args.len != payload_types.len {
+								c.error_at_span("Enum variant '${variant_name}' expects ${payload_types.len} argument(s), got ${args.len}",
+									variant_span)
 							}
 
-							payload_types := enum_type.variants[variant_name] or { []Type{} }
-							if payload_types.len > 0 {
-								type_strs := payload_types.map(type_to_string)
-								return error('Variant "${variant_name}" requires payload(s) of type (${type_strs.join(', ')})')
+							c.emit_arg(.push_const, c.add_constant(enum_type.id))
+							enum_idx := c.add_constant(enum_name)
+							c.emit_arg(.push_const, enum_idx)
+							variant_idx := c.add_constant(variant_name)
+							c.emit_arg(.push_const, variant_idx)
+							for i, arg in args {
+								arg_hint := if i < payload_types.len {
+									payload_types[i]
+								} else {
+									t_none()
+								}
+								arg_type := c.compile_expr(arg, arg_hint)!
+								if i < payload_types.len {
+									c.expect_type(arg_type, payload_types[i], arg.span,
+										'in enum variant argument')
+								}
 							}
-
+							c.emit_arg(.make_enum_payload, args.len)
+						} else if args.len > 0 {
+							c.error_at_span("Enum variant '${variant_name}' takes no arguments",
+								variant_span)
+							c.emit_arg(.push_const, c.add_constant(enum_type.id))
+							enum_idx := c.add_constant(enum_name)
+							c.emit_arg(.push_const, enum_idx)
+							variant_idx := c.add_constant(variant_name)
+							c.emit_arg(.push_const, variant_idx)
+							c.emit(.make_enum)
+						} else {
 							c.emit_arg(.push_const, c.add_constant(enum_type.id))
 							enum_idx := c.add_constant(enum_name)
 							c.emit_arg(.push_const, enum_idx)
@@ -1173,32 +1255,54 @@ fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) !Type {
 					c.compile_expr(arg, none)!
 				}
 
-				return error("Cannot call '${call.identifier.name}' as a method. AL does not have methods - use '${call.identifier.name}(...)' as a regular function call instead.")
+				c.error_at_span("Cannot call '${call.identifier.name}' as a method. AL does not have methods - use '${call.identifier.name}(...)' as a regular function call instead.",
+					call.span)
+				return t_none()
 			} else if expr.right is ast.NumberLiteral {
 				num := expr.right as ast.NumberLiteral
 				index := num.value.int()
-				c.emit_arg(.tuple_index, index)
-				// Return tuple element type if available
-				if left_type is type_def.TypeTuple {
-					if index < left_type.elements.len {
-						return left_type.elements[index]
-					}
-				}
-				return t_none()
-			} else if expr.right is ast.Identifier {
-				id := expr.right as ast.Identifier
 
-				idx := c.add_constant(id.name)
-				c.emit_arg(.get_field, idx)
-				// Return struct field type if available
-				if left_type is TypeStruct {
-					if field_type := left_type.fields[id.name] {
-						return field_type
+				if left_type is type_def.TypeTuple {
+					if index < 0 || index >= left_type.elements.len {
+						c.error_at_span('Tuple index ${index} out of bounds. Tuple has ${left_type.elements.len} elements.',
+							num.span)
+						return t_none()
 					}
+					c.emit_arg(.tuple_index, index)
+					return left_type.elements[index]
+				} else {
+					c.error_at_span('Cannot use numeric index on type ${type_to_string(left_type)}. Only tuples support .0 .1 etc.',
+						num.span)
+					return t_none()
 				}
+			} else if expr.right is ast.Identifier {
+				right := expr.right as ast.Identifier
+
+				if left_type is TypeStruct {
+					if field_type := left_type.fields[right.name] {
+						// Record type for field hover
+						qualified_name := '${left_type.name}.${right.name}'
+						field_doc := c.env.lookup_doc(qualified_name)
+						c.record_type(qualified_name, field_type, right.span, field_doc)
+
+						idx := c.add_constant(right.name)
+						c.emit_arg(.get_field, idx)
+						return field_type
+					} else {
+						available := left_type.fields.keys().join(', ')
+						c.error_at_span("Struct '${left_type.name}' has no field '${right.name}'. Available fields: ${available}",
+							right.span)
+						return t_none()
+					}
+				} else {
+					c.error_at_span("Cannot access property '${right.name}' on type '${type_to_string(left_type)}'",
+						right.span)
+					return t_none()
+				}
+			} else {
+				c.error_at_span('Expected identifier in property access', expr.right.span)
 				return t_none()
 			}
-			return t_none()
 		}
 		ast.StructInitExpression {
 			struct_name := expr.identifier.name
@@ -1446,7 +1550,13 @@ fn (mut c Compiler) compile_function_common(name ?string, params []ast.FunctionP
 
 	// Build parameter types and register them in the type environment
 	c.env.push_scope()
+	mut seen_params := map[string]bool{}
 	for i, param in params {
+		if param.identifier.name in seen_params {
+			c.error_at_span("Duplicate parameter '${param.identifier.name}'", param.identifier.span)
+		}
+		seen_params[param.identifier.name] = true
+
 		c.get_or_create_local(param.identifier.name)
 		// Resolve parameter type and register it in the environment
 		pt := if t := param.typ {

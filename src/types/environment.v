@@ -72,6 +72,10 @@ pub fn (e TypeEnv) lookup_definition(name string) ?DefinitionLocation {
 	return e.definitions[name] or { return none }
 }
 
+pub fn (mut e TypeEnv) store_definition(name string, loc DefinitionLocation) {
+	e.definitions[name] = loc
+}
+
 pub fn (mut e TypeEnv) store_doc(name string, doc string) {
 	e.docs[name] = doc
 }
