@@ -75,9 +75,11 @@ added_int = add(5, 3)
 added_str = add_generic('Hello, ', 'world!')
 
 callback = fn(x Int) Int { x * 2 }
+
 fn apply(x Int, f fn(Int) Int) Int {
 	f(x)
 }
+
 fn apply_generic(x A, f fn(A) A) A {
 	f(x)
 }
@@ -362,6 +364,6 @@ fn make_pair(a A, b B) Pair(A, B) {
 auto_pair = make_pair(100, 'hundred')
 println('auto_pair: ${auto_pair.first}, ${auto_pair.second}')
 
-x Option = Option.Some('')
+x Option = Some(42)
 
 x

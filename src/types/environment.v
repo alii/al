@@ -9,6 +9,19 @@ pub:
 	end_col int
 }
 
+pub struct TypePosition {
+pub:
+	line      int
+	column    int
+	end_col   int
+	name      string
+	type_info Type
+	def_line  int // definition location (0 if unknown)
+	def_col   int
+	def_end   int
+	doc       ?string
+}
+
 pub struct TypeEnv {
 mut:
 	scopes       []map[string]Type
@@ -57,6 +70,10 @@ pub fn (mut e TypeEnv) define_at(name string, t Type, loc DefinitionLocation) {
 
 pub fn (e TypeEnv) lookup_definition(name string) ?DefinitionLocation {
 	return e.definitions[name] or { return none }
+}
+
+pub fn (mut e TypeEnv) store_definition(name string, loc DefinitionLocation) {
+	e.definitions[name] = loc
 }
 
 pub fn (mut e TypeEnv) store_doc(name string, doc string) {
@@ -143,6 +160,15 @@ pub fn (e TypeEnv) lookup_type(name string) ?Type {
 		return Type(en)
 	}
 
+	return none
+}
+
+pub fn (e TypeEnv) lookup_enum_by_variant(variant_name string) ?TypeEnum {
+	for _, enum_type in e.enums {
+		if variant_name in enum_type.variants {
+			return enum_type
+		}
+	}
 	return none
 }
 
