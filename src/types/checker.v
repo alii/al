@@ -49,6 +49,7 @@ mut:
 	current_fn_return_type ?Type
 	param_subs             map[string]Type // tracks inferred parameter types
 	type_positions         []TypePosition
+	resolved_types         map[string]Type // cache of resolved TypeIdentifiers by span key
 }
 
 pub struct CheckResult {
@@ -58,6 +59,11 @@ pub:
 	env            TypeEnv
 	program_type   Type
 	type_positions []TypePosition
+	resolved_types map[string]Type // resolved TypeIdentifiers by span key
+}
+
+fn span_key(s Span) string {
+	return '${s.start_line}:${s.start_column}:${s.end_line}:${s.end_column}'
 }
 
 pub fn check(program ast.BlockExpression) CheckResult {
@@ -76,6 +82,7 @@ pub fn check(program ast.BlockExpression) CheckResult {
 		env:            checker.env
 		program_type:   program_type
 		type_positions: checker.type_positions
+		resolved_types: checker.resolved_types
 	}
 }
 
@@ -391,7 +398,7 @@ fn (mut c TypeChecker) infer_type_args(expected Type, actual Type, mut subs map[
 	}
 }
 
-fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
+fn (mut c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
 	if t.is_function {
 		mut param_types := []Type{}
 		for param_type in t.param_types {
@@ -419,6 +426,7 @@ fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
 			base_type = t_option(base_type)
 		}
 
+		c.resolved_types[span_key(t.span)] = base_type
 		return base_type
 	}
 
@@ -429,6 +437,7 @@ fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
 		if t.is_option {
 			base_type = t_option(base_type)
 		}
+		c.resolved_types[span_key(t.span)] = base_type
 		return base_type
 	}
 
@@ -456,6 +465,7 @@ fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
 		base_type = t_option(base_type)
 	}
 
+	c.resolved_types[span_key(t.span)] = base_type
 	return base_type
 }
 

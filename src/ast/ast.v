@@ -2,6 +2,7 @@ module ast
 
 import token
 import span { Span }
+import type_def
 
 // ============================================================================
 // Literals and Basic Nodes
@@ -60,6 +61,8 @@ pub:
 	return_type  ?&TypeIdentifier
 	error_type   ?&TypeIdentifier
 	span         Span @[required]
+pub mut:
+	resolved ?type_def.Type
 }
 
 pub struct Operator {

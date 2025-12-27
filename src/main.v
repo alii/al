@@ -380,7 +380,8 @@ fn main() {
 						println('')
 					}
 
-					program := bytecode.compile(parsed.ast, checked.env, fl)!
+					program := bytecode.compile(parsed.ast, checked.env, checked.resolved_types,
+						fl)!
 
 					mut v := vm.new_vm(program, fl)
 					run_result := v.run()!

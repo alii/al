@@ -2,7 +2,8 @@ module bytecode
 
 import flags { Flags }
 import ast
-import type_def { TypeEnum, type_to_string }
+import span { Span }
+import type_def { Type, TypeEnum, type_to_string }
 import types { TypeEnv }
 
 struct Scope {
@@ -10,8 +11,9 @@ struct Scope {
 }
 
 struct Compiler {
-	flags    Flags
-	type_env TypeEnv
+	flags          Flags
+	type_env       TypeEnv
+	resolved_types map[string]Type
 mut:
 	program          Program
 	locals           map[string]int
@@ -24,10 +26,19 @@ mut:
 	in_tail_position bool
 }
 
-pub fn compile(expr ast.Expression, type_env TypeEnv, fl Flags) !Program {
+fn span_key(s Span) string {
+	return '${s.start_line}:${s.start_column}:${s.end_line}:${s.end_column}'
+}
+
+fn (c Compiler) get_resolved_type(s Span) ?Type {
+	return c.resolved_types[span_key(s)] or { return none }
+}
+
+pub fn compile(expr ast.Expression, type_env TypeEnv, resolved_types map[string]Type, fl Flags) !Program {
 	mut c := Compiler{
 		flags:            fl
 		type_env:         type_env
+		resolved_types:   resolved_types
 		program:          Program{
 			constants: []
 			functions: []
@@ -44,7 +55,7 @@ pub fn compile(expr ast.Expression, type_env TypeEnv, fl Flags) !Program {
 
 	main_start := c.program.code.len
 
-	c.compile_expr(expr)!
+	c.compile_expr(expr, none)!
 	c.emit(.halt)
 
 	c.program.functions << Function{
@@ -133,7 +144,7 @@ fn (mut c Compiler) resolve_variable(name string) ?VarAccess {
 fn (mut c Compiler) compile_node(node ast.Node) ! {
 	match node {
 		ast.Statement { c.compile_statement(node)! }
-		ast.Expression { c.compile_expr(node)! }
+		ast.Expression { c.compile_expr(node, none)! }
 	}
 }
 
@@ -144,22 +155,24 @@ fn (mut c Compiler) compile_statement(stmt ast.Statement) ! {
 
 			old_binding := c.current_binding
 			c.current_binding = stmt.identifier.name
-			c.compile_expr(stmt.init)!
+			type_hint := if t := stmt.typ { c.get_resolved_type(t.span) } else { none }
+			c.compile_expr(stmt.init, type_hint)!
 			c.current_binding = old_binding
 
 			c.emit_arg(.store_local, idx)
 		}
 		ast.ConstBinding {
-			c.compile_expr(stmt.init)!
+			type_hint := if t := stmt.typ { c.get_resolved_type(t.span) } else { none }
+			c.compile_expr(stmt.init, type_hint)!
 			idx := c.get_or_create_local(stmt.identifier.name)
 			c.emit_arg(.store_local, idx)
 		}
 		ast.TypePatternBinding {
-			c.compile_expr(stmt.init)!
+			c.compile_expr(stmt.init, none)!
 			c.emit(.pop)
 		}
 		ast.TupleDestructuringBinding {
-			c.compile_expr(stmt.init)!
+			c.compile_expr(stmt.init, none)!
 			for i, pattern in stmt.patterns {
 				if pattern is ast.Identifier {
 					c.emit(.dup)
@@ -171,7 +184,12 @@ fn (mut c Compiler) compile_statement(stmt ast.Statement) ! {
 			c.emit(.pop)
 		}
 		ast.FunctionDeclaration {
-			c.compile_function_common(stmt.identifier.name, stmt.params, stmt.body)!
+			ret_hint := if rt := stmt.return_type {
+				c.get_resolved_type(rt.span)
+			} else {
+				none
+			}
+			c.compile_function_common(stmt.identifier.name, stmt.params, stmt.body, ret_hint)!
 			idx := c.get_or_create_local(stmt.identifier.name)
 			c.emit_arg(.store_local, idx)
 		}
@@ -184,51 +202,7 @@ fn (mut c Compiler) compile_statement(stmt ast.Statement) ! {
 	}
 }
 
-fn (mut c Compiler) compile_expr_with_hint(expr ast.Expression, expected_type string) ! {
-	if expected_type != '' {
-		if enum_type := c.type_env.lookup_type(expected_type) {
-			if enum_type is TypeEnum {
-				if expr is ast.FunctionCallExpression {
-					call := expr as ast.FunctionCallExpression
-					if call.identifier.name in enum_type.variants {
-						c.emit_arg(.push_const, c.add_constant(enum_type.id))
-						enum_idx := c.add_constant(expected_type)
-						c.emit_arg(.push_const, enum_idx)
-						variant_idx := c.add_constant(call.identifier.name)
-						c.emit_arg(.push_const, variant_idx)
-
-						if call.arguments.len >= 1 {
-							for arg in call.arguments {
-								c.compile_expr(arg)!
-							}
-							c.emit_arg(.make_enum_payload, call.arguments.len)
-						} else {
-							c.emit(.make_enum)
-						}
-						return
-					}
-				}
-
-				if expr is ast.Identifier {
-					ident := expr as ast.Identifier
-					if ident.name in enum_type.variants {
-						c.emit_arg(.push_const, c.add_constant(enum_type.id))
-						enum_idx := c.add_constant(expected_type)
-						c.emit_arg(.push_const, enum_idx)
-						variant_idx := c.add_constant(ident.name)
-						c.emit_arg(.push_const, variant_idx)
-						c.emit(.make_enum)
-						return
-					}
-				}
-			}
-		}
-	}
-
-	c.compile_expr(expr)!
-}
-
-fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
+fn (mut c Compiler) compile_expr(expr ast.Expression, hint ?Type) ! {
 	is_tail := c.in_tail_position
 	c.in_tail_position = false
 
@@ -237,16 +211,22 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			for i, node in expr.body {
 				is_last := i == expr.body.len - 1
 				c.in_tail_position = is_tail && is_last
-				c.compile_node(node)!
-				c.in_tail_position = false
-				if !is_last && node is ast.Expression {
-					c.emit(.pop)
+				if is_last {
+					if node is ast.Expression {
+						c.compile_expr(node, hint)!
+					} else {
+						c.compile_node(node)!
+						c.emit(.push_none)
+					}
+				} else {
+					c.compile_node(node)!
+					if node is ast.Expression {
+						c.emit(.pop)
+					}
 				}
+				c.in_tail_position = false
 			}
-
 			if expr.body.len == 0 {
-				c.emit(.push_none)
-			} else if expr.body[expr.body.len - 1] is ast.Statement {
 				c.emit(.push_none)
 			}
 		}
@@ -270,11 +250,11 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 				idx := c.add_constant('')
 				c.emit_arg(.push_const, idx)
 			} else {
-				c.compile_expr(expr.parts[0])!
+				c.compile_expr(expr.parts[0], none)!
 				c.emit(.to_string)
 
 				for i := 1; i < expr.parts.len; i++ {
-					c.compile_expr(expr.parts[i])!
+					c.compile_expr(expr.parts[i], none)!
 					c.emit(.to_string)
 					c.emit(.str_concat)
 				}
@@ -291,6 +271,19 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			c.emit(.push_none)
 		}
 		ast.Identifier {
+			// Check if this is a shorthand enum variant like None when hint is Option
+			if h := hint {
+				if h is TypeEnum {
+					if expr.name in h.variants {
+						c.emit_arg(.push_const, c.add_constant(h.id))
+						c.emit_arg(.push_const, c.add_constant(h.name))
+						c.emit_arg(.push_const, c.add_constant(expr.name))
+						c.emit(.make_enum)
+						return
+					}
+				}
+			}
+
 			if access := c.resolve_variable(expr.name) {
 				if access.is_local {
 					c.emit_arg(.push_local, access.index)
@@ -305,30 +298,30 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 		}
 		ast.BinaryExpression {
 			if expr.op.kind == .logical_and {
-				c.compile_expr(expr.left)!
+				c.compile_expr(expr.left, none)!
 				c.emit(.dup)
 
 				end_jump := c.current_addr()
 				c.emit_arg(.jump_if_false, 0)
 				c.emit(.pop)
-				c.compile_expr(expr.right)!
+				c.compile_expr(expr.right, none)!
 				c.program.code[end_jump] = op_arg(.jump_if_false, c.current_addr())
 				return
 			}
 			if expr.op.kind == .logical_or {
-				c.compile_expr(expr.left)!
+				c.compile_expr(expr.left, none)!
 				c.emit(.dup)
 
 				end_jump := c.current_addr()
 				c.emit_arg(.jump_if_true, 0)
 				c.emit(.pop)
-				c.compile_expr(expr.right)!
+				c.compile_expr(expr.right, none)!
 				c.program.code[end_jump] = op_arg(.jump_if_true, c.current_addr())
 				return
 			}
 
-			c.compile_expr(expr.left)!
-			c.compile_expr(expr.right)!
+			c.compile_expr(expr.left, none)!
+			c.compile_expr(expr.right, none)!
 			match expr.op.kind {
 				.punc_plus {
 					c.emit(.add)
@@ -369,7 +362,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			}
 		}
 		ast.UnaryExpression {
-			c.compile_expr(expr.expression)!
+			c.compile_expr(expr.expression, none)!
 			match expr.op.kind {
 				.punc_exclamation_mark {
 					c.emit(.not)
@@ -383,13 +376,13 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			}
 		}
 		ast.IfExpression {
-			c.compile_expr(expr.condition)!
+			c.compile_expr(expr.condition, none)!
 
 			else_jump := c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
 
 			c.in_tail_position = is_tail
-			c.compile_expr(expr.body)!
+			c.compile_expr(expr.body, hint)!
 			c.in_tail_position = false
 
 			end_jump := c.current_addr()
@@ -400,7 +393,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 
 			c.in_tail_position = is_tail
 			if else_body := expr.else_body {
-				c.compile_expr(else_body)!
+				c.compile_expr(else_body, hint)!
 			} else {
 				c.emit(.push_none)
 			}
@@ -418,7 +411,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			if !has_spread {
 				for elem in expr.elements {
 					if elem is ast.Expression {
-						c.compile_expr(elem)!
+						c.compile_expr(elem, none)!
 					}
 				}
 				c.emit_arg(.make_array, expr.elements.len)
@@ -434,7 +427,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 							return error('Spread in array literal missing expression')
 						}
 
-						c.compile_expr(inner)!
+						c.compile_expr(inner, none)!
 						if have_result {
 							c.emit(.array_concat)
 						} else {
@@ -449,7 +442,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 							}
 							arr_elem := expr.elements[j]
 							if arr_elem is ast.Expression {
-								c.compile_expr(arr_elem)!
+								c.compile_expr(arr_elem, none)!
 							}
 							group_count++
 						}
@@ -470,44 +463,60 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 		}
 		ast.TupleExpression {
 			for elem in expr.elements {
-				c.compile_expr(elem)!
+				c.compile_expr(elem, none)!
 			}
 			c.emit_arg(.make_tuple, expr.elements.len)
 		}
 		ast.ArrayIndexExpression {
-			c.compile_expr(expr.expression)!
+			c.compile_expr(expr.expression, none)!
 			if expr.index is ast.RangeExpression {
 				range_idx := expr.index as ast.RangeExpression
-				c.compile_expr(range_idx.start)!
-				c.compile_expr(range_idx.end)!
+				c.compile_expr(range_idx.start, none)!
+				c.compile_expr(range_idx.end, none)!
 				c.emit(.array_slice)
 			} else {
-				c.compile_expr(expr.index)!
+				c.compile_expr(expr.index, none)!
 				c.emit(.index)
 			}
 		}
 		ast.RangeExpression {
-			c.compile_expr(expr.start)!
-			c.compile_expr(expr.end)!
+			c.compile_expr(expr.start, none)!
+			c.compile_expr(expr.end, none)!
 			c.emit(.make_range)
 		}
 		ast.FunctionExpression {
 			c.compile_function_expression(expr)!
 		}
 		ast.FunctionCallExpression {
+			// Check if this is a shorthand enum variant like Ok(value) when hint is an enum
+			if h := hint {
+				if h is TypeEnum {
+					if expr.identifier.name in h.variants {
+						c.emit_arg(.push_const, c.add_constant(h.id))
+						c.emit_arg(.push_const, c.add_constant(h.name))
+						c.emit_arg(.push_const, c.add_constant(expr.identifier.name))
+						if expr.arguments.len > 0 {
+							for arg in expr.arguments {
+								c.compile_expr(arg, none)!
+							}
+							c.emit_arg(.make_enum_payload, expr.arguments.len)
+						} else {
+							c.emit(.make_enum)
+						}
+						return
+					}
+				}
+			}
+
 			func_type := c.type_env.lookup_function(expr.identifier.name)
 
 			for i, arg in expr.arguments {
-				expected_type := if ft := func_type {
-					if i < ft.params.len {
-						type_to_string(ft.params[i])
-					} else {
-						''
-					}
+				param_hint := if ft := func_type {
+					if i < ft.params.len { ft.params[i] } else { none }
 				} else {
-					''
+					none
 				}
-				c.compile_expr_with_hint(arg, expected_type)!
+				c.compile_expr(arg, param_hint)!
 			}
 
 			if access := c.resolve_variable(expr.identifier.name) {
@@ -543,9 +552,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 								return error('Unknown variant "${variant_name}" in enum ${enum_name}')
 							}
 
-							payload_types := enum_type.variants[variant_name] or {
-								[]type_def.Type{}
-							}
+							payload_types := enum_type.variants[variant_name] or { []Type{} }
 							if payload_types.len > 0 {
 								if call.arguments.len != payload_types.len {
 									return error('Variant "${variant_name}" expects ${payload_types.len} payload argument(s)')
@@ -557,7 +564,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 								variant_idx := c.add_constant(variant_name)
 								c.emit_arg(.push_const, variant_idx)
 								for arg in call.arguments {
-									c.compile_expr(arg)!
+									c.compile_expr(arg, none)!
 								}
 								c.emit_arg(.make_enum_payload, call.arguments.len)
 							} else {
@@ -571,9 +578,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 								return error('Unknown variant "${variant_name}" in enum ${enum_name}')
 							}
 
-							payload_types := enum_type.variants[variant_name] or {
-								[]type_def.Type{}
-							}
+							payload_types := enum_type.variants[variant_name] or { []Type{} }
 							if payload_types.len > 0 {
 								type_strs := payload_types.map(type_to_string)
 								return error('Variant "${variant_name}" requires payload(s) of type (${type_strs.join(', ')})')
@@ -591,13 +596,13 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 				}
 			}
 
-			c.compile_expr(expr.left)!
+			c.compile_expr(expr.left, none)!
 
 			if expr.right is ast.FunctionCallExpression {
 				call := expr.right as ast.FunctionCallExpression
 
 				for arg in call.arguments {
-					c.compile_expr(arg)!
+					c.compile_expr(arg, none)!
 				}
 
 				return error("Cannot call '${call.identifier.name}' as a method. AL does not have methods - use '${call.identifier.name}(...)' as a regular function call instead.")
@@ -640,7 +645,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			for field in expr.fields {
 				name_idx := c.add_constant(field.identifier.name)
 				c.emit_arg(.push_const, name_idx)
-				c.compile_expr(field.init)!
+				c.compile_expr(field.init, none)!
 			}
 			c.emit_arg(.push_const, c.add_constant(struct_type.id))
 			type_idx := c.add_constant(expr.identifier.name)
@@ -648,11 +653,11 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			c.emit_arg(.make_struct, expr.fields.len)
 		}
 		ast.ErrorExpression {
-			c.compile_expr(expr.expression)!
+			c.compile_expr(expr.expression, none)!
 			c.emit(.make_error)
 		}
 		ast.OrExpression {
-			c.compile_expr(expr.expression)!
+			c.compile_expr(expr.expression, none)!
 			c.emit(.dup)
 			c.emit(.is_failure)
 
@@ -667,7 +672,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 				c.emit(.pop)
 			}
 
-			c.compile_expr(expr.body)!
+			c.compile_expr(expr.body, none)!
 
 			end_jump := c.current_addr()
 			c.emit_arg(.jump, 0)
@@ -682,10 +687,15 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 }
 
 fn (mut c Compiler) compile_function_expression(func ast.FunctionExpression) ! {
-	c.compile_function_common(none, func.params, func.body)!
+	ret_hint := if rt := func.return_type {
+		c.get_resolved_type(rt.span)
+	} else {
+		none
+	}
+	c.compile_function_common(none, func.params, func.body, ret_hint)!
 }
 
-fn (mut c Compiler) compile_function_common(name ?string, params []ast.FunctionParameter, body ast.Expression) ! {
+fn (mut c Compiler) compile_function_common(name ?string, params []ast.FunctionParameter, body ast.Expression, return_type ?Type) ! {
 	old_locals := c.locals.clone()
 	old_local_count := c.local_count
 	old_captures := c.captures.clone()
@@ -721,7 +731,7 @@ fn (mut c Compiler) compile_function_common(name ?string, params []ast.FunctionP
 
 	old_tail := c.in_tail_position
 	c.in_tail_position = true
-	c.compile_expr(body)!
+	c.compile_expr(body, return_type)!
 	c.in_tail_position = old_tail
 	c.current_binding = old_binding
 	c.emit(.ret)
@@ -764,7 +774,7 @@ fn (mut c Compiler) compile_function_common(name ?string, params []ast.FunctionP
 fn (mut c Compiler) compile_pattern_element(pattern ast.Expression, mut fail_jumps []int) ! {
 	match pattern {
 		ast.NumberLiteral, ast.StringLiteral, ast.BooleanLiteral {
-			c.compile_expr(pattern)!
+			c.compile_expr(pattern, none)!
 			c.emit(.eq)
 			fail_jumps << c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
@@ -782,13 +792,13 @@ fn (mut c Compiler) compile_pattern_element(pattern ast.Expression, mut fail_jum
 			c.emit(.dup)
 			c.emit_arg(.store_local, temp_idx)
 
-			c.compile_expr(pattern.start)!
+			c.compile_expr(pattern.start, none)!
 			c.emit(.gte)
 			fail_jumps << c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
 
 			c.emit_arg(.push_local, temp_idx)
-			c.compile_expr(pattern.end)!
+			c.compile_expr(pattern.end, none)!
 			c.emit(.lt)
 			fail_jumps << c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
@@ -858,7 +868,7 @@ fn (mut c Compiler) compile_pattern_element(pattern ast.Expression, mut fail_jum
 			}
 		}
 		else {
-			c.compile_expr(pattern)!
+			c.compile_expr(pattern, none)!
 			c.emit(.eq)
 			fail_jumps << c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
@@ -870,7 +880,7 @@ fn (mut c Compiler) compile_pattern(pattern ast.Expression, mut fail_jumps []int
 	match pattern {
 		ast.NumberLiteral, ast.StringLiteral, ast.BooleanLiteral {
 			c.emit(.dup)
-			c.compile_expr(pattern)!
+			c.compile_expr(pattern, none)!
 			c.emit(.eq)
 			fail_jumps << c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
@@ -883,13 +893,13 @@ fn (mut c Compiler) compile_pattern(pattern ast.Expression, mut fail_jumps []int
 		ast.WildcardPattern {}
 		ast.RangeExpression {
 			c.emit(.dup)
-			c.compile_expr(pattern.start)!
+			c.compile_expr(pattern.start, none)!
 			c.emit(.gte)
 			fail_jumps << c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
 
 			c.emit(.dup)
-			c.compile_expr(pattern.end)!
+			c.compile_expr(pattern.end, none)!
 			c.emit(.lt)
 			fail_jumps << c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
@@ -952,7 +962,7 @@ fn (mut c Compiler) compile_pattern(pattern ast.Expression, mut fail_jumps []int
 		}
 		else {
 			c.emit(.dup)
-			c.compile_expr(pattern)!
+			c.compile_expr(pattern, none)!
 			c.emit(.eq)
 			fail_jumps << c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
@@ -961,7 +971,7 @@ fn (mut c Compiler) compile_pattern(pattern ast.Expression, mut fail_jumps []int
 }
 
 fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
-	c.compile_expr(m.subject)!
+	c.compile_expr(m.subject, none)!
 
 	mut end_jumps := []int{}
 
@@ -1002,6 +1012,30 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 					}
 				}
 			}
+		} else if arm.pattern is ast.FunctionCallExpression {
+			call := arm.pattern as ast.FunctionCallExpression
+			vname := call.identifier.name
+			if en := c.type_env.lookup_enum_by_variant(vname) {
+				is_enum_pattern = true
+				enum_name = en.name
+				enum_type_id = en.id
+				variant_name = vname
+				for arg in call.arguments {
+					if arg is ast.Identifier {
+						binding_names << arg.name
+					} else {
+						enum_payload_patterns << arg
+					}
+				}
+			}
+		} else if arm.pattern is ast.Identifier {
+			vname := arm.pattern.name
+			if en := c.type_env.lookup_enum_by_variant(vname) {
+				is_enum_pattern = true
+				enum_name = en.name
+				enum_type_id = en.id
+				variant_name = vname
+			}
 		}
 
 		if is_enum_pattern {
@@ -1036,7 +1070,7 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 
 					c.emit(.pop)
 					c.in_tail_position = is_tail
-					c.compile_expr(arm.body)!
+					c.compile_expr(arm.body, none)!
 					c.in_tail_position = false
 
 					end_jumps << c.current_addr()
@@ -1079,7 +1113,7 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 
 			c.emit(.pop)
 			c.in_tail_position = is_tail
-			c.compile_expr(arm.body)!
+			c.compile_expr(arm.body, none)!
 			c.in_tail_position = false
 
 			end_jumps << c.current_addr()
@@ -1096,7 +1130,7 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 
 		c.emit(.pop)
 		c.in_tail_position = is_tail
-		c.compile_expr(arm.body)!
+		c.compile_expr(arm.body, none)!
 		c.in_tail_position = false
 
 		end_jumps << c.current_addr()
@@ -1123,7 +1157,7 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			if call.arguments.len != 1 {
 				return error('println expects 1 argument')
 			}
-			c.compile_expr(call.arguments[0])!
+			c.compile_expr(call.arguments[0], none)!
 			c.emit(.print)
 			c.emit(.push_none)
 		}
@@ -1131,7 +1165,7 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			if call.arguments.len != 1 {
 				return error('inspect expects 1 argument')
 			}
-			c.compile_expr(call.arguments[0])!
+			c.compile_expr(call.arguments[0], none)!
 			c.emit(.to_string)
 		}
 		'__stack_depth__' {
@@ -1147,59 +1181,59 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			if call.arguments.len != 1 {
 				return error('read_file expects 1 argument (path)')
 			}
-			c.compile_expr(call.arguments[0])!
+			c.compile_expr(call.arguments[0], none)!
 			c.emit(.file_read)
 		}
 		'write_file' {
 			if call.arguments.len != 2 {
 				return error('write_file expects 2 arguments (path, content)')
 			}
-			c.compile_expr(call.arguments[0])!
-			c.compile_expr(call.arguments[1])!
+			c.compile_expr(call.arguments[0], none)!
+			c.compile_expr(call.arguments[1], none)!
 			c.emit(.file_write)
 		}
 		'tcp_listen' {
 			if call.arguments.len != 1 {
 				return error('tcp_listen expects 1 argument (port)')
 			}
-			c.compile_expr(call.arguments[0])!
+			c.compile_expr(call.arguments[0], none)!
 			c.emit(.tcp_listen)
 		}
 		'tcp_accept' {
 			if call.arguments.len != 1 {
 				return error('tcp_accept expects 1 argument (listener)')
 			}
-			c.compile_expr(call.arguments[0])!
+			c.compile_expr(call.arguments[0], none)!
 			c.emit(.tcp_accept)
 		}
 		'tcp_read' {
 			if call.arguments.len != 1 {
 				return error('tcp_read expects 1 argument (socket)')
 			}
-			c.compile_expr(call.arguments[0])!
+			c.compile_expr(call.arguments[0], none)!
 			c.emit(.tcp_read)
 		}
 		'tcp_write' {
 			if call.arguments.len != 2 {
 				return error('tcp_write expects 2 arguments (socket, data)')
 			}
-			c.compile_expr(call.arguments[0])!
-			c.compile_expr(call.arguments[1])!
+			c.compile_expr(call.arguments[0], none)!
+			c.compile_expr(call.arguments[1], none)!
 			c.emit(.tcp_write)
 		}
 		'tcp_close' {
 			if call.arguments.len != 1 {
 				return error('tcp_close expects 1 argument (socket)')
 			}
-			c.compile_expr(call.arguments[0])!
+			c.compile_expr(call.arguments[0], none)!
 			c.emit(.tcp_close)
 		}
 		'str_split' {
 			if call.arguments.len != 2 {
 				return error('str_split expects 2 arguments (string, delimiter)')
 			}
-			c.compile_expr(call.arguments[0])!
-			c.compile_expr(call.arguments[1])!
+			c.compile_expr(call.arguments[0], none)!
+			c.compile_expr(call.arguments[1], none)!
 			c.emit(.str_split)
 		}
 		else {
