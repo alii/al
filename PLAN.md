@@ -17,7 +17,7 @@ A single-pass compiler with HM type inference baked in:
 - Union-find for type variable unification
 - Levels-based generalization (Remy's technique)
 - Let-polymorphism (generalize at bindings, instantiate at use sites)
-- Constrained type variables for operators (Elm-style: addable, numeric, comparable)
+- Constrained type variables for operators (Elm-style: addable, numeric)
 - Proper occurs check
 - Good error messages via spans on constraints
 - Bytecode emission happens inline as types are inferred
@@ -77,7 +77,10 @@ InferEngine:
 
 TyVarState = Unbound { level: int, constraint: ?Constraint } | Link { ty: InferType }
 
-Constraint = .addable | .numeric | .comparable
+Constraint = .addable | .numeric   // enum — add variants as needed
+
+fn (c Constraint) allowed_types() []string   // .addable → ["Int", "Float", "String"]
+fn (c Constraint) name() string              // .addable → "addable" (for error messages)
 
 InferType:
   | IVar(id: int)                              // type variable (index into vars[])
@@ -155,9 +158,14 @@ TypeInfo:
   id: int
   kind: .struct_ | .enum_
   type_params: []string
-  fields: map[string]InferType          // for structs
-  variants: map[string][]InferType      // for enums
+  fields: map[string]type_def.Type      // for structs (template, immutable)
+  variants: map[string][]type_def.Type  // for enums (template, immutable)
 ```
+
+Field/variant types use `type_def.Type` (with `TypeVar("A")` for params), NOT
+`InferType`. This keeps templates immutable — unification can't corrupt them.
+When instantiating a struct/enum, convert field types to `InferType`, replacing
+`TypeVar("A")` with fresh IVars. This conversion happens each time.
 
 Key operations:
 
@@ -253,11 +261,13 @@ struct Pair(A, B) { first: A, second: B }
 
 When compiling `Pair { first: 1, second: "hi" }`:
 
-1. Look up Pair's TypeInfo, create fresh vars for A, B
-2. Compile `first: 1` -> Int, unify with A => A = Int
-3. Compile `second: "hi"` -> String, unify with B => B = String
-4. Return type: Pair(Int, String)
-5. Emit: struct init bytecode
+1. Look up Pair's TypeInfo (fields stored as `type_def.Type` with `TypeVar("A")`, etc.)
+2. Create fresh IVars: `'a` for A, `'b` for B
+3. Convert each field's template type to InferType, replacing TypeVar("A") → `'a`, TypeVar("B") → `'b`
+4. Compile `first: 1` -> Int, unify with `'a` => `'a` = Int
+5. Compile `second: "hi"` -> String, unify with `'b` => `'b` = String
+6. Return type: `ICon("Pair", ['a, 'b])` = Pair(Int, String)
+7. Emit: struct init bytecode
 
 ### Let-polymorphism
 
@@ -284,14 +294,29 @@ Pure HM only has parametric polymorphism (same code for all types). Operators
 like `+` need ad-hoc polymorphism (different behavior per type). We solve this
 with Elm-style **constrained type variables** - a small, closed extension to HM.
 
-Type variables can carry a constraint tag:
+Type variables can carry a constraint — an enum variant with an `allowed_types()` method:
 
+```v
+enum Constraint {
+  addable    // Int, Float, String
+  numeric    // Int, Float
+}
+
+fn (c Constraint) allowed_types() []string {
+  return match c {
+    .addable { ["Int", "Float", "String"] }
+    .numeric { ["Int", "Float"] }
+  }
+}
 ```
-Constraint:
-  .addable    — can be Int, Float, or String
-  .numeric    — can be Int or Float
-  .comparable — can be Int, Float, or String
-```
+
+Adding a new constraint = add an enum variant + a case in `allowed_types()`.
+
+The unifier uses `allowed_types()` generically — no per-constraint special casing:
+- `IVar{constraint: C}` meets `ICon(name)` → check `name in C.allowed_types()`. Yes → OK. No → ERROR.
+- `IVar{constraint: C}` meets `IVar{constraint: none}` → propagate: both get constraint C
+- `IVar{constraint: C1}` meets `IVar{constraint: C2}` → intersect `C1.allowed_types()` ∩ `C2.allowed_types()`.
+  Pick whichever constraint has the smaller set (or error if empty intersection).
 
 When the compiler sees `a + b`:
 1. Compile `a`, get type `T_a`
@@ -301,28 +326,22 @@ When the compiler sees `a + b`:
 5. Unify `T_b` with `'r` (right operand must match, also addable)
 6. Return type: `'r` (same type as operands)
 
-The constraint is enforced during unification:
-- `IVar{constraint: .addable}` meets `ICon("Int")` → OK, resolve to Int
-- `IVar{constraint: .addable}` meets `ICon("Bool")` → ERROR: Bool is not addable
-- `IVar{constraint: .addable}` meets `IVar{constraint: none}` → propagate: both become addable
-- `IVar{constraint: .addable}` meets `IVar{constraint: .numeric}` → tighter wins: numeric
-
 This means `add = fn(a, b) { a + b }` infers as `addable -> addable -> addable`:
-- `add(1, 2)` → addable meets Int → OK
+- `add(1, 2)` → addable meets Int → Int ∈ allowed → OK
 - `add("hi", "there")` → addable meets String → OK
-- `add(true, false)` → addable meets Bool → ERROR
+- `add(true, false)` → addable meets Bool → Bool ∉ allowed → ERROR
 
 Operator constraint mapping:
 - `+`: operands `addable`, result = operand type
 - `-`, `*`, `/`, `%`: operands `numeric`, result = operand type
-- `<`, `>`, `<=`, `>=`: operands `comparable`, result = Bool
+- `<`, `>`, `<=`, `>=`: operands `numeric`, result = Bool
 - `==`, `!=`: operands unconstrained (any type), result = Bool
 - `&&`, `||`: operands must be Bool, result = Bool
 - unary `-`: operand `numeric`, result = operand type
 - unary `!`: operand must be Bool, result = Bool
 
-This is NOT type classes. The constraint set is hardcoded and closed. Users
-can't define new constraints. It's ~15 lines of extra code in the unifier.
+This is NOT type classes. Users can't define new constraints. But we can
+add them easily — one enum variant + one match arm.
 
 ### Pattern matching
 
@@ -365,6 +384,9 @@ The `error` expression: `error DivisionError{ message: 'Cannot divide by zero' }
 3. Record `E` as contributing to the current function's error type
 4. Return type: `'t` (unifies freely with whatever context expects)
 5. Emit: compile inner expr + `make_error` opcode
+
+The `error` expression is only valid inside functions declared with `!E`.
+If used elsewhere, emit an error: "error expression outside failable function."
 
 Why a fresh var? Because `error` is control flow — it exits the function through
 the error channel. It never produces a success value. A fresh var unifies with
@@ -563,8 +585,8 @@ resolve() converts InferType → type_def.Type. It's needed at:
 
 If a constrained var is never unified with a concrete type (e.g., `add = fn(a, b) { a + b }`
 is declared but never called), it stays constrained in the scheme. When resolve()
-encounters an unbound var with constraint `.addable`, it becomes `TypeVar("addable")`
-in the final type. This is fine for display purposes.
+encounters an unbound var with a constraint, it becomes `TypeVar(constraint.name)`
+in the final type (e.g. `TypeVar("addable")`). This is fine for display purposes.
 
 No defaulting (unlike Elm which defaults `number` → `Int`). An unresolved constrained
 var just stays polymorphic.
