@@ -1247,48 +1247,6 @@ match net.serve('0.0.0.0', 8080, respond) {
   },
 
   // ======================================================================
-  // The standard library
-  // ======================================================================
-  {
-    id: "stdlib",
-    title: "The standard library",
-    body: [
-      "The standard library is small and written in AL. It is embedded in the compiler binary, so imports never touch the network or a package registry. What exists today:",
-      {
-        id: "stdlib-list",
-        plain: true,
-        code: `al/array     map, filter, fold, each, reverse, length, contains, find, any,
-             all, concat
-al/string    split, length, contains, trim, inspect
-al/int       to_string, max, min, min_value, max_value, abs, clamp
-al/float     floor, ceil, round, truncate, from_int, to_string, max, min, abs
-al/bool      negate, to_string
-al/decimal   fixed-point arithmetic
-al/option    map, then, unwrap, or_else, is_some, is_none
-al/result    map, map_err, then, unwrap, is_ok, is_err
-al/map       new, set, get, delete, has, keys, values, size, to_list,
-             from_list, fold, merge
-al/binary    from_string, to_string, bit_size, byte_size, slice, slice_bytes,
-             append, index_of, byte_at, parse_int, eq_ignore_ascii_case,
-             to_ascii_lower, from_int_ascii
-al/io        read_file, write_file, read_text, write_text
-al/net       listen, listen_addr, accept, serve, serve_on, connect,
-             connect_addr, resolve, local_addr, close
-al/net/socket    read, read_exact, read_within, read_until, write,
-                 write_parts, close
-al/net/address   parse, to_string, ip_to_string, is_v6
-al/http      serve, serve_on, text, ok, not_found, with_header, path, query
-al/http/h1   sans-IO HTTP/1.1 parser
-al/http/body al/http/headers al/http/status
-al/scheduler   spawn, spawn_local, spawn_on_each, sleep
-al/time      monotonic, add_ms, since_ms, to_deadline_ms
-al/process   argv, env, get_env`,
-      },
-      "Anything missing from this list does not exist yet. The source for all of it is in `crates/al_core/src/std/al/` in the repository, and it reads like the examples on this page.",
-    ],
-  },
-
-  // ======================================================================
   // Tooling
   // ======================================================================
   {
@@ -1327,7 +1285,7 @@ export const examples = sections.flatMap((section) =>
   section.body
     .filter(isSnippet)
     .filter((snippet) => !snippet.plain)
-    .map((snippet) => ({ title: section.title, ...snippet }))
+    .map((snippet) => ({ title: section.title, ...snippet })),
 );
 
 // ======================================================================
@@ -1349,7 +1307,7 @@ function Paragraph({ text }: { text: string }) {
           </code>
         ) : (
           part
-        )
+        ),
       )}
     </p>
   );
@@ -1446,8 +1404,8 @@ export function App({ rendered }: { rendered: Rendered }) {
         <pre className="text-sm mb-6">{logo}</pre>
         <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-6">
           AL is a small, statically typed language for writing concurrent
-          programs. It ships as a single binary with no dependencies. The
-          whole language is documented on this page.
+          programs. It ships as a single binary with no dependencies. The whole
+          language is documented on this page.
         </p>
         <div className="p-4 bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 mb-4">
           <code className="text-xs tracking-tight">
@@ -1479,7 +1437,7 @@ export function App({ rendered }: { rendered: Rendered }) {
                 <PlainBlock key={block.id} code={block.code} />
               ) : (
                 <CodeBlock key={block.id} rendered={rendered[block.id]!} />
-              )
+              ),
             )}
           </section>
         ))}
