@@ -1046,11 +1046,15 @@ impl Formatter {
                 d![text("fn"), delimited("(", ps, ")"), r]
             }
             ast::TypeKind::NamedType(n) => {
+                let name = match &n.qualifier {
+                    Some(q) => format!("{}.{}", q.name, n.identifier.name),
+                    None => n.identifier.name.clone(),
+                };
                 if n.type_args.is_empty() {
-                    text(n.identifier.name.clone())
+                    text(name)
                 } else {
                     let args: Vec<Doc> = n.type_args.iter().map(|a| self.type_(a)).collect();
-                    d![text(n.identifier.name.clone()), delimited("(", args, ")")]
+                    d![text(name), delimited("(", args, ")")]
                 }
             }
         }

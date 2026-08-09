@@ -298,15 +298,15 @@ impl Compiler {
     }
 
     /// Synthesise reference-graph [`Definition`]s for a static/hydrated stdlib
-    /// module from its exported values' `Scheme.def`, which already carries the
-    /// real declaration span. `None` for a value-less interface.
+    /// module from its exported values' `Scheme.def` and its exported types'
+    /// `ExportedType.def`, both of which carry the real declaration span.
+    /// `None` for an interface exporting nothing.
     ///
     /// Every `DefId` and the owning container go through
     /// [`Compiler::defid_of`], the same computation a populated use of the name
     /// bakes into its occurrence target, so both share one canonical `DefId`
     /// even when the precompiled `Scheme.def.module` spelling differs from the
-    /// `ModuleTable` key. Types are not synthesised: `TypeInfo` has no
-    /// declaration span.
+    /// `ModuleTable` key.
     fn synth_refs_from_interface(
         &mut self,
         defs: &[SynthDef],
@@ -383,19 +383,23 @@ impl Compiler {
             match cm.module_refs() {
                 Some(mr) => graph.insert(Rc::clone(mr)),
                 None => {
-                    let defs: Vec<SynthDef> = cm
-                        .iface
-                        .values
-                        .iter()
-                        .filter_map(|(name, ev)| {
-                            ev.scheme.def.map(|dl| SynthDef {
-                                name: name.clone(),
-                                location: dl,
-                                doc: ev.doc.clone(),
-                                param_names: ev.param_names.clone(),
-                            })
+                    let values = cm.iface.values.iter().filter_map(|(name, ev)| {
+                        ev.scheme.def.map(|dl| SynthDef {
+                            name: name.clone(),
+                            location: dl,
+                            doc: ev.doc.clone(),
+                            param_names: ev.param_names.clone(),
                         })
-                        .collect();
+                    });
+                    let types = cm.iface.types.iter().filter_map(|(name, et)| {
+                        et.def.map(|dl| SynthDef {
+                            name: name.clone(),
+                            location: dl,
+                            doc: et.doc.clone(),
+                            param_names: Vec::new(),
+                        })
+                    });
+                    let defs: Vec<SynthDef> = values.chain(types).collect();
                     if !defs.is_empty() {
                         synth_inputs.push((defs, cm.iface.doc.clone()));
                     }

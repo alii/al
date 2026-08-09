@@ -36,7 +36,6 @@ pub fn disassemble_native(
 ) -> Result<String, String> {
     let mut out = render(program, Some(needle));
     let mut module = jit::jit_module().map_err(|e| e.to_string())?;
-    let native = clif::native_set(&plans, program);
     let mut listed = false;
     for plan in plans {
         let idx = plan.func_idx.index();
@@ -46,7 +45,7 @@ pub fn disassemble_native(
         if !f.name.contains(needle) {
             continue;
         }
-        match clif::compile(&mut module, &plan, &native, program) {
+        match clif::compile(&mut module, &plan, program) {
             Ok(Some(body)) => {
                 let _ = writeln!(
                     out,

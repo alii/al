@@ -97,16 +97,15 @@ use crate::type_def::TypeId;
 use crate::typed_ir::{RTy, ResolvedNode, ResolvedPool};
 use crate::types::{Prim, StrId};
 
-const SYM_RT_CALL: &str = "al_rt_call";
-const SYM_RT_TAIL_CALL: &str = "al_rt_tail_call";
-const SYM_RT_PUSH_FRAME: &str = "al_rt_push_frame";
-const SYM_RT_DIRECT_RESULT: &str = "al_rt_direct_result";
+const SYM_RT_PREPARE_CALL: &str = "al_rt_prepare_call";
+const SYM_RT_PREPARE_CALL_VALUE: &str = "al_rt_prepare_call_value";
+const SYM_RT_PREPARE_TAIL: &str = "al_rt_prepare_tail";
+const SYM_RT_PREPARE_TAIL_VALUE: &str = "al_rt_prepare_tail_value";
+const SYM_RT_RET_TRANSFER: &str = "al_rt_ret_transfer";
+const SYM_RT_POP: &str = "al_rt_pop";
 const SYM_RT_CHECKPOINT: &str = "al_rt_checkpoint";
 const SYM_RT_FRAME_BASE: &str = "al_rt_frame_base";
-const SYM_RT_RET: &str = "al_rt_ret";
 const SYM_RT_MAKE_CLOSURE: &str = "al_rt_make_closure";
-const SYM_RT_CALL_VALUE: &str = "al_rt_call_value";
-const SYM_RT_TAIL_CALL_VALUE: &str = "al_rt_tail_call_value";
 const SYM_DIV_INT: &str = "al_shim_div_int";
 const SYM_MOD_INT: &str = "al_shim_mod_int";
 const SYM_ENUM_ALLOC: &str = "al_shim_enum_alloc";
@@ -253,6 +252,16 @@ pub fn plan(
         gate.record(p);
     }
     gate.expr(&f.body)?;
+    // KNOWN GAP (Phase 1): a self-tail loop whose body reaches a non-tail call
+    // (a continuation) before the self-call miscompiles on its second-plus
+    // iteration — the in-place back-edge re-enters the head, but the call's
+    // continuation blocks are only reachable from the entry dispatch. Such a
+    // function interprets correctly; only its native fast path is withheld.
+    // Tracked for a focused fix (see docs/beam-exec.md). Tight self-tail loops
+    // with no intervening call are unaffected and still compile.
+    if self_tail_with_continuation(&f.body) {
+        return None;
+    }
     Some(NativePlan {
         func_idx,
         fun: f.clone(),
@@ -1320,16 +1329,15 @@ struct RtRefs {
     int_box: ir::FuncRef,
     div_int: ir::FuncRef,
     mod_int: ir::FuncRef,
-    rt_call: ir::FuncRef,
-    rt_tail_call: ir::FuncRef,
-    rt_push_frame: ir::FuncRef,
-    rt_direct_result: ir::FuncRef,
+    prepare_call: ir::FuncRef,
+    prepare_call_value: ir::FuncRef,
+    prepare_tail: ir::FuncRef,
+    prepare_tail_value: ir::FuncRef,
+    ret_transfer: ir::FuncRef,
+    rt_pop: ir::FuncRef,
     make_closure: ir::FuncRef,
-    rt_call_value: ir::FuncRef,
-    rt_tail_call_value: ir::FuncRef,
     rt_checkpoint: ir::FuncRef,
     rt_frame_base: ir::FuncRef,
-    rt_ret: ir::FuncRef,
 }
 
 fn declare_imports<M: Module>(
@@ -1376,46 +1384,33 @@ fn declare_imports<M: Module>(
     let int_box = import(module, NATIVE_INT_BOX_SYMBOL, &[ptr, i64t], Some(i64t))?;
     let div_int = import(module, SYM_DIV_INT, &[i64t, i64t], Some(i64t))?;
     let mod_int = import(module, SYM_MOD_INT, &[i64t, i64t], Some(i64t))?;
-    let rt_call = import(
+    // The transfer helpers return a `PreparedCall`: two registers.
+    let import2 =
+        |module: &mut M, name: &str, params: &[ir::Type]| -> Result<FuncId, Box<ModuleError>> {
+            let mut sig = module.make_signature();
+            sig.params.extend(params.iter().map(|&t| AbiParam::new(t)));
+            sig.returns.push(AbiParam::new(ptr));
+            sig.returns.push(AbiParam::new(i64t));
+            Ok(module.declare_function(name, Linkage::Import, &sig)?)
+        };
+    let prepare_call = import2(module, SYM_RT_PREPARE_CALL, &[ptr, i64t, i64t, ptr, i64t])?;
+    let prepare_call_value = import2(
         module,
-        SYM_RT_CALL,
-        &[ptr, i64t, i64t, ptr, i64t, ptr],
-        Some(i64t),
-    )?;
-    let rt_tail_call = import(
-        module,
-        SYM_RT_TAIL_CALL,
-        &[ptr, i64t, ptr, i64t],
-        Some(i64t),
-    )?;
-    let rt_push_frame = import(
-        module,
-        SYM_RT_PUSH_FRAME,
+        SYM_RT_PREPARE_CALL_VALUE,
         &[ptr, i64t, i64t, ptr, i64t],
-        Some(i64t),
     )?;
-    let rt_direct_result = import(module, SYM_RT_DIRECT_RESULT, &[ptr, i64t, ptr], Some(i64t))?;
+    let prepare_tail = import2(module, SYM_RT_PREPARE_TAIL, &[ptr, i64t, ptr, i64t])?;
+    let prepare_tail_value = import2(module, SYM_RT_PREPARE_TAIL_VALUE, &[ptr, i64t, ptr, i64t])?;
+    let ret_transfer = import2(module, SYM_RT_RET_TRANSFER, &[ptr, i64t])?;
+    let rt_pop = import(module, SYM_RT_POP, &[ptr], Some(i64t))?;
     let make_closure = import(
         module,
         SYM_RT_MAKE_CLOSURE,
         &[ptr, i64t, ptr, i64t],
         Some(i64t),
     )?;
-    let rt_call_value = import(
-        module,
-        SYM_RT_CALL_VALUE,
-        &[ptr, i64t, i64t, ptr, i64t, ptr],
-        Some(i64t),
-    )?;
-    let rt_tail_call_value = import(
-        module,
-        SYM_RT_TAIL_CALL_VALUE,
-        &[ptr, i64t, ptr, i64t],
-        Some(i64t),
-    )?;
     let rt_checkpoint = import(module, SYM_RT_CHECKPOINT, &[ptr], Some(i64t))?;
     let rt_frame_base = import(module, SYM_RT_FRAME_BASE, &[ptr], Some(ptr))?;
-    let rt_ret = import(module, SYM_RT_RET, &[ptr, i64t], None)?;
     Ok(RtRefs {
         release: module.declare_func_in_func(release, func),
         hollow: module.declare_func_in_func(hollow, func),
@@ -1435,102 +1430,16 @@ fn declare_imports<M: Module>(
         int_box: module.declare_func_in_func(int_box, func),
         div_int: module.declare_func_in_func(div_int, func),
         mod_int: module.declare_func_in_func(mod_int, func),
-        rt_call: module.declare_func_in_func(rt_call, func),
-        rt_tail_call: module.declare_func_in_func(rt_tail_call, func),
-        rt_push_frame: module.declare_func_in_func(rt_push_frame, func),
-        rt_direct_result: module.declare_func_in_func(rt_direct_result, func),
+        prepare_call: module.declare_func_in_func(prepare_call, func),
+        prepare_call_value: module.declare_func_in_func(prepare_call_value, func),
+        prepare_tail: module.declare_func_in_func(prepare_tail, func),
+        prepare_tail_value: module.declare_func_in_func(prepare_tail_value, func),
+        ret_transfer: module.declare_func_in_func(ret_transfer, func),
+        rt_pop: module.declare_func_in_func(rt_pop, func),
         make_closure: module.declare_func_in_func(make_closure, func),
-        rt_call_value: module.declare_func_in_func(rt_call_value, func),
-        rt_tail_call_value: module.declare_func_in_func(rt_tail_call_value, func),
         rt_checkpoint: module.declare_func_in_func(rt_checkpoint, func),
         rt_frame_base: module.declare_func_in_func(rt_frame_base, func),
-        rt_ret: module.declare_func_in_func(rt_ret, func),
     })
-}
-
-/// Every statically-known call target the body reaches, for
-/// [`declare_native_peers`]. `Callee::Self_` counts as a known call to
-/// `self_idx`: covered bodies never read captures.
-fn known_callees(self_idx: FuncIdx, fun: &CoreFn) -> HashSet<FuncIdx> {
-    let mut out = HashSet::new();
-    let mut stack = vec![&fun.body];
-    let atom = |a: &Atom, out: &mut HashSet<FuncIdx>| match a {
-        Atom::Call {
-            callee: Callee::Known(f),
-            ..
-        } => {
-            out.insert(*f);
-        }
-        Atom::Call {
-            callee: Callee::Self_,
-            ..
-        } => {
-            out.insert(self_idx);
-        }
-        _ => {}
-    };
-    while let Some(mut e) = stack.pop() {
-        loop {
-            match e {
-                CoreExpr::Let { rhs, body, .. } => {
-                    atom(rhs, &mut out);
-                    e = body;
-                }
-                CoreExpr::LetJoin { join, body, .. }
-                | CoreExpr::LetCont {
-                    cont: join, body, ..
-                } => {
-                    stack.push(join);
-                    e = body;
-                }
-                CoreExpr::Drop { body, .. } => e = body,
-                CoreExpr::If { then, els, .. } => {
-                    stack.push(then);
-                    e = els;
-                }
-                CoreExpr::Match { arms, .. } => {
-                    for (_, body) in arms {
-                        stack.push(body);
-                    }
-                    break;
-                }
-                CoreExpr::Tail(a) => {
-                    atom(a, &mut out);
-                    break;
-                }
-                CoreExpr::Goto(_) => break,
-            }
-        }
-    }
-    out
-}
-
-/// Declare a `FuncRef` for every native peer this body statically calls,
-/// under the same `al_fn_{idx}` name and signature the peer's own [`compile`]
-/// declares. A callee outside `native` gets no entry and falls back to the
-/// trampoline shims.
-fn declare_native_peers<M: Module>(
-    module: &mut M,
-    func: &mut ir::Function,
-    self_idx: FuncIdx,
-    fun: &CoreFn,
-    native: &HashSet<FuncIdx>,
-) -> Result<HashMap<FuncIdx, ir::FuncRef>, Box<ModuleError>> {
-    let ptr_ty = module.target_config().pointer_type();
-    let mut sig = module.make_signature();
-    sig.call_conv = CallConv::Tail;
-    sig.params.push(AbiParam::new(ptr_ty));
-    sig.returns.push(AbiParam::new(types::I64));
-    let mut peers = HashMap::new();
-    for f in known_callees(self_idx, fun) {
-        if !native.contains(&f) {
-            continue;
-        }
-        let name = format!("al_fn_{}", f.index());
-        let id = module.declare_function(&name, Linkage::Export, &sig)?;
-        peers.insert(f, module.declare_func_in_func(id, func));
-    }
-    Ok(peers)
 }
 
 /// The `FuncIdx`s whose [`compile`] will actually define a body: plans that
@@ -1561,7 +1470,6 @@ pub fn native_set(plans: &[NativePlan], program: &crate::bytecode::Program) -> H
 pub fn compile<M: Module>(
     module: &mut M,
     plan: &NativePlan,
-    native: &HashSet<FuncIdx>,
     program: &crate::bytecode::Program,
 ) -> Result<Option<CompiledBody>, Box<ModuleError>> {
     let consts: &[Value] = &program.constants;
@@ -1603,6 +1511,8 @@ pub fn compile<M: Module>(
     // only through the module's entry trampoline.
     sig.call_conv = CallConv::Tail;
     sig.params.push(AbiParam::new(ptr_ty));
+    // The resume ordinal: 0 enters at the head, k at continuation k.
+    sig.params.push(AbiParam::new(types::I64));
     sig.returns.push(AbiParam::new(types::I64));
     let name = format!("al_fn_{}", plan.func_idx.index());
     let func_id = module.declare_function(&name, Linkage::Export, &sig)?;
@@ -1613,8 +1523,8 @@ pub fn compile<M: Module>(
     {
         let b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
         let fns = declare_imports(module, b.func)?;
-        let peers = declare_native_peers(module, b.func, plan.func_idx, &plan.fun, native)?;
-        let g = BodyGen::prologue(b, plan, peers, layout, uses, cmap, ctor_sites, fns, ptr_ty);
+        let conts = count_call_conts(&plan.fun.body, false);
+        let g = BodyGen::prologue(b, plan, conts, layout, uses, cmap, ctor_sites, fns, ptr_ty);
         g.run();
     }
     let clif = ctx.func.display().to_string();
@@ -1629,6 +1539,102 @@ pub fn compile<M: Module>(
         clif,
         code_size,
     }))
+}
+
+/// Whether `e` contains both a self-tail call and a call inside a `LetJoin`
+/// (a short-circuit `&&`/`||` or if-as-value condition). See the KNOWN GAP
+/// note at the [`plan`] gate: this is the exact miscompiling shape — a
+/// continuation reachable only through the entry dispatch that the in-place
+/// loop back-edge cannot re-enter. A continuation elsewhere (e.g. a call in a
+/// self-tail arg, as in the `dot_loop` bench) compiles correctly.
+fn self_tail_with_continuation(body: &CoreExpr) -> bool {
+    has_self_tail(body) && has_call_in_join(body)
+}
+
+/// Whether any `LetJoin` join in `e` contains a call.
+fn has_call_in_join(e: &CoreExpr) -> bool {
+    fn any_call(e: &CoreExpr) -> bool {
+        match e {
+            CoreExpr::Let { rhs, body, .. } => matches!(rhs, Atom::Call { .. }) || any_call(body),
+            CoreExpr::LetJoin { join, body, .. } => any_call(join) || any_call(body),
+            CoreExpr::LetCont { cont, body, .. } => any_call(cont) || any_call(body),
+            CoreExpr::Drop { body, .. } => any_call(body),
+            CoreExpr::If { then, els, .. } => any_call(then) || any_call(els),
+            CoreExpr::Match { arms, .. } => arms.iter().any(|(_, b)| any_call(b)),
+            CoreExpr::Tail(a) => matches!(a, Atom::Call { .. }),
+            CoreExpr::Goto(_) => false,
+        }
+    }
+    match e {
+        CoreExpr::Let { body, .. } | CoreExpr::Drop { body, .. } => has_call_in_join(body),
+        CoreExpr::LetJoin { join, body, .. } => {
+            any_call(join) || has_call_in_join(join) || has_call_in_join(body)
+        }
+        CoreExpr::LetCont { cont, body, .. } => has_call_in_join(cont) || has_call_in_join(body),
+        CoreExpr::If { then, els, .. } => has_call_in_join(then) || has_call_in_join(els),
+        CoreExpr::Match { arms, .. } => arms.iter().any(|(_, b)| has_call_in_join(b)),
+        CoreExpr::Tail(_) | CoreExpr::Goto(_) => false,
+    }
+}
+
+fn has_self_tail(e: &CoreExpr) -> bool {
+    match e {
+        CoreExpr::Let { body, .. } | CoreExpr::Drop { body, .. } => has_self_tail(body),
+        CoreExpr::LetJoin { join, body, .. } => has_self_tail(join) || has_self_tail(body),
+        CoreExpr::LetCont { cont, body, .. } => has_self_tail(cont) || has_self_tail(body),
+        CoreExpr::If { then, els, .. } => has_self_tail(then) || has_self_tail(els),
+        CoreExpr::Match { arms, .. } => arms.iter().any(|(_, b)| has_self_tail(b)),
+        CoreExpr::Tail(Atom::Call {
+            callee: Callee::Self_,
+            ..
+        }) => true,
+        CoreExpr::Tail(_) | CoreExpr::Goto(_) => false,
+    }
+}
+
+/// Count the non-tail call sites in `e`, in exactly the walk order
+/// [`BodyGen::expr`] emits them: every `Let`-bound call, plus every `Tail`
+/// call inside a `LetJoin`'s join (whose Dest is a merge, not a return).
+/// Each gets one continuation block in the entry dispatch table.
+fn count_call_conts(e: &CoreExpr, in_join: bool) -> usize {
+    let mut n = 0;
+    let mut e = e;
+    loop {
+        match e {
+            CoreExpr::Let { rhs, body, .. } => {
+                if matches!(rhs, Atom::Call { .. }) {
+                    n += 1;
+                }
+                e = body;
+            }
+            CoreExpr::LetJoin { join, body, .. } => {
+                n += count_call_conts(join, true);
+                e = body;
+            }
+            CoreExpr::LetCont { cont, body, .. } => {
+                n += count_call_conts(body, in_join);
+                e = cont;
+            }
+            CoreExpr::Drop { body, .. } => e = body,
+            CoreExpr::If { then, els, .. } => {
+                n += count_call_conts(then, in_join);
+                e = els;
+            }
+            CoreExpr::Match { arms, .. } => {
+                for (_, b) in arms {
+                    n += count_call_conts(b, in_join);
+                }
+                return n;
+            }
+            CoreExpr::Tail(a) => {
+                if in_join && matches!(a, Atom::Call { .. }) {
+                    n += 1;
+                }
+                return n;
+            }
+            CoreExpr::Goto(_) => return n,
+        }
+    }
 }
 
 /// Where an expression delivers its value: function-tail position, or a jump
@@ -1652,7 +1658,18 @@ struct BodyGen<'a> {
     /// Direct-call targets for `Callee::Known` sites whose callee is in this
     /// JIT round's native set. A `Known` callee absent here falls back to the
     /// `al_rt_*` trampoline.
-    peers: HashMap<FuncIdx, ir::FuncRef>,
+    /// Continuation blocks, one per non-tail call in walk order; the entry
+    /// dispatch table's targets 1..=N.
+    cont_blocks: Vec<ir::Block>,
+    cont_cursor: usize,
+    /// This body's own (tail) signature, imported for `return_call_indirect`
+    /// transfers.
+    sig_ref: ir::SigRef,
+    /// The entry's resume-ordinal parameter, read by the dispatch table.
+    resume_param: ir::Value,
+    /// Locals bound to a constant `(bits, int)` — slotless, so a continuation
+    /// rematerializes them instead of reloading a frame slot.
+    const_locals: TiVec<LocalId, Option<(u64, Option<i64>)>>,
     layout: FrameLayout,
     uses: Uses,
     cmap: ConstMap,
@@ -1662,14 +1679,10 @@ struct BodyGen<'a> {
     /// The frame-base pointer (`&stack[frame.base_slot]`), re-fetched after
     /// every runtime call that can grow the value stack.
     base: Variable,
-    out_slot: ir::StackSlot,
     words: TiVec<LocalId, Option<Variable>>,
     ints: TiVec<LocalId, Option<Variable>>,
     joins: TiVec<JoinId, Option<ir::Block>>,
     loop_head: ir::Block,
-    /// Cursor into [`FrameLayout::call_resume_ips`], advanced once per
-    /// non-tail call in walk order, the order emit recorded them in.
-    resume_cursor: usize,
     /// Non-Bool constructor sites in walk order, paired with `Atom::Ctor`s by
     /// [`Self::next_ctor_site`]'s cursor.
     ctor_sites: Vec<EnumCtorSite>,
@@ -1682,7 +1695,7 @@ impl<'a> BodyGen<'a> {
     fn prologue(
         mut b: FunctionBuilder<'a>,
         plan: &'a NativePlan,
-        peers: HashMap<FuncIdx, ir::FuncRef>,
+        conts: usize,
         layout: FrameLayout,
         uses: Uses,
         cmap: ConstMap,
@@ -1700,24 +1713,26 @@ impl<'a> BodyGen<'a> {
         // it, and a stale scheduler pointer means cross-thread mutation of
         // one VM.
         let ctx = b.block_params(entry)[0];
+        // Captured in the entry block; the dispatch at the end of the
+        // prologue may sit blocks later (param unboxing branches), and entry
+        // dominates it either way.
+        let resume_param = b.block_params(entry)[1];
         b.ins().set_pinned_reg(ctx);
-        let vm = b
-            .ins()
-            .load(ptr_ty, MemFlagsData::trusted(), ctx, NativeCtx::VM_OFFSET);
 
+        // `base` is defined only in the head and each continuation — never in
+        // the entry block — so no value is live across the dispatch br_table.
         let base = b.declare_var(ptr_ty);
-        let call = b.ins().call(fns.rt_frame_base, &[vm]);
-        let base0 = b.inst_results(call)[0];
-        b.def_var(base, base0);
 
-        let out_slot =
-            b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
         let loop_head = b.create_block();
+        let cont_blocks: Vec<ir::Block> = (0..conts).map(|_| b.create_block()).collect();
+        let sig_ref = {
+            let own = b.func.signature.clone();
+            b.import_signature(own)
+        };
 
         let mut g = BodyGen {
             b,
             plan,
-            peers,
             layout,
             uses,
             cmap,
@@ -1725,12 +1740,15 @@ impl<'a> BodyGen<'a> {
             fns,
             ptr_ty,
             base,
-            out_slot,
+            cont_blocks,
+            cont_cursor: 0,
+            sig_ref,
+            resume_param,
+            const_locals: TiVec::new(),
             words: TiVec::new(),
             ints: TiVec::new(),
             joins: TiVec::new(),
             loop_head,
-            resume_cursor: 0,
             ctor_sites,
             ctor_cursor: 0,
         };
@@ -1743,6 +1761,13 @@ impl<'a> BodyGen<'a> {
     /// frame, and this word must never survive into a parked frame.
     fn ctx(&mut self) -> ir::Value {
         self.b.ins().get_pinned_reg(self.ptr_ty)
+    }
+
+    /// Fetch the current frame's slot-0 address through `rt_frame_base`.
+    fn frame_base_now(&mut self) -> ir::Value {
+        let vmx = self.vmx();
+        let call = self.b.ins().call(self.fns.rt_frame_base, &[vmx]);
+        self.b.inst_results(call)[0]
     }
 
     /// The scheduler's VM for shim calls. Loaded immediately before each use
@@ -1760,6 +1785,29 @@ impl<'a> BodyGen<'a> {
 
     fn init_params(&mut self) {
         let g = self;
+        // Entry dispatch, emitted in the entry block BEFORE any Variable is
+        // defined: resume 0 is the head, k is continuation k. Because no
+        // value flows into a Variable that is live across this br_table, the
+        // FunctionBuilder inserts no implicit block params on head/conts — so
+        // `self_tail`'s arg-less back-edge jump to the head stays consistent.
+        let head = g.loop_head;
+        let resume = g.resume_param;
+        let r32 = g.b.ins().ireduce(types::I32, resume);
+        let default = g.b.func.dfg.block_call(head, &[]);
+        let mut targets = vec![default];
+        for &cb in &g.cont_blocks {
+            targets.push(g.b.func.dfg.block_call(cb, &[]));
+        }
+        let jt =
+            g.b.create_jump_table(ir::JumpTableData::new(default, &targets));
+        g.b.ins().br_table(r32, jt);
+
+        // The head loads params into their Variables, so every resume enters
+        // the head with clean register state and continuations reload from
+        // slots. `loop_head` is the self-tail back-edge target too.
+        g.b.switch_to_block(head);
+        let nb = g.frame_base_now();
+        g.b.def_var(g.base, nb);
         for p in &g.plan.fun.params {
             let slot = g.slot_of(p.id);
             let w = g.load_slot(slot);
@@ -1773,9 +1821,6 @@ impl<'a> BodyGen<'a> {
                 },
             );
         }
-        let head = g.loop_head;
-        g.b.ins().jump(head, &[]);
-        g.b.switch_to_block(head);
     }
 
     fn run(mut self) {
@@ -1783,7 +1828,7 @@ impl<'a> BodyGen<'a> {
         // not run through `self`.
         let body: &CoreExpr = &self.plan.fun.body;
         self.expr(body, Dest::Ret);
-        if self.resume_cursor != self.layout.call_resume_ips.len() {
+        if self.cont_cursor != self.cont_blocks.len() {
             resume_walk_mismatch();
         }
         if self.ctor_cursor != self.ctor_sites.len() {
@@ -2453,12 +2498,34 @@ impl<'a> BodyGen<'a> {
         self.b.block_params(merge)[0]
     }
 
-    fn next_resume(&mut self) -> i32 {
-        let Some(&ip) = self.layout.call_resume_ips.get(self.resume_cursor) else {
+    /// The next continuation ordinal (1-based; 0 is the head) and its block.
+    fn next_cont(&mut self) -> (i64, ir::Block) {
+        let Some(&block) = self.cont_blocks.get(self.cont_cursor) else {
             resume_walk_mismatch()
         };
-        self.resume_cursor += 1;
-        ip
+        self.cont_cursor += 1;
+        (self.cont_cursor as i64, block)
+    }
+
+    /// Act on a `PreparedCall`: null entry returns `aux` as the status;
+    /// otherwise control transfers to `entry` at resume ordinal `aux` via a
+    /// machine tail call — the caller's native frame is gone before the
+    /// target runs.
+    fn transfer(&mut self, entry: ir::Value, aux: ir::Value) {
+        let go = self.b.create_block();
+        let bail = self.b.create_block();
+        self.b.set_cold_block(bail);
+        let is_null = self.b.ins().icmp_imm(IntCC::Equal, entry, 0);
+        self.b.ins().brif(is_null, bail, &[], go, &[]);
+        self.b.seal_block(bail);
+        self.b.seal_block(go);
+        self.b.switch_to_block(bail);
+        self.b.ins().return_(&[aux]);
+        self.b.switch_to_block(go);
+        let ctx = self.ctx();
+        self.b
+            .ins()
+            .return_call_indirect(self.sig_ref, entry, &[ctx, aux]);
     }
 
     /// Spill owned argument words into a native stack buffer for a runtime
@@ -2479,38 +2546,24 @@ impl<'a> BodyGen<'a> {
 
     /// Return `status` unless it is `Done`, which keeps every native frame
     /// droppable at a suspension. Leaves the builder in the continue block.
-    fn unwind_unless_done(&mut self, status: ir::Value) {
-        let cont = self.b.create_block();
-        let bail = self.b.create_block();
-        self.b.set_cold_block(bail);
-        let ok = self
-            .b
-            .ins()
-            .icmp_imm(IntCC::Equal, status, NativeStatus::Done as u64 as i64);
-        self.b.ins().brif(ok, cont, &[], bail, &[]);
-        self.b.seal_block(cont);
-        self.b.seal_block(bail);
-        self.b.switch_to_block(bail);
-        self.b.ins().return_(&[status]);
-        self.b.switch_to_block(cont);
-    }
-
-    /// A non-tail call, returning the callee's owned result word. A known
-    /// native callee splits the `al_rt_call` sequence around a direct machine
-    /// call to the peer entry; frame state is bit-identical at every seam,
-    /// only the table lookup and indirect dispatch are elided. Anything else
-    /// keeps the trampoline.
+    /// A non-tail call, as a transfer plus a continuation. The prepare shim
+    /// pushes the callee frame and stamps this frame's `ip` with the
+    /// continuation ordinal; control tail-transfers to a native callee or
+    /// returns `Done` for the trampoline to dispatch an interpreted one.
+    /// Either way this native frame is gone while the callee runs, and the
+    /// continuation block — entered only through the entry dispatch — picks
+    /// the result off the value stack.
     ///
     /// `moved` are [`peel_call_arg_drops`]'s peeled last-use drops. They must
-    /// run after the operand copies but *before* the call, so the callee is
-    /// sole owner and its Perceus `Drop` sees rc==1.
+    /// run after the operand copies but *before* the transfer, so the callee
+    /// is sole owner and its Perceus `Drop` sees rc==1.
     fn call_value(
         &mut self,
         callee: Callee,
         args: &[LocalId],
         moved: &[(LocalId, bool)],
     ) -> ir::Value {
-        let resume = self.next_resume();
+        let (resume, cont) = self.next_cont();
         let buf = self.arg_buffer(args);
         // Emit's operand order: args, then a dynamic callee, then the peeled
         // drops. The dispatch word must be resolved before the drops. `Self_`
@@ -2518,86 +2571,109 @@ impl<'a> BodyGen<'a> {
         // captures. A dynamic callee is an owned closure word that becomes
         // the callee frame's `captures` handle.
         let dispatch = match callee {
-            Callee::Known(f) => {
-                let t = self.b.ins().iconst(types::I64, i64::from(f.to_operand()));
-                Ok((f, t))
-            }
+            Callee::Known(f) => Ok(self.b.ins().iconst(types::I64, i64::from(f.to_operand()))),
             Callee::Self_ => {
                 let fi = self.plan.func_idx;
-                let t = self.b.ins().iconst(types::I64, i64::from(fi.to_operand()));
-                Ok((fi, t))
+                Ok(self.b.ins().iconst(types::I64, i64::from(fi.to_operand())))
             }
             Callee::Local(x) => Err(self.owned_word(x)),
         };
         for &(m, reusable) in moved {
             self.drop_local(m, reusable);
         }
-        let outp = self.b.ins().stack_addr(self.ptr_ty, self.out_slot, 0);
-        let r = self.b.ins().iconst(types::I64, i64::from(resume));
+        let r = self.b.ins().iconst(types::I64, resume);
         let n = self.b.ins().iconst(types::I64, args.len() as i64);
-        let status = match dispatch {
-            Ok((fi, t)) => match self.peers.get(&fi).copied() {
-                // Direct native→native. `al_rt_push_frame` is `al_rt_call`
-                // up to but not including `drive_top_frame`, leaving the
-                // callee frame bit-identical to the interpreter's at ip 0, so
-                // a `Yield` here resumes the callee from the top.
-                // `al_rt_direct_result` is the trampoline's Done tail and
-                // drives a collapsed `TailCall` chain.
-                Some(entry) => {
-                    let vmx = self.vmx();
-                    let push = self
-                        .b
-                        .ins()
-                        .call(self.fns.rt_push_frame, &[vmx, t, r, buf, n]);
-                    let s = self.b.inst_results(push)[0];
-                    self.unwind_unless_done(s);
-                    // Peer entries are NativeEntry, not shims: they take the
-                    // ctx and re-pin and re-load their own vm.
-                    let ctx = self.ctx();
-                    let direct = self.b.ins().call(entry, &[ctx]);
-                    let s = self.b.inst_results(direct)[0];
-                    let vmx = self.vmx();
-                    let after = self
-                        .b
-                        .ins()
-                        .call(self.fns.rt_direct_result, &[vmx, s, outp]);
-                    self.b.inst_results(after)[0]
-                }
-                // Interpreter-only callee: the trampoline stays.
-                None => {
-                    let vmx = self.vmx();
-                    let call = self
-                        .b
-                        .ins()
-                        .call(self.fns.rt_call, &[vmx, t, r, buf, n, outp]);
-                    self.b.inst_results(call)[0]
-                }
-            },
-            Err(cw) => {
-                let vmx = self.vmx();
-                let call = self
-                    .b
-                    .ins()
-                    .call(self.fns.rt_call_value, &[vmx, cw, r, buf, n, outp]);
-                self.b.inst_results(call)[0]
-            }
+        let vmx = self.vmx();
+        let prepared = match dispatch {
+            Ok(t) => self
+                .b
+                .ins()
+                .call(self.fns.prepare_call, &[vmx, t, r, buf, n]),
+            Err(cw) => self
+                .b
+                .ins()
+                .call(self.fns.prepare_call_value, &[vmx, cw, r, buf, n]),
         };
-        self.unwind_unless_done(status);
-        // The callee chain may have grown (and reallocated) the value stack.
+        let entry = self.b.inst_results(prepared)[0];
+        let aux = self.b.inst_results(prepared)[1];
+        self.transfer(entry, aux);
+
+        // The continuation: a fresh entry into this function. Nothing from
+        // before the call survives in machine registers — every cached view
+        // is redefined from its frame slot (which Perceus already keeps
+        // authoritative at every call); slotless single-use temps are dead
+        // here by construction and their cache entries drop.
+        self.b.switch_to_block(cont);
         let vmx = self.vmx();
         let refetch = self.b.ins().call(self.fns.rt_frame_base, &[vmx]);
         let nb = self.b.inst_results(refetch)[0];
         self.b.def_var(self.base, nb);
-        self.b.ins().stack_load(types::I64, self.out_slot, 0)
+        // A continuation is a fresh machine entry: nothing computed before the
+        // transfer survives in a register. Redefine every cached view HERE, at
+        // the continuation's top, which dominates all downstream blocks — a
+        // lazy reload inside a later if-arm would define a Variable that the
+        // sibling arm does not see, and the sibling would read the entry
+        // default instead.
+        self.reload_cached_views();
+        let vmx = self.vmx();
+        let pop = self.b.ins().call(self.fns.rt_pop, &[vmx]);
+        self.b.inst_results(pop)[0]
     }
 
-    /// A cross-function tail call.
-    ///
-    /// `al_rt_tail_call` collapses the frame in place either way. Who
-    /// dispatches it differs: a native peer gets a direct `return_call`,
-    /// keeping mutual native tail chains in machine code (bodies are
-    /// `CallConv::Tail` precisely for this); a non-native callee falls back
-    /// to the shim's `TailCall` status and the trampoline loop.
+    /// Reload every currently-cached local from its frame slot (or constant)
+    /// into its existing Variable, at a continuation's dominating top. A
+    /// slotless, non-constant cached local is a temp consumed before the
+    /// transfer; its cache entry is dropped so a stray later use fails the
+    /// build. Int views are re-derived from the reloaded word.
+    fn reload_cached_views(&mut self) {
+        let n = self.words.len().max(self.ints.len());
+        let ids: Vec<LocalId> = (0..n)
+            .map(LocalId::from_usize)
+            .filter(|&id| {
+                self.words.get(id).copied().flatten().is_some()
+                    || self.ints.get(id).copied().flatten().is_some()
+            })
+            .collect();
+        for id in ids {
+            let word_var = self.words.get(id).copied().flatten();
+            let int_var = self.ints.get(id).copied().flatten();
+            if let Some(slot) = self.layout.slot(id) {
+                let w = self.load_slot(slot);
+                if let Some(wv) = word_var {
+                    self.b.def_var(wv, w);
+                }
+                if let Some(iv) = int_var {
+                    let d = unbox_int(&mut self.b, &self.facts, w);
+                    self.b.def_var(iv, d);
+                }
+            } else if let Some((bits, int)) = self.const_locals.get(id).copied().flatten() {
+                if let Some(wv) = word_var {
+                    let w = self.b.ins().iconst(types::I64, bits as i64);
+                    self.b.def_var(wv, w);
+                }
+                if let Some(iv) = int_var {
+                    let Some(i) = int else {
+                        unsupported_node("non-Int constant in Int position")
+                    };
+                    let d = self.b.ins().iconst(types::I64, i);
+                    self.b.def_var(iv, d);
+                }
+            } else {
+                // Consumed temp: forget it.
+                if word_var.is_some() {
+                    self.words[id] = None;
+                }
+                if int_var.is_some() {
+                    self.ints[id] = None;
+                }
+            }
+        }
+    }
+
+    /// A cross-function tail call, as a transfer: collapse the frame in
+    /// place (interpreter surgery, `ip = 0`), then tail-transfer to a native
+    /// target or return `Done` for the trampoline. Machine tail chains cost
+    /// one `return_call_indirect` per hop and never grow any stack.
     fn tail_call_known(&mut self, target: FuncIdx, args: &[LocalId]) {
         let buf = self.arg_buffer(args);
         let t = self
@@ -2606,29 +2682,10 @@ impl<'a> BodyGen<'a> {
             .iconst(types::I64, i64::from(target.to_operand()));
         let n = self.b.ins().iconst(types::I64, args.len() as i64);
         let vmx = self.vmx();
-        let call = self.b.ins().call(self.fns.rt_tail_call, &[vmx, t, buf, n]);
-        let status = self.b.inst_results(call)[0];
-        if self.b.func.signature.call_conv.supports_tail_calls()
-            && let Some(&peer) = self.peers.get(&target)
-        {
-            let go = self.b.create_block();
-            let bail = self.b.create_block();
-            self.b.set_cold_block(bail);
-            let ready =
-                self.b
-                    .ins()
-                    .icmp_imm(IntCC::Equal, status, NativeStatus::TailCall as u64 as i64);
-            self.b.ins().brif(ready, go, &[], bail, &[]);
-            self.b.seal_block(bail);
-            self.b.seal_block(go);
-            self.b.switch_to_block(bail);
-            self.b.ins().return_(&[status]);
-            self.b.switch_to_block(go);
-            let ctx = self.ctx();
-            self.b.ins().return_call(peer, &[ctx]);
-            return;
-        }
-        self.b.ins().return_(&[status]);
+        let prepared = self.b.ins().call(self.fns.prepare_tail, &[vmx, t, buf, n]);
+        let entry = self.b.inst_results(prepared)[0];
+        let aux = self.b.inst_results(prepared)[1];
+        self.transfer(entry, aux);
     }
 
     /// [`Self::tail_call_known`] with an owned closure word instead of an
@@ -2639,12 +2696,13 @@ impl<'a> BodyGen<'a> {
         let cw = self.owned_word(callee);
         let n = self.b.ins().iconst(types::I64, args.len() as i64);
         let vmx = self.vmx();
-        let call = self
+        let prepared = self
             .b
             .ins()
-            .call(self.fns.rt_tail_call_value, &[vmx, cw, buf, n]);
-        let status = self.b.inst_results(call)[0];
-        self.b.ins().return_(&[status]);
+            .call(self.fns.prepare_tail_value, &[vmx, cw, buf, n]);
+        let entry = self.b.inst_results(prepared)[0];
+        let aux = self.b.inst_results(prepared)[1];
+        self.transfer(entry, aux);
     }
 
     /// The native loop back-edge, in the interpreter's `TailCallSelf` order:
@@ -2689,12 +2747,8 @@ impl<'a> BodyGen<'a> {
         let status = self.b.inst_results(call)[0];
         // `base` points into the scheduler's `VM::stack` Vec, and the
         // checkpoint is a suspension point. Refetch unconditionally so the
-        // loop-carried value is scheduler-clean by construction: if a
-        // checkpoint ever parks in place, a stale `base` would resume
-        // pointing into the parking scheduler's Vec.
-        let vmx = self.vmx();
-        let refetch = self.b.ins().call(self.fns.rt_frame_base, &[vmx]);
-        let nb = self.b.inst_results(refetch)[0];
+        // loop-carried value is scheduler-clean by construction.
+        let nb = self.frame_base_now();
         self.b.def_var(self.base, nb);
         let bail = self.b.create_block();
         self.b.set_cold_block(bail);
@@ -2826,6 +2880,12 @@ impl<'a> BodyGen<'a> {
                             || self.uses.word_uses(bind.id) > 0
                             || matches!(rhs, Atom::Closure { .. });
                         let want_int = self.uses.int_demand(bind.id);
+                        if let Atom::Const(c) = rhs
+                            && let Some(cv) = self.cmap.get(&c.0)
+                        {
+                            self.const_locals.resize_at_least(bind.id, None);
+                            self.const_locals[bind.id] = Some((cv.bits, cv.int));
+                        }
                         let v = self.eval_pure(rhs, want_word, want_int);
                         self.def_local(bind.id, v);
                     }
@@ -2952,12 +3012,10 @@ impl<'a> BodyGen<'a> {
             (a, Dest::Ret) => {
                 let w = self.owned_atom_word(a);
                 let vmx = self.vmx();
-                self.b.ins().call(self.fns.rt_ret, &[vmx, w]);
-                let done = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, NativeStatus::Done as u64 as i64);
-                self.b.ins().return_(&[done]);
+                let prepared = self.b.ins().call(self.fns.ret_transfer, &[vmx, w]);
+                let entry = self.b.inst_results(prepared)[0];
+                let aux = self.b.inst_results(prepared)[1];
+                self.transfer(entry, aux);
             }
             (a, Dest::Merge(mb)) => {
                 let w = self.owned_atom_word(a);
@@ -3442,15 +3500,26 @@ mod tests {
             }
         }
 
-        /// `drive_top_frame`'s mock, consuming `TailCall` by re-dispatching.
+        /// `run_slice`'s trampoline mock: dispatch the top frame at its
+        /// stored resume ordinal until the slice ends. Every test fn is
+        /// native, so `Done` with frames left means a transfer landed on an
+        /// interpreted parent — impossible here — and `Done` with none means
+        /// the slice result is on the stack.
         fn drive(&mut self) -> u64 {
             loop {
-                let func = self.frames.last().unwrap().func;
+                let Some(f) = self.frames.last() else {
+                    return NativeStatus::Done as u64;
+                };
+                let (func, resume) = (f.func, i64::from(f.ip));
                 let entry = self.entries[func].expect("mock runtime only drives native fns");
-                let status = Self::call_entry(self, entry) as u64;
-                if status != NativeStatus::TailCall as u64 {
-                    return status;
+                let status = Self::call_entry(self, entry, resume) as u64;
+                if status == NativeStatus::Done as u64 {
+                    if self.frames.is_empty() {
+                        return status;
+                    }
+                    continue;
                 }
+                return status;
             }
         }
 
@@ -3461,7 +3530,7 @@ mod tests {
         /// `#[inline(never)]` is a barrier only; it is not what makes the
         /// register safe.
         #[inline(never)]
-        fn call_entry(vm: &mut TestVm, entry: NativeEntry) -> NativeStatus {
+        fn call_entry(vm: &mut TestVm, entry: NativeEntry, resume: i64) -> NativeStatus {
             vm.ctx.vm = (vm as *mut TestVm).cast();
             let tramp = vm.trampoline;
             // SAFETY: a finalized trampoline + entry from this harness's
@@ -3471,6 +3540,7 @@ mod tests {
                     (&raw mut vm.ctx).cast(),
                     tramp,
                     entry,
+                    resume,
                 )
             }
         }
@@ -3484,14 +3554,42 @@ mod tests {
         unsafe { vm.stack.as_mut_ptr().add(base).cast::<u64>() }
     }
 
-    unsafe extern "C" fn t_rt_call(
+    #[repr(C)]
+    struct TPrepared {
+        entry: *const u8,
+        aux: u64,
+    }
+
+    impl TPrepared {
+        fn status(s: NativeStatus) -> TPrepared {
+            TPrepared {
+                entry: std::ptr::null(),
+                aux: s as u64,
+            }
+        }
+    }
+
+    /// The transfer decision after a mock frame push/collapse: every test fn
+    /// is native, so this hands back its entry unless the budget yielded.
+    fn t_prepared(vm: &mut TestVm) -> TPrepared {
+        vm.reds -= 1;
+        if vm.reds <= 0 {
+            return TPrepared::status(NativeStatus::Yield);
+        }
+        let func = vm.frames.last().unwrap().func;
+        match vm.entries[func] {
+            Some(entry) => TPrepared { entry, aux: 0 },
+            None => TPrepared::status(NativeStatus::Done),
+        }
+    }
+
+    unsafe extern "C" fn t_prepare_call(
         vmx: *mut core::ffi::c_void,
         target: i64,
         resume: i64,
         args: *const u64,
         argc: i64,
-        out: *mut u64,
-    ) -> u64 {
+    ) -> TPrepared {
         let vm = vm_of(vmx);
         vm.frames.last_mut().unwrap().ip = resume as i32;
         for i in 0..argc as usize {
@@ -3500,68 +3598,39 @@ mod tests {
                 .push(unsafe { Value::from_bits(args.add(i).read()) });
         }
         vm.push_frame(target as usize, argc as usize);
-        vm.reds -= 1;
-        if vm.reds <= 0 {
-            return NativeStatus::Yield as u64;
-        }
-        let status = vm.drive();
-        if status != NativeStatus::Done as u64 {
-            return status;
-        }
-        let result = vm.stack.pop().unwrap();
-        // SAFETY: `out` is the caller's one-word result slot.
-        unsafe { out.write(ManuallyDrop::new(result).to_bits()) };
-        NativeStatus::Done as u64
+        t_prepared(vm)
     }
 
-    unsafe extern "C" fn t_rt_push_frame(
+    unsafe extern "C" fn t_prepare_call_value(
         vmx: *mut core::ffi::c_void,
-        target: i64,
+        callee: u64,
         resume: i64,
         args: *const u64,
         argc: i64,
-    ) -> u64 {
+    ) -> TPrepared {
         let vm = vm_of(vmx);
         vm.frames.last_mut().unwrap().ip = resume as i32;
+        // SAFETY: `callee` is an owned closure word per the shim contract.
+        let callee = unsafe { Value::from_bits(callee) };
+        let target = callee
+            .as_closure()
+            .expect("dynamic call target must be a closure")
+            .func_idx() as usize;
         for i in 0..argc as usize {
             // SAFETY: owned words per the shim contract.
             vm.stack
                 .push(unsafe { Value::from_bits(args.add(i).read()) });
         }
-        vm.push_frame(target as usize, argc as usize);
-        vm.reds -= 1;
-        if vm.reds <= 0 {
-            return NativeStatus::Yield as u64;
-        }
-        NativeStatus::Done as u64
+        vm.push_frame_with(target, argc as usize, callee);
+        t_prepared(vm)
     }
 
-    unsafe extern "C" fn t_rt_direct_result(
-        vmx: *mut core::ffi::c_void,
-        status: u64,
-        out: *mut u64,
-    ) -> u64 {
-        let vm = vm_of(vmx);
-        let status = if status == NativeStatus::TailCall as u64 {
-            vm.drive()
-        } else {
-            status
-        };
-        if status != NativeStatus::Done as u64 {
-            return status;
-        }
-        let result = vm.stack.pop().unwrap();
-        // SAFETY: `out` is the caller's one-word result slot.
-        unsafe { out.write(ManuallyDrop::new(result).to_bits()) };
-        NativeStatus::Done as u64
-    }
-
-    unsafe extern "C" fn t_rt_tail_call(
+    unsafe extern "C" fn t_prepare_tail(
         vmx: *mut core::ffi::c_void,
         target: i64,
         args: *const u64,
         argc: i64,
-    ) -> u64 {
+    ) -> TPrepared {
         let vm = vm_of(vmx);
         for i in 0..argc as usize {
             // SAFETY: owned words per the shim contract.
@@ -3579,55 +3648,15 @@ mod tests {
         for _ in argc as usize..locals {
             vm.stack.push(Value::small_int(0));
         }
-        vm.reds -= 1;
-        if vm.reds <= 0 {
-            return NativeStatus::Yield as u64;
-        }
-        NativeStatus::TailCall as u64
+        t_prepared(vm)
     }
 
-    unsafe extern "C" fn t_rt_call_value(
-        vmx: *mut core::ffi::c_void,
-        callee: u64,
-        resume: i64,
-        args: *const u64,
-        argc: i64,
-        out: *mut u64,
-    ) -> u64 {
-        let vm = vm_of(vmx);
-        vm.frames.last_mut().unwrap().ip = resume as i32;
-        // SAFETY: `callee` is an owned closure word per the shim contract.
-        let callee = unsafe { Value::from_bits(callee) };
-        let target = callee
-            .as_closure()
-            .expect("dynamic call target must be a closure")
-            .func_idx() as usize;
-        for i in 0..argc as usize {
-            // SAFETY: owned words per the shim contract.
-            vm.stack
-                .push(unsafe { Value::from_bits(args.add(i).read()) });
-        }
-        vm.push_frame_with(target, argc as usize, callee);
-        vm.reds -= 1;
-        if vm.reds <= 0 {
-            return NativeStatus::Yield as u64;
-        }
-        let status = vm.drive();
-        if status != NativeStatus::Done as u64 {
-            return status;
-        }
-        let result = vm.stack.pop().unwrap();
-        // SAFETY: `out` is the caller's one-word result slot.
-        unsafe { out.write(ManuallyDrop::new(result).to_bits()) };
-        NativeStatus::Done as u64
-    }
-
-    unsafe extern "C" fn t_rt_tail_call_value(
+    unsafe extern "C" fn t_prepare_tail_value(
         vmx: *mut core::ffi::c_void,
         callee: u64,
         args: *const u64,
         argc: i64,
-    ) -> u64 {
+    ) -> TPrepared {
         let vm = vm_of(vmx);
         // SAFETY: `callee` is an owned closure word per the shim contract.
         let callee = unsafe { Value::from_bits(callee) };
@@ -3651,11 +3680,30 @@ mod tests {
         for _ in argc as usize..locals {
             vm.stack.push(Value::small_int(0));
         }
-        vm.reds -= 1;
-        if vm.reds <= 0 {
-            return NativeStatus::Yield as u64;
+        t_prepared(vm)
+    }
+
+    unsafe extern "C" fn t_ret_transfer(vmx: *mut core::ffi::c_void, result: u64) -> TPrepared {
+        let vm = vm_of(vmx);
+        let frame = vm.frames.pop().unwrap();
+        vm.stack.truncate(frame.base);
+        // SAFETY: `result` is an owned value word per the shim contract.
+        vm.stack.push(unsafe { Value::from_bits(result) });
+        let Some(parent) = vm.frames.last() else {
+            return TPrepared::status(NativeStatus::Done);
+        };
+        match vm.entries[parent.func] {
+            Some(entry) => TPrepared {
+                entry,
+                aux: parent.ip as u64,
+            },
+            None => TPrepared::status(NativeStatus::Done),
         }
-        NativeStatus::TailCall as u64
+    }
+
+    extern "C" fn t_pop(vmx: *mut core::ffi::c_void) -> u64 {
+        let vm = vm_of(vmx);
+        ManuallyDrop::new(vm.stack.pop().expect("continuation result")).to_bits()
     }
 
     unsafe extern "C" fn t_make_closure(
@@ -3689,14 +3737,6 @@ mod tests {
             return NativeStatus::Yield as u64;
         }
         NativeStatus::Done as u64
-    }
-
-    unsafe extern "C" fn t_rt_ret(vmx: *mut core::ffi::c_void, result: u64) {
-        let vm = vm_of(vmx);
-        let frame = vm.frames.pop().unwrap();
-        vm.stack.truncate(frame.base);
-        // SAFETY: `result` is an owned value word per the shim contract.
-        vm.stack.push(unsafe { Value::from_bits(result) });
     }
 
     extern "C" fn t_int_box(vmx: *mut core::ffi::c_void, i: i64) -> u64 {
@@ -3949,27 +3989,25 @@ mod tests {
         jb.symbol(SYM_HTTP_HEADER_HAS, t_http_unused as *const u8);
         jb.symbol(SYM_HTTP_SERIALIZE_HEAD, t_http_unused as *const u8);
         jb.symbol(SYM_HTTP_FRAMING, t_http_unused as *const u8);
-        jb.symbol(SYM_RT_CALL, t_rt_call as *const u8);
-        jb.symbol(SYM_RT_TAIL_CALL, t_rt_tail_call as *const u8);
-        jb.symbol(SYM_RT_PUSH_FRAME, t_rt_push_frame as *const u8);
-        jb.symbol(SYM_RT_DIRECT_RESULT, t_rt_direct_result as *const u8);
-        jb.symbol(SYM_RT_CALL_VALUE, t_rt_call_value as *const u8);
-        jb.symbol(SYM_RT_TAIL_CALL_VALUE, t_rt_tail_call_value as *const u8);
+        jb.symbol(SYM_RT_PREPARE_CALL, t_prepare_call as *const u8);
+        jb.symbol(SYM_RT_PREPARE_CALL_VALUE, t_prepare_call_value as *const u8);
+        jb.symbol(SYM_RT_PREPARE_TAIL, t_prepare_tail as *const u8);
+        jb.symbol(SYM_RT_PREPARE_TAIL_VALUE, t_prepare_tail_value as *const u8);
+        jb.symbol(SYM_RT_POP, t_pop as *const u8);
         jb.symbol(SYM_RT_MAKE_CLOSURE, t_make_closure as *const u8);
         jb.symbol(SYM_RT_CHECKPOINT, t_rt_checkpoint as *const u8);
         jb.symbol(SYM_RT_FRAME_BASE, t_frame_base as *const u8);
-        jb.symbol(SYM_RT_RET, t_rt_ret as *const u8);
+        jb.symbol(SYM_RT_RET_TRANSFER, t_ret_transfer as *const u8);
         let mut module = JITModule::new(jb);
 
         let mut ids = Vec::new();
         let mut metas = Vec::new();
         let mut clifs = Vec::new();
         let prelude = test_prelude();
-        let native: HashSet<FuncIdx> = (0..fns.len()).map(FuncIdx::from_usize).collect();
         for (i, f) in fns.iter().enumerate() {
             let p =
                 plan(FuncIdx::from_usize(i), f, pool, &prelude).expect("test fn must be covered");
-            let body = compile(&mut module, &p, &native, &program)
+            let body = compile(&mut module, &p, &program)
                 .expect("module error")
                 .expect("test fn must compile");
             assert!(!body.clif.is_empty());
@@ -4333,8 +4371,7 @@ mod tests {
             constants: vec![heap_const],
             ..Default::default()
         };
-        let native = HashSet::from([FuncIdx(0)]);
-        let rejected = compile(&mut module, &p, &native, &heap_program).unwrap();
+        let rejected = compile(&mut module, &p, &heap_program).unwrap();
         assert!(rejected.is_none(), "heap constants are not embeddable");
 
         // The same body over an immediate constant compiles.
@@ -4342,7 +4379,7 @@ mod tests {
             constants: vec![Value::small_int(7)],
             ..Default::default()
         };
-        let ok = compile(&mut module, &p, &native, &ok_program).unwrap();
+        let ok = compile(&mut module, &p, &ok_program).unwrap();
         assert!(ok.is_some());
     }
 
@@ -4521,43 +4558,24 @@ mod tests {
     /// colocated entry is the direct-call proof; recompiling with the callee
     /// outside the native set leaves none.
     #[test]
-    fn known_native_callee_is_a_direct_call_not_the_trampoline() {
+    fn known_calls_transfer_and_dispatch_through_the_resume_table() {
         let (pool, int) = int_pool();
         let j = jit(&[fib_fn(int)], &pool, &test_consts());
         let clif = &j.clifs[0];
+        // Every call site is a transfer: prepare shim, then a machine tail
+        // call to the target's entry — never a stack-growing `call`.
         assert!(
-            clif.contains("colocated"),
-            "known-native call should reference a same-module (colocated) peer FuncRef; \
-             CLIF was:\n{clif}"
+            clif.contains("return_call_indirect"),
+            "call sites must tail-transfer to the callee entry; CLIF was:\n{clif}"
+        );
+        // The entry dispatch: fib has two non-tail call sites, so the resume
+        // table routes 0 (head) plus two continuations.
+        assert!(
+            clif.contains("br_table"),
+            "the prologue must dispatch on the resume ordinal; CLIF was:\n{clif}"
         );
         let (v, _) = run(&j, 0, &[Value::small_int(15)], i64::MAX / 2);
         assert_eq!(v.as_int(), Some(610));
-
-        // Negative: with an empty native set the peer is absent and the same
-        // body routes both call sites through `al_rt_call`.
-        let mut flags = settings::builder();
-        flags.set("use_colocated_libcalls", "false").unwrap();
-        flags.set("enable_pinned_reg", "true").unwrap();
-        flags.set("is_pic", "false").unwrap();
-        let isa = cranelift_native::builder()
-            .unwrap()
-            .finish(settings::Flags::new(flags))
-            .unwrap();
-        let mut module = JITModule::new(JITBuilder::with_isa(isa, default_libcall_names()));
-        let p = plan(FuncIdx(0), &fib_fn(int), &pool, &test_prelude()).unwrap();
-        let program = crate::bytecode::Program {
-            constants: test_consts(),
-            ..Default::default()
-        };
-        let body = compile(&mut module, &p, &HashSet::new(), &program)
-            .unwrap()
-            .unwrap();
-        assert!(
-            !body.clif.contains("colocated"),
-            "with no native peers every known call goes through the trampoline; \
-             CLIF was:\n{}",
-            body.clif
-        );
     }
 
     #[test]

@@ -13,13 +13,14 @@ use std::sync::Arc;
 
 use crate::bytecode::{Function, Instruction, PreludeBindings, Value};
 use crate::frozen::FrozenBuilder;
-use crate::module::{ExportedValue, ModuleInterface};
+use crate::module::{ExportedType, ExportedValue, ModuleInterface};
 use crate::type_def::TypeId;
 // build.rs Debug-prints `Some(GlobalSlot(n))` into the generated stdlib file,
 // which glob-imports this module.
 pub use crate::typed_ir::GlobalSlot;
 use crate::types::{
-    QuantVar, Scheme, StrId, Ty, TypeInfo, TypeNode, TypeParam, Variant, VariantField,
+    DefinitionLocation, QuantVar, Scheme, StrId, Ty, TypeInfo, TypeNode, TypeParam, Variant,
+    VariantField,
 };
 
 /// Index into [`StaticStdlib::str_pool`]. Not interchangeable with a `StrId`:
@@ -84,6 +85,11 @@ pub struct SExport {
 pub struct STypeExport {
     pub name: StrIdx,
     pub info: TypeInfoIdx,
+    /// The `type` declaration's location, so hydrated stdlib modules get the
+    /// same reference-graph `Definition`s as source modules.
+    pub def: Option<DefinitionLocation>,
+    /// The declaration's doc comment.
+    pub doc: Option<StrIdx>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -168,9 +174,14 @@ impl StaticStdlib {
     fn hydrate_module(&self, m: &SModule) -> ModuleInterface {
         let mut iface = ModuleInterface::new(self.modpath(m.path));
         for te in &self.stypeexport_pool[m.types.range()] {
-            iface
-                .types
-                .insert(self.s(te.name), self.typeinfos[te.info.0 as usize]);
+            iface.types.insert(
+                self.s(te.name),
+                ExportedType {
+                    info: self.typeinfos[te.info.0 as usize],
+                    def: te.def,
+                    doc: te.doc.map(|i| self.s(i)),
+                },
+            );
         }
         for e in &self.sexport_pool[m.values.range()] {
             iface.values.insert(

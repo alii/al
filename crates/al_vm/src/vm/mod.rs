@@ -206,6 +206,10 @@ enum Step {
     Yield,
     /// The process must wait for I/O readiness or a timer.
     Parked(Wait),
+    /// The top frame changed engines mid-slice (interpreter pushed or
+    /// returned into a native-table frame): `run_slice`'s trampoline must
+    /// re-dispatch. Never escapes `run_slice`.
+    Dispatch,
 }
 
 /// A suspended lightweight process: a complete resumable continuation. The
@@ -229,7 +233,6 @@ struct Process {
     /// state, so it must travel and must never leak to the next process the
     /// scheduler runs. The VM fields of the same names are the running
     /// process's copies; `suspend_current`/`resume` swap them with these.
-    native_floor: usize,
     native_reds: i32,
     native_pending: Option<Box<NativePending>>,
 }
@@ -349,7 +352,6 @@ pub struct VM {
     /// `Ret` pops the frame stack back to exactly this depth. 0 everywhere
     /// except inside a native→interpreter re-entry, which raises it so control
     /// returns to the native caller, and restores it on the way out.
-    native_floor: usize,
     /// The reduction budget on the native side of the backend boundary.
     /// `execute_slice` keeps its budget in a hot-loop local that compiled code
     /// cannot reach, so native checkpoints decrement this instead. Every
@@ -456,7 +458,6 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
         main_result: None,
         native_pending: None,
         native_ctx: crate::bytecode::NativeCtx::new(),
-        native_floor: 0,
         native_reds: 0,
         run_queue: VecDeque::new(),
         parked: HashMap::new(),
@@ -579,6 +580,10 @@ impl VM {
             }
 
             match self.run_slice()? {
+                // Consumed inside `run_slice`; reaching here is a bug.
+                Step::Dispatch => {
+                    return Err(VmError::internal("Step::Dispatch escaped run_slice"));
+                }
                 Step::Done => {
                     // The ended process's connections die with it.
                     self.release_connections_of(self.current_pid);
@@ -648,7 +653,6 @@ impl VM {
             frames: std::mem::take(&mut self.frames),
             is_main: std::mem::take(&mut self.current_is_main),
             pid: self.current_pid,
-            native_floor: std::mem::take(&mut self.native_floor),
             native_reds: std::mem::take(&mut self.native_reds),
             native_pending: self.native_pending.take(),
         }
@@ -661,7 +665,6 @@ impl VM {
         self.frames = p.frames;
         self.current_is_main = p.is_main;
         self.current_pid = p.pid;
-        self.native_floor = p.native_floor;
         self.native_reds = p.native_reds;
         self.native_pending = p.native_pending;
     }
@@ -1047,7 +1050,6 @@ impl VM {
             frames,
             is_main: false,
             pid,
-            native_floor: 0,
             native_reds: 0,
             native_pending: None,
         });

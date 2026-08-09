@@ -526,7 +526,6 @@ fn parked_process() -> Process {
         frames: Vec::new(),
         is_main: false,
         pid: 0,
-        native_floor: 0,
         native_reds: 0,
         native_pending: None,
     }
@@ -543,28 +542,23 @@ fn park_wait(vm: &mut VM, wait: Wait) -> u64 {
 #[test]
 fn scheduler_scratch_travels_with_the_process() {
     let mut vm = halt_test_vm();
-    vm.native_floor = 3;
     vm.native_reds = 42;
     vm.native_pending = Some(Box::new(NativePending::Parked(Wait::until(
         Instant::now() + Duration::from_secs(3600),
     ))));
 
     let carrier = vm.suspend_current();
-    assert_eq!(carrier.native_floor, 3);
     assert_eq!(carrier.native_reds, 42);
     assert!(carrier.native_pending.is_some());
 
     // The next process on this scheduler starts from clean scratch.
-    assert_eq!(vm.native_floor, 0);
     assert_eq!(vm.native_reds, 0);
     assert!(vm.native_pending.is_none());
     vm.resume(parked_process());
-    assert_eq!(vm.native_floor, 0);
 
     // Resuming the carrier restores exactly what it suspended with.
     vm.suspend_current();
     vm.resume(carrier);
-    assert_eq!(vm.native_floor, 3);
     assert_eq!(vm.native_reds, 42);
     assert!(matches!(
         vm.native_pending.as_deref(),
@@ -656,7 +650,6 @@ fn donation_fd_guard_blocks_entangled_connections() {
         frames: Vec::new(),
         is_main: false,
         pid: 0,
-        native_floor: 0,
         native_reds: 0,
         native_pending: None,
     };
@@ -692,7 +685,6 @@ fn donation_fd_guard_blocks_entangled_connections() {
         }],
         is_main: false,
         pid: 0,
-        native_floor: 0,
         native_reds: 0,
         native_pending: None,
     };

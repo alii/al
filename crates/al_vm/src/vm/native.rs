@@ -41,6 +41,38 @@ use crate::tivec::Idx;
 use super::poll::Wait;
 use super::{CallFrame, Step, VM, VmError, VmResult};
 
+/// What a `prepare_*` / `ret_transfer` shim hands back to compiled code:
+/// where control goes next. Two machine words, returned in registers on both
+/// supported ABIs.
+///
+/// - `entry` non-null: `return_call_indirect(entry, [ctx, aux])` — `aux` is
+///   the resume ordinal to enter at (0 for a fresh callee, the stored
+///   continuation for a return transfer).
+/// - `entry` null: `return aux` — a plain status for the trampoline
+///   (`Done` = dispatch the new top frame / slice finished, `Yield`,
+///   `Error`).
+#[repr(C)]
+pub struct PreparedCall {
+    pub entry: *const u8,
+    pub aux: u64,
+}
+
+impl PreparedCall {
+    fn status(s: NativeStatus) -> PreparedCall {
+        PreparedCall {
+            entry: std::ptr::null(),
+            aux: s as u64,
+        }
+    }
+
+    fn enter(entry: NativeEntry, resume: i64) -> PreparedCall {
+        PreparedCall {
+            entry,
+            aux: resume as u64,
+        }
+    }
+}
+
 /// The payload half of a [`NativeStatus::Parked`]/[`NativeStatus::Error`],
 /// parked in the VM while the status word unwinds the native frames above
 /// it. At most one is in flight per process.
@@ -65,7 +97,7 @@ impl VM {
     /// caller's live value is silently corrupted in release with no test
     /// failing.
     #[inline(never)]
-    pub(super) fn call_native(&mut self, entry: NativeEntry) -> NativeStatus {
+    pub(super) fn call_native(&mut self, entry: NativeEntry, resume: i64) -> NativeStatus {
         self.native_ctx.vm = (self as *mut VM).cast();
         let tramp = self.program.native.trampoline();
         debug_assert!(!tramp.is_null(), "entry published without a trampoline");
@@ -77,6 +109,7 @@ impl VM {
                 (&raw mut self.native_ctx).cast(),
                 tramp,
                 entry,
+                resume,
             )
         }
     }
@@ -85,7 +118,9 @@ impl VM {
     /// the VM for [`VM::outcome_from_status`] to rehydrate.
     pub(super) fn status_from_outcome(&mut self, outcome: VmResult<Step>) -> NativeStatus {
         match outcome {
-            Ok(Step::Done) => NativeStatus::Done,
+            // `Dispatch` never crosses the native boundary: it is minted by
+            // the interpreter for `run_slice` alone.
+            Ok(Step::Done | Step::Dispatch) => NativeStatus::Done,
             Ok(Step::Yield) => NativeStatus::Yield,
             Ok(Step::Parked(wait)) => {
                 // A leftover payload means a native frame swallowed a
@@ -130,33 +165,6 @@ impl VM {
 
     /// [`al_rt_enter_interp`]'s body: run the interpreter until the frame
     /// the native caller pushed returns, then encode the outcome as a status.
-    fn enter_interp(&mut self) -> NativeStatus {
-        // Re-entries nest, and each restores the floor it found, so once a
-        // non-Done status has unwound to `scheduler_loop` the floor is 0.
-        let saved = self.native_floor;
-        debug_assert!(
-            self.frames.len() > saved,
-            "native→interp call without a pushed callee frame"
-        );
-        self.native_floor = self.frames.len() - 1;
-        let floor = self.native_floor;
-        // The nested slice spends the caller's remaining budget, so a native
-        // fn looping over interpreted callees yields as often as the
-        // all-interpreted program would.
-        let outcome = self.execute_slice_budgeted(self.native_reds);
-        self.native_floor = saved;
-        match outcome {
-            Ok(Step::Done) if self.frames.len() == floor => NativeStatus::Done,
-            // Done away from the floor is `Op::Halt`, which only `__main__`
-            // carries, and `__main__` can never sit above a native caller.
-            // Refuse rather than hand the caller a stack it no longer owns.
-            Ok(Step::Done) => self.status_from_outcome(Err(VmError::internal(
-                "process halted under a native caller",
-            ))),
-            other => self.status_from_outcome(other),
-        }
-    }
-
     /// The native twin of the interpreter's `checkpoint!`. Returns true when
     /// the budget is spent and the caller must yield; the caller must leave
     /// the top frame consistent at its resume point first.
@@ -165,6 +173,23 @@ impl VM {
         self.charge_reclamation(&mut reds);
         self.native_reds = reds;
         reds <= 0
+    }
+
+    /// The transfer decision after a frame push/collapse: charge the entry
+    /// checkpoint, then hand back the target's entry (native) or a `Done`
+    /// status (interpreted — the trampoline dispatches it).
+    fn prepared(&mut self, target: i32) -> PreparedCall {
+        if self.native_checkpoint() {
+            return PreparedCall::status(NativeStatus::Yield);
+        }
+        match self
+            .program
+            .native
+            .get(FuncIdx::from_usize(target as usize))
+        {
+            Some(entry) => PreparedCall::enter(entry, 0),
+            None => PreparedCall::status(NativeStatus::Done),
+        }
     }
 
     /// `enter_frame!`'s non-tail branch for a known capture-free target.
@@ -211,20 +236,6 @@ impl VM {
     /// The trampoline: drive the top frame to a boundary status, consuming
     /// [`NativeStatus::TailCall`] by re-dispatching the collapsed frame.
     /// Every native entry invocation must go through here, which is what
-    /// keeps tail chains flat and `TailCall` off the interpreter boundary.
-    pub(super) fn drive_top_frame(&mut self) -> NativeStatus {
-        loop {
-            let idx = FuncIdx::from_usize(self.frame().func_idx as usize);
-            let status = match self.program.native.get(idx) {
-                Some(entry) => self.call_native(entry),
-                None => self.enter_interp(),
-            };
-            if status != NativeStatus::TailCall {
-                return status;
-            }
-        }
-    }
-
     /// The `Op::Call`/`Op::TailCall` callee checks: closure value, matching
     /// arity. Returns the `func_idx` both the entry table and the
     /// interpreter dispatch on.
@@ -245,7 +256,7 @@ impl VM {
     /// `enter_frame!`'s non-tail branch for a dynamic callee. The closure
     /// value itself becomes the frame's `captures` handle: one word moved,
     /// no captures clone, as in the interpreter's `Op::Call`.
-    fn push_closure_frame(&mut self, callee: Value, argc: i64) -> VmResult<()> {
+    fn push_closure_frame(&mut self, callee: Value, argc: i64) -> VmResult<i32> {
         let target = self.dynamic_target(&callee, argc)?;
         let func = &self.program.functions[target as usize];
         let (arity, locals, code_start) = (func.arity, func.locals, func.code_start);
@@ -260,13 +271,13 @@ impl VM {
         for _ in arity..locals {
             self.stack.push(Value::small_int(0));
         }
-        Ok(())
+        Ok(target)
     }
 
     /// `enter_frame!`'s tail branch for a dynamic callee. Assigning the
     /// closure as the collapsed frame's `captures` releases the caller's own
     /// handle, as the interpreter's tail branch does.
-    fn collapse_closure_frame(&mut self, callee: Value, argc: i64) -> VmResult<()> {
+    fn collapse_closure_frame(&mut self, callee: Value, argc: i64) -> VmResult<i32> {
         let target = self.dynamic_target(&callee, argc)?;
         let func = &self.program.functions[target as usize];
         let (arity, locals, code_start) = (func.arity, func.locals, func.code_start);
@@ -281,57 +292,7 @@ impl VM {
         for _ in arity..locals {
             self.stack.push(Value::small_int(0));
         }
-        Ok(())
-    }
-
-    /// [`al_rt_call`]'s body once the argument words are on the stack.
-    fn rt_call(&mut self, target: i32, resume_ip: i32, out: *mut u64) -> NativeStatus {
-        self.frame_mut().ip = resume_ip;
-        self.push_known_frame(target);
-        self.drive_pushed_callee(out)
-    }
-
-    /// [`al_rt_call_value`]'s body. A failed callee check surfaces as an
-    /// error status.
-    fn rt_call_value(
-        &mut self,
-        callee: Value,
-        resume_ip: i32,
-        argc: i64,
-        out: *mut u64,
-    ) -> NativeStatus {
-        self.frame_mut().ip = resume_ip;
-        if let Err(err) = self.push_closure_frame(callee, argc) {
-            return self.status_from_outcome(Err(err));
-        }
-        self.drive_pushed_callee(out)
-    }
-
-    /// Charge the entry checkpoint, drive the freshly pushed callee frame,
-    /// and on `Done` pop the result out to the native caller.
-    #[allow(unsafe_code)] // one write into the caller-provided out-slot
-    fn drive_pushed_callee(&mut self, out: *mut u64) -> NativeStatus {
-        // The callee frame is already consistent at ip 0, so exhaustion is a
-        // plain unwind and resume re-enters it from the top.
-        if self.native_checkpoint() {
-            return NativeStatus::Yield;
-        }
-        let status = self.drive_top_frame();
-        if status != NativeStatus::Done {
-            return status;
-        }
-        // Ownership of the reference moves with the bits.
-        match self.stack.pop() {
-            Some(result) => {
-                // SAFETY: `out` is the caller's result slot per
-                // `al_rt_call`'s contract, valid for one u64 write.
-                unsafe { out.write(std::mem::ManuallyDrop::new(result).to_bits()) };
-                NativeStatus::Done
-            }
-            None => self.status_from_outcome(Err(VmError::internal(
-                "native call returned Done with an empty stack",
-            ))),
-        }
+        Ok(target)
     }
 }
 
@@ -352,210 +313,6 @@ unsafe fn push_args(vm: &mut VM, args: *const u64, argc: i64) {
         // SAFETY: each word is an owned value whose reference transfers here.
         vm.stack.push(unsafe { Value::from_bits(bits) });
     }
-}
-
-/// Call an interpreter-only function from a compiled body.
-///
-/// The caller completes the same frame handshake as for a native callee,
-/// then calls this instead of a table entry. The interpreter runs the callee
-/// with a frame floor at the caller's depth: a `Ret` down to the floor ends
-/// the slice with [`NativeStatus::Done`] and the result on the stack top.
-///
-/// A suspension inside the callee comes back as a non-`Done` status and no
-/// native frame survives it. On wake the parked frame finishes interpreted,
-/// and the native caller's frame then continues as *bytecode* from its
-/// stored resume ip.
-///
-/// # Safety
-/// `vmx` must point at the running scheduler's live `VM`, with the callee
-/// frame installed as described above; no other reference to the VM may be
-/// live for the duration of the call.
-#[allow(unsafe_code)] // the designated native→interp re-entry point; contract above
-pub unsafe extern "C" fn al_rt_enter_interp(vmx: *mut VM) -> NativeStatus {
-    // SAFETY: `vmx` is the running scheduler's live VM per the contract.
-    let vm = unsafe { &mut *vmx };
-    vm.enter_interp()
-}
-
-/// The re-entry shim as a `(symbol name, address)` pair for
-/// `JITBuilder::symbol`.
-pub fn enter_interp_symbol() -> (&'static str, *const u8) {
-    ("al_rt_enter_interp", al_rt_enter_interp as *const u8)
-}
-
-/// Call a known capture-free function from a compiled body: the whole
-/// interpreter `CallKnown` sequence behind the C ABI. `resume_ip` is the
-/// caller's own *bytecode* resume point, so a suspension under the callee
-/// resumes the caller's remainder interpreted. `args` ownership transfers
-/// in; on `Done` the result word is written to `out`.
-///
-/// # Safety
-/// `vmx` must point at the running scheduler's live `VM` (no other reference
-/// live for the duration); `args` must be valid for `argc` reads of owned
-/// value words; `out` must be valid for one u64 write.
-#[allow(unsafe_code)] // the native call seam; contracts above
-pub unsafe extern "C" fn al_rt_call(
-    vmx: *mut VM,
-    target: i64,
-    resume_ip: i64,
-    args: *const u64,
-    argc: i64,
-    out: *mut u64,
-) -> NativeStatus {
-    // SAFETY: `vmx` is the running scheduler's live VM per the contract.
-    let vm = unsafe { &mut *vmx };
-    // SAFETY: `args`/`argc` per the contract.
-    unsafe { push_args(vm, args, argc) };
-    vm.rt_call(target as i32, resume_ip as i32, out)
-}
-
-/// Call a dynamic callee from a compiled body. `callee` is an owned closure
-/// word; it is installed as the callee frame's `captures` handle, where
-/// `PushCapture` expects to find the environment. A non-closure callee or an
-/// arity mismatch surfaces as [`NativeStatus::Error`].
-///
-/// # Safety
-/// As [`al_rt_call`], plus: `callee` must be the bits of a `Value` whose
-/// reference the caller owns and transfers to this call.
-#[allow(unsafe_code)] // the dynamic-call seam; contracts above
-pub unsafe extern "C" fn al_rt_call_value(
-    vmx: *mut VM,
-    callee: u64,
-    resume_ip: i64,
-    args: *const u64,
-    argc: i64,
-    out: *mut u64,
-) -> NativeStatus {
-    // SAFETY: `vmx` is the running scheduler's live VM per the contract.
-    let vm = unsafe { &mut *vmx };
-    // SAFETY: `args`/`argc` per the contract.
-    unsafe { push_args(vm, args, argc) };
-    // SAFETY: `callee` is an owned value word per the contract.
-    let callee = unsafe { Value::from_bits(callee) };
-    vm.rt_call_value(callee, resume_ip as i32, argc, out)
-}
-
-/// The frame-handshake half of a direct native→native call: [`al_rt_call`]
-/// up to but not including `drive_top_frame`. On `Done` the caller emits a
-/// direct machine call to the peer's `NativeEntry` and hands the status to
-/// [`al_rt_direct_result`]. The pair is `al_rt_call` with the table lookup
-/// and indirect dispatch replaced by a statically resolved call.
-///
-/// # Safety
-/// As [`al_rt_call`], minus `out`.
-#[allow(unsafe_code)] // the direct-call frame-handshake seam; contracts above
-pub unsafe extern "C" fn al_rt_push_frame(
-    vmx: *mut VM,
-    target: i64,
-    resume_ip: i64,
-    args: *const u64,
-    argc: i64,
-) -> NativeStatus {
-    // SAFETY: `vmx` is the running scheduler's live VM per the contract.
-    let vm = unsafe { &mut *vmx };
-    // SAFETY: `args`/`argc` per the contract.
-    unsafe { push_args(vm, args, argc) };
-    vm.frame_mut().ip = resume_ip as i32;
-    vm.push_known_frame(target as i32);
-    if vm.native_checkpoint() {
-        return NativeStatus::Yield;
-    }
-    NativeStatus::Done
-}
-
-/// The return-path half of a direct native→native call. `status` is what the
-/// peer's `NativeEntry` returned; on `Done` the result is popped into `out`.
-///
-/// [`NativeStatus::TailCall`] must be consumed here, never propagated: the
-/// caller's `CallFrame` sits under the collapsed one, so unwinding on it
-/// would strand that frame.
-///
-/// # Safety
-/// `vmx` must point at the running scheduler's live `VM`; `out` must be
-/// valid for one u64 write; `status` must be a value the direct callee's
-/// `NativeEntry` returned.
-#[allow(unsafe_code)] // the direct-call return-path seam; contracts above
-pub unsafe extern "C" fn al_rt_direct_result(
-    vmx: *mut VM,
-    status: NativeStatus,
-    out: *mut u64,
-) -> NativeStatus {
-    // SAFETY: `vmx` is the running scheduler's live VM per the contract.
-    let vm = unsafe { &mut *vmx };
-    let status = if status == NativeStatus::TailCall {
-        vm.drive_top_frame()
-    } else {
-        status
-    };
-    if status != NativeStatus::Done {
-        return status;
-    }
-    match vm.stack.pop() {
-        Some(result) => {
-            // SAFETY: `out` is valid for one u64 write per the contract.
-            unsafe { out.write(std::mem::ManuallyDrop::new(result).to_bits()) };
-            NativeStatus::Done
-        }
-        None => vm.status_from_outcome(Err(VmError::internal(
-            "native call returned Done with an empty stack",
-        ))),
-    }
-}
-
-/// Cross-function tail call from a compiled body: the interpreter's
-/// `TailCallKnown` surgery behind the C ABI. Returns
-/// [`NativeStatus::TailCall`] for the driver that invoked the caller to
-/// dispatch, or `Yield` if the budget ran out (collapsed frame at `ip == 0`).
-/// A tail-call site compiles to `return al_rt_tail_call(...)`, so the
-/// caller's machine frame is gone before the callee runs.
-///
-/// # Safety
-/// As [`al_rt_call`], minus `out` — a tail caller never sees the result.
-#[allow(unsafe_code)] // the native tail-call seam; contracts above
-pub unsafe extern "C" fn al_rt_tail_call(
-    vmx: *mut VM,
-    target: i64,
-    args: *const u64,
-    argc: i64,
-) -> NativeStatus {
-    // SAFETY: `vmx` is the running scheduler's live VM per the contract.
-    let vm = unsafe { &mut *vmx };
-    // SAFETY: `args`/`argc` per the contract.
-    unsafe { push_args(vm, args, argc) };
-    vm.collapse_known_frame(target as i32);
-    if vm.native_checkpoint() {
-        return NativeStatus::Yield;
-    }
-    NativeStatus::TailCall
-}
-
-/// Dynamic cross-function tail call: `Op::TailCall`'s surgery behind the C
-/// ABI, the closure becoming the collapsed frame's `captures` handle. The
-/// caller returns the status verbatim.
-///
-/// # Safety
-/// As [`al_rt_call_value`], minus `out` — a tail caller never sees the
-/// result.
-#[allow(unsafe_code)] // the dynamic tail-call seam; contracts above
-pub unsafe extern "C" fn al_rt_tail_call_value(
-    vmx: *mut VM,
-    callee: u64,
-    args: *const u64,
-    argc: i64,
-) -> NativeStatus {
-    // SAFETY: `vmx` is the running scheduler's live VM per the contract.
-    let vm = unsafe { &mut *vmx };
-    // SAFETY: `args`/`argc` per the contract.
-    unsafe { push_args(vm, args, argc) };
-    // SAFETY: `callee` is an owned value word per the contract.
-    let callee = unsafe { Value::from_bits(callee) };
-    if let Err(err) = vm.collapse_closure_frame(callee, argc) {
-        return vm.status_from_outcome(Err(err));
-    }
-    if vm.native_checkpoint() {
-        return NativeStatus::Yield;
-    }
-    NativeStatus::TailCall
 }
 
 /// `Op::MakeClosure` for a compiled body. Each capture word transfers one
@@ -600,6 +357,9 @@ pub unsafe extern "C" fn al_rt_make_closure(
 /// into the argument slots and `stack.len() == base_slot + locals`.
 #[allow(unsafe_code)] // the self-tail back-edge seam; contract above
 pub unsafe extern "C" fn al_rt_checkpoint(vmx: *mut VM) -> NativeStatus {
+    // On exhaustion the frame must resume at its head: a self-tail loop's
+    // back-edge state is exactly "params rebound in slots, enter at 0".
+
     // SAFETY: `vmx` is the running scheduler's live VM per the contract.
     let vm = unsafe { &mut *vmx };
     if vm.native_checkpoint() {
@@ -626,44 +386,167 @@ pub unsafe extern "C" fn al_rt_frame_base(vmx: *mut VM) -> *mut u64 {
     unsafe { vm.stack.as_mut_ptr().add(base).cast::<u64>() }
 }
 
-/// The compiled epilogue: `ret!`'s stack surgery behind the C ABI. Leaves
-/// the caller frame on top with the result on the stack top. Ownership of
-/// `result` transfers in.
+/// The compiled epilogue as a transfer: pop the frame, truncate to its base,
+/// push the result, and say where control goes — the native parent's entry at
+/// its stored resume ordinal, or `Done` for the trampoline (empty frames, or
+/// an interpreted parent).
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM` with the returning
 /// compiled function's frame on top; `result` must be an owned value word.
 #[allow(unsafe_code)] // the native return seam; contract above
-pub unsafe extern "C" fn al_rt_ret(vmx: *mut VM, result: u64) {
+pub unsafe extern "C" fn al_rt_ret_transfer(vmx: *mut VM, result: u64) -> PreparedCall {
     // SAFETY: `vmx` is the running scheduler's live VM per the contract.
     let vm = unsafe { &mut *vmx };
-    // Unreachable with a frame installed. Continuing would drop the result,
-    // leak its reference, and run on with corrupted frames; abort instead
-    // (never unwind across the C boundary).
     let Some(frame) = vm.frames.pop() else {
-        crate::bytecode::value::proof_violation("al_rt_ret with no active call frame");
+        crate::bytecode::value::proof_violation("al_rt_ret_transfer with no active call frame");
     };
     vm.stack.truncate(frame.base_slot);
     // SAFETY: `result` is an owned value word per the contract.
     vm.stack.push(unsafe { Value::from_bits(result) });
-    // `frame` drops here, releasing its captures handle.
+    drop(frame);
+    let Some(parent) = vm.frames.last() else {
+        return PreparedCall::status(NativeStatus::Done);
+    };
+    match vm
+        .program
+        .native
+        .get(FuncIdx::from_usize(parent.func_idx as usize))
+    {
+        Some(entry) => PreparedCall::enter(entry, i64::from(parent.ip)),
+        None => PreparedCall::status(NativeStatus::Done),
+    }
+}
+
+/// Non-tail call from a compiled body, as a transfer. Pushes the args and the
+/// callee frame (caller's `ip` set to `resume`, the continuation ordinal) and
+/// says where control goes.
+///
+/// # Safety
+/// `vmx` must point at the running scheduler's live `VM`; `args` must point
+/// at `argc` initialized owned value words the caller transfers.
+#[allow(unsafe_code)] // the call seam; contracts above
+pub unsafe extern "C" fn al_rt_prepare_call(
+    vmx: *mut VM,
+    target: i64,
+    resume: i64,
+    args: *const u64,
+    argc: i64,
+) -> PreparedCall {
+    // SAFETY: per the contract above.
+    let vm = unsafe { &mut *vmx };
+    // SAFETY: `args`/`argc` per the contract.
+    unsafe { push_args(vm, args, argc) };
+    vm.frame_mut().ip = resume as i32;
+    vm.push_known_frame(target as i32);
+    vm.prepared(target as i32)
+}
+
+/// [`al_rt_prepare_call`] for a dynamic callee. A non-closure callee or an
+/// arity mismatch surfaces as an `Error` status.
+///
+/// # Safety
+/// As [`al_rt_prepare_call`], plus: `callee` must be the bits of a `Value`
+/// whose reference the caller owns and transfers.
+#[allow(unsafe_code)] // the dynamic-call seam; contracts above
+pub unsafe extern "C" fn al_rt_prepare_call_value(
+    vmx: *mut VM,
+    callee: u64,
+    resume: i64,
+    args: *const u64,
+    argc: i64,
+) -> PreparedCall {
+    // SAFETY: per the contract above.
+    let vm = unsafe { &mut *vmx };
+    // SAFETY: `args`/`argc` per the contract.
+    unsafe { push_args(vm, args, argc) };
+    // SAFETY: `callee` is an owned value word per the contract.
+    let callee = unsafe { Value::from_bits(callee) };
+    vm.frame_mut().ip = resume as i32;
+    match vm.push_closure_frame(callee, argc) {
+        Ok(target) => vm.prepared(target),
+        Err(err) => PreparedCall::status(vm.status_from_outcome(Err(err))),
+    }
+}
+
+/// Cross-function tail call, as a transfer: the interpreter's `TailCallKnown`
+/// surgery (collapse in place, `ip = 0`), then where control goes.
+///
+/// # Safety
+/// As [`al_rt_prepare_call`].
+#[allow(unsafe_code)] // the tail-call seam; contracts above
+pub unsafe extern "C" fn al_rt_prepare_tail(
+    vmx: *mut VM,
+    target: i64,
+    args: *const u64,
+    argc: i64,
+) -> PreparedCall {
+    // SAFETY: per the contract above.
+    let vm = unsafe { &mut *vmx };
+    // SAFETY: `args`/`argc` per the contract.
+    unsafe { push_args(vm, args, argc) };
+    vm.collapse_known_frame(target as i32);
+    vm.prepared(target as i32)
+}
+
+/// [`al_rt_prepare_tail`] for a dynamic callee.
+///
+/// # Safety
+/// As [`al_rt_prepare_call_value`].
+#[allow(unsafe_code)] // the dynamic tail-call seam; contracts above
+pub unsafe extern "C" fn al_rt_prepare_tail_value(
+    vmx: *mut VM,
+    callee: u64,
+    args: *const u64,
+    argc: i64,
+) -> PreparedCall {
+    // SAFETY: per the contract above.
+    let vm = unsafe { &mut *vmx };
+    // SAFETY: `args`/`argc` per the contract.
+    unsafe { push_args(vm, args, argc) };
+    // SAFETY: `callee` is an owned value word per the contract.
+    let callee = unsafe { Value::from_bits(callee) };
+    match vm.collapse_closure_frame(callee, argc) {
+        Ok(target) => vm.prepared(target),
+        Err(err) => PreparedCall::status(vm.status_from_outcome(Err(err))),
+    }
+}
+
+/// Pop the value-stack top into a compiled continuation: the call result the
+/// callee's return transfer pushed. Ownership moves with the bits.
+///
+/// # Safety
+/// `vmx` must point at the running scheduler's live `VM` whose stack top is
+/// the callee's result.
+#[allow(unsafe_code)] // the continuation result seam; contract above
+pub unsafe extern "C" fn al_rt_pop(vmx: *mut VM) -> u64 {
+    // SAFETY: `vmx` is the running scheduler's live VM per the contract.
+    let vm = unsafe { &mut *vmx };
+    match vm.stack.pop() {
+        Some(v) => std::mem::ManuallyDrop::new(v).to_bits(),
+        None => crate::bytecode::value::proof_violation("continuation with an empty stack"),
+    }
 }
 
 /// Every `al_rt_*` boundary shim as a `(symbol name, address)` pair for JIT
 /// symbol registration.
-pub fn rt_symbols() -> [(&'static str, *const u8); 11] {
+pub fn rt_symbols() -> [(&'static str, *const u8); 9] {
     [
-        enter_interp_symbol(),
-        ("al_rt_call", al_rt_call as *const u8),
-        ("al_rt_tail_call", al_rt_tail_call as *const u8),
-        ("al_rt_push_frame", al_rt_push_frame as *const u8),
-        ("al_rt_direct_result", al_rt_direct_result as *const u8),
-        ("al_rt_call_value", al_rt_call_value as *const u8),
-        ("al_rt_tail_call_value", al_rt_tail_call_value as *const u8),
         ("al_rt_make_closure", al_rt_make_closure as *const u8),
-        ("al_rt_checkpoint", al_rt_checkpoint as *const u8),
         ("al_rt_frame_base", al_rt_frame_base as *const u8),
-        ("al_rt_ret", al_rt_ret as *const u8),
+        ("al_rt_prepare_call", al_rt_prepare_call as *const u8),
+        (
+            "al_rt_prepare_call_value",
+            al_rt_prepare_call_value as *const u8,
+        ),
+        ("al_rt_prepare_tail", al_rt_prepare_tail as *const u8),
+        (
+            "al_rt_prepare_tail_value",
+            al_rt_prepare_tail_value as *const u8,
+        ),
+        ("al_rt_ret_transfer", al_rt_ret_transfer as *const u8),
+        ("al_rt_pop", al_rt_pop as *const u8),
+        ("al_rt_checkpoint", al_rt_checkpoint as *const u8),
     ]
 }
 
@@ -732,33 +615,20 @@ mod tests {
         ));
     }
 
-    extern "C" fn yield_entry(ctx: *mut core::ffi::c_void) -> NativeStatus {
-        assert!(!ctx.is_null());
+    extern "C" fn yield_entry(_ctx: *mut core::ffi::c_void, _resume: i64) -> NativeStatus {
         NativeStatus::Yield
-    }
-
-    /// Reads the VM out of the entry's `NativeCtx` the way a compiled
-    /// prologue does.
-    fn vm_from_ctx(ctx: *mut core::ffi::c_void) -> *mut VM {
-        unsafe { (*ctx.cast::<crate::bytecode::NativeCtx>()).vm.cast() }
     }
 
     /// Stand-in for the module trampoline: test entries are plain Rust
     /// `extern "C"` fns, so the bridge invokes them as such.
-    extern "C" fn test_trampoline(ctx: *mut core::ffi::c_void, entry: *const u8) -> NativeStatus {
-        type SysvEntry = extern "C" fn(*mut core::ffi::c_void) -> NativeStatus;
+    extern "C" fn test_trampoline(
+        ctx: *mut core::ffi::c_void,
+        entry: *const u8,
+        resume: i64,
+    ) -> NativeStatus {
+        type SysvEntry = extern "C" fn(*mut core::ffi::c_void, i64) -> NativeStatus;
         let f: SysvEntry = unsafe { std::mem::transmute::<*const u8, SysvEntry>(entry) };
-        f(ctx)
-    }
-
-    /// Publish `f` at `fn_idx` with the test trampoline in place.
-    fn publish_test_entry(
-        table: &crate::bytecode::NativeTable,
-        fn_idx: FuncIdx,
-        f: extern "C" fn(*mut core::ffi::c_void) -> NativeStatus,
-    ) {
-        table.set_trampoline(test_trampoline as *const u8);
-        table.set(fn_idx, f as *const u8);
+        f(ctx, resume)
     }
 
     #[test]
@@ -767,183 +637,17 @@ mod tests {
         vm.program
             .native
             .set_trampoline(test_trampoline as *const u8);
-        let status = vm.call_native(yield_entry as *const u8);
+        let status = vm.call_native(yield_entry as *const u8, 0);
         assert!(matches!(vm.outcome_from_status(status), Ok(Step::Yield)));
     }
 
     use std::sync::Arc;
 
-    use crate::bytecode::{Function, Instruction, Op, Program, Value, op, op_arg};
+    use crate::bytecode::{Function, Instruction, NativeTable, Op, Program, Value, op};
 
-    use super::super::{CallFrame, new_vm};
+    use super::super::new_vm;
 
-    // fn 0 ("main") is a single `Halt`, standing in for the native caller's
-    // bytecode body; fn 1 is `callee` at addresses [1, 1 + len).
-    fn caller_callee_program(constants: Vec<Value>, callee: Vec<Instruction>) -> Program {
-        let callee_len = callee.len() as i32;
-        let mut code = vec![op(Op::Halt)];
-        code.extend(callee);
-        let frozen = Arc::new(crate::frozen::FrozenArea::new());
-        let mut fb = frozen.builder();
-        let (templates, abi) = crate::template::test_fixture::build(&mut fb);
-        drop(fb);
-        Program {
-            constants,
-            functions: vec![
-                Function {
-                    name: "main".into(),
-                    arity: 0,
-                    locals: 0,
-                    capture_count: 0,
-                    code_start: 0,
-                    code_len: 1,
-                },
-                Function {
-                    name: "callee".into(),
-                    arity: 0,
-                    locals: 0,
-                    capture_count: 0,
-                    code_start: 1,
-                    code_len: callee_len,
-                },
-            ],
-            code,
-            entry: 0,
-            frozen,
-            native: Default::default(),
-            templates,
-            abi,
-        }
-    }
-
-    // The frame shape a native caller leaves right before its
-    // `al_rt_enter_interp` call: its own frame below with the resume ip
-    // stored, the interpreted callee's fresh frame on top.
-    fn vm_with_callee_pushed(constants: Vec<Value>, callee: Vec<Instruction>) -> VM {
-        let mut vm =
-            new_vm(caller_callee_program(constants, callee)).expect("test VM must construct");
-        vm.frames.push(CallFrame {
-            func_idx: 0,
-            code_start: 0,
-            ip: 0,
-            base_slot: 0,
-            captures: Value::small_int(0),
-        });
-        vm.frames.push(CallFrame {
-            func_idx: 1,
-            code_start: 1,
-            ip: 0,
-            base_slot: 0,
-            captures: Value::small_int(0),
-        });
-        vm
-    }
-
-    #[test]
-    fn interp_callee_return_stops_at_the_frame_floor() {
-        let mut vm = vm_with_callee_pushed(
-            vec![Value::small_int(42)],
-            vec![op_arg(Op::PushConst, 0), op(Op::Ret)],
-        );
-        let status = unsafe { al_rt_enter_interp(&raw mut vm) };
-        assert_eq!(status, NativeStatus::Done);
-        assert_eq!(vm.frames.len(), 1);
-        assert_eq!(vm.stack.len(), 1);
-        assert_eq!(vm.stack[0].to_bits(), Value::small_int(42).to_bits());
-        assert_eq!(vm.native_floor, 0);
-        assert!(vm.native_pending.is_none());
-    }
-
-    #[test]
-    fn interp_callee_park_unwinds_and_resume_finishes_interpreted() {
-        // callee: sleep(1ms), then return the nil the wake left on top.
-        let mut vm = vm_with_callee_pushed(
-            vec![Value::small_int(1)],
-            vec![op_arg(Op::PushConst, 0), op(Op::Sleep), op(Op::Ret)],
-        );
-        let status = unsafe { al_rt_enter_interp(&raw mut vm) };
-        // The parked continuation is entirely (stack, frames): callee frame
-        // intact, `ip` on the `Ret` after `Sleep`.
-        assert_eq!(status, NativeStatus::Parked);
-        assert_eq!(vm.native_floor, 0);
-        assert_eq!(vm.frames.len(), 2);
-        assert_eq!(vm.frames[1].ip, 2);
-        match vm.outcome_from_status(status) {
-            Ok(Step::Parked(Wait::Timer(_))) => {}
-            _ => panic!("expected the sleep's timer park back"),
-        }
-        // Resume finishes the callee interpreted, then the native caller's
-        // frame continues as bytecode from its stored resume ip.
-        let resumed = vm.execute_slice().expect("resume must not error");
-        assert!(matches!(resumed, Step::Done));
-        assert_eq!(vm.stack.len(), 1);
-        // `sleep` pushes the VM's Nil enum, not the raw immediate.
-        assert_eq!(vm.stack[0].to_bits(), vm.make_nil().unwrap().to_bits());
-    }
-
-    #[test]
-    fn interp_callee_yield_unwinds_with_a_resumable_frame() {
-        // callee: an infinite self-tail loop, so it yields at the back-edge
-        // checkpoint with `ip == 0`.
-        let mut vm = vm_with_callee_pushed(Vec::new(), vec![op_arg(Op::TailCallSelf, 0)]);
-        let status = unsafe { al_rt_enter_interp(&raw mut vm) };
-        assert_eq!(status, NativeStatus::Yield);
-        assert_eq!(vm.native_floor, 0);
-        assert_eq!(vm.frames.len(), 2);
-        assert_eq!(vm.frames[1].ip, 0);
-        assert!(matches!(vm.outcome_from_status(status), Ok(Step::Yield)));
-    }
-
-    #[test]
-    fn interp_callee_error_unwinds_with_its_payload() {
-        // callee: `Sleep` over an empty stack.
-        let mut vm = vm_with_callee_pushed(Vec::new(), vec![op(Op::Sleep), op(Op::Ret)]);
-        let status = unsafe { al_rt_enter_interp(&raw mut vm) };
-        assert_eq!(status, NativeStatus::Error);
-        assert_eq!(vm.native_floor, 0);
-        assert!(matches!(
-            vm.outcome_from_status(status),
-            Err(VmError::Internal(_))
-        ));
-    }
-
-    #[test]
-    fn nested_re_entry_restores_the_outer_floor() {
-        // As if an outer re-entry (floor 1) is on the machine stack and the
-        // native code under it now calls a further interpreted callee.
-        let mut vm = vm_with_callee_pushed(
-            vec![Value::small_int(7)],
-            vec![op_arg(Op::PushConst, 0), op(Op::Ret)],
-        );
-        vm.native_floor = 1;
-        vm.frames.push(CallFrame {
-            func_idx: 1,
-            code_start: 1,
-            ip: 0,
-            base_slot: vm.stack.len(),
-            captures: Value::small_int(0),
-        });
-        let status = unsafe { al_rt_enter_interp(&raw mut vm) };
-        assert_eq!(status, NativeStatus::Done);
-        assert_eq!(vm.frames.len(), 2);
-        assert_eq!(vm.native_floor, 1);
-        assert_eq!(vm.stack.len(), 1);
-        assert_eq!(vm.stack[0].to_bits(), Value::small_int(7).to_bits());
-    }
-
-    #[test]
-    fn enter_interp_symbol_names_the_shim() {
-        let (name, addr) = enter_interp_symbol();
-        assert_eq!(name, "al_rt_enter_interp");
-        assert!(!addr.is_null());
-    }
-
-    use std::mem::ManuallyDrop;
-
-    use crate::bytecode::NativeTable;
-
-    /// Entry fn 0 ("main") is `[Nop, Halt]`, so ip 1 is a realistic non-zero
-    /// resume point; fn i+1 gets `(arity, locals, body)`.
+    /// fn 0 ("main") is `[Nop, Halt]`; fn i+1 gets `(arity, locals, body)`.
     fn program_with(constants: Vec<Value>, fns: Vec<(i32, i32, Vec<Instruction>)>) -> Program {
         let mut code = vec![op(Op::Nop), op(Op::Halt)];
         let mut functions = vec![Function {
@@ -984,223 +688,77 @@ mod tests {
         }
     }
 
-    /// A VM in the state a native caller runs in: main's frame installed as
-    /// the stand-in caller, boundary reds counter seeded.
-    fn native_caller_vm(program: Program, reds: i32) -> VM {
+    fn test_vm(program: Program) -> super::super::VM {
         let mut vm = new_vm(program).expect("test VM must construct");
+        vm.native_reds = 1_000;
         vm.frames.push(CallFrame {
             func_idx: 0,
             code_start: 0,
-            ip: 0,
+            ip: 1,
             base_slot: 0,
             captures: Value::small_int(0),
         });
-        vm.native_reds = reds;
         vm
     }
 
     fn small(bits: u64) -> i64 {
-        ManuallyDrop::new(unsafe { Value::from_bits(bits) }).as_int_typed()
+        let v = std::mem::ManuallyDrop::new(unsafe { Value::from_bits(bits) });
+        v.as_int().expect("expected an int result")
     }
 
-    /// A compiled body stand-in for `fn add_five(n) { n + 5 }`.
-    extern "C" fn add_five_entry(ctx: *mut core::ffi::c_void) -> NativeStatus {
-        let vm: *mut VM = vm_from_ctx(ctx);
-        let base = unsafe { al_rt_frame_base(vm) };
-        let n = small(unsafe { base.read() });
-        unsafe { al_rt_ret(vm, Value::small_int(n + 5).to_bits()) };
-        NativeStatus::Done
-    }
-
+    /// `prepare_call` pushes the callee frame, stamps the caller resume, and
+    /// says "interpret it" for a non-native target.
     #[test]
-    fn known_call_dispatches_directly_via_the_entry_table() {
+    fn prepare_call_hands_an_interpreted_callee_to_the_trampoline() {
         let program = program_with(Vec::new(), vec![(1, 1, vec![op(Op::Halt)])]);
-        let mut vm = native_caller_vm(program, 100);
-        publish_test_entry(&vm.program.native, FuncIdx::from_usize(1), add_five_entry);
-
+        let mut vm = test_vm(program);
         let args = [Value::small_int(37).to_bits()];
-        let mut out = 0u64;
-        let status = unsafe { al_rt_call(&raw mut vm, 1, 1, args.as_ptr(), 1, &raw mut out) };
-
-        assert_eq!(status, NativeStatus::Done);
-        assert_eq!(small(out), 42);
-        assert_eq!(vm.frames.len(), 1);
-        assert_eq!(vm.frames[0].ip, 1);
-        assert_eq!(vm.stack.len(), 0);
-        // Exactly one reduction charged, matching the interpreter.
-        assert_eq!(vm.native_reds, 99);
-    }
-
-    #[test]
-    fn known_call_falls_back_to_the_frame_floor_for_an_interp_callee() {
-        // fn1 is interpreter-only: the identity function `[PushLocal 0, Ret]`.
-        let program = program_with(
-            Vec::new(),
-            vec![(1, 1, vec![op_arg(Op::PushLocal, 0), op(Op::Ret)])],
-        );
-        let mut vm = native_caller_vm(program, 100);
-
-        let args = [Value::small_int(37).to_bits()];
-        let mut out = 0u64;
-        let status = unsafe { al_rt_call(&raw mut vm, 1, 1, args.as_ptr(), 1, &raw mut out) };
-
-        assert_eq!(status, NativeStatus::Done);
-        assert_eq!(small(out), 37);
-        assert_eq!(vm.frames.len(), 1);
-        assert_eq!(vm.stack.len(), 0);
-        assert_eq!(vm.native_floor, 0);
-    }
-
-    #[test]
-    fn call_checkpoint_exhaustion_yields_with_the_callee_resumable() {
-        let program = program_with(Vec::new(), vec![(1, 2, vec![op(Op::Halt)])]);
-        let mut vm = native_caller_vm(program, 1);
-        publish_test_entry(&vm.program.native, FuncIdx::from_usize(1), add_five_entry);
-
-        let args = [Value::small_int(37).to_bits()];
-        let mut out = 0u64;
-        let status = unsafe { al_rt_call(&raw mut vm, 1, 1, args.as_ptr(), 1, &raw mut out) };
-
-        // The budget died at the entry checkpoint: the callee never ran, but
-        // its frame is consistent, so resume re-enters it from the top.
-        assert_eq!(status, NativeStatus::Yield);
+        let p = unsafe { al_rt_prepare_call(&raw mut vm, 1, 7, args.as_ptr(), 1) };
+        assert!(p.entry.is_null());
+        assert_eq!(p.aux, NativeStatus::Done as u64);
         assert_eq!(vm.frames.len(), 2);
-        assert_eq!(vm.frames[0].ip, 1);
-        assert_eq!(vm.frames[1].ip, 0);
-        assert_eq!(vm.frames[1].func_idx, 1);
-        assert_eq!(vm.frames[1].base_slot, 0);
-        assert_eq!(vm.stack.len(), 2);
+        assert_eq!(vm.frames[0].ip, 7, "caller resume ordinal stamped");
+        assert_eq!(vm.frames[1].ip, 0, "callee enters at its head");
         assert_eq!(small(vm.stack[0].to_bits()), 37);
-        assert_eq!(small(vm.stack[1].to_bits()), 0);
     }
 
-    /// A compiled body stand-in for `fn f1(n) { f2(n + 1) }`, the call in
-    /// tail position.
-    extern "C" fn tail_to_f2_entry(ctx: *mut core::ffi::c_void) -> NativeStatus {
-        let vm: *mut VM = vm_from_ctx(ctx);
-        let base = unsafe { al_rt_frame_base(vm) };
-        let n = small(unsafe { base.read() });
-        let args = [Value::small_int(n + 1).to_bits()];
-        unsafe { al_rt_tail_call(vm, 2, args.as_ptr(), 1) }
-    }
-
+    /// A native target comes back as its entry pointer with resume 0.
     #[test]
-    fn cross_fn_tail_call_collapses_and_the_trampoline_drives_the_target() {
-        // fn1: native, tail-calls fn2. fn2: interpreter-only identity.
-        let program = program_with(
-            Vec::new(),
-            vec![
-                (1, 1, vec![op(Op::Halt)]),
-                (1, 1, vec![op_arg(Op::PushLocal, 0), op(Op::Ret)]),
-            ],
-        );
-        let mut vm = native_caller_vm(program, 100);
-        publish_test_entry(&vm.program.native, FuncIdx::from_usize(1), tail_to_f2_entry);
-
-        let args = [Value::small_int(41).to_bits()];
-        let mut out = 0u64;
-        let status = unsafe { al_rt_call(&raw mut vm, 1, 1, args.as_ptr(), 1, &raw mut out) };
-
-        // f1 returned `TailCall` before f2 ran; the driver loop inside
-        // `al_rt_call` dispatched the collapsed frame, so only `Done` escapes.
-        assert_eq!(status, NativeStatus::Done);
-        assert_eq!(small(out), 42);
-        assert_eq!(vm.frames.len(), 1);
-        assert_eq!(vm.stack.len(), 0);
-        // Two applications, two reductions: the call and the tail call.
-        assert_eq!(vm.native_reds, 98);
+    fn prepare_call_transfers_to_a_native_callee() {
+        let program = program_with(Vec::new(), vec![(0, 0, vec![op(Op::Halt)])]);
+        let mut vm = test_vm(program);
+        vm.program
+            .native
+            .set_trampoline(test_trampoline as *const u8);
+        vm.program
+            .native
+            .set(crate::FuncIdx::from_usize(1), yield_entry as *const u8);
+        let p = unsafe { al_rt_prepare_call(&raw mut vm, 1, 3, std::ptr::null(), 0) };
+        assert!(std::ptr::eq(p.entry, yield_entry as *const u8));
+        assert_eq!(p.aux, 0, "fresh callee enters at its head");
     }
 
+    /// Budget exhaustion at the entry checkpoint: the callee frame is
+    /// consistent at ip 0, so a plain Yield unwinds and resume re-enters it.
     #[test]
-    fn tail_call_checkpoint_exhaustion_yields_the_collapsed_frame() {
-        let program = program_with(
-            Vec::new(),
-            vec![
-                (1, 1, vec![op(Op::Halt)]),
-                (1, 1, vec![op_arg(Op::PushLocal, 0), op(Op::Ret)]),
-            ],
-        );
-        // Budget 2 puts the yield exactly at the tail edge.
-        let mut vm = native_caller_vm(program, 2);
-        publish_test_entry(&vm.program.native, FuncIdx::from_usize(1), tail_to_f2_entry);
-
-        let args = [Value::small_int(41).to_bits()];
-        let mut out = 0u64;
-        let status = unsafe { al_rt_call(&raw mut vm, 1, 1, args.as_ptr(), 1, &raw mut out) };
-
-        // The caller frame was already collapsed, so the top frame is f2 at
-        // ip 0 with its argument in place.
-        assert_eq!(status, NativeStatus::Yield);
+    fn prepare_call_yields_on_an_exhausted_budget() {
+        let program = program_with(Vec::new(), vec![(0, 0, vec![op(Op::Halt)])]);
+        let mut vm = test_vm(program);
+        vm.native_reds = 0;
+        let p = unsafe { al_rt_prepare_call(&raw mut vm, 1, 3, std::ptr::null(), 0) };
+        assert!(p.entry.is_null());
+        assert_eq!(p.aux, NativeStatus::Yield as u64);
         assert_eq!(vm.frames.len(), 2);
-        assert_eq!(vm.frames[1].func_idx, 2);
-        assert_eq!(vm.frames[1].ip, 0);
-        assert_eq!(vm.frames[1].base_slot, 0);
-        assert_eq!(vm.stack.len(), 1);
-        assert_eq!(small(vm.stack[0].to_bits()), 42);
-        let resumed = vm.execute_slice().expect("resume must not error");
-        assert!(matches!(resumed, Step::Done));
-        assert_eq!(vm.stack.len(), 1);
-        assert_eq!(small(vm.stack[0].to_bits()), 42);
     }
 
+    /// `ret_transfer` pops the frame, delivers the result, and routes to the
+    /// parent: `Done` for an interpreted parent, the entry+resume pair for a
+    /// native one.
     #[test]
-    fn self_tail_checkpoint_charges_one_reduction_per_back_edge() {
-        let program = program_with(Vec::new(), vec![(1, 1, vec![op(Op::Halt)])]);
-        let mut vm = native_caller_vm(program, 5);
-        vm.frames.push(CallFrame {
-            func_idx: 1,
-            code_start: 2,
-            ip: 9, // stale; only a yield may (and must) reset it
-            base_slot: 0,
-            captures: Value::small_int(0),
-        });
-
-        // Budget left: keep looping, ip untouched.
-        assert_eq!(unsafe { al_rt_checkpoint(&raw mut vm) }, NativeStatus::Done);
-        assert_eq!(vm.native_reds, 4);
-        assert_eq!(vm.frames[1].ip, 9);
-
-        // Exhaustion: yield with the frame resumable from the top.
-        vm.native_reds = 1;
-        assert_eq!(
-            unsafe { al_rt_checkpoint(&raw mut vm) },
-            NativeStatus::Yield
-        );
-        assert_eq!(vm.frames[1].ip, 0);
-        assert!(vm.native_reds <= 0);
-    }
-
-    /// A compiled body stand-in for `fn f1() { loop { f2() } }` over an
-    /// interpreter-only f2.
-    extern "C" fn call_interp_forever_entry(ctx: *mut core::ffi::c_void) -> NativeStatus {
-        let vm: *mut VM = vm_from_ctx(ctx);
-        loop {
-            let mut out = 0u64;
-            let status = unsafe { al_rt_call(vm, 2, 0, std::ptr::null(), 0, &raw mut out) };
-            if status != NativeStatus::Done {
-                return status;
-            }
-        }
-    }
-
-    #[test]
-    fn interp_callee_spends_the_native_callers_budget() {
-        // f1: native, loops calling f2. f2: interpreter-only, one `CallKnown`
-        // to f3 per invocation. f3: returns a constant.
-        let program = program_with(
-            vec![Value::small_int(7)],
-            vec![
-                (0, 0, vec![op(Op::Halt)]),
-                (0, 0, vec![op_arg(Op::CallKnown, 3), op(Op::Ret)]),
-                (0, 0, vec![op_arg(Op::PushConst, 0), op(Op::Ret)]),
-            ],
-        );
-        let mut vm = native_caller_vm(program, 10);
-        publish_test_entry(
-            &vm.program.native,
-            FuncIdx::from_usize(1),
-            call_interp_forever_entry,
-        );
+    fn ret_transfer_routes_by_parent_engine() {
+        let program = program_with(Vec::new(), vec![(0, 0, vec![op(Op::Halt)])]);
+        let mut vm = test_vm(program);
+        // Interpreted parent (main): plain Done.
         vm.frames.push(CallFrame {
             func_idx: 1,
             code_start: 2,
@@ -1208,164 +766,45 @@ mod tests {
             base_slot: 0,
             captures: Value::small_int(0),
         });
+        let p = unsafe { al_rt_ret_transfer(&raw mut vm, Value::small_int(9).to_bits()) };
+        assert!(p.entry.is_null());
+        assert_eq!(p.aux, NativeStatus::Done as u64);
+        assert_eq!(vm.frames.len(), 1);
+        assert_eq!(small(unsafe { al_rt_pop(&raw mut vm) }), 9);
 
-        let status = vm.drive_top_frame();
-
-        // Each iteration costs two reductions, so a budget of 10 dies
-        // mid-callee on the fifth. If each native→interp re-entry got a
-        // fresh budget, the yield would land on the tenth entry checkpoint
-        // with f2's frame on top instead.
-        assert_eq!(status, NativeStatus::Yield);
-        assert_eq!(vm.frames.len(), 4);
-        assert_eq!(vm.frames.last().unwrap().func_idx, 3);
-        assert_eq!(vm.frames.last().unwrap().ip, 0);
-        assert_eq!(vm.native_floor, 0);
+        // Native parent: its entry plus its stored resume ordinal.
+        vm.program
+            .native
+            .set_trampoline(test_trampoline as *const u8);
+        vm.program
+            .native
+            .set(crate::FuncIdx::from_usize(0), yield_entry as *const u8);
+        vm.frames[0].ip = 5;
+        vm.frames.push(CallFrame {
+            func_idx: 1,
+            code_start: 2,
+            ip: 0,
+            base_slot: 0,
+            captures: Value::small_int(0),
+        });
+        let p = unsafe { al_rt_ret_transfer(&raw mut vm, Value::small_int(8).to_bits()) };
+        assert!(std::ptr::eq(p.entry, yield_entry as *const u8));
+        assert_eq!(p.aux, 5, "parent resumes at its stored continuation");
+        assert_eq!(small(unsafe { al_rt_pop(&raw mut vm) }), 8);
     }
 
-    use crate::bytecode::value::take_freed_objects;
-
+    /// `prepare_tail` collapses in place: same frame count, new function,
+    /// ip back to 0.
     #[test]
-    fn make_closure_transfers_capture_ownership() {
-        let mut vm = halt_test_vm();
-        let big = Value::int_in(&mut vm.heap, i64::MAX); // rc 1
-        let word = ManuallyDrop::new(big.clone()).to_bits(); // rc 2
-        take_freed_objects();
-        let bits = unsafe { al_rt_make_closure(&raw mut vm, 7, &word, 1) };
-        // SAFETY: the shim returned one owned reference to a fresh closure.
-        let cl = unsafe { Value::from_bits(bits) };
-        {
-            let cr = cl.as_closure().expect("a closure cell");
-            assert_eq!(cr.func_idx(), 7);
-            assert_eq!(cr.captures().len(), 1);
-            assert_eq!(cr.captures()[0].as_int(), Some(i64::MAX));
-        }
-        // The shim's internal retain/release pair cancels: nothing freed yet.
-        assert_eq!(take_freed_objects(), 0);
-        drop(cl); // frees the cell, releasing its capture reference
-        drop(big); // the last reference to the box
-        assert_eq!(take_freed_objects(), 2);
-    }
-
-    #[test]
-    fn dynamic_call_dispatches_through_the_closure_func_idx() {
+    fn prepare_tail_collapses_the_frame_in_place() {
         let program = program_with(Vec::new(), vec![(1, 1, vec![op(Op::Halt)])]);
-        let mut vm = native_caller_vm(program, 100);
-        publish_test_entry(&vm.program.native, FuncIdx::from_usize(1), add_five_entry);
-
-        let cl = Value::closure_in(&mut vm.heap, 1, &[]);
-        let args = [Value::small_int(37).to_bits()];
-        let mut out = 0u64;
-        take_freed_objects();
-        let status = unsafe {
-            al_rt_call_value(
-                &raw mut vm,
-                ManuallyDrop::new(cl).to_bits(),
-                1,
-                args.as_ptr(),
-                1,
-                &raw mut out,
-            )
-        };
-
-        assert_eq!(status, NativeStatus::Done);
-        assert_eq!(small(out), 42);
-        assert_eq!(vm.frames.len(), 1);
-        assert_eq!(vm.frames[0].ip, 1);
-        assert_eq!(vm.stack.len(), 0);
-        assert_eq!(vm.native_reds, 99);
-        // The frame pop released the closure's only reference.
-        assert_eq!(take_freed_objects(), 1);
-    }
-
-    #[test]
-    fn dynamic_call_checks_the_callee_and_arity() {
-        let program = program_with(Vec::new(), vec![(1, 1, vec![op(Op::Halt)])]);
-        let mut vm = native_caller_vm(program, 100);
-
-        // Not a closure.
-        let mut out = 0u64;
-        let status = unsafe {
-            al_rt_call_value(
-                &raw mut vm,
-                Value::small_int(3).to_bits(),
-                1,
-                std::ptr::null(),
-                0,
-                &raw mut out,
-            )
-        };
-        assert_eq!(status, NativeStatus::Error);
-        assert!(matches!(
-            vm.outcome_from_status(status),
-            Err(VmError::Internal(_))
-        ));
-
-        // Arity mismatch: fn 1 takes one argument, none supplied.
-        let cl = Value::closure_in(&mut vm.heap, 1, &[]);
-        let status = unsafe {
-            al_rt_call_value(
-                &raw mut vm,
-                ManuallyDrop::new(cl).to_bits(),
-                1,
-                std::ptr::null(),
-                0,
-                &raw mut out,
-            )
-        };
-        assert_eq!(status, NativeStatus::Error);
-        assert!(matches!(
-            vm.outcome_from_status(status),
-            Err(VmError::Internal(_))
-        ));
-        // No frame was pushed by either failure.
-        assert_eq!(vm.frames.len(), 1);
-    }
-
-    #[test]
-    fn dynamic_tail_call_collapses_with_the_closure_handle() {
-        // fn1: interpreter-only identity.
-        let program = program_with(
-            Vec::new(),
-            vec![(1, 1, vec![op_arg(Op::PushLocal, 0), op(Op::Ret)])],
-        );
-        let mut vm = native_caller_vm(program, 100);
-
-        let cl = Value::closure_in(&mut vm.heap, 1, &[]);
-        let args = [Value::small_int(37).to_bits()];
-        take_freed_objects();
-        let status = unsafe {
-            al_rt_tail_call_value(
-                &raw mut vm,
-                ManuallyDrop::new(cl).to_bits(),
-                args.as_ptr(),
-                1,
-            )
-        };
-        assert_eq!(status, NativeStatus::TailCall);
-        assert_eq!(vm.frames.len(), 1);
+        let mut vm = test_vm(program);
+        let args = [Value::small_int(4).to_bits()];
+        let p = unsafe { al_rt_prepare_tail(&raw mut vm, 1, args.as_ptr(), 1) };
+        assert!(p.entry.is_null());
+        assert_eq!(p.aux, NativeStatus::Done as u64);
+        assert_eq!(vm.frames.len(), 1, "tail call must not grow the frames");
         assert_eq!(vm.frames[0].func_idx, 1);
         assert_eq!(vm.frames[0].ip, 0);
-        assert!(vm.frames[0].captures.as_closure().is_some());
-        assert_eq!(take_freed_objects(), 0);
-
-        let status = vm.drive_top_frame();
-        assert_eq!(status, NativeStatus::Done);
-        assert_eq!(vm.frames.len(), 0);
-        assert_eq!(vm.stack.len(), 1);
-        assert_eq!(small(vm.stack[0].to_bits()), 37);
-        // The frame pop released the handle.
-        assert_eq!(take_freed_objects(), 1);
-    }
-
-    #[test]
-    fn rt_symbols_are_unique_and_non_null() {
-        let syms = rt_symbols();
-        for (i, (name, addr)) in syms.iter().enumerate() {
-            assert!(!addr.is_null(), "{name} has a null address");
-            assert!(
-                syms[..i].iter().all(|(n, _)| n != name),
-                "duplicate symbol {name}"
-            );
-        }
     }
 }

@@ -83,9 +83,9 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), String> {
         close_type_info(&mut engine, ti);
     }
     for iface in interfaces.values_mut() {
-        for ti in iface.types.values_mut() {
-            if let TypeBody::Alias { .. } = ti.body {
-                close_type_info(&mut engine, ti);
+        for et in iface.types.values_mut() {
+            if let TypeBody::Alias { .. } = et.info.body {
+                close_type_info(&mut engine, &mut et.info);
             }
         }
     }

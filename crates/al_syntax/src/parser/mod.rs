@@ -1714,6 +1714,21 @@ impl Parser {
         let span = self.current_span();
         let name = self.eat_name("Expected type name")?;
 
+        // `module.Type` — the first name is an import qualifier, the second
+        // names the type inside that module.
+        let mut qualifier: Option<ast::Identifier> = None;
+        let mut identifier = ast::Identifier { name, span };
+        if self.kind() == Kind::PuncDot {
+            self.eat(Kind::PuncDot)?;
+            let member_span = self.current_span();
+            let member = self.eat_name("Expected type name after '.'")?;
+            qualifier = Some(identifier);
+            identifier = ast::Identifier {
+                name: member,
+                span: member_span,
+            };
+        }
+
         let mut type_args: Vec<ast::TypeIdentifier> = Vec::new();
         if self.kind() == Kind::PuncOpenParen && !self.has_newline_before_current() {
             type_args = self.parse_comma_list(Kind::PuncOpenParen, Kind::PuncCloseParen, |p| {
@@ -1723,7 +1738,8 @@ impl Parser {
 
         Ok(ast::TypeIdentifier {
             kind: ast::TypeKind::NamedType(ast::NamedType {
-                identifier: ast::Identifier { name, span },
+                qualifier,
+                identifier,
                 type_args,
             }),
             span: self.span_from(span),
@@ -2591,6 +2607,14 @@ mod tests {
         assert_no_errors("f(1, 2)");
         assert_no_errors("a.f(1).g");
         assert_no_errors("get_fn()(1, 2)");
+    }
+
+    #[test]
+    fn test_qualified_types() {
+        assert_no_errors("type C = http.Method");
+        assert_no_errors("type C = mod.Wrapper(Int)");
+        assert_no_errors("fn f(m http.Method) http.Method { m }");
+        assert_no_errors("fn g(xs fn(a) mod.Out) { xs }");
     }
 
     #[test]

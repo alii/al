@@ -243,7 +243,9 @@ fn emit_pools(out: &mut String, p: &FlatPools) {
         "STypeExport",
         p.stypeexport_pool.iter().map(|e| {
             lit!(STypeExport: name = format_args!("{:?}", e.name),
-                 info = format_args!("{:?}", e.info))
+                 info = format_args!("{:?}", e.info),
+                 def = def_lit(e.def),
+                 doc = format_args!("{:?}", e.doc))
         }),
     );
     emit_static_slice(

@@ -143,12 +143,14 @@ pub fn jit_module() -> Result<JITModule, JitError> {
 pub fn native_entry_signature(module: &JITModule) -> Signature {
     let mut sig = module.make_signature();
     // The tail calling convention is what admits `return_call`: an AL-level
-    // tail transfer between compiled bodies stays in machine code instead of
+    // transfer between compiled bodies stays in machine code instead of
     // bouncing through the trampoline. Rust never calls a tail-cc pointer
     // directly — every entry goes through [`entry_trampoline`].
     sig.call_conv = CallConv::Tail;
     sig.params
         .push(AbiParam::new(module.target_config().pointer_type()));
+    // The resume ordinal: 0 enters at the head, k enters continuation k.
+    sig.params.push(AbiParam::new(types::I64));
     sig.returns.push(AbiParam::new(types::I64));
     sig
 }
@@ -164,6 +166,7 @@ pub fn entry_trampoline(module: &mut JITModule) -> Result<FuncId, JitError> {
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(ptr)); // ctx
     sig.params.push(AbiParam::new(ptr)); // tail-cc entry to invoke
+    sig.params.push(AbiParam::new(types::I64)); // resume ordinal
     sig.returns.push(AbiParam::new(types::I64));
     let id = module.declare_function("al_entry_trampoline", Linkage::Export, &sig)?;
     let mut ctx = module.make_context();
@@ -178,7 +181,9 @@ pub fn entry_trampoline(module: &mut JITModule) -> Result<FuncId, JitError> {
         b.seal_block(entry);
         let params = b.block_params(entry).to_vec();
         let sig_ref = b.import_signature(callee_sig);
-        let call = b.ins().call_indirect(sig_ref, params[1], &[params[0]]);
+        let call = b
+            .ins()
+            .call_indirect(sig_ref, params[1], &[params[0], params[2]]);
         let status = b.inst_results(call)[0];
         b.ins().return_(&[status]);
         b.finalize();
@@ -220,17 +225,16 @@ pub struct RuntimeFns {
     /// `al_shim_mod_int(a, b) -> r` — unboxed remainder with interpreter
     /// totality.
     pub mod_int: FuncId,
-    /// `al_rt_enter_interp(vmx) -> status` — run the already-pushed callee
-    /// frame under the interpreter's frame floor. Used directly only when the
-    /// emitter has done its own frame handshake.
-    pub enter_interp: FuncId,
-    /// `al_rt_call(vmx, target, resume_ip, args, argc, out) -> status` —
-    /// known call: frame handshake, entry checkpoint, table dispatch with
-    /// frame-floor fallback, result to `out` on `Done`.
-    pub rt_call: FuncId,
-    /// `al_rt_tail_call(vmx, target, args, argc) -> status` — cross-function
-    /// tail call. Compiled tail sites are `return al_rt_tail_call(...)`.
-    pub rt_tail_call: FuncId,
+    /// `al_rt_prepare_call(vmx, target, resume, args, argc) -> (entry, aux)`
+    /// — non-tail call as a transfer decision.
+    pub prepare_call: FuncId,
+    /// `al_rt_prepare_tail(vmx, target, args, argc) -> (entry, aux)`.
+    pub prepare_tail: FuncId,
+    /// `al_rt_ret_transfer(vmx, result) -> (entry, aux)` — the compiled
+    /// epilogue as a transfer decision.
+    pub ret_transfer: FuncId,
+    /// `al_rt_pop(vmx) -> bits` — the callee result at a continuation.
+    pub rt_pop: FuncId,
     /// `al_rt_checkpoint(vmx) -> status` — the reds checkpoint at a
     /// self-tail-call back-edge (`Done` = keep looping, `Yield` = unwind
     /// with the frame resumable at ip 0).
@@ -238,9 +242,6 @@ pub struct RuntimeFns {
     /// `al_rt_frame_base(vmx) -> ptr` — address of the top frame's slot 0;
     /// re-fetched after any stack-growing seam.
     pub rt_frame_base: FuncId,
-    /// `al_rt_ret(vmx, result)` — the compiled epilogue: pop frame, truncate
-    /// to its base, push the result.
-    pub rt_ret: FuncId,
 }
 
 impl RuntimeFns {
@@ -252,8 +253,8 @@ impl RuntimeFns {
         // declare time instead, so drift is an error with the name in it.
         let registered: std::collections::HashSet<&'static str> =
             runtime_symbols().into_iter().map(|(n, _)| n).collect();
-        let mut import =
-            |name: &'static str, params: &[Type], ret: Option<Type>| -> Result<FuncId, JitError> {
+        let mut import_rets =
+            |name: &'static str, params: &[Type], rets: &[Type]| -> Result<FuncId, JitError> {
                 if !registered.contains(name) {
                     return Err(JitError::Host(format!(
                         "runtime helper {name} is declared but not in the symbol table"
@@ -261,27 +262,32 @@ impl RuntimeFns {
                 }
                 let mut sig = module.make_signature();
                 sig.params.extend(params.iter().map(|&t| AbiParam::new(t)));
-                sig.returns.extend(ret.map(AbiParam::new));
+                sig.returns.extend(rets.iter().map(|&t| AbiParam::new(t)));
                 Ok(module.declare_function(name, Linkage::Import, &sig)?)
             };
+
         Ok(RuntimeFns {
-            release_at_zero: import(NATIVE_RELEASE_AT_ZERO_SYMBOL, &[ptr], None)?,
-            int_box: import("al_shim_int_box", &[ptr, i64t], Some(i64t))?,
-            int_unbox: import("al_shim_int_unbox", &[i64t], Some(i64t))?,
-            add_int_val: import("al_shim_add_int_val", &[ptr, i64t, i64t], Some(i64t))?,
-            sub_int_val: import("al_shim_sub_int_val", &[ptr, i64t, i64t], Some(i64t))?,
-            mul_int_val: import("al_shim_mul_int_val", &[ptr, i64t, i64t], Some(i64t))?,
-            div_int_val: import("al_shim_div_int_val", &[ptr, i64t, i64t], Some(i64t))?,
-            mod_int_val: import("al_shim_mod_int_val", &[ptr, i64t, i64t], Some(i64t))?,
-            neg_int_val: import("al_shim_neg_int_val", &[ptr, i64t], Some(i64t))?,
-            div_int: import("al_shim_div_int", &[i64t, i64t], Some(i64t))?,
-            mod_int: import("al_shim_mod_int", &[i64t, i64t], Some(i64t))?,
-            enter_interp: import("al_rt_enter_interp", &[ptr], Some(i64t))?,
-            rt_call: import("al_rt_call", &[ptr, i64t, i64t, ptr, i64t, ptr], Some(i64t))?,
-            rt_tail_call: import("al_rt_tail_call", &[ptr, i64t, ptr, i64t], Some(i64t))?,
-            rt_checkpoint: import("al_rt_checkpoint", &[ptr], Some(i64t))?,
-            rt_frame_base: import("al_rt_frame_base", &[ptr], Some(ptr))?,
-            rt_ret: import("al_rt_ret", &[ptr, i64t], None)?,
+            release_at_zero: import_rets(NATIVE_RELEASE_AT_ZERO_SYMBOL, &[ptr], &[])?,
+            int_box: import_rets("al_shim_int_box", &[ptr, i64t], &[i64t])?,
+            int_unbox: import_rets("al_shim_int_unbox", &[i64t], &[i64t])?,
+            add_int_val: import_rets("al_shim_add_int_val", &[ptr, i64t, i64t], &[i64t])?,
+            sub_int_val: import_rets("al_shim_sub_int_val", &[ptr, i64t, i64t], &[i64t])?,
+            mul_int_val: import_rets("al_shim_mul_int_val", &[ptr, i64t, i64t], &[i64t])?,
+            div_int_val: import_rets("al_shim_div_int_val", &[ptr, i64t, i64t], &[i64t])?,
+            mod_int_val: import_rets("al_shim_mod_int_val", &[ptr, i64t, i64t], &[i64t])?,
+            neg_int_val: import_rets("al_shim_neg_int_val", &[ptr, i64t], &[i64t])?,
+            div_int: import_rets("al_shim_div_int", &[i64t, i64t], &[i64t])?,
+            mod_int: import_rets("al_shim_mod_int", &[i64t, i64t], &[i64t])?,
+            prepare_call: import_rets(
+                "al_rt_prepare_call",
+                &[ptr, i64t, i64t, ptr, i64t],
+                &[ptr, i64t],
+            )?,
+            prepare_tail: import_rets("al_rt_prepare_tail", &[ptr, i64t, ptr, i64t], &[ptr, i64t])?,
+            ret_transfer: import_rets("al_rt_ret_transfer", &[ptr, i64t], &[ptr, i64t])?,
+            rt_pop: import_rets("al_rt_pop", &[ptr], &[i64t])?,
+            rt_checkpoint: import_rets("al_rt_checkpoint", &[ptr], &[i64t])?,
+            rt_frame_base: import_rets("al_rt_frame_base", &[ptr], &[ptr])?,
         })
     }
 }
@@ -412,22 +418,17 @@ mod tests {
             native_shims::al_shim_neg_int_val;
         let div_int: extern "C" fn(i64, i64) -> i64 = native_shims::al_shim_div_int;
         let mod_int: extern "C" fn(i64, i64) -> i64 = native_shims::al_shim_mod_int;
-        let enter_interp: unsafe extern "C" fn(*mut VM) -> NativeStatus =
-            native::al_rt_enter_interp;
-        let rt_call: unsafe extern "C" fn(
-            *mut VM,
-            i64,
-            i64,
-            *const u64,
-            i64,
-            *mut u64,
-        ) -> NativeStatus = native::al_rt_call;
-        let rt_tail_call: unsafe extern "C" fn(*mut VM, i64, *const u64, i64) -> NativeStatus =
-            native::al_rt_tail_call;
+        type Prepared2 = crate::vm::native::PreparedCall;
+        let prepare_call: unsafe extern "C" fn(*mut VM, i64, i64, *const u64, i64) -> Prepared2 =
+            native::al_rt_prepare_call;
+        let prepare_tail: unsafe extern "C" fn(*mut VM, i64, *const u64, i64) -> Prepared2 =
+            native::al_rt_prepare_tail;
+        let ret_transfer: unsafe extern "C" fn(*mut VM, u64) -> Prepared2 =
+            native::al_rt_ret_transfer;
+        let rt_pop: unsafe extern "C" fn(*mut VM) -> u64 = native::al_rt_pop;
         let rt_checkpoint: unsafe extern "C" fn(*mut VM) -> NativeStatus = native::al_rt_checkpoint;
         let rt_frame_base: unsafe extern "C" fn(*mut VM) -> *mut u64 = native::al_rt_frame_base;
-        let rt_ret: unsafe extern "C" fn(*mut VM, u64) = native::al_rt_ret;
-        let rows: [(FuncId, *const u8, Vec<Type>, Option<Type>); 17] = [
+        let rows: [(FuncId, *const u8, Vec<Type>, Option<Type>); 14] = [
             (fns.release_at_zero, release as *const u8, vec![ptr], None),
             (
                 fns.int_box,
@@ -489,24 +490,7 @@ mod tests {
                 vec![i64t, i64t],
                 Some(i64t),
             ),
-            (
-                fns.enter_interp,
-                enter_interp as *const u8,
-                vec![ptr],
-                Some(i64t),
-            ),
-            (
-                fns.rt_call,
-                rt_call as *const u8,
-                vec![ptr, i64t, i64t, ptr, i64t, ptr],
-                Some(i64t),
-            ),
-            (
-                fns.rt_tail_call,
-                rt_tail_call as *const u8,
-                vec![ptr, i64t, ptr, i64t],
-                Some(i64t),
-            ),
+            (fns.rt_pop, rt_pop as *const u8, vec![ptr], Some(i64t)),
             (
                 fns.rt_checkpoint,
                 rt_checkpoint as *const u8,
@@ -519,7 +503,6 @@ mod tests {
                 vec![ptr],
                 Some(ptr),
             ),
-            (fns.rt_ret, rt_ret as *const u8, vec![ptr, i64t], None),
         ];
         for (id, addr, params, ret) in rows {
             let decl = module.declarations().get_function_decl(id);
@@ -542,6 +525,43 @@ mod tests {
                 *registered, addr,
                 "{name} resolves to a different function than the one whose ABI is pinned here"
             );
+        }
+
+        // The `PreparedCall`-returning helpers: two return registers.
+        let rows2: [(FuncId, *const u8, Vec<Type>); 3] = [
+            (
+                fns.prepare_call,
+                prepare_call as *const u8,
+                vec![ptr, i64t, i64t, ptr, i64t],
+            ),
+            (
+                fns.prepare_tail,
+                prepare_tail as *const u8,
+                vec![ptr, i64t, ptr, i64t],
+            ),
+            (fns.ret_transfer, ret_transfer as *const u8, vec![ptr, i64t]),
+        ];
+        for (id, addr, params) in rows2 {
+            let decl = module.declarations().get_function_decl(id);
+            let name = decl.name.clone().unwrap_or_default();
+            let declared_params: Vec<Type> =
+                decl.signature.params.iter().map(|p| p.value_type).collect();
+            assert_eq!(
+                declared_params, params,
+                "{name}: declared CLIF params drifted"
+            );
+            let rets: Vec<Type> = decl
+                .signature
+                .returns
+                .iter()
+                .map(|p| p.value_type)
+                .collect();
+            assert_eq!(rets, vec![ptr, i64t], "{name}: PreparedCall return drifted");
+            let (_, registered) = syms
+                .iter()
+                .find(|(n, _)| *n == name)
+                .unwrap_or_else(|| panic!("declared import {name} is not in runtime_symbols()"));
+            assert_eq!(*registered, addr, "{name} address drifted");
         }
     }
 
@@ -670,6 +690,7 @@ mod tests {
                 std::ptr::null_mut(),
                 tramp,
                 entry,
+                0,
             )
         };
         assert_eq!(status, NativeStatus::Done);

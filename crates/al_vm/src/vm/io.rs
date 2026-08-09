@@ -1006,7 +1006,6 @@ mod tests {
             frames: Vec::new(),
             is_main: false,
             pid: 0,
-            native_floor: 0,
             native_reds: 0,
             native_pending: None,
         };

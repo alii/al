@@ -65,11 +65,8 @@ fn compile_with_backend(src: &str) -> (bytecode::Program, Vec<String>) {
     let mut module = vm::jit::jit_module().expect("jit module");
     let mut defs = Vec::new();
     let plans = plans.take();
-    let native = clif::native_set(&plans, &program);
     for plan in &plans {
-        if let Some(body) =
-            clif::compile(&mut module, plan, &native, &program).expect("clif define")
-        {
+        if let Some(body) = clif::compile(&mut module, plan, &program).expect("clif define") {
             let name = program
                 .functions
                 .get(body.func_idx.index())

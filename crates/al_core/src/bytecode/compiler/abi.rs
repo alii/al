@@ -117,7 +117,7 @@ impl Compiler {
             // From here on the module is present, so a missing type or
             // constructor is stdlib drift: the AL source no longer matches
             // this registry. Surface it, naming the slot.
-            let Some(ti) = iface.types.get(type_name).copied() else {
+            let Some(ti) = iface.types.get(type_name).map(|et| et.info) else {
                 self.abi_drift(slot, type_name, ctor, "type not found");
                 continue;
             };

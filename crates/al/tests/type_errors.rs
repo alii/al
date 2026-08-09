@@ -316,3 +316,60 @@ fn ctor_spread_solves_type_params_before_lambda_args_are_hinted() {
         "2\n",
     );
 }
+
+// A top-level value declaration shadows an imported module qualifier
+// (`resolve_qualified_member` checks `env` before `imported_qualifiers`), so
+// `name.member` resolves through the declaration. Both the decl site and a
+// failed member access must say so.
+reject_case! {
+    shadowing_fn_failed_field_access_names_the_shadowed_module: (
+        "import al/http\n\npub fn http() {\n    http.Unsized\n}\n",
+        "note: 'http' here is a local binding that shadows the imported module 'al/http'",
+    ),
+    fn_shadowing_import_qualifier_gets_decl_site_hint: (
+        "import al/http\n\npub fn http() {\n    http.Unsized\n}\n",
+        "'http' shadows the imported module 'al/http'",
+    ),
+}
+
+ok_case! {
+    // The decl-site shadow warning is a hint, not an error: a module that
+    // never touches the shadowed qualifier still checks.
+    shadowing_import_qualifier_alone_is_not_an_error: (
+        "import al/http\n\npub fn http() {\n    2\n}\n",
+    ),
+    // Renaming the value away from the qualifier restores qualified access.
+    qualified_member_access_works_when_not_shadowed: (
+        "import al/http\n\npub fn serve() {\n    http.Unsized\n}\n",
+    ),
+}
+
+// Qualified type identifiers: `module.Type` resolves through the mangled
+// `qualifier.Name` keys `process_import` registers for every public type of
+// an imported module.
+ok_case! {
+    qualified_type_in_alias_position: (
+        "import al/http\n\ntype C = http.Method\n\npub fn new() {\n    2\n}\n",
+    ),
+    qualified_type_in_annotation_position: (
+        "import al/http\n\npub fn f(m http.Method) http.Method {\n    m\n}\n",
+    ),
+    qualified_type_through_import_alias: (
+        "import al/http as h\n\ntype C = h.Method\n\npub fn new() {\n    2\n}\n",
+    ),
+}
+
+reject_case! {
+    unknown_qualified_type_names_module_and_member: (
+        "import al/http\n\ntype C = http.Nope\n",
+        "Unknown type 'http.Nope' — check that 'http' is imported and exports a type 'Nope'",
+    ),
+    qualified_type_arity_error_uses_qualified_name: (
+        "import al/http\n\ntype C = http.Method(Int)\n",
+        "Type 'http.Method' expects 0 type arguments, got 1",
+    ),
+    unimported_qualifier_in_type_position_is_unknown: (
+        "type C = http.Method\n",
+        "Unknown type 'http.Method'",
+    ),
+}

@@ -407,10 +407,9 @@ fn publish_native(plans: Vec<clif::NativePlan>, program: &bytecode::Program) {
             return;
         }
     };
-    let native = clif::native_set(&plans, program);
     let mut defs = Vec::with_capacity(plans.len());
     for plan in &plans {
-        match clif::compile(&mut module, plan, &native, program) {
+        match clif::compile(&mut module, plan, program) {
             Ok(Some(body)) => {
                 let name = program
                     .functions

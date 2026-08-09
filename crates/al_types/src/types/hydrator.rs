@@ -20,6 +20,10 @@ pub struct TypeRefHit {
     pub name: StrId,
     /// Owning module path, interned in `InferEngine.str_slices`.
     pub module: ArenaSlice<pool::StrSlices>,
+    /// `(name, span)` of the module qualifier when the occurrence was written
+    /// `module.Type`; the drain records a `Qualifier` occurrence from it so
+    /// the import registers as used and the qualifier resolves in the editor.
+    pub qualifier: Option<(StrId, Span)>,
 }
 
 /// Where the annotation being hydrated appears. Each position answers two
@@ -176,7 +180,11 @@ impl Hydrator {
         let name = &nt.identifier.name;
         let name_span = nt.identifier.span;
 
-        if let Some(&(v, _)) = self.created.get(name) {
+        // A qualified name can only be a nominal type in the named module:
+        // the type-variable paths below are for bare lowercase names.
+        if nt.qualifier.is_none()
+            && let Some(&(v, _)) = self.created.get(name)
+        {
             if !nt.type_args.is_empty() {
                 return Err(err(
                     span,
@@ -192,7 +200,7 @@ impl Hydrator {
         }
 
         // Lowercase identifiers are type variables.
-        if !is_type_name(name) {
+        if nt.qualifier.is_none() && !is_type_name(name) {
             if !arg_tys.is_empty() {
                 return Err(err(
                     span,
@@ -210,17 +218,33 @@ impl Hydrator {
             return Ok(t);
         }
 
-        match env.lookup_type_info(name) {
+        // Imported modules register their public types under the mangled
+        // `qualifier.Name` key (see `process_import`), so a qualified
+        // reference resolves through the same table as a bare one. Type names
+        // cannot contain '.', so mangled keys never collide with local types.
+        let (lookup_key, display) = match &nt.qualifier {
+            Some(q) => {
+                let full = format!("{}.{}", q.name, name);
+                (full.clone(), full)
+            }
+            None => (name.clone(), name.clone()),
+        };
+
+        match env.lookup_type_info(&lookup_key) {
             Some(ti) => {
                 let arity = ti.arity();
                 if arg_tys.len() != arity {
-                    return Err(arity_error(span, name, arity, arg_tys.len()));
+                    return Err(arity_error(span, &display, arity, arg_tys.len()));
                 }
                 // Recording-only: the produced `Ty` below is unchanged.
                 self.type_refs.push(TypeRefHit {
                     span: name_span,
                     name: ti.name,
                     module: ti.module,
+                    qualifier: nt
+                        .qualifier
+                        .as_ref()
+                        .map(|q| (engine.intern(&q.name), q.span)),
                 });
                 match ti.body {
                     TypeBody::Alias { target } => {
@@ -233,7 +257,16 @@ impl Hydrator {
                     _ => Ok(engine.mk_con_id(ti.id, ti.name, &arg_tys)),
                 }
             }
-            None => Err(err(name_span, format!("Unknown type '{}'", name))),
+            None => Err(err(
+                name_span,
+                match &nt.qualifier {
+                    Some(q) => format!(
+                        "Unknown type '{display}' — check that '{}' is imported and exports a type '{}'",
+                        q.name, name
+                    ),
+                    None => format!("Unknown type '{}'", name),
+                },
+            )),
         }
     }
 }

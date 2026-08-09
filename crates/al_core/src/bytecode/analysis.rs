@@ -44,7 +44,7 @@ use petgraph::stable_graph::{NodeIndex, StableGraph};
 use super::Op;
 use super::compiler::{Compiler, ToplevelDecl};
 use crate::ast;
-use crate::module::{self, ExportedValue, ModuleInterface};
+use crate::module::{self, ExportedType, ExportedValue, ModuleInterface};
 use crate::reference::{DefId, DefinitionKind};
 use crate::span::Span;
 use crate::type_def::TypeId;
@@ -270,6 +270,7 @@ impl Compiler {
                             ast::Declaration::Function(fd) => {
                                 self.validate_attributes(&fd.attributes, in_stdlib, AttrTarget::Fn);
                                 if !check_duplicate(self, &mut seen_values, &fd.identifier) {
+                                    self.warn_shadowed_qualifier(&fd.identifier);
                                     // `@vm` fns carry no AL body: siphon them
                                     // off so every surviving `Decl::Fn` holds
                                     // a real expression body.
@@ -294,6 +295,7 @@ impl Compiler {
                             }
                             ast::Declaration::Const(cb) => {
                                 if !check_duplicate(self, &mut seen_values, &cb.identifier) {
+                                    self.warn_shadowed_qualifier(&cb.identifier);
                                     decls.push(Decl::Const {
                                         cb,
                                         is_pub: is_public,
@@ -807,7 +809,19 @@ impl Compiler {
         else {
             // Aliases and externals have no constructors; just export the type info.
             let ti = export_id.and_then(|id| self.env.lookup_type_info_by_id(id));
-            export_type(iface.as_deref_mut(), &td.identifier.name, is_public, ti);
+            let def = DefinitionLocation::new(
+                td.identifier.span,
+                self.current_module_slice(),
+                EntityKind::Type,
+            );
+            export_type(
+                iface.as_deref_mut(),
+                &td.identifier.name,
+                is_public,
+                ti,
+                Some(def),
+                &td.doc,
+            );
             return;
         };
         let ctors_public = is_public && !*opaque;
@@ -924,7 +938,19 @@ impl Compiler {
             .set_type_body(type_id, TypeBody::Custom { variants });
 
         let ti = self.env.lookup_type_info_by_id(type_id);
-        export_type(iface.as_deref_mut(), type_name, is_public, ti);
+        let def = DefinitionLocation::new(
+            td.identifier.span,
+            self.current_module_slice(),
+            EntityKind::Type,
+        );
+        export_type(
+            iface.as_deref_mut(),
+            type_name,
+            is_public,
+            ti,
+            Some(def),
+            &td.doc,
+        );
     }
 }
 
@@ -990,11 +1016,20 @@ fn export_type(
     name: &str,
     is_pub: bool,
     ti: Option<TypeInfo>,
+    def: Option<DefinitionLocation>,
+    doc: &Option<String>,
 ) {
     let Some(iface) = iface else { return };
     if is_pub {
         if let Some(ti) = ti {
-            iface.types.insert(name.to_string(), ti);
+            iface.types.insert(
+                name.to_string(),
+                ExportedType {
+                    info: ti,
+                    def,
+                    doc: doc.clone(),
+                },
+            );
         }
     } else {
         iface.private_names.insert(name.to_string());
@@ -1037,7 +1072,12 @@ fn check_reserved(c: &mut Compiler, id: &ast::Identifier, in_prelude: bool) {
 fn collect_type_ast_deps<'a>(t: &'a ast::TypeIdentifier, out: &mut Vec<&'a str>) {
     match &t.kind {
         ast::TypeKind::NamedType(nt) => {
-            out.push(nt.identifier.name.as_str());
+            // A qualified `module.Type` lives in another module, so it can
+            // never be a dependency edge onto a local declaration; pushing
+            // the bare member name would alias any same-named local type.
+            if nt.qualifier.is_none() {
+                out.push(nt.identifier.name.as_str());
+            }
             for a in &nt.type_args {
                 collect_type_ast_deps(a, out);
             }

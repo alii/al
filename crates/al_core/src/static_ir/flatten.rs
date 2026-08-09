@@ -102,10 +102,16 @@ impl FlatPools {
     fn flatten_module(&mut self, key: &str, iface: &ModuleInterface) {
         let path = self.push_str_slice(iface.path.iter().cloned());
         let t_start = self.stypeexport_pool.len() as u32;
-        for (n, ti) in &iface.types {
-            let info = self.push_typeinfo(*ti);
+        for (n, et) in &iface.types {
+            let info = self.push_typeinfo(et.info);
             let name = self.intern(n);
-            self.stypeexport_pool.push(STypeExport { name, info });
+            let doc = et.doc.as_deref().map(|d| self.intern(d));
+            self.stypeexport_pool.push(STypeExport {
+                name,
+                info,
+                def: et.def,
+                doc,
+            });
         }
         let types = slice_since(self.stypeexport_pool.len(), t_start);
         let v_start = self.sexport_pool.len() as u32;

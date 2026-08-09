@@ -698,10 +698,9 @@ fn compile_native(src: &str, must_native: &[&str]) -> bytecode::Program {
     let plans = plans.take();
     if !plans.is_empty() {
         let mut module = vm::jit::jit_module().expect("jit module");
-        let native = clif::native_set(&plans, &program);
         let mut defs = Vec::with_capacity(plans.len());
         for plan in &plans {
-            let body = clif::compile(&mut module, plan, &native, &program).expect("clif define");
+            let body = clif::compile(&mut module, plan, &program).expect("clif define");
             if let Some(body) = body {
                 let name = program
                     .functions

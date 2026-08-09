@@ -75,6 +75,8 @@ pub enum TypeKind {
 
 #[derive(Debug, Clone)]
 pub struct NamedType {
+    /// Module qualifier of a `module.Type` reference; `None` for a bare name.
+    pub qualifier: Option<Identifier>,
     pub identifier: Identifier,
     pub type_args: Vec<TypeIdentifier>,
 }

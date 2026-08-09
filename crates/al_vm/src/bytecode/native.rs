@@ -559,14 +559,17 @@ pub unsafe extern "C" fn call_entry_preserving_pinned(
     ctx: *mut core::ffi::c_void,
     tramp: *const u8,
     entry: NativeEntry,
+    resume: i64,
 ) -> NativeStatus {
-    // rdi = ctx, rsi = tramp, rdx = entry. The trampoline takes (ctx, entry),
-    // so entry moves into rsi. Entry rsp is 8 (mod 16); one push makes it 0,
-    // which is what the callee's `call` requires.
+    // rdi = ctx, rsi = tramp, rdx = entry, rcx = resume. The trampoline takes
+    // (ctx, entry, resume), so entry and resume shift down one register.
+    // Entry rsp is 8 (mod 16); one push makes it 0, which is what the
+    // callee's `call` requires.
     core::arch::naked_asm!(
         "push r15",
         "mov rax, rsi",
         "mov rsi, rdx",
+        "mov rdx, rcx",
         "call rax",
         "pop r15",
         "ret",
@@ -585,12 +588,15 @@ pub unsafe extern "C" fn call_entry_preserving_pinned(
     ctx: *mut core::ffi::c_void,
     tramp: *const u8,
     entry: NativeEntry,
+    resume: i64,
 ) -> NativeStatus {
-    // x0 = ctx, x1 = tramp, x2 = entry; the trampoline takes (ctx, entry).
+    // x0 = ctx, x1 = tramp, x2 = entry, x3 = resume; the trampoline takes
+    // (ctx, entry, resume).
     core::arch::naked_asm!(
         "stp x21, x30, [sp, #-16]!",
         "mov x9, x1",
         "mov x1, x2",
+        "mov x2, x3",
         "blr x9",
         "ldp x21, x30, [sp], #16",
         "ret",

@@ -1730,6 +1730,25 @@ impl Compiler {
             .push(Diagnostic::hint(sp, DiagnosticCode::RelatedLocation, msg));
     }
 
+    /// Pass-0 heads-up when a top-level value declaration takes over the name
+    /// of an imported module qualifier: `name.member` in this module now
+    /// resolves through the declaration, not the module.
+    pub(super) fn warn_shadowed_qualifier(&mut self, ident: &ast::Identifier) {
+        let Some(key) = self.imported_qualifiers.get(&ident.name) else {
+            return;
+        };
+        let module = self.module_name(&key.clone());
+        self.engine.diagnostics.push(Diagnostic::hint(
+            ident.span,
+            DiagnosticCode::ShadowedImport,
+            format!(
+                "'{}' shadows the imported module '{module}': '{}.member' now refers \
+                 to this declaration, not the module",
+                ident.name, ident.name
+            ),
+        ));
+    }
+
     fn unused_binding(&mut self, name: &str, sp: Span) {
         self.engine.diagnostics.push(Diagnostic::error(
             sp,
@@ -1976,7 +1995,22 @@ impl Compiler {
         for hit in h.take_type_refs() {
             let path = self.engine.strs_of(hit.module);
             let name = self.engine.str(hit.name).to_string();
-            self.record_type_use(&path, &name, hit.span, ReferenceKind::Unqualified);
+            let kind = match hit.qualifier {
+                Some(_) => ReferenceKind::Qualified,
+                None => ReferenceKind::Unqualified,
+            };
+            self.record_type_use(&path, &name, hit.span, kind);
+            // A `module.Type` occurrence names the import through its
+            // qualifier, exactly like a `module.value` use: record the
+            // `Qualifier` occurrence so the import counts as used and the
+            // qualifier resolves under hover / goto-def.
+            if let Some((qid, qspan)) = hit.qualifier {
+                let q = ast::Identifier {
+                    name: self.engine.str(qid).to_string(),
+                    span: qspan,
+                };
+                self.record_qualifier_use(&q);
+            }
         }
         match result {
             Ok(ty) => ty,
@@ -2156,6 +2190,7 @@ impl Compiler {
                     // type occurrence for the reference graph.
                     let ann = ast::TypeIdentifier {
                         kind: ast::TypeKind::NamedType(ast::NamedType {
+                            qualifier: None,
                             identifier: td.ty_name.clone(),
                             type_args: Vec::new(),
                         }),
@@ -2305,6 +2340,25 @@ impl Compiler {
             );
         }
 
+        // Every public type of the module is reachable as `qualifier.Name` in
+        // type position. Register each under the mangled `qualifier.Name` key
+        // the hydrator probes for a qualified reference; type names cannot
+        // contain '.', so these keys never collide with local declarations.
+        let qualified_types: Vec<(String, _)> = self
+            .module_table
+            .get(&key)
+            .map(|iface| {
+                iface
+                    .types
+                    .iter()
+                    .map(|(n, et)| (format!("{qualifier}.{n}"), et.info))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (mangled, ti) in qualified_types {
+            self.env.store_type_info(&mangled, ti);
+        }
+
         self.imported_qualifiers.insert(qualifier, key.clone());
 
         // Per-item occurrences resolved through the imported module's
@@ -2386,7 +2440,7 @@ impl Compiler {
                     self.bind_local(id, slot.0);
                 }
             }
-            if let Some(ti) = typ {
+            if let Some(et) = &typ {
                 // Bind the imported type unconditionally so annotation
                 // hydration resolves it through this module's env rather than
                 // residual global `type_info` left over from the dependency's
@@ -2394,7 +2448,7 @@ impl Compiler {
                 // (module-aware, after the loop) from the imported module's
                 // reference graph, never the constructor-clobbered
                 // `env.definitions`.
-                self.env.store_type_info(&local_name, ti);
+                self.env.store_type_info(&local_name, et.info);
                 type_item_refs.push((
                     item.name.span,
                     ReferenceKind::ImportItem,
@@ -3688,6 +3742,20 @@ impl Compiler {
             }
         }
 
+        // A `name.field` shape whose `name` is an imported qualifier can only
+        // fall through to here shadowed by a value binding (an unshadowed
+        // qualifier resolves or fails above). Remember the name so a failed
+        // field lookup can say what actually happened instead of leaving the
+        // user staring at the shadowing value's type.
+        let shadowing_qualifier = match (expr.left.as_ref(), &expr.right) {
+            (ast::Expression::Identifier(id), ast::PropertyKey::Field(_))
+                if self.imported_qualifiers.contains_key(&id.name) =>
+            {
+                Some(id.name.clone())
+            }
+            _ => None,
+        };
+
         let left_ty = self.compile_expr(&expr.left);
 
         match &expr.right {
@@ -3728,7 +3796,21 @@ impl Compiler {
             }
             // `value.field` — labelled field shared by every variant.
             ast::PropertyKey::Field(field) => {
-                self.compile_field_access(left_ty, &field.name, field.span)
+                let before = self.engine.diagnostics.len();
+                let ty = self.compile_field_access(left_ty, &field.name, field.span);
+                if let Some(name) = shadowing_qualifier
+                    && self.engine.diagnostics.len() > before
+                {
+                    let module = self.module_name(&self.imported_qualifiers[&name]);
+                    if let Some(d) = self.engine.diagnostics.last_mut() {
+                        d.message.push_str(&format!(
+                            "; note: '{name}' here is a local binding that shadows \
+                             the imported module '{module}' — rename one of them \
+                             (e.g. 'import {module} as ...') to reach the module"
+                        ));
+                    }
+                }
+                ty
             }
         }
     }

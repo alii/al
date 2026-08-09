@@ -9,7 +9,7 @@ use crate::bytecode::Watermark;
 use crate::reference::ModuleReferences;
 use crate::type_def::TypeId;
 use crate::typed_ir::GlobalSlot;
-use crate::types::{Scheme, TypeInfo};
+use crate::types::{DefinitionLocation, Scheme, TypeInfo};
 
 pub mod stdlib;
 
@@ -111,13 +111,26 @@ pub struct ExportedValue {
     pub doc: Option<String>,
 }
 
+/// A module's exported type: its `TypeInfo` plus the declaration site and doc,
+/// so the reference graph and hover work identically whether the module was
+/// compiled from source or hydrated from the precompiled stdlib blob.
+#[derive(Debug, Clone)]
+pub struct ExportedType {
+    pub info: TypeInfo,
+    /// The `type` declaration's own location. `None` only for types with no
+    /// source declaration to point at.
+    pub def: Option<DefinitionLocation>,
+    /// The declaration's own doc comment, carried across module boundaries.
+    pub doc: Option<String>,
+}
+
 /// What an importer sees of a compiled module: its `pub` types and values, plus
 /// the names of its non-`pub` items so a reference to one gets a "private"
 /// error rather than "not found".
 #[derive(Debug, Clone)]
 pub struct ModuleInterface {
     pub path: ModulePath,
-    pub types: IndexMap<String, TypeInfo>,
+    pub types: IndexMap<String, ExportedType>,
     pub values: IndexMap<String, ExportedValue>,
     /// `BTreeSet` so iteration is sorted: `static_ir::flatten` interns these
     /// in iteration order into the reproducible stdlib blob.

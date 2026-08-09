@@ -40,40 +40,35 @@ impl VM {
     /// frame's resume point. `ip == 0` is the only resume point at which a
     /// compiled body may be entered; every other resume point runs the
     /// interpreter, so bytecode is kept for every function as its fallback.
+    /// One scheduling slice: the per-frame trampoline. Dispatch the top
+    /// frame to whichever engine owns it — a native-table function enters
+    /// compiled code at its stored resume ordinal, everything else
+    /// interprets — until the slice ends (`Done` with no frames, `Yield`,
+    /// `Parked`, `Error`). One reduction budget spans the whole slice no
+    /// matter which engine spends it.
     pub(super) fn run_slice(&mut self) -> VmResult<Step> {
-        debug_assert_eq!(
-            self.native_floor, 0,
-            "a suspended process must never carry a raised frame floor"
-        );
-        let f = self.frame();
-        if f.ip == 0
-            && self
-                .program
-                .native
-                .get(FuncIdx::from_usize(f.func_idx as usize))
-                .is_some()
-        {
-            self.native_reds = REDUCTION_BUDGET;
-            take_freed_objects();
-            let status = self.drive_top_frame();
-            return match self.outcome_from_status(status) {
-                // The native entry returned into a frame below it. Interpret
-                // on from there with the budget the native side left, not a
-                // fresh one: it is still the same scheduling slice.
-                Ok(Step::Done) if !self.frames.is_empty() => {
-                    self.execute_slice_budgeted(self.native_reds)
-                }
-                outcome => outcome,
-            };
-        }
-        self.execute_slice()
-    }
-
-    pub(super) fn execute_slice(&mut self) -> VmResult<Step> {
-        // A fresh slice must not be billed for reclamation done before it (a
-        // previous process's death-free, scheduler bookkeeping).
         take_freed_objects();
-        self.execute_slice_budgeted(REDUCTION_BUDGET)
+        self.native_reds = REDUCTION_BUDGET;
+        loop {
+            let f = self.frame();
+            let fi = FuncIdx::from_usize(f.func_idx as usize);
+            if let Some(entry) = self.program.native.get(fi) {
+                let resume = i64::from(f.ip);
+                let status = self.call_native(entry, resume);
+                match self.outcome_from_status(status)? {
+                    Step::Done if self.frames.is_empty() => return Ok(Step::Done),
+                    // A transfer to an interpreted frame (call or return):
+                    // dispatch the new top.
+                    Step::Done => continue,
+                    step => return Ok(step),
+                }
+            } else {
+                match self.execute_slice_budgeted(self.native_reds)? {
+                    Step::Dispatch => continue,
+                    step => return Ok(step),
+                }
+            }
+        }
     }
 
     /// As [`VM::execute_slice`], but resuming from `budget` remaining
@@ -203,15 +198,12 @@ impl VM {
                 }
             }};
         }
-        // The interp→native seam, for *non-tail* calls only. After
-        // `enter_frame!` the callee frame is exactly what a native entry
-        // expects, so a table hit hands it to the native trampoline.
-        //
-        // Tail calls must NOT take this seam: an interpreted tail chain that
-        // bounced into native here would stack one Rust frame pair per bounce,
-        // breaking the flat-tail-call guarantee for a mutually recursive
-        // covered/uncovered pair. A tail-collapsed frame sits at `ip == 0`, so
-        // the covered function goes native at the next slice boundary instead.
+        // The interp→native seam. After `enter_frame!` (push or tail
+        // collapse) the callee frame sits at `ip == 0`, exactly what a native
+        // entry expects, so a table hit hands it to the trampoline. Firing on
+        // tail calls too is required, not optional: a native-table function
+        // must never be interpreted, or its `frame.ip` would advance to a
+        // bytecode position the trampoline later misreads as a resume ordinal.
         macro_rules! native_entry_check {
             ($target:expr) => {{
                 if self
@@ -220,20 +212,11 @@ impl VM {
                     .get(FuncIdx::from_usize($target as usize))
                     .is_some()
                 {
+                    // Hand the pushed frame to the trampoline; it re-enters
+                    // the interpreter for the caller when the callee's return
+                    // transfer lands back on it.
                     self.native_reds = reds;
-                    let status = self.drive_top_frame();
-                    reds = self.native_reds;
-                    match self.outcome_from_status(status)? {
-                        Step::Done => {
-                            debug_assert!(self.frames.len() > self.native_floor);
-                            let f = self.frame();
-                            ip = f.ip;
-                            code_start = f.code_start;
-                            base_slot = f.base_slot;
-                            func_idx = f.func_idx;
-                        }
-                        step => return Ok(step),
-                    }
+                    return Ok(Step::Dispatch);
                 }
             }};
         }
@@ -329,9 +312,10 @@ impl VM {
                 // execution backend must reproduce this frame-at-yield shape;
                 // pinned by `tests/vm_fairness.rs`.
                 checkpoint!();
-                if $instr.op == Op::CallSelf {
-                    native_entry_check!(func_idx);
-                }
+                // Fire for tail calls too: the collapsed frame sits at ip 0,
+                // exactly a fresh entry, and a native-table function must
+                // never be interpreted — the trampoline enters it at resume 0.
+                native_entry_check!(func_idx);
             }};
         }
         // Known top-level target: the callee is provably capture-free and is
@@ -357,9 +341,7 @@ impl VM {
                     $instr.op == Op::TailCallKnown
                 );
                 checkpoint!();
-                if $instr.op == Op::CallKnown {
-                    native_entry_check!(target_idx);
-                }
+                native_entry_check!(target_idx);
             }};
         }
         macro_rules! ret {
@@ -373,14 +355,20 @@ impl VM {
 
                 self.stack.push(ret_val);
 
-                // The floor is 0 for a whole process, and is raised across a
-                // native→interpreter re-entry so control returns to the native
-                // caller instead of interpreting on into its body.
-                if self.frames.len() == self.native_floor {
-                    break;
-                }
                 match self.frames.last() {
                     None => break,
+                    Some(f)
+                        if self
+                            .program
+                            .native
+                            .get(FuncIdx::from_usize(f.func_idx as usize))
+                            .is_some() =>
+                    {
+                        // Returning into a compiled caller: its `ip` is a
+                        // resume ordinal only the trampoline may dispatch.
+                        self.native_reds = reds;
+                        return Ok(Step::Dispatch);
+                    }
                     Some(f) => {
                         ip = f.ip;
                         code_start = f.code_start;
@@ -665,9 +653,7 @@ impl VM {
                         instr.op == Op::TailCall
                     );
                     checkpoint!();
-                    if instr.op == Op::Call {
-                        native_entry_check!(cl_func_idx);
-                    }
+                    native_entry_check!(cl_func_idx);
                 }
                 Op::CallSelf | Op::TailCallSelf => {
                     call_self!(instr);
