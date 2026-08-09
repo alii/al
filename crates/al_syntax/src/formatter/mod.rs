@@ -243,14 +243,21 @@ impl Formatter {
         doc::concat(parts)
     }
 
-    fn trailing_comments(&self, s: Span) -> Doc {
+    /// Comments attached to a block's closing brace. `after_content` says
+    /// whether block content precedes them: the first comment then needs a
+    /// separating hardline of its own. In an otherwise-empty block the
+    /// enclosing brace layout already supplies the newline, and a leading
+    /// hardline here would render as a blank indented line under the `{`.
+    fn trailing_comments(&self, s: Span, after_content: bool) -> Doc {
         let Some(trivia) = self.closing_brace_trivia(s) else {
             return nil();
         };
         let mut parts = Vec::new();
         for t in trivia {
             if let Some(c) = t.comment_text() {
-                parts.push(hardline());
+                if after_content || !parts.is_empty() {
+                    parts.push(hardline());
+                }
                 parts.push(text(c.trim_end().to_string()));
             }
         }
@@ -476,7 +483,7 @@ impl Formatter {
     /// onto the signature line. Lambdas go through `lambda_body` instead.
     fn fn_body(&self, body: &ast::Expression) -> Doc {
         if let ast::Expression::BlockExpression(b) = body {
-            let trail = self.trailing_comments(b.span);
+            let trail = self.trailing_comments(b.span, true);
             if b.body.is_empty() && trail.is_nil() {
                 return text("{}");
             }
@@ -489,7 +496,7 @@ impl Formatter {
             && b.body.len() == 1
             && let ast::Node::Expression(inner) = &b.body[0]
             && !self.has_comment_at(inner.span())
-            && self.trailing_comments(b.span).is_nil()
+            && self.trailing_comments(b.span, true).is_nil()
         {
             return group(self.expr(inner));
         }
@@ -770,7 +777,7 @@ impl Formatter {
     }
 
     fn block_expr(&self, b: &ast::BlockExpression) -> Doc {
-        let trail = self.trailing_comments(b.span);
+        let trail = self.trailing_comments(b.span, !b.body.is_empty());
         if b.body.is_empty() && trail.is_nil() {
             return text("{}");
         }
@@ -868,7 +875,7 @@ impl Formatter {
         let ast::Expression::BlockExpression(blk) = b else {
             return false;
         };
-        if blk.body.len() != 1 || !self.trailing_comments(blk.span).is_nil() {
+        if blk.body.len() != 1 || !self.trailing_comments(blk.span, true).is_nil() {
             return false;
         }
         let ast::Node::Expression(inner) = &blk.body[0] else {
@@ -890,7 +897,7 @@ impl Formatter {
             ast::Expression::BlockExpression(b) => {
                 d![
                     self.nodes_with_trivia(&b.body, 1),
-                    self.trailing_comments(b.span)
+                    self.trailing_comments(b.span, !b.body.is_empty())
                 ]
             }
             other => self.expr(other),
@@ -922,7 +929,7 @@ impl Formatter {
             };
             arms.push(d![head, guard, tail]);
         }
-        let trail = self.trailing_comments(m.span);
+        let trail = self.trailing_comments(m.span, true);
         d![
             text("match "),
             self.expr(&m.subject),
