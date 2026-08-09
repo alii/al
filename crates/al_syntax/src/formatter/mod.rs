@@ -293,8 +293,8 @@ impl Formatter {
 
     fn program(&self, block: &ast::BlockExpression, eof_trivia: &[Trivia]) -> Doc {
         d![
-            self.nodes_with_trivia(&block.body, 2),
-            self.trivia_doc(eof_trivia, block.body.is_empty(), 2),
+            self.nodes_with_trivia(&block.body, 1),
+            self.trivia_doc(eof_trivia, block.body.is_empty(), 1),
         ]
     }
 
