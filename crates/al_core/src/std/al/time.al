@@ -2,8 +2,8 @@
  * Monotonic time.
  *
  * monotonic() returns an Instant representing "now" on a clock that only ever
- * moves forward — it is unaffected by wall-clock adjustments (NTP steps, leap
- * seconds, the user changing the system time) — so it is the right primitive
+ * moves forward - it is unaffected by wall-clock adjustments (NTP steps, leap
+ * seconds, the user changing the system time) - so it is the right primitive
  * for measuring durations, computing deadlines, and timing out I/O.
  *
  * Instant is opaque: it can only be obtained from monotonic() (or its deadline

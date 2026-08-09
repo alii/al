@@ -1,8 +1,4 @@
 // Reason phrases for HTTP status codes, per the IANA registry / RFC 9110.
-// Each phrase is hoisted into a top-level `const` so the backing binary is
-// built once at module load: a `binary.from_string` call inside the match
-// would allocate a fresh binary on every lookup (binary literals are not
-// constant-folded).
 
 // 1xx informational
 const rp_continue = <<'Continue'>>
