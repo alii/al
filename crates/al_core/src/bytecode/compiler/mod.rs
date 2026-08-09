@@ -460,6 +460,10 @@ pub struct Compiler {
     /// `/private/var/.../lib`.
     pub(super) module_display: HashMap<ModuleKey, String>,
     pub(super) base_dir: Option<PathBuf>,
+    /// When set, `al/...` imports resolve to `.al` files under this directory
+    /// (the in-repo `src/std`) instead of the embedded snapshot, so a session
+    /// editing the stdlib compiles it like any other on-disk module tree.
+    pub(super) stdlib_source_root: Option<PathBuf>,
     pub(super) prelude: PreludeBindings,
     /// Names user code may not redefine. Populated from the prelude module's
     /// interface (every exported type and constructor) so the set is derived
@@ -966,6 +970,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         defid_module_memo: HashMap::new(),
         imported_qualifiers: HashMap::new(),
         base_dir: base_dir.map(|p| p.to_path_buf()),
+        stdlib_source_root: None,
         prelude: PreludeBindings::default(),
         reserved: BTreeSet::new(),
         static_stdlib: None,
@@ -1043,6 +1048,10 @@ fn compile_impl(
         // written form is its canonical identity.
         c.current_module_key = ModuleKey::for_stdlib(&m);
         c.current_module = m;
+        // The user is editing stdlib source, so sibling `al/...` imports must
+        // resolve to the on-disk files next to it, not the stale embedded
+        // snapshot.
+        c.stdlib_source_root = base_dir.and_then(module::find_stdlib_root);
     }
 
     // When analysing the prelude file itself, don't load the prelude on top of
@@ -2515,7 +2524,11 @@ impl Compiler {
         path: &ast::ImportPath,
         at: Span,
     ) -> Option<(ModulePath, ModuleKey)> {
-        let resolved = match module::resolve(path, self.base_dir.as_deref()) {
+        let resolved = match module::resolve_with(
+            path,
+            self.base_dir.as_deref(),
+            self.stdlib_source_root.as_deref(),
+        ) {
             Ok(r) => r,
             // These two get richer, import-syntax-aware guidance than
             // `ResolveError`'s shared Display wording provides.

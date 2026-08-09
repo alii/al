@@ -634,6 +634,20 @@ pub struct ResolvedModule {
 /// `base_dir` is the directory of the importing file, used for `./` and `../`
 /// relative imports.
 pub fn resolve(path: &ImportPath, base_dir: Option<&Path>) -> Result<ResolvedModule, ResolveError> {
+    resolve_with(path, base_dir, None)
+}
+
+/// [`resolve`], with an optional on-disk stdlib source root. When set and the
+/// path is a stdlib module whose `.al` file exists under the root, the module
+/// resolves as a regular `File` source — identity unchanged — so a session
+/// editing the stdlib itself compiles, caches and invalidates stdlib modules
+/// exactly like any other on-disk module instead of reading the embedded
+/// build-time snapshot.
+pub fn resolve_with(
+    path: &ImportPath,
+    base_dir: Option<&Path>,
+    stdlib_root: Option<&Path>,
+) -> Result<ResolvedModule, ResolveError> {
     if path.is_relative() {
         let Some(base) = base_dir else {
             return Err(ResolveError::NoBaseDir);
@@ -667,13 +681,22 @@ pub fn resolve(path: &ImportPath, base_dir: Option<&Path>) -> Result<ResolvedMod
         return Err(ResolveError::FileNotFound(p));
     }
 
-    resolve_canonical(&path.names)
+    resolve_canonical_with(&path.names, stdlib_root)
 }
 
 /// Resolve a canonical, non-relative module path: a [`file_module_path`]
 /// identity, a stdlib path, or a bare name. This is the form paths take in the
 /// reference graph, so the LSP's module-to-URI translation enters here.
 pub fn resolve_canonical(path: &ModulePath) -> Result<ResolvedModule, ResolveError> {
+    resolve_canonical_with(path, None)
+}
+
+/// [`resolve_canonical`] with an optional on-disk stdlib root — see
+/// [`resolve_with`].
+pub fn resolve_canonical_with(
+    path: &ModulePath,
+    stdlib_root: Option<&Path>,
+) -> Result<ResolvedModule, ResolveError> {
     if is_resolved_file(path) {
         let key = ModuleKey::of(path);
         // Rebuild with the platform separator; the key's '/'-join form is
@@ -692,6 +715,23 @@ pub fn resolve_canonical(path: &ModulePath) -> Result<ResolvedModule, ResolveErr
 
     if is_stdlib(path) {
         let key = ModuleKey::of(path);
+        // Editing the stdlib in-repo: the on-disk source is the truth, the
+        // embedded snapshot is a stale build-time copy. Identity (`al/...`)
+        // is unchanged either way.
+        if let Some(root) = stdlib_root {
+            let mut p = root.to_path_buf();
+            for seg in path {
+                p.push(seg);
+            }
+            p.set_extension("al");
+            if p.is_file() {
+                return Ok(ResolvedModule {
+                    source: ModuleSource::File(p),
+                    canon: path.clone(),
+                    key,
+                });
+            }
+        }
         return match stdlib::lookup(key.as_str()) {
             Some(src) => Ok(ResolvedModule {
                 source: ModuleSource::Embedded(src),

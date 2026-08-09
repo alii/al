@@ -22,6 +22,19 @@ use super::wire::{
 };
 use super::xrefs::{RootState, Xref};
 
+/// The [`RootState`] key owning `path`, plus whether that root is the in-repo
+/// stdlib source tree. Stdlib sources are bucketed under their own root (the
+/// `src/std` directory itself) with a from-source session; everything else
+/// under the longest matching workspace root.
+fn owning_root(workspace_roots: &[PathBuf], path: &Path) -> (PathBuf, bool) {
+    if module::detect_stdlib_module(path).is_some()
+        && let Some(std_root) = module::find_stdlib_root(path)
+    {
+        return (std_root, true);
+    }
+    (root_for(workspace_roots, path), false)
+}
+
 pub struct Workspace {
     /// Every known `.al` buffer's text, keyed by URI. Text only: the session's
     /// reference graph answers hover / goto-def / find-refs / rename.
@@ -87,7 +100,7 @@ impl Workspace {
         } else {
             self.documents.remove(uri);
             if let Some(p) = &path
-                && let Some(r) = self.roots.get_mut(&root_for(&self.workspace_roots, p))
+                && let Some(r) = self.roots.get_mut(&owning_root(&self.workspace_roots, p).0)
             {
                 r.xrefs.refresh(uri, Vec::new());
             }
@@ -101,7 +114,17 @@ impl Workspace {
         let Some(path) = uri_to_path(uri) else {
             return;
         };
-        let root = root_for(&self.workspace_roots, &path);
+        let (root, is_stdlib_root) = owning_root(&self.workspace_roots, &path);
+        // The prelude is the stdlib session's seed, below its rewind floor:
+        // drop the whole root so the next analysis re-seeds from the new
+        // source instead of serving stale prelude facts.
+        if is_stdlib_root
+            && module::detect_stdlib_module(&path).as_deref()
+                == Some(module::al_prelude().as_slice())
+        {
+            self.roots.remove(&root);
+            return;
+        }
         if let Some(r) = self.roots.get_mut(&root) {
             r.session.invalidate_path(&path);
             if ty == FileChangeType::Deleted {
@@ -150,21 +173,16 @@ impl Workspace {
     }
 
     /// The workspace reference graph held by the session that owns `uri`.
-    /// `None` for an in-repo stdlib file: it has no session, so graph features
-    /// no-op on it. Goto-def *into* `al/*` from a normal file still works.
     pub(super) fn graph_for(&self, uri: &str) -> Option<&reference::ReferenceGraph> {
         Some(self.session_for(uri)?.reference_graph())
     }
 
     /// The persistent compiler session owning `uri`, for handlers that need its
-    /// type-aware queries rather than just the reference graph. `None` for
-    /// in-repo stdlib files, which have no session.
+    /// type-aware queries rather than just the reference graph. In-repo stdlib
+    /// files are owned by the stdlib root's from-source session.
     pub fn session_for(&self, uri: &str) -> Option<&bytecode::IncrementalSession> {
         let path = uri_to_path(uri)?;
-        if module::detect_stdlib_module(&path).is_some() {
-            return None;
-        }
-        let root = root_for(&self.workspace_roots, &path);
+        let (root, _) = owning_root(&self.workspace_roots, &path);
         self.roots.get(&root).map(|r| &r.session)
     }
 
@@ -174,7 +192,6 @@ impl Workspace {
     /// rather than the `main` entry identity a re-rooted analysis would assign.
     pub(super) fn query_module_path(&self, uri: &str) -> ModulePath {
         if let Some(path) = uri_to_path(uri)
-            && module::detect_stdlib_module(&path).is_none()
             && let Some(session) = self.session_for(uri)
             && let Some(mpath) = session.module_path_for_source(&path)
         {
@@ -211,7 +228,7 @@ impl Workspace {
         def: reference::DefId,
     ) -> impl Iterator<Item = &Xref> {
         uri_to_path(uri)
-            .and_then(|p| self.roots.get(&root_for(&self.workspace_roots, &p)))
+            .and_then(|p| self.roots.get(&owning_root(&self.workspace_roots, &p).0))
             .into_iter()
             .flat_map(move |r| r.xrefs.callers(def))
             .filter(|x| x.kind.is_reference_site())
@@ -290,28 +307,33 @@ impl Workspace {
         let stdlib_module = file_path
             .as_deref()
             .and_then(crate::module::detect_stdlib_module);
-        let check_result = match &stdlib_module {
-            // Editing stdlib: the precompiled blob is stale, so bypass the
-            // session and check from source.
-            Some(m) => bytecode::check_as_module(&ast_expr, base_dir, m.clone()),
-            None => {
-                let root = file_path
-                    .as_deref()
-                    .map(|p| root_for(&self.workspace_roots, p))
-                    .unwrap_or_default();
-                let session = &mut self
-                    .roots
-                    .entry(root)
-                    .or_insert_with(RootState::new)
-                    .session;
-                // Mirror the buffer into the module overlay so dependents pick
-                // up unsaved edits, but only while it parses cleanly: importers
-                // keep resolving against the last good version.
-                if !has_errors && let Some(p) = &file_path {
-                    session.set_overlay(p.clone(), text.to_string());
+        let (root, is_stdlib_root) = file_path
+            .as_deref()
+            .map(|p| owning_root(&self.workspace_roots, p))
+            .unwrap_or_default();
+        let session = &mut self
+            .roots
+            .entry(root.clone())
+            .or_insert_with(|| {
+                if is_stdlib_root {
+                    RootState::new_stdlib(root.clone())
+                } else {
+                    RootState::new()
                 }
-                session.check(&ast_expr, base_dir)
-            }
+            })
+            .session;
+        // Mirror the buffer into the module overlay so dependents pick
+        // up unsaved edits, but only while it parses cleanly: importers
+        // keep resolving against the last good version.
+        if !has_errors && let Some(p) = &file_path {
+            session.set_overlay(p.clone(), text.to_string());
+        }
+        let check_result = match &stdlib_module {
+            // Editing stdlib: analyse the buffer *as* its stdlib module in the
+            // stdlib root's from-source session, so it gets the same graph /
+            // hover / incremental machinery as any other file.
+            Some(m) => session.check_as(&ast_expr, base_dir, m.clone()),
+            None => session.check(&ast_expr, base_dir),
         };
 
         // Type / unused diagnostics only for a buffer that fully parsed: a
@@ -321,10 +343,8 @@ impl Workspace {
                 lsp_diagnostics.push(diagnostic_to_json(diag));
             }
 
-            // Unused-import / dead-code diagnostics. Only the session path
-            // builds a reference graph, so the stdlib path has none.
-            if stdlib_module.is_none()
-                && let Some(qm) = query_module(uri)
+            // Unused-import / dead-code diagnostics.
+            if let Some(qm) = query_module(uri)
                 && let Some(graph) = self.graph_for(uri)
             {
                 for diag in graph.unused_diagnostics_for(&qm) {
@@ -343,13 +363,12 @@ impl Workspace {
         // one imports, dropping this file from the session graph and with it
         // the reverse edges find-references needs. Refreshed per file so a
         // removed import drops its stale edges.
-        if stdlib_module.is_none()
-            && let Some(p) = &file_path
-        {
-            let root = root_for(&self.workspace_roots, p);
+        if let Some(p) = &file_path {
+            let root = owning_root(&self.workspace_roots, p).0;
+            let entry_module = stdlib_module.clone().unwrap_or_else(module::main_module);
             let found = self
                 .graph_for(uri)
-                .and_then(|g| g.module_id(&module::main_module()).map(|id| (g, id)))
+                .and_then(|g| g.module_id(&entry_module).map(|id| (g, id)))
                 .map(|(g, entry_id)| {
                     g.module_refs(entry_id).map_or_else(Vec::new, |mr| {
                         mr.occurrences()

@@ -465,6 +465,15 @@ impl Compiler {
 pub struct IncrementalSession {
     c: Compiler,
     seed: Watermark,
+    /// Watermark before anything at all was seeded — the floor a
+    /// prelude-as-entry check rewinds to, since the prelude cannot be checked
+    /// on top of itself. Equals `seed` for blob-seeded sessions, which never
+    /// check the prelude as an entry.
+    bare: Watermark,
+    /// Whether the prelude seed is currently in place. A prelude-as-entry
+    /// check tears it down (`bare` rewind); the next ordinary check re-seeds.
+    /// Always true for blob-seeded sessions.
+    seeded: bool,
     /// Watermark immediately before the previous entry-body analysis, i.e.
     /// after every imported module had been compiled.
     last_entry: Option<Watermark>,
@@ -485,6 +494,32 @@ impl IncrementalSession {
         IncrementalSession {
             c,
             seed,
+            bare: seed,
+            seeded: true,
+            last_entry: None,
+            graph: Rc::new(ReferenceGraph::new()),
+            type_facts: Vec::new(),
+        }
+    }
+
+    /// A session that compiles the stdlib from the `.al` sources under
+    /// `stdlib_root` (the in-repo `src/std`) instead of seeding the
+    /// precompiled blob. Used when editing the stdlib itself: every `al/...`
+    /// module is then an ordinary on-disk `File` module — compiled, cached,
+    /// hashed and invalidated exactly like user code — so the reference graph
+    /// and hover facts carry full fidelity for stdlib sources.
+    pub fn new_from_source(stdlib_root: std::path::PathBuf) -> Self {
+        let mut c = new_compiler(None, true);
+        c.collect_hover_facts = true;
+        c.stdlib_source_root = Some(stdlib_root);
+        let bare = c.watermark();
+        c.register_prelude();
+        let seed = c.watermark();
+        IncrementalSession {
+            c,
+            seed,
+            bare,
+            seeded: true,
             last_entry: None,
             graph: Rc::new(ReferenceGraph::new()),
             type_facts: Vec::new(),
@@ -546,17 +581,68 @@ impl IncrementalSession {
     }
 
     pub fn check(&mut self, expr: &ast::Expression, base_dir: Option<&Path>) -> CompileResult {
+        self.check_impl(expr, base_dir, module::main_module())
+    }
+
+    /// [`check`](Self::check), analysing the buffer *as* the given module
+    /// rather than as `main`. Used by a from-source stdlib session so an open
+    /// `src/std/**/*.al` file keeps its canonical `al/...` identity: `@vm` is
+    /// legal, prelude-redefinition rules apply, and every def/occurrence/hover
+    /// fact is keyed under the module its importers reference.
+    pub fn check_as(
+        &mut self,
+        expr: &ast::Expression,
+        base_dir: Option<&Path>,
+        module: ModulePath,
+    ) -> CompileResult {
+        self.check_impl(expr, base_dir, module)
+    }
+
+    fn check_impl(
+        &mut self,
+        expr: &ast::Expression,
+        base_dir: Option<&Path>,
+        entry_module: ModulePath,
+    ) -> CompileResult {
+        // The prelude cannot be analysed on top of itself: tear the seed down
+        // to `bare` and compile the buffer as the whole world. The next
+        // ordinary check re-seeds below.
+        let prelude_self = entry_module == module::al_prelude();
+        if prelude_self {
+            self.c.module_table.invalidate_all();
+            self.c.reset_to(&self.bare);
+            self.seeded = false;
+            self.last_entry = None;
+        } else if !self.seeded {
+            // A previous prelude-as-entry check tore the seed down. Rebuild
+            // the session outright — byte-for-byte the fresh-session state,
+            // with none of the partially-rewound world to reason about. Rare
+            // (only after editing `al.al` and switching file), so the full
+            // stdlib recompile it implies is acceptable.
+            #[allow(clippy::expect_used)]
+            let root = self
+                .c
+                .stdlib_source_root
+                .clone()
+                .expect("only a from-source session tears down its seed");
+            *self = Self::new_from_source(root);
+        }
+
         // The previous entry's contributions are dropped; cached modules' arena
         // state sits below this line and survives.
         let mut floor = self.last_entry.unwrap_or(self.seed);
 
         // Keys are collected first so the staleness scan can take
         // `&mut module_table` for its stat cache without overlapping the
-        // `user_modules()` borrow.
+        // `user_modules()` borrow. Modules baked at or below the seed (the
+        // from-source prelude) are excluded: they cannot be rewound past, so a
+        // change there is handled by the owner dropping the session instead.
+        let seed = self.seed;
         let candidates: Vec<module::ModuleKey> = self
             .c
             .module_table
             .user_modules()
+            .filter(|(_, cm)| cm.watermark().is_none_or(|w| w >= seed))
             .map(|(k, _)| k.clone())
             .collect();
         let dirty: Vec<module::ModuleKey> = candidates
@@ -568,8 +654,23 @@ impl IncrementalSession {
                 floor = floor.earlier(w);
             }
         }
-        self.rewind_to(floor);
+        if !prelude_self {
+            self.rewind_to(floor);
+        }
         self.c.base_dir = base_dir.map(|p| p.to_path_buf());
+
+        // Entry identity. Set on every check — never left over from the
+        // previous one — and the entry's reference collector is re-keyed to
+        // match, so its defs land under the module id importers target.
+        self.c.current_module = entry_module.clone();
+        self.c.current_module_key = if prelude_self || module::is_stdlib(&entry_module) {
+            module::ModuleKey::for_stdlib(&entry_module)
+        } else {
+            module::ModuleKey::main()
+        };
+        self.c.module_path_slice = None;
+        let entry_mid = self.c.ref_interner.intern(&entry_module);
+        self.c.module_refs = ModuleReferences::new(entry_mid);
 
         self.compile_entry(expr);
 

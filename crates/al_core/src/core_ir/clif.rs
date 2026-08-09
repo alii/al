@@ -252,16 +252,6 @@ pub fn plan(
         gate.record(p);
     }
     gate.expr(&f.body)?;
-    // KNOWN GAP (Phase 1): a self-tail loop whose body reaches a non-tail call
-    // (a continuation) before the self-call miscompiles on its second-plus
-    // iteration — the in-place back-edge re-enters the head, but the call's
-    // continuation blocks are only reachable from the entry dispatch. Such a
-    // function interprets correctly; only its native fast path is withheld.
-    // Tracked for a focused fix (see docs/beam-exec.md). Tight self-tail loops
-    // with no intervening call are unaffected and still compile.
-    if self_tail_with_continuation(&f.body) {
-        return None;
-    }
     Some(NativePlan {
         func_idx,
         fun: f.clone(),
@@ -1523,8 +1513,8 @@ pub fn compile<M: Module>(
     {
         let b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
         let fns = declare_imports(module, b.func)?;
-        let conts = count_call_conts(&plan.fun.body, false);
-        let g = BodyGen::prologue(b, plan, conts, layout, uses, cmap, ctor_sites, fns, ptr_ty);
+        let live = cont_live_sets(&plan.fun.body);
+        let g = BodyGen::prologue(b, plan, live, layout, uses, cmap, ctor_sites, fns, ptr_ty);
         g.run();
     }
     let clif = ctx.func.display().to_string();
@@ -1541,100 +1531,75 @@ pub fn compile<M: Module>(
     }))
 }
 
-/// Whether `e` contains both a self-tail call and a call inside a `LetJoin`
-/// (a short-circuit `&&`/`||` or if-as-value condition). See the KNOWN GAP
-/// note at the [`plan`] gate: this is the exact miscompiling shape — a
-/// continuation reachable only through the entry dispatch that the in-place
-/// loop back-edge cannot re-enter. A continuation elsewhere (e.g. a call in a
-/// self-tail arg, as in the `dot_loop` bench) compiles correctly.
-fn self_tail_with_continuation(body: &CoreExpr) -> bool {
-    has_self_tail(body) && has_call_in_join(body)
-}
-
-/// Whether any `LetJoin` join in `e` contains a call.
-fn has_call_in_join(e: &CoreExpr) -> bool {
-    fn any_call(e: &CoreExpr) -> bool {
+/// For each non-tail call (continuation), the locals read strictly after it
+/// in emission order — its live-in set. `reload_cached_views` restores exactly
+/// these at the continuation's top; a local dead here is never reloaded, so a
+/// freed slot is never dereferenced. Indexed by continuation ordinal, matching
+/// [`count_call_conts`] / [`BodyGen::next_cont`].
+fn cont_live_sets(body: &CoreExpr) -> Vec<HashSet<LocalId>> {
+    enum Ev {
+        Read(LocalId),
+        Boundary,
+    }
+    fn collect(e: &CoreExpr, in_join: bool, ev: &mut Vec<Ev>) {
+        let mut e = e;
+        loop {
+            match e {
+                CoreExpr::Let { rhs, body, .. } => {
+                    rhs.for_each_operand(|x| ev.push(Ev::Read(x)));
+                    if matches!(rhs, Atom::Call { .. }) {
+                        ev.push(Ev::Boundary);
+                    }
+                    e = body;
+                }
+                CoreExpr::LetJoin { join, body, .. } => {
+                    collect(join, true, ev);
+                    e = body;
+                }
+                CoreExpr::LetCont { cont, body, .. } => {
+                    collect(body, in_join, ev);
+                    e = cont;
+                }
+                CoreExpr::Drop { body, .. } => e = body,
+                CoreExpr::If {
+                    cond, then, els, ..
+                } => {
+                    ev.push(Ev::Read(*cond));
+                    collect(then, in_join, ev);
+                    e = els;
+                }
+                CoreExpr::Match { scrut, arms, .. } => {
+                    ev.push(Ev::Read(*scrut));
+                    for (_, b) in arms {
+                        collect(b, in_join, ev);
+                    }
+                    return;
+                }
+                CoreExpr::Tail(a) => {
+                    a.for_each_operand(|x| ev.push(Ev::Read(x)));
+                    if in_join && matches!(a, Atom::Call { .. }) {
+                        ev.push(Ev::Boundary);
+                    }
+                    return;
+                }
+                CoreExpr::Goto(_) => return,
+            }
+        }
+    }
+    let mut ev = Vec::new();
+    collect(body, false, &mut ev);
+    let mut seen = HashSet::new();
+    let mut rev = Vec::new();
+    for e in ev.iter().rev() {
         match e {
-            CoreExpr::Let { rhs, body, .. } => matches!(rhs, Atom::Call { .. }) || any_call(body),
-            CoreExpr::LetJoin { join, body, .. } => any_call(join) || any_call(body),
-            CoreExpr::LetCont { cont, body, .. } => any_call(cont) || any_call(body),
-            CoreExpr::Drop { body, .. } => any_call(body),
-            CoreExpr::If { then, els, .. } => any_call(then) || any_call(els),
-            CoreExpr::Match { arms, .. } => arms.iter().any(|(_, b)| any_call(b)),
-            CoreExpr::Tail(a) => matches!(a, Atom::Call { .. }),
-            CoreExpr::Goto(_) => false,
+            Ev::Read(x) => {
+                seen.insert(*x);
+            }
+            Ev::Boundary => rev.push(seen.clone()),
         }
     }
-    match e {
-        CoreExpr::Let { body, .. } | CoreExpr::Drop { body, .. } => has_call_in_join(body),
-        CoreExpr::LetJoin { join, body, .. } => {
-            any_call(join) || has_call_in_join(join) || has_call_in_join(body)
-        }
-        CoreExpr::LetCont { cont, body, .. } => has_call_in_join(cont) || has_call_in_join(body),
-        CoreExpr::If { then, els, .. } => has_call_in_join(then) || has_call_in_join(els),
-        CoreExpr::Match { arms, .. } => arms.iter().any(|(_, b)| has_call_in_join(b)),
-        CoreExpr::Tail(_) | CoreExpr::Goto(_) => false,
-    }
-}
-
-fn has_self_tail(e: &CoreExpr) -> bool {
-    match e {
-        CoreExpr::Let { body, .. } | CoreExpr::Drop { body, .. } => has_self_tail(body),
-        CoreExpr::LetJoin { join, body, .. } => has_self_tail(join) || has_self_tail(body),
-        CoreExpr::LetCont { cont, body, .. } => has_self_tail(cont) || has_self_tail(body),
-        CoreExpr::If { then, els, .. } => has_self_tail(then) || has_self_tail(els),
-        CoreExpr::Match { arms, .. } => arms.iter().any(|(_, b)| has_self_tail(b)),
-        CoreExpr::Tail(Atom::Call {
-            callee: Callee::Self_,
-            ..
-        }) => true,
-        CoreExpr::Tail(_) | CoreExpr::Goto(_) => false,
-    }
-}
-
-/// Count the non-tail call sites in `e`, in exactly the walk order
-/// [`BodyGen::expr`] emits them: every `Let`-bound call, plus every `Tail`
-/// call inside a `LetJoin`'s join (whose Dest is a merge, not a return).
-/// Each gets one continuation block in the entry dispatch table.
-fn count_call_conts(e: &CoreExpr, in_join: bool) -> usize {
-    let mut n = 0;
-    let mut e = e;
-    loop {
-        match e {
-            CoreExpr::Let { rhs, body, .. } => {
-                if matches!(rhs, Atom::Call { .. }) {
-                    n += 1;
-                }
-                e = body;
-            }
-            CoreExpr::LetJoin { join, body, .. } => {
-                n += count_call_conts(join, true);
-                e = body;
-            }
-            CoreExpr::LetCont { cont, body, .. } => {
-                n += count_call_conts(body, in_join);
-                e = cont;
-            }
-            CoreExpr::Drop { body, .. } => e = body,
-            CoreExpr::If { then, els, .. } => {
-                n += count_call_conts(then, in_join);
-                e = els;
-            }
-            CoreExpr::Match { arms, .. } => {
-                for (_, b) in arms {
-                    n += count_call_conts(b, in_join);
-                }
-                return n;
-            }
-            CoreExpr::Tail(a) => {
-                if in_join && matches!(a, Atom::Call { .. }) {
-                    n += 1;
-                }
-                return n;
-            }
-            CoreExpr::Goto(_) => return n,
-        }
-    }
+    rev.reverse();
+    rev
 }
 
 /// Where an expression delivers its value: function-tail position, or a jump
@@ -1662,6 +1627,9 @@ struct BodyGen<'a> {
     /// dispatch table's targets 1..=N.
     cont_blocks: Vec<ir::Block>,
     cont_cursor: usize,
+    /// Live-in set per continuation (locals read after it); reload restores
+    /// only these, so a dead local's freed slot is never dereferenced.
+    cont_live: Vec<HashSet<LocalId>>,
     /// This body's own (tail) signature, imported for `return_call_indirect`
     /// transfers.
     sig_ref: ir::SigRef,
@@ -1695,7 +1663,7 @@ impl<'a> BodyGen<'a> {
     fn prologue(
         mut b: FunctionBuilder<'a>,
         plan: &'a NativePlan,
-        conts: usize,
+        cont_live: Vec<HashSet<LocalId>>,
         layout: FrameLayout,
         uses: Uses,
         cmap: ConstMap,
@@ -1724,7 +1692,7 @@ impl<'a> BodyGen<'a> {
         let base = b.declare_var(ptr_ty);
 
         let loop_head = b.create_block();
-        let cont_blocks: Vec<ir::Block> = (0..conts).map(|_| b.create_block()).collect();
+        let cont_blocks: Vec<ir::Block> = (0..cont_live.len()).map(|_| b.create_block()).collect();
         let sig_ref = {
             let own = b.func.signature.clone();
             b.import_signature(own)
@@ -1742,6 +1710,7 @@ impl<'a> BodyGen<'a> {
             base,
             cont_blocks,
             cont_cursor: 0,
+            cont_live,
             sig_ref,
             resume_param,
             const_locals: TiVec::new(),
@@ -2609,23 +2578,24 @@ impl<'a> BodyGen<'a> {
         let nb = self.b.inst_results(refetch)[0];
         self.b.def_var(self.base, nb);
         // A continuation is a fresh machine entry: nothing computed before the
-        // transfer survives in a register. Redefine every cached view HERE, at
-        // the continuation's top, which dominates all downstream blocks — a
-        // lazy reload inside a later if-arm would define a Variable that the
-        // sibling arm does not see, and the sibling would read the entry
-        // default instead.
-        self.reload_cached_views();
+        // transfer survives in a register. Redefine the live cached views HERE,
+        // at the continuation's top, which dominates all downstream blocks — a
+        // lazy reload inside a later if-arm would define a Variable the sibling
+        // arm does not see. Only locals live after this continuation are
+        // reloaded, so a dead local's freed slot is never dereferenced.
+        let live = self.cont_live[(resume - 1) as usize].clone();
+        self.reload_cached_views(&live);
         let vmx = self.vmx();
         let pop = self.b.ins().call(self.fns.rt_pop, &[vmx]);
         self.b.inst_results(pop)[0]
     }
 
-    /// Reload every currently-cached local from its frame slot (or constant)
-    /// into its existing Variable, at a continuation's dominating top. A
-    /// slotless, non-constant cached local is a temp consumed before the
-    /// transfer; its cache entry is dropped so a stray later use fails the
-    /// build. Int views are re-derived from the reloaded word.
-    fn reload_cached_views(&mut self) {
+    /// Reload each live cached local from its frame slot (or constant) into its
+    /// existing Variable, at a continuation's dominating top. A local absent
+    /// from `live` is dead here — dropping its cache entry keeps a stray later
+    /// use as a loud build error rather than reloading (and unboxing) a freed
+    /// slot. Int views are re-derived from the reloaded word.
+    fn reload_cached_views(&mut self, live: &HashSet<LocalId>) {
         let n = self.words.len().max(self.ints.len());
         let ids: Vec<LocalId> = (0..n)
             .map(LocalId::from_usize)
@@ -2635,6 +2605,17 @@ impl<'a> BodyGen<'a> {
             })
             .collect();
         for id in ids {
+            if !live.contains(&id) {
+                // Dead here: forget it so a later use is a loud miss, never a
+                // dereference of a stale slot.
+                if self.words.get(id).copied().flatten().is_some() {
+                    self.words[id] = None;
+                }
+                if self.ints.get(id).copied().flatten().is_some() {
+                    self.ints[id] = None;
+                }
+                continue;
+            }
             let word_var = self.words.get(id).copied().flatten();
             let int_var = self.ints.get(id).copied().flatten();
             if let Some(slot) = self.layout.slot(id) {

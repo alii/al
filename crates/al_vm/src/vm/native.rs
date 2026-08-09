@@ -378,6 +378,16 @@ pub unsafe extern "C" fn al_rt_checkpoint(vmx: *mut VM) -> NativeStatus {
 /// function's frame on top.
 #[allow(unsafe_code)] // the frame-slot access seam; contract above
 pub unsafe extern "C" fn al_rt_frame_base(vmx: *mut VM) -> *mut u64 {
+    if std::env::var("ALTRACE2").is_ok() {
+        let vm2 = unsafe { &*vmx };
+        eprintln!(
+            "FRAMEBASE frames={} stack={} topfn={} ip={}",
+            vm2.frames.len(),
+            vm2.stack.len(),
+            vm2.frames.last().map(|f| f.func_idx).unwrap_or(-1),
+            vm2.frames.last().map(|f| f.ip).unwrap_or(-1)
+        );
+    }
     // SAFETY: `vmx` is the running scheduler's live VM per the contract.
     let vm = unsafe { &mut *vmx };
     let base = vm.frame().base_slot;
@@ -408,14 +418,25 @@ pub unsafe extern "C" fn al_rt_ret_transfer(vmx: *mut VM, result: u64) -> Prepar
     let Some(parent) = vm.frames.last() else {
         return PreparedCall::status(NativeStatus::Done);
     };
-    match vm
+    let r = match vm
         .program
         .native
         .get(FuncIdx::from_usize(parent.func_idx as usize))
     {
         Some(entry) => PreparedCall::enter(entry, i64::from(parent.ip)),
         None => PreparedCall::status(NativeStatus::Done),
+    };
+    if std::env::var("ALTRACE").is_ok() {
+        eprintln!(
+            "RET parent_fn={} parent_ip={} frames={} stack={} entry={}",
+            parent.func_idx,
+            parent.ip,
+            vm.frames.len(),
+            vm.stack.len(),
+            !r.entry.is_null()
+        );
     }
+    r
 }
 
 /// Non-tail call from a compiled body, as a transfer. Pushes the args and the
@@ -439,6 +460,13 @@ pub unsafe extern "C" fn al_rt_prepare_call(
     unsafe { push_args(vm, args, argc) };
     vm.frame_mut().ip = resume as i32;
     vm.push_known_frame(target as i32);
+    if std::env::var("ALTRACE").is_ok() {
+        eprintln!(
+            "PREPCALL target={target} resume={resume} frames={} stack={}",
+            vm.frames.len(),
+            vm.stack.len()
+        );
+    }
     vm.prepared(target as i32)
 }
 
@@ -486,6 +514,13 @@ pub unsafe extern "C" fn al_rt_prepare_tail(
     // SAFETY: `args`/`argc` per the contract.
     unsafe { push_args(vm, args, argc) };
     vm.collapse_known_frame(target as i32);
+    if std::env::var("ALTRACE").is_ok() {
+        eprintln!(
+            "PREPTAIL target={target} frames={} stack={}",
+            vm.frames.len(),
+            vm.stack.len()
+        );
+    }
     vm.prepared(target as i32)
 }
 
@@ -522,6 +557,14 @@ pub unsafe extern "C" fn al_rt_prepare_tail_value(
 pub unsafe extern "C" fn al_rt_pop(vmx: *mut VM) -> u64 {
     // SAFETY: `vmx` is the running scheduler's live VM per the contract.
     let vm = unsafe { &mut *vmx };
+    if std::env::var("ALTRACE").is_ok() {
+        eprintln!(
+            "POP frames={} stack={} topfn={}",
+            vm.frames.len(),
+            vm.stack.len(),
+            vm.frames.last().map(|f| f.func_idx).unwrap_or(-1)
+        );
+    }
     match vm.stack.pop() {
         Some(v) => std::mem::ManuallyDrop::new(v).to_bits(),
         None => crate::bytecode::value::proof_violation("continuation with an empty stack"),

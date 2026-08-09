@@ -78,4 +78,15 @@ impl RootState {
             xrefs: WorkspaceXrefs::default(),
         }
     }
+
+    /// A root for the in-repo stdlib source tree itself: the session compiles
+    /// `al/...` modules from the `.al` files under `stdlib_root` rather than
+    /// seeding the (stale, span-less) precompiled blob, so stdlib sources get
+    /// the same hover / goto-def / references fidelity as user code.
+    pub(super) fn new_stdlib(stdlib_root: std::path::PathBuf) -> Self {
+        Self {
+            session: bytecode::IncrementalSession::new_from_source(stdlib_root),
+            xrefs: WorkspaceXrefs::default(),
+        }
+    }
 }
