@@ -598,7 +598,8 @@ fn cmd_upgrade(version: Option<String>) -> Result<(), String> {
     // Download next to the target so the rename is same-device; temp_dir is
     // often tmpfs on Linux, which fails with EXDEV.
     let tmp_path = current_exe.with_extension("new");
-    let download_url = format!("https://github.com/alii/scarlet/releases/download/{tag}/{asset_name}");
+    let download_url =
+        format!("https://github.com/alii/scarlet/releases/download/{tag}/{asset_name}");
 
     println!("Downloading {tag}...");
 

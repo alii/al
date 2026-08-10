@@ -1,8 +1,8 @@
 <img width="128" src="https://github.com/scarletindustries.png" />
 
-### Scarlet
+### Scarlet programming language
 
-The Scarlet programming language is a statically-typed and expression-oriented programming language, for developer productivity.
+A statically-typed and expression-oriented programming language for developer productivity.
 
 [Documentation](https://scarlet.industries)
 

@@ -9,9 +9,9 @@ mod common;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use common::parse;
 use scarlet::tivec::Idx;
 use scarlet::types::Prim;
-use common::parse;
 
 /// What the hook recorded for one body. The prims are resolved inside the
 /// hook, through the pool it arrived with: an `RTy` indexes a per-body pool,

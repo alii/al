@@ -10,9 +10,12 @@ use std::path::PathBuf;
 use scarlet::bytecode::IncrementalSession;
 
 fn std_root() -> PathBuf {
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../scarlet_core/src/std"))
-        .canonicalize()
-        .expect("stdlib source root exists")
+    PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../scarlet_core/src/std"
+    ))
+    .canonicalize()
+    .expect("stdlib source root exists")
 }
 
 fn read_std(rel: &str) -> String {
