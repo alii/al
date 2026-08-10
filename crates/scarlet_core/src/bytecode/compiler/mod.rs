@@ -465,6 +465,11 @@ pub struct Compiler {
     /// graph (goto-def/find-refs/dead-code) is built independently via
     /// `module_refs` and is unaffected.
     pub(super) collect_hover_facts: bool,
+    /// Memo for [`Compiler::restricted_generalization_cons`]: the TypeIds
+    /// whose parameters must not generalize at a value binding. Stdlib type
+    /// ids are stable across `reset_to` (the watermark sits past the static
+    /// stdlib), so the memo survives a session's rewinds.
+    pub(super) restricted_gen_cons: Option<HashSet<TypeId>>,
     // --- Module state ---
     pub(super) module_table: ModuleTable,
     /// Append-only `ModulePath` ↔ `ModuleId` interner backing every `DefId`.
@@ -1000,6 +1005,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         module_refs: main_refs,
         check_only,
         collect_hover_facts: false,
+        restricted_gen_cons: None,
         module_table: ModuleTable::new(),
         module_display: HashMap::new(),
         ref_interner,
@@ -2168,7 +2174,8 @@ impl Compiler {
                     init_ty
                 };
 
-                let scheme = self.engine.generalize(final_ty);
+                let restricted = self.restricted_generalization_cons();
+                let scheme = self.engine.generalize_restricted(final_ty, &restricted);
                 let m = self.current_module_slice();
                 self.env.define_at(
                     &name,

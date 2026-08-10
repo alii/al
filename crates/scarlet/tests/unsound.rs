@@ -374,6 +374,51 @@ fn u22_module_shadow_preserves_closure_capture() {
     );
 }
 
+reject_case! {
+    /// U24: a binding holding a live `Subject` must not generalize the
+    /// message type — one mailbox sent an Int and received as a String would
+    /// smuggle values between types. The relaxed value restriction keeps the
+    /// variable weak, so the first send pins it and the second is an
+    /// ordinary mismatch. (An empty `Map` stays polymorphic: it is
+    /// immutable, so reuse at two types is sound.)
+    u24_toplevel_subject_binding_does_not_generalize: (
+        "import scarlet/scheduler\n\
+         s = scheduler.subject()\n\
+         scheduler.send(s, 1)\n\
+         scheduler.send(s, 'text')\n",
+        "Type mismatch: expected 'Int', got 'String'",
+    ),
+
+    /// U24, the local-let form: block bindings generalize through the same
+    /// path and must be guarded the same way.
+    u24_local_subject_binding_does_not_generalize: (
+        "import scarlet/scheduler\n\
+         fn f() Nil {\n\
+         \ts = scheduler.subject()\n\
+         \tscheduler.send(s, 1)\n\
+         \tscheduler.send(s, 'text')\n\
+         }\n\
+         f()\n",
+        "Type mismatch: expected 'Int', got 'String'",
+    ),
+}
+
+// U25: receive on another process's subject is a clean runtime error: the
+// handle travels, the right to receive does not.
+#[test]
+fn u25_foreign_receive_is_a_clean_error() {
+    run_rejects(
+        "import scarlet/scheduler\n\
+         mine = scheduler.subject()\n\
+         scheduler.spawn(fn() {\n\
+         \tprintln(scheduler.receive(mine))\n\
+         })\n\
+         scheduler.sleep(50)\n\
+         scheduler.send(mine, 1)\n",
+        "only the process that created a subject may receive on it",
+    );
+}
+
 // U23: a slice whose bounds escape the array, or is reversed, is a clean
 // runtime error: non-zero exit with a diagnostic, never a panic or abort.
 #[test]
