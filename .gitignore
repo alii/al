@@ -18,3 +18,5 @@ editors/vscode/out
 /target/
 /docs/
 *.vsix
+.claude/worktrees/
+editors/zed/grammars/
