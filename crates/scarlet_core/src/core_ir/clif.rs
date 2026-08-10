@@ -4417,6 +4417,8 @@ mod tests {
         let mut flags = settings::builder();
         flags.set("use_colocated_libcalls", "false").unwrap();
         flags.set("enable_pinned_reg", "true").unwrap();
+        // x64 return_call requires frame pointers; mirror the real module.
+        flags.set("preserve_frame_pointers", "true").unwrap();
         flags.set("is_pic", "false").unwrap();
         let isa = cranelift_native::builder()
             .unwrap()
