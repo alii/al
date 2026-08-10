@@ -11,7 +11,7 @@ pub enum Trivia {
 impl Trivia {
     /// The comment's source text, or `None` for a `Newline`.
     #[inline]
-    pub fn comment_text(&self) -> Option<&str> {
+    pub(crate) fn comment_text(&self) -> Option<&str> {
         match self {
             Trivia::Newline => None,
             Trivia::LineComment(s) | Trivia::BlockComment(s) | Trivia::DocComment(s) => Some(s),

@@ -42,12 +42,12 @@ pub trait EmitCtx {
 }
 
 /// Result of [`emit`].
-pub struct EmitOut {
-    pub code: Vec<Instruction>,
+pub(crate) struct EmitOut {
+    pub(crate) code: Vec<Instruction>,
     /// High-water stack-slot count for the frame — becomes `Function.locals`.
-    pub locals: i32,
+    pub(crate) locals: i32,
     /// Frame-layout facts this emission fixed. See [`FrameLayout`].
-    pub layout: FrameLayout,
+    pub(crate) layout: FrameLayout,
 }
 
 /// The frame-layout facts one [`emit`] run fixed, for the native (Cranelift)
@@ -73,13 +73,6 @@ pub struct EmitOut {
 #[derive(Debug, Clone, Default)]
 pub struct FrameLayout {
     slots: TiVec<LocalId, Option<i32>>,
-    /// High-water slot count of this body alone. The final `Function.locals`
-    /// maxes this with the reserved param count.
-    pub locals: i32,
-    /// Function-relative resume ip per non-tail call, in emission order —
-    /// which is the order a straight walk of the same Core meets the call
-    /// atoms, since calls are never hoisted (see [`is_hoistable`]).
-    pub call_resume_ips: Vec<i32>,
     /// Function-relative address of the first header `PushConst` of each
     /// non-Bool constructor site, in emission order — the order a straight
     /// walk of the same Core meets the `Ctor` atoms.
@@ -90,7 +83,7 @@ pub struct FrameLayout {
     /// expression, so it occupies an arbitrary number of instructions, and a
     /// field can itself be a `PushConst`. The position is emitted knowledge,
     /// so it is recorded rather than re-derived.
-    pub ctor_headers: Vec<CtorHeader>,
+    pub(crate) ctor_headers: Vec<CtorHeader>,
 }
 
 /// Where one constructor site's header sits, and whether it reused a cell.
@@ -98,16 +91,16 @@ pub struct FrameLayout {
 #[derive(Debug, Clone, Copy)]
 pub struct CtorHeader {
     /// Function-relative address of the first header `PushConst`.
-    pub at: i32,
+    pub(crate) at: i32,
     /// Whether emit put an `Op::Reuse` before the `MakeEnumPayload`.
-    pub reuse: bool,
+    pub(crate) reuse: bool,
 }
 
 impl FrameLayout {
     /// The frame-relative slot `id` occupies — the value word lives at
     /// `stack[frame.base_slot + slot]` — or `None` when emit elided the local
     /// and it never touches the frame.
-    pub fn slot(&self, id: LocalId) -> Option<i32> {
+    pub(crate) fn slot(&self, id: LocalId) -> Option<i32> {
         self.slots.get(id).copied().flatten()
     }
 }
@@ -120,7 +113,7 @@ impl FrameLayout {
 /// [`Op::has_jump_target`] is the one authority on which operands are
 /// addresses, and it is an exhaustive match, so a new jump op cannot skip
 /// classification.
-pub fn relocate(code: &mut [Instruction], base: i32) {
+pub(crate) fn relocate(code: &mut [Instruction], base: i32) {
     if base == 0 {
         return;
     }
@@ -133,7 +126,7 @@ pub fn relocate(code: &mut [Instruction], base: i32) {
 
 /// Lower one Core function to bytecode. Jump operands index the returned
 /// `code` vector; see [`relocate`].
-pub fn emit<C: EmitCtx>(f: &CoreFn, ctx: &mut C) -> EmitOut {
+pub(crate) fn emit<C: EmitCtx>(f: &CoreFn, ctx: &mut C) -> EmitOut {
     let mut e = Emitter::new(ctx);
     e.scan = Scan::of(&f.body);
     e.alias_consts = true;
@@ -153,7 +146,7 @@ pub fn emit<C: EmitCtx>(f: &CoreFn, ctx: &mut C) -> EmitOut {
 /// `StoreLocal` to the same indices; the pinnings are read back off the body
 /// being emitted ([`CoreExpr::toplevel_globals`]) so a disagreement is
 /// unrepresentable. Every other bind allocates linearly past that range.
-pub fn emit_toplevel<C: EmitCtx>(body: &CoreExpr, slot_base: i32, ctx: &mut C) -> EmitOut {
+pub(crate) fn emit_toplevel<C: EmitCtx>(body: &CoreExpr, slot_base: i32, ctx: &mut C) -> EmitOut {
     let preassigned = body.toplevel_globals();
     let mut e = Emitter::new(ctx);
     e.scan = Scan::of(body);
@@ -206,7 +199,6 @@ struct Emitter<'a, C: EmitCtx> {
     /// Off for the module toplevel, whose `StoreLocal`s are the global-table
     /// init and must all be emitted.
     alias_consts: bool,
-    call_resume_ips: Vec<i32>,
     ctor_headers: Vec<CtorHeader>,
     next_slot: i32,
     max_locals: i32,
@@ -281,7 +273,6 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             joins: TiVec::new(),
             scan: Scan::default(),
             alias_consts: false,
-            call_resume_ips: Vec::new(),
             ctor_headers: Vec::new(),
             next_slot: 0,
             max_locals: 0,
@@ -295,8 +286,6 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             locals: self.max_locals,
             layout: FrameLayout {
                 slots: self.slots,
-                locals: self.max_locals,
-                call_resume_ips: self.call_resume_ips,
                 ctor_headers: self.ctor_headers,
             },
         }
@@ -1161,12 +1150,6 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                 self.push(op_arg(o, argc));
             }
         }
-        // `enter_frame!` stores the post-increment ip into the caller frame;
-        // record it so a native caller stores the identical value. Tail calls
-        // collapse the frame and store no resume point.
-        if !tail {
-            self.call_resume_ips.push(self.here().to_operand());
-        }
     }
 
     /// Push the four header constants and the payload fields, then
@@ -1462,18 +1445,6 @@ mod tests {
         assert_eq!(out.layout.slot(LocalId(0)), Some(0));
         assert_eq!(out.layout.slot(LocalId(1)), Some(1));
         assert_eq!(out.layout.slot(LocalId(2)), Some(2));
-        assert_eq!(out.layout.locals, out.locals);
-
-        // The one non-tail call's resume ip names the instruction after the
-        // `CallKnown`. The trailing self-call records nothing.
-        assert_eq!(out.layout.call_resume_ips.len(), 1);
-        let ip = out.layout.call_resume_ips[0];
-        assert_eq!(out.code[ip as usize - 1].op, Op::CallKnown);
-        assert_eq!(out.code[ip as usize].op, Op::StoreLocal);
-        assert_eq!(
-            out.code[ip as usize].operand,
-            out.layout.slot(LocalId(2)).unwrap()
-        );
     }
 
     /// A `let x = <const>` whose reads became `PushConst` owns no slot, and
@@ -1494,7 +1465,6 @@ mod tests {
         let out = emit(&f, &mut cx);
         assert_eq!(out.layout.slot(LocalId(0)), Some(0));
         assert_eq!(out.layout.slot(LocalId(1)), None);
-        assert!(out.layout.call_resume_ips.is_empty());
     }
 
     #[test]

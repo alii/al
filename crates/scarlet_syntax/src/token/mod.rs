@@ -14,7 +14,7 @@ use std::fmt;
 #[derive(Debug, Clone)]
 pub struct Token {
     pub kind: Kind,
-    pub span: Span,
+    pub(crate) span: Span,
     pub leading_trivia: Vec<Trivia>,
 }
 

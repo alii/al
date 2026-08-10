@@ -29,7 +29,9 @@ use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{self, InstBuilder, MemFlagsData, types};
 use cranelift_frontend::FunctionBuilder;
 
+#[cfg(test)]
 use super::LocalId;
+#[cfg(test)]
 use super::emit::FrameLayout;
 use super::native_rc::{emit_dynamic_drop, emit_dynamic_dup};
 use crate::bytecode::Value;
@@ -37,7 +39,7 @@ use crate::bytecode::value::NATIVE_PTR_MASK;
 
 /// Symbol the JIT finalize step registers the Int spill shim under
 /// (`crates/al`'s `al_shim_int_box`: `extern "C" fn(vmx, i64) -> u64`).
-pub const NATIVE_INT_BOX_SYMBOL: &str = "al_shim_int_box";
+pub(crate) const NATIVE_INT_BOX_SYMBOL: &str = "al_shim_int_box";
 
 /// NaN-box layout facts compiled code bakes into instruction immediates.
 ///
@@ -47,21 +49,21 @@ pub const NATIVE_INT_BOX_SYMBOL: &str = "al_shim_int_box";
 pub struct ValueBits {
     /// Small-int header; also the zero-fill word `enter_frame!` writes into
     /// non-argument slots.
-    pub int_header: u64,
+    pub(crate) int_header: u64,
     /// `(bits & header_mask) == int_header` is `is_small_int`.
-    pub header_mask: u64,
+    header_mask: u64,
     /// Selects the 48-bit immediate payload.
-    pub payload_mask: u64,
+    payload_mask: u64,
     /// `Value::bool(false)`, also the Bool header: `bool_false | flag` boxes.
-    pub bool_false: u64,
+    pub(crate) bool_false: u64,
     /// `Value::bool(true)`.
-    pub bool_true: u64,
+    pub(crate) bool_true: u64,
     /// `Value::nil()`.
-    pub nil: u64,
+    pub(crate) nil: u64,
 }
 
 /// The process-wide [`ValueBits`], computed from `Value`'s public encoding.
-pub fn value_bits() -> ValueBits {
+pub(crate) fn value_bits() -> ValueBits {
     let int_header = Value::small_int(0).to_bits();
     let payload_mask = Value::small_int(-1).to_bits() ^ int_header;
     ValueBits {
@@ -74,19 +76,6 @@ pub fn value_bits() -> ValueBits {
     }
 }
 
-/// The backend addressed a local `emit` elided (const alias / stack temp), so
-/// no frame slot exists. The coverage gate must keep such locals in registers;
-/// reaching this is a backend bug.
-#[allow(clippy::panic)]
-#[cold]
-#[inline(never)]
-fn slotless_local(id: LocalId) -> ! {
-    panic!(
-        "internal compiler error: native backend addressed local {id}, which owns no \
-         frame slot. Please report this as a compiler bug."
-    )
-}
-
 /// Frame-slot access: local `id`'s word lives at `base + 8 * layout.slot(id)`,
 /// where `base` is `&mut stack[frame.base_slot]` for the running frame.
 ///
@@ -94,33 +83,25 @@ fn slotless_local(id: LocalId) -> ! {
 /// emitter re-derives it after every pushing call and builds a fresh
 /// `FrameSlots`. Cheap and `Copy` for that reason.
 #[derive(Clone, Copy)]
-pub struct FrameSlots<'a> {
-    layout: &'a FrameLayout,
+pub struct FrameSlots {
     base: ir::Value,
 }
 
-impl<'a> FrameSlots<'a> {
-    pub fn new(layout: &'a FrameLayout, base: ir::Value) -> FrameSlots<'a> {
-        FrameSlots { layout, base }
-    }
-
-    /// The slot `id` occupies, aborting on an elided local (backend bug).
-    pub fn slot_of(&self, id: LocalId) -> i32 {
-        match self.layout.slot(id) {
-            Some(s) => s,
-            None => slotless_local(id),
-        }
+impl FrameSlots {
+    pub(crate) fn new(base: ir::Value) -> FrameSlots {
+        FrameSlots { base }
     }
 
     /// Read `stack[base_slot + slot]`, borrowed (see the module docs).
-    pub fn load_slot(&self, b: &mut FunctionBuilder, slot: i32) -> ir::Value {
+    pub(crate) fn load_slot(&self, b: &mut FunctionBuilder, slot: i32) -> ir::Value {
         b.ins()
             .load(types::I64, MemFlagsData::trusted(), self.base, slot * 8)
     }
 
     /// [`FrameSlots::load_slot`] by `LocalId`.
-    pub fn load(&self, b: &mut FunctionBuilder, id: LocalId) -> ir::Value {
-        self.load_slot(b, self.slot_of(id))
+    #[cfg(test)]
+    fn load(&self, b: &mut FunctionBuilder, layout: &FrameLayout, id: LocalId) -> ir::Value {
+        self.load_slot(b, layout.slot(id).expect("test local owns a slot"))
     }
 
     /// Write `stack[base_slot + slot] = bits` with `StoreLocal`'s semantics:
@@ -131,7 +112,7 @@ impl<'a> FrameSlots<'a> {
     /// [`NATIVE_RELEASE_AT_ZERO_SYMBOL`](crate::bytecode::value::NATIVE_RELEASE_AT_ZERO_SYMBOL)
     /// import. The release gate branches, so the builder ends up in a fresh
     /// sealed block; codegen continues there.
-    pub fn store_slot(
+    pub(crate) fn store_slot(
         &self,
         b: &mut FunctionBuilder,
         slot: i32,
@@ -144,41 +125,48 @@ impl<'a> FrameSlots<'a> {
     }
 
     /// [`FrameSlots::store_slot`] by `LocalId`.
-    pub fn store(
+    #[cfg(test)]
+    fn store(
         &self,
         b: &mut FunctionBuilder,
+        layout: &FrameLayout,
         id: LocalId,
         bits: ir::Value,
         release_at_zero: ir::FuncRef,
     ) {
-        self.store_slot(b, self.slot_of(id), bits, release_at_zero)
+        self.store_slot(
+            b,
+            layout.slot(id).expect("test local owns a slot"),
+            bits,
+            release_at_zero,
+        )
     }
 
     /// Raw slot write, no release of the old word. Correct **only** when the
     /// slot provably still holds an immediate (the `enter_frame!` zero-fill, a
     /// Bool/Nil, an unspilled Int). A self-tail loop re-stores its slots over
     /// possibly-heap words every iteration and must use the releasing store.
-    pub fn store_slot_no_release(&self, b: &mut FunctionBuilder, slot: i32, bits: ir::Value) {
+    pub(crate) fn store_slot_no_release(
+        &self,
+        b: &mut FunctionBuilder,
+        slot: i32,
+        bits: ir::Value,
+    ) {
         b.ins()
             .store(MemFlagsData::trusted(), bits, self.base, slot * 8);
-    }
-
-    /// [`FrameSlots::store_slot_no_release`] by `LocalId`.
-    pub fn store_no_release(&self, b: &mut FunctionBuilder, id: LocalId, bits: ir::Value) {
-        self.store_slot_no_release(b, self.slot_of(id), bits)
     }
 }
 
 /// NaN-box an `i64` known to be in the 47-bit immediate range. Arithmetic
 /// results that may leave the range must use [`box_int`].
-pub fn box_small_int(b: &mut FunctionBuilder, facts: &ValueBits, payload: ir::Value) -> ir::Value {
+fn box_small_int(b: &mut FunctionBuilder, facts: &ValueBits, payload: ir::Value) -> ir::Value {
     let masked = b.ins().band_imm(payload, facts.payload_mask as i64);
     b.ins().bor_imm(masked, facts.int_header as i64)
 }
 
 /// Sign-extend a small-int word's 48-bit payload. Meaningful only when the
 /// word really is a small-int immediate.
-pub fn unbox_small_int(b: &mut FunctionBuilder, bits: ir::Value) -> ir::Value {
+fn unbox_small_int(b: &mut FunctionBuilder, bits: ir::Value) -> ir::Value {
     let shifted = b.ins().ishl_imm(bits, 16);
     b.ins().sshr_imm(shifted, 16)
 }
@@ -188,7 +176,7 @@ pub fn unbox_small_int(b: &mut FunctionBuilder, bits: ir::Value) -> ir::Value {
 ///
 /// Terminates the current block; on return the builder sits in a sealed merge
 /// block whose parameter is the decoded `i64`.
-pub fn unbox_int(b: &mut FunctionBuilder, facts: &ValueBits, bits: ir::Value) -> ir::Value {
+pub(crate) fn unbox_int(b: &mut FunctionBuilder, facts: &ValueBits, bits: ir::Value) -> ir::Value {
     let big = b.create_block();
     let merge = b.create_block();
     b.append_block_param(merge, types::I64);
@@ -218,7 +206,7 @@ pub fn unbox_int(b: &mut FunctionBuilder, facts: &ValueBits, bits: ir::Value) ->
 /// `int_box`'s signature is `(i64 vmx, i64 payload) -> i64 bits`, `vmx` being
 /// the opaque VM pointer the entry received. Terminates the current block; on
 /// return the builder sits in a sealed merge block holding the boxed word.
-pub fn box_int(
+pub(crate) fn box_int(
     b: &mut FunctionBuilder,
     facts: &ValueBits,
     vmx: ir::Value,
@@ -248,7 +236,7 @@ pub fn box_int(
 }
 
 /// NaN-box an `i8` flag (an `icmp` result) as a Bool value word.
-pub fn box_bool(b: &mut FunctionBuilder, facts: &ValueBits, flag: ir::Value) -> ir::Value {
+pub(crate) fn box_bool(b: &mut FunctionBuilder, facts: &ValueBits, flag: ir::Value) -> ir::Value {
     let wide = b.ins().uextend(types::I64, flag);
     b.ins().bor_imm(wide, facts.bool_false as i64)
 }
@@ -256,7 +244,8 @@ pub fn box_bool(b: &mut FunctionBuilder, facts: &ValueBits, flag: ir::Value) -> 
 /// Whether a Bool value word is `true`. Total on Bool-typed values, but not
 /// the interpreter's `is_truthy` (which raises on non-Bool), so the coverage
 /// gate must have proven the type first.
-pub fn bool_is_true(b: &mut FunctionBuilder, facts: &ValueBits, bits: ir::Value) -> ir::Value {
+#[cfg(test)]
+fn bool_is_true(b: &mut FunctionBuilder, facts: &ValueBits, bits: ir::Value) -> ir::Value {
     b.ins().icmp_imm(IntCC::Equal, bits, facts.bool_true as i64)
 }
 
@@ -266,7 +255,7 @@ pub fn bool_is_true(b: &mut FunctionBuilder, facts: &ValueBits, bits: ir::Value)
 ///
 /// Terminates the current block; on return the builder sits in a fresh sealed
 /// block where codegen continues.
-pub fn emit_retain(b: &mut FunctionBuilder, bits: ir::Value) {
+pub(crate) fn emit_retain(b: &mut FunctionBuilder, bits: ir::Value) {
     emit_dynamic_dup(b, bits);
 }
 
@@ -399,8 +388,8 @@ mod tests {
         let layout = layout_with_slots(3);
         let (_m, code) = jit(1, 1, |b, _release, _box| {
             let base = b.block_params(b.current_block().unwrap())[0];
-            let slots = FrameSlots::new(&layout, base);
-            let v = slots.load(b, LocalId(2));
+            let slots = FrameSlots::new(base);
+            let v = slots.load(b, &layout, LocalId(2));
             b.ins().return_(&[v]);
         });
         let f: extern "C" fn(i64) -> u64 = unsafe { std::mem::transmute(code) };
@@ -422,8 +411,8 @@ mod tests {
         let (_m, code) = jit(2, 0, |b, release, _box| {
             let block = b.current_block().unwrap();
             let (base, bits) = (b.block_params(block)[0], b.block_params(block)[1]);
-            let slots = FrameSlots::new(&layout, base);
-            slots.store(b, LocalId(1), bits, release);
+            let slots = FrameSlots::new(base);
+            slots.store(b, &layout, LocalId(1), bits, release);
             b.ins().return_(&[]);
         });
         let f: extern "C" fn(i64, u64) = unsafe { std::mem::transmute(code) };
@@ -453,8 +442,8 @@ mod tests {
         let (_m, code) = jit(2, 0, |b, release, _box| {
             let block = b.current_block().unwrap();
             let (base, bits) = (b.block_params(block)[0], b.block_params(block)[1]);
-            let slots = FrameSlots::new(&layout, base);
-            slots.store(b, LocalId(0), bits, release);
+            let slots = FrameSlots::new(base);
+            slots.store(b, &layout, LocalId(0), bits, release);
             b.ins().return_(&[]);
         });
         let f: extern "C" fn(i64, u64) = unsafe { std::mem::transmute(code) };
@@ -574,14 +563,14 @@ mod tests {
         let (_m, code) = jit(2, 0, |b, release, int_box| {
             let block = b.current_block().unwrap();
             let (base, vmx) = (b.block_params(block)[0], b.block_params(block)[1]);
-            let slots = FrameSlots::new(&layout, base);
-            let a_bits = slots.load(b, LocalId(0));
-            let b_bits = slots.load(b, LocalId(1));
+            let slots = FrameSlots::new(base);
+            let a_bits = slots.load(b, &layout, LocalId(0));
+            let b_bits = slots.load(b, &layout, LocalId(1));
             let a = unbox_int(b, &facts, a_bits);
             let bv = unbox_int(b, &facts, b_bits);
             let sum = b.ins().iadd(a, bv); // wrapping, like `wrapping_add`
             let boxed = box_int(b, &facts, vmx, sum, int_box);
-            slots.store(b, LocalId(2), boxed, release);
+            slots.store(b, &layout, LocalId(2), boxed, release);
             b.ins().return_(&[]);
         });
         let f: extern "C" fn(i64, i64) = unsafe { std::mem::transmute(code) };

@@ -51,9 +51,8 @@ fn compile_with_backend(src: &str) -> (bytecode::Program, Vec<String>) {
     let plans: Rc<RefCell<Vec<clif::NativePlan>>> = Rc::default();
     let sink = Rc::clone(&plans);
     let hook: bytecode::NativeHook = Box::new(move |idx, f, pool| {
-        if let Some(p) = clif::plan(idx, f, pool, scarlet::STDLIB.prelude) {
-            sink.borrow_mut().push(p);
-        }
+        sink.borrow_mut()
+            .push(clif::plan(idx, f, pool, scarlet::STDLIB.prelude));
     });
     let r = bytecode::compile_with_native(&ast, None, Some(&scarlet::STDLIB), hook);
     assert!(
@@ -66,7 +65,8 @@ fn compile_with_backend(src: &str) -> (bytecode::Program, Vec<String>) {
     let mut defs = Vec::new();
     let plans = plans.take();
     for plan in &plans {
-        if let Some(body) = clif::compile(&mut module, plan, &program).expect("clif define") {
+        {
+            let body = clif::compile(&mut module, plan, &program).expect("clif define");
             let name = program
                 .functions
                 .get(body.func_idx.index())

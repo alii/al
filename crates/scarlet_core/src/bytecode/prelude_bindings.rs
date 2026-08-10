@@ -11,17 +11,17 @@ use crate::types::{Scheme, TypeEnv, ValueKind};
 /// `type_def::prim_names`, which the InferType→Type resolver also uses.
 pub mod names {
     pub use crate::type_def::prim_names::{ARRAY, FLOAT, INT, STRING};
-    pub const BOOL: &str = "Bool";
-    pub const BINARY: &str = "Binary";
-    pub const NIL: &str = "Nil";
-    pub const OPTION: &str = "Option";
-    pub const RESULT: &str = "Result";
-    pub const TRUE: &str = "True";
-    pub const FALSE: &str = "False";
-    pub const SOME: &str = "Some";
-    pub const NONE: &str = "None";
-    pub const OK: &str = "Ok";
-    pub const ERR: &str = "Err";
+    pub(crate) const BOOL: &str = "Bool";
+    pub(crate) const BINARY: &str = "Binary";
+    pub(crate) const NIL: &str = "Nil";
+    pub(crate) const OPTION: &str = "Option";
+    pub(crate) const RESULT: &str = "Result";
+    pub(crate) const TRUE: &str = "True";
+    pub(crate) const FALSE: &str = "False";
+    pub(crate) const SOME: &str = "Some";
+    pub(crate) const NONE: &str = "None";
+    pub(crate) const OK: &str = "Ok";
+    pub(crate) const ERR: &str = "Err";
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -43,7 +43,7 @@ impl TypeRef {
     /// Whether `id` is this prelude type. Guards on `id != NONE` so a
     /// pre-capture binding never falsely matches.
     #[inline]
-    pub fn is(&self, id: TypeId) -> bool {
+    pub(crate) fn is(&self, id: TypeId) -> bool {
         id != TypeId::NONE && id == self.id
     }
 }
@@ -67,7 +67,7 @@ impl CtorRef {
     /// Whether `(type_id, variant_idx)` is this prelude constructor. Guards on
     /// `type_id != NONE` so a pre-capture binding never falsely matches.
     #[inline]
-    pub fn is(&self, type_id: TypeId, variant_idx: u16) -> bool {
+    pub(crate) fn is(&self, type_id: TypeId, variant_idx: u16) -> bool {
         type_id != TypeId::NONE && type_id == self.type_id && variant_idx == self.variant_idx
     }
 }

@@ -34,15 +34,15 @@ const FN_SLOTS: usize = 4096;
 
 const DEFAULT_THRESHOLD: u64 = 20_000_000;
 
-pub static OP_COUNTS: [AtomicU64; OP_SLOTS] = [const { AtomicU64::new(0) }; OP_SLOTS];
-pub static FN_COUNTS: [AtomicU64; FN_SLOTS + 1] = [const { AtomicU64::new(0) }; FN_SLOTS + 1];
-pub static TOTAL_OPS: AtomicU64 = AtomicU64::new(0);
+static OP_COUNTS: [AtomicU64; OP_SLOTS] = [const { AtomicU64::new(0) }; OP_SLOTS];
+static FN_COUNTS: [AtomicU64; FN_SLOTS + 1] = [const { AtomicU64::new(0) }; FN_SLOTS + 1];
+static TOTAL_OPS: AtomicU64 = AtomicU64::new(0);
 
 static DUMPED: AtomicBool = AtomicBool::new(false);
 
 /// One executed instruction, attributed to the function whose frame is live.
 #[inline(always)]
-pub fn record(op: Op, func_idx: i32) {
+pub(crate) fn record(op: Op, func_idx: i32) {
     TOTAL_OPS.fetch_add(1, Ordering::Relaxed);
     OP_COUNTS[op as u8 as usize].fetch_add(1, Ordering::Relaxed);
     let slot = if (0..FN_SLOTS as i32).contains(&func_idx) {
@@ -55,7 +55,7 @@ pub fn record(op: Op, func_idx: i32) {
 
 /// Slice-entry check: dump once, the first time the sample is big enough.
 #[inline]
-pub fn maybe_dump(program: &Program) {
+pub(crate) fn maybe_dump(program: &Program) {
     if TOTAL_OPS.load(Ordering::Relaxed) < threshold() {
         return;
     }
@@ -84,7 +84,7 @@ fn threshold() -> u64 {
 /// Write both histograms to stderr, biggest share first. The header names the
 /// native mode because the sample's scope depends on it: under anything but
 /// `SCARLET_NATIVE=off` the missing bodies are exactly the hot ones.
-pub fn dump_op_counts(program: &Program) {
+fn dump_op_counts(program: &Program) {
     let total = TOTAL_OPS.load(Ordering::Relaxed).max(1);
     let mode = native::config().mode;
     let mut out = String::new();

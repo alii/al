@@ -20,7 +20,7 @@ pub enum PrimitiveKind {
 }
 
 impl PrimitiveKind {
-    pub const fn name(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self {
             Self::Int => prim_names::INT,
             Self::Float => prim_names::FLOAT,
@@ -33,8 +33,8 @@ impl PrimitiveKind {
 /// unsubstituted template form is `environment::VariantField`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldDef {
-    pub label: String,
-    pub ty: Type,
+    pub(crate) label: String,
+    pub(crate) ty: Type,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,39 +66,40 @@ pub enum Type {
     },
 }
 
-pub fn t_int() -> Type {
+pub(crate) fn t_int() -> Type {
     Type::Primitive {
         kind: PrimitiveKind::Int,
     }
 }
 
-pub fn t_float() -> Type {
+pub(crate) fn t_float() -> Type {
     Type::Primitive {
         kind: PrimitiveKind::Float,
     }
 }
 
-pub fn t_string() -> Type {
+pub(crate) fn t_string() -> Type {
     Type::Primitive {
         kind: PrimitiveKind::String,
     }
 }
 
-pub fn t_var(name: impl Into<String>) -> Type {
+pub(crate) fn t_var(name: impl Into<String>) -> Type {
     Type::Var { name: name.into() }
 }
 
-pub fn t_array(element: Type) -> Type {
+pub(crate) fn t_array(element: Type) -> Type {
     Type::Array {
         element: Box::new(element),
     }
 }
 
-pub fn t_tuple(elements: Vec<Type>) -> Type {
+pub(crate) fn t_tuple(elements: Vec<Type>) -> Type {
     Type::Tuple { elements }
 }
 
-pub fn t_named(
+#[cfg(test)]
+pub(crate) fn t_named(
     id: TypeId,
     name: impl Into<String>,
     type_args: Vec<Type>,

@@ -24,11 +24,10 @@ pub use elaborate::{
     Elab, ElabCtx, OrShape, PreludeTys, WalkStep, elaborate_body, elaborate_toplevel,
     elaborator_bug,
 };
-pub use elaborate_pat::{CtorPat, PatCtx, elaborate_arms, elaborate_pattern};
-pub use eta::{FnRTy, FnTable, eta_wrapper};
-pub use resolve::{CallForm, Denotation, EtaTarget, ValueForm};
+pub(crate) use eta::FnTable;
+pub(crate) use resolve::Denotation;
 pub use rty::{Arity, RSlice, RTy, ResolvedNode, ResolvedPool};
-pub use zonk::{Zonker, pool_for};
+pub(crate) use zonk::{Zonker, pool_for};
 
 use crate::bytecode::{Op, Value};
 use crate::core_ir::{ConstId, FuncIdx, VariantRef};
@@ -39,7 +38,7 @@ use crate::types::StrId;
 /// Distinct from `core_ir::LocalId` — `lower` mints those in ANF evaluation
 /// order and maps this onto them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BindingId(pub u32);
+pub struct BindingId(pub(crate) u32);
 
 impl std::fmt::Display for BindingId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -57,22 +56,22 @@ pub struct GlobalSlot(pub i32);
 /// space from [`GlobalSlot`] and [`CaptureIdx`], kept distinct so the three
 /// cannot be swapped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct FrameSlot(pub i32);
+pub struct FrameSlot(pub(crate) i32);
 
 /// An index into the current closure's capture array: what `PushCapture`
 /// addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct CaptureIdx(pub i32);
+pub struct CaptureIdx(pub(crate) i32);
 
 /// A name bound to a value, with the type the checker gave it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypedBind {
-    pub id: BindingId,
-    pub name: StrId,
-    pub ty: RTy,
+    pub(crate) id: BindingId,
+    pub(crate) name: StrId,
+    pub(crate) ty: RTy,
     /// `Some(slot)` when this binding is module-level and must land in that
     /// entry-frame slot, because fn bodies address it by `PushGlobal slot`.
-    pub global: Option<GlobalSlot>,
+    pub(crate) global: Option<GlobalSlot>,
 }
 
 /// Where a value reference reads from at runtime. Name resolution is finished:
@@ -221,7 +220,7 @@ pub enum TypedPat {
 }
 
 impl TypedPat {
-    pub fn ty(&self) -> RTy {
+    pub(crate) fn ty(&self) -> RTy {
         match self {
             TypedPat::Wild { ty }
             | TypedPat::Lit { ty, .. }
@@ -239,9 +238,9 @@ impl TypedPat {
 /// One arm of a `match`. Exhaustiveness has already been proven.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedArm {
-    pub pat: TypedPat,
-    pub guard: Option<TypedExpr>,
-    pub body: TypedExpr,
+    pub(crate) pat: TypedPat,
+    pub(crate) guard: Option<TypedExpr>,
+    pub(crate) body: TypedExpr,
 }
 
 /// A typechecked expression. Every node carries its resolved type.
@@ -395,7 +394,7 @@ pub enum TypedExpr {
 impl TypedExpr {
     /// The resolved type of this expression. Every arm is a field read, so this
     /// never recurses and never walks a `Let` spine.
-    pub fn ty(&self) -> RTy {
+    pub(crate) fn ty(&self) -> RTy {
         match self {
             TypedExpr::Const { ty, .. }
             | TypedExpr::Nil { ty }
@@ -430,17 +429,17 @@ impl TypedExpr {
 /// [`TypedProgram::fns`]; a `TypedFn` never contains another.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedFn {
-    pub name: StrId,
-    pub params: Vec<TypedBind>,
-    pub ret: RTy,
-    pub body: TypedExpr,
+    pub(crate) name: StrId,
+    pub(crate) params: Vec<TypedBind>,
+    pub(crate) ret: RTy,
+    pub(crate) body: TypedExpr,
     /// Number of [`BindingId`]s minted in this function, params included, so a
     /// consumer can size a dense `BindingId → LocalId` map with a `Vec`.
     ///
     /// The counter is per function, not global: a nested closure is a separate
     /// [`TypedFn`] whose ids restart at zero and which reaches an enclosing
     /// binding through [`ValueRef::Capture`].
-    pub binds: u32,
+    pub(crate) binds: u32,
 }
 
 /// A whole module, typechecked. The only input `lower` takes.
@@ -459,10 +458,10 @@ pub struct TypedProgram {
     /// Top-level functions, nested closures, and eta-wrappers, indexed by the
     /// [`FuncIdx`] every [`TypedCallee::Known`] and [`TypedExpr::Closure`]
     /// carries.
-    pub fns: Vec<TypedFn>,
+    pub(crate) fns: Vec<TypedFn>,
     /// The module's initialiser — top-level declarations in dependency order
     /// followed by its statements. `params` is empty.
-    pub toplevel: TypedFn,
+    pub(crate) toplevel: TypedFn,
     /// The compiler's own constant pool, moved in — not a copy, and not a
     /// second pool merged at emit.
     ///
@@ -473,13 +472,13 @@ pub struct TypedProgram {
     /// no source literal behind them (`TypedPat::Array`'s `len`,
     /// `TypedPat::Bin`'s `zero`, `TypedBinPatSeg::Utf8Literal`'s `bits`).
     /// Pinned by `typed_program_consts_are_stable_ids`.
-    pub consts: Vec<Value>,
+    pub(crate) consts: Vec<Value>,
     /// The arena every [`RTy`] in the program indexes. Append-only during
     /// elaboration, immutable afterwards. `lower` never reads it; `perceus`
     /// reads it for `is_heap`, and `emit` erases types entirely.
-    pub pool: ResolvedPool,
+    pub(crate) pool: ResolvedPool,
     /// Types for the locals `lower` mints that no source expression names.
-    pub temps: TempTys,
+    pub(crate) temps: TempTys,
 }
 
 /// The handful of [`RTy`]s `lower` needs for the temporaries it introduces —
@@ -492,12 +491,12 @@ pub struct TypedProgram {
 /// and `Bool` is a nominal non-primitive and so heap-shaped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TempTys {
-    pub int: RTy,
-    pub bool: RTy,
-    pub string: RTy,
-    pub binary: RTy,
+    pub(crate) int: RTy,
+    pub(crate) bool: RTy,
+    pub(crate) string: RTy,
+    pub(crate) binary: RTy,
     /// `(Int, Int)` — `Op::BinReadUtf8`'s `(codepoint, bits)` result.
-    pub int_pair: RTy,
+    pub(crate) int_pair: RTy,
 }
 
 impl TempTys {
@@ -507,7 +506,7 @@ impl TempTys {
     /// `Binary` stay outside `PrimIds` and [`ResolvedPool::is_heap`] answers
     /// `true` for them. `int_pair` has no prelude `Ty` — the source language
     /// never spells `Op::BinReadUtf8`'s result — so it is built structurally.
-    pub fn intern<C: PreludeTys>(ctx: &mut C, pool: &mut ResolvedPool) -> TempTys {
+    pub(crate) fn intern<C: PreludeTys>(ctx: &mut C, pool: &mut ResolvedPool) -> TempTys {
         let t = ctx.ty_int();
         let int = ctx.resolve_rty(pool, t);
         let t = ctx.ty_bool();

@@ -23,7 +23,7 @@ impl Arity {
     /// The arity of a parameter/field list.
     #[inline]
     #[allow(clippy::expect_used)] // ctor arity is bounded far below u16::MAX upstream
-    pub fn of<T>(items: &[T]) -> Self {
+    pub(crate) fn of<T>(items: &[T]) -> Self {
         Arity(u16::try_from(items.len()).expect("constructor arity exceeds u16"))
     }
 }
@@ -51,12 +51,12 @@ impl std::fmt::Display for RTy {
 /// A contiguous run of child [`RTy`]s in [`ResolvedPool::children`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RSlice {
-    pub start: u32,
-    pub len: u32,
+    start: u32,
+    pub(crate) len: u32,
 }
 
 impl RSlice {
-    pub const EMPTY: RSlice = RSlice { start: 0, len: 0 };
+    const EMPTY: RSlice = RSlice { start: 0, len: 0 };
 }
 
 /// A fully-resolved type node. `types::TypeNode` minus its `Var` arm.
@@ -89,7 +89,7 @@ pub struct ResolvedPool {
 }
 
 impl ResolvedPool {
-    pub fn new(prims: PrimIds) -> Self {
+    pub(crate) fn new(prims: PrimIds) -> Self {
         ResolvedPool {
             nodes: Vec::new(),
             children: Vec::new(),
@@ -97,15 +97,12 @@ impl ResolvedPool {
         }
     }
 
-    pub fn len(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
         self.nodes.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
-    }
-
-    pub fn prims(&self) -> PrimIds {
+    pub(crate) fn prims(&self) -> PrimIds {
         self.prims
     }
 
@@ -127,39 +124,39 @@ impl ResolvedPool {
         t
     }
 
-    pub fn mk_bound(&mut self, idx: u32) -> RTy {
+    pub(crate) fn mk_bound(&mut self, idx: u32) -> RTy {
         self.alloc(ResolvedNode::Bound(idx))
     }
 
-    pub fn mk_con(&mut self, id: TypeId, name: StrId, args: &[RTy]) -> RTy {
+    pub(crate) fn mk_con(&mut self, id: TypeId, name: StrId, args: &[RTy]) -> RTy {
         let args = self.push_children(args);
         self.alloc(ResolvedNode::Con { id, name, args })
     }
 
-    pub fn mk_fun(&mut self, params: &[RTy], ret: RTy) -> RTy {
+    pub(crate) fn mk_fun(&mut self, params: &[RTy], ret: RTy) -> RTy {
         let params = self.push_children(params);
         self.alloc(ResolvedNode::Fun { params, ret })
     }
 
-    pub fn mk_tuple(&mut self, elems: &[RTy]) -> RTy {
+    pub(crate) fn mk_tuple(&mut self, elems: &[RTy]) -> RTy {
         let elems = self.push_children(elems);
         self.alloc(ResolvedNode::Tuple { elems })
     }
 
     /// The node `t` names. Panics on an `RTy` from a different pool.
     #[allow(clippy::indexing_slicing)]
-    pub fn node(&self, t: RTy) -> ResolvedNode {
+    pub(crate) fn node(&self, t: RTy) -> ResolvedNode {
         self.nodes[t.0 as usize]
     }
 
     #[allow(clippy::indexing_slicing)]
-    pub fn children(&self, s: RSlice) -> &[RTy] {
+    pub(crate) fn children(&self, s: RSlice) -> &[RTy] {
         let lo = s.start as usize;
         &self.children[lo..lo + s.len as usize]
     }
 
     /// Type arguments of a nominal type; empty for every other node.
-    pub fn con_args(&self, t: RTy) -> &[RTy] {
+    pub(crate) fn con_args(&self, t: RTy) -> &[RTy] {
         match self.node(t) {
             ResolvedNode::Con { args, .. } => self.children(args),
             _ => &[],
@@ -168,29 +165,29 @@ impl ResolvedPool {
 
     /// `i`th type argument of a nominal type — `Result(_, E)`'s `E` is
     /// `con_arg(t, 1)`.
-    pub fn con_arg(&self, t: RTy, i: usize) -> Option<RTy> {
+    pub(crate) fn con_arg(&self, t: RTy, i: usize) -> Option<RTy> {
         self.con_args(t).get(i).copied()
     }
 
-    pub fn tuple_elems(&self, t: RTy) -> &[RTy] {
+    pub(crate) fn tuple_elems(&self, t: RTy) -> &[RTy] {
         match self.node(t) {
             ResolvedNode::Tuple { elems } => self.children(elems),
             _ => &[],
         }
     }
 
-    pub fn tuple_elem(&self, t: RTy, i: usize) -> Option<RTy> {
+    pub(crate) fn tuple_elem(&self, t: RTy, i: usize) -> Option<RTy> {
         self.tuple_elems(t).get(i).copied()
     }
 
-    pub fn fun_params(&self, t: RTy) -> &[RTy] {
+    pub(crate) fn fun_params(&self, t: RTy) -> &[RTy] {
         match self.node(t) {
             ResolvedNode::Fun { params, .. } => self.children(params),
             _ => &[],
         }
     }
 
-    pub fn fun_ret(&self, t: RTy) -> Option<RTy> {
+    pub(crate) fn fun_ret(&self, t: RTy) -> Option<RTy> {
         match self.node(t) {
             ResolvedNode::Fun { ret, .. } => Some(ret),
             _ => None,
@@ -214,7 +211,7 @@ impl ResolvedPool {
     ///
     /// `Bound` answers `false`: its representation is unknown here, so the
     /// value is handled dynamically.
-    pub fn is_heap(&self, t: RTy) -> bool {
+    pub(crate) fn is_heap(&self, t: RTy) -> bool {
         match self.node(t) {
             ResolvedNode::Con { id, .. } => self.as_prim(id).is_none(),
             ResolvedNode::Tuple { .. } | ResolvedNode::Fun { .. } => true,

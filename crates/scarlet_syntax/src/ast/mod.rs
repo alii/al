@@ -35,7 +35,7 @@ pub enum InterpPart {
 #[derive(Debug, Clone)]
 pub struct InterpolatedString {
     pub parts: Vec<InterpPart>,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -62,7 +62,7 @@ pub struct Identifier {
 #[derive(Debug, Clone)]
 pub struct Attribute {
     pub name: Identifier,
-    pub args: Vec<Identifier>,
+    pub(crate) args: Vec<Identifier>,
     pub span: Span,
 }
 
@@ -116,7 +116,7 @@ pub enum BinaryOp {
 }
 
 impl BinaryOp {
-    pub fn symbol(self) -> &'static str {
+    pub(crate) fn symbol(self) -> &'static str {
         match self {
             Self::Add => "+",
             Self::Sub => "-",
@@ -142,7 +142,7 @@ pub enum UnaryOp {
 }
 
 impl UnaryOp {
-    pub fn symbol(self) -> &'static str {
+    pub(crate) fn symbol(self) -> &'static str {
         match self {
             Self::Not => "!",
             Self::Neg => "-",
@@ -156,7 +156,7 @@ pub struct VariableBinding {
     pub identifier: Identifier,
     pub typ: Option<TypeIdentifier>,
     pub init: Expression,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -182,18 +182,18 @@ pub struct TupleDestructuringBinding {
 pub struct TypedDiscard {
     pub ty_name: Identifier,
     pub init: Expression,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 /// `Ctor(p1, ..) = expr` at statement position. Lowered to a one-arm match
 /// that must pass exhaustiveness, so only single-constructor types qualify.
 #[derive(Debug, Clone)]
 pub struct CtorDestructuringBinding {
-    pub name: Identifier,
+    pub(crate) name: Identifier,
     pub args: Vec<PatternArg>,
-    pub rest: bool,
+    pub(crate) rest: bool,
     /// Span of just the `Ctor(args)` head, not the `= init` tail.
-    pub pattern_span: Span,
+    pub(crate) pattern_span: Span,
     pub init: Expression,
     pub span: Span,
 }
@@ -222,7 +222,7 @@ impl CtorDestructuringBinding {
 pub struct BackpassBinding {
     pub binders: Vec<Identifier>,
     pub call: Expression,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -289,14 +289,14 @@ pub struct Constructor {
     pub doc: Option<String>,
     pub identifier: Identifier,
     pub fields: Vec<ConstructorField>,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub struct ConstructorField {
     pub label: Identifier,
     pub typ: TypeIdentifier,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -389,7 +389,7 @@ pub enum Statement {
 }
 
 impl Statement {
-    pub fn span(&self) -> Span {
+    fn span(&self) -> Span {
         match self {
             Statement::Declaration { decl, .. } => decl.span(),
             Statement::ImportDeclaration(x) => x.span,
@@ -414,7 +414,7 @@ pub struct FunctionExpression {
 pub struct IfExpression {
     pub condition: Box<Expression>,
     pub body: Box<Expression>,
-    pub span: Span,
+    pub(crate) span: Span,
     pub else_body: Box<Expression>,
 }
 
@@ -452,48 +452,39 @@ pub struct BinaryExpression {
 pub struct UnaryExpression {
     pub expression: Box<Expression>,
     pub op: UnaryOp,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub struct ArrayExpression {
     pub elements: Vec<ArrayElement>,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub struct TupleExpression {
     pub elements: Vec<Expression>,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub struct ArrayIndexExpression {
     pub expression: Box<Expression>,
     pub index: Box<Expression>,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub struct RangeExpression {
     pub start: Box<Expression>,
     pub end: Box<Expression>,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub enum PropertyKey {
     Field(Identifier),
     TupleIndex(NumberLiteral),
-}
-
-impl PropertyKey {
-    pub fn span(&self) -> Span {
-        match self {
-            PropertyKey::Field(id) => id.span,
-            PropertyKey::TupleIndex(n) => n.span,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -521,7 +512,7 @@ pub enum CallArg {
 }
 
 impl CallArg {
-    pub fn span(&self) -> Span {
+    pub(crate) fn span(&self) -> Span {
         match self {
             CallArg::Positional(e) => e.span(),
             CallArg::Labeled { label, value } => label.span.union(&value.span()),
@@ -539,7 +530,7 @@ pub struct BlockExpression {
 #[derive(Debug, Clone)]
 pub struct SpreadElement {
     pub expression: Expression,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -576,13 +567,13 @@ impl BinSpec {
 pub struct BinSegment {
     pub value: Expression,
     pub spec: BinSpec,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub struct BinaryLiteral {
     pub segments: Vec<BinSegment>,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]

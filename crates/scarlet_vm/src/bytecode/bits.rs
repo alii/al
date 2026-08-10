@@ -6,14 +6,14 @@
 
 /// Read bit `i` (MSB-first). Caller guarantees `i / 8` is in bounds.
 #[inline]
-pub fn get_bit(bytes: &[u8], i: u64) -> u8 {
+pub(crate) fn get_bit(bytes: &[u8], i: u64) -> u8 {
     (bytes[(i / 8) as usize] >> (7 - (i % 8))) & 1
 }
 
 /// Write bit `i` (MSB-first) to `bit & 1`. Caller guarantees `i / 8` is in
 /// bounds. Overwrites rather than ORs, so a non-zero destination is fine.
 #[inline]
-pub fn set_bit(bytes: &mut [u8], i: u64, bit: u8) {
+fn set_bit(bytes: &mut [u8], i: u64, bit: u8) {
     let idx = (i / 8) as usize;
     let shift = 7 - (i % 8) as u32;
     bytes[idx] = (bytes[idx] & !(1 << shift)) | ((bit & 1) << shift);
@@ -23,7 +23,7 @@ pub fn set_bit(bytes: &mut [u8], i: u64, bit: u8) {
 /// end of `bytes` read as zero rather than panicking; callers needing strict
 /// bounds mask through [`tail_mask`].
 #[inline]
-pub fn read_byte(bytes: &[u8], at: u64) -> u8 {
+pub(crate) fn read_byte(bytes: &[u8], at: u64) -> u8 {
     let idx = (at / 8) as usize;
     let shift = (at % 8) as u32;
     let hi = bytes.get(idx).copied().unwrap_or(0);
@@ -39,7 +39,7 @@ pub fn read_byte(bytes: &[u8], at: u64) -> u8 {
 /// `None` when `bit_len` is a whole number of bytes. Equality and hashing both
 /// mask through this, which is what keeps them consistent.
 #[inline]
-pub fn tail_mask(bit_len: u64) -> Option<u8> {
+pub(crate) fn tail_mask(bit_len: u64) -> Option<u8> {
     let rem = (bit_len % 8) as u32;
     if rem == 0 {
         None
@@ -52,7 +52,7 @@ pub fn tail_mask(bit_len: u64) -> Option<u8> {
 /// Caller guarantees both windows are in bounds; unlike [`read_byte`], an
 /// out-of-window access panics. Writes overwrite rather than OR, so `dst` need
 /// not be pre-zeroed.
-pub fn copy_bits(dst: &mut [u8], dst_at: u64, src: &[u8], src_at: u64, n: u64) {
+pub(crate) fn copy_bits(dst: &mut [u8], dst_at: u64, src: &[u8], src_at: u64, n: u64) {
     let mut done = 0u64;
     if dst_at.is_multiple_of(8) && src_at.is_multiple_of(8) {
         let full = (n / 8) as usize;

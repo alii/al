@@ -50,7 +50,7 @@ impl EnumTemplate {
 
     /// Build an instance carrying `payload` in `a`.
     #[inline]
-    pub fn instantiate<A: Arena + ?Sized>(&self, a: &mut A, payload: &[Value]) -> Value {
+    pub(crate) fn instantiate<A: Arena + ?Sized>(&self, a: &mut A, payload: &[Value]) -> Value {
         // Lazy: see `EnumRef::hash` — 0 means "computed on first use".
         Value::enum_in(
             a,
@@ -66,11 +66,11 @@ impl EnumTemplate {
 
     /// The pre-built value, for a nullary constructor.
     #[inline]
-    pub fn nullary(&self) -> Option<&Value> {
+    pub(crate) fn nullary(&self) -> Option<&Value> {
         self.nullary.as_ref()
     }
 
-    pub fn arity(&self) -> usize {
+    fn arity(&self) -> usize {
         self.labels.as_tuple().map_or(0, |t| t.len())
     }
 }
@@ -92,7 +92,7 @@ impl Default for AbiTable {
 
 impl AbiTable {
     #[inline]
-    pub fn get(&self, slot: AbiSlot) -> Option<TemplateIdx> {
+    pub(crate) fn get(&self, slot: AbiSlot) -> Option<TemplateIdx> {
         self.slots[slot.index()]
     }
 
@@ -116,7 +116,7 @@ impl AbiTable {
 
     /// Check every binding names a real template of the slot's arity. Run once
     /// at load; construction sites rely on it thereafter.
-    pub fn validate(
+    pub(crate) fn validate(
         &self,
         templates: &crate::tivec::TiVec<TemplateIdx, EnumTemplate>,
     ) -> Result<(), String> {

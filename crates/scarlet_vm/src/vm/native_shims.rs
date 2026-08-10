@@ -73,7 +73,7 @@ unsafe fn bin_int_val(vmx: *mut VM, a: u64, b: u64, op: impl FnOnce(i64, i64) ->
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`.
 #[cold]
-pub unsafe extern "C" fn al_shim_int_box(vmx: *mut VM, i: i64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_int_box(vmx: *mut VM, i: i64) -> u64 {
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
     into_bits(vm.boxed_int(i))
@@ -86,7 +86,7 @@ pub unsafe extern "C" fn al_shim_int_box(vmx: *mut VM, i: i64) -> u64 {
 /// `bits` must be the bits of an Int-typed `Value`; a `BigInt` box must be
 /// live for the duration of the call.
 #[cold]
-pub unsafe extern "C" fn al_shim_int_unbox(bits: u64) -> i64 {
+pub(crate) unsafe extern "C" fn al_shim_int_unbox(bits: u64) -> i64 {
     // SAFETY: borrowed read per the contract above; ManuallyDrop keeps the
     // caller's reference count untouched.
     let v = std::mem::ManuallyDrop::new(unsafe { Value::from_bits(bits) });
@@ -98,7 +98,7 @@ pub unsafe extern "C" fn al_shim_int_unbox(bits: u64) -> i64 {
 /// # Safety
 /// As [`bin_int_val`].
 #[cold]
-pub unsafe extern "C" fn al_shim_add_int_val(vmx: *mut VM, a: u64, b: u64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_add_int_val(vmx: *mut VM, a: u64, b: u64) -> u64 {
     // SAFETY: forwarded contract.
     unsafe { bin_int_val(vmx, a, b, i64::wrapping_add) }
 }
@@ -108,7 +108,7 @@ pub unsafe extern "C" fn al_shim_add_int_val(vmx: *mut VM, a: u64, b: u64) -> u6
 /// # Safety
 /// As [`bin_int_val`].
 #[cold]
-pub unsafe extern "C" fn al_shim_sub_int_val(vmx: *mut VM, a: u64, b: u64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_sub_int_val(vmx: *mut VM, a: u64, b: u64) -> u64 {
     // SAFETY: forwarded contract.
     unsafe { bin_int_val(vmx, a, b, i64::wrapping_sub) }
 }
@@ -118,7 +118,7 @@ pub unsafe extern "C" fn al_shim_sub_int_val(vmx: *mut VM, a: u64, b: u64) -> u6
 /// # Safety
 /// As [`bin_int_val`].
 #[cold]
-pub unsafe extern "C" fn al_shim_mul_int_val(vmx: *mut VM, a: u64, b: u64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_mul_int_val(vmx: *mut VM, a: u64, b: u64) -> u64 {
     // SAFETY: forwarded contract.
     unsafe { bin_int_val(vmx, a, b, i64::wrapping_mul) }
 }
@@ -128,7 +128,7 @@ pub unsafe extern "C" fn al_shim_mul_int_val(vmx: *mut VM, a: u64, b: u64) -> u6
 /// # Safety
 /// As [`bin_int_val`].
 #[cold]
-pub unsafe extern "C" fn al_shim_div_int_val(vmx: *mut VM, a: u64, b: u64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_div_int_val(vmx: *mut VM, a: u64, b: u64) -> u64 {
     // SAFETY: forwarded contract.
     unsafe { bin_int_val(vmx, a, b, div_int) }
 }
@@ -138,7 +138,7 @@ pub unsafe extern "C" fn al_shim_div_int_val(vmx: *mut VM, a: u64, b: u64) -> u6
 /// # Safety
 /// As [`bin_int_val`].
 #[cold]
-pub unsafe extern "C" fn al_shim_mod_int_val(vmx: *mut VM, a: u64, b: u64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_mod_int_val(vmx: *mut VM, a: u64, b: u64) -> u64 {
     // SAFETY: forwarded contract.
     unsafe { bin_int_val(vmx, a, b, mod_int) }
 }
@@ -151,7 +151,7 @@ pub unsafe extern "C" fn al_shim_mod_int_val(vmx: *mut VM, a: u64, b: u64) -> u6
 /// `vmx` must point at the running scheduler's live `VM`; `a` must be the
 /// bits of an Int-typed `Value` whose reference the caller transfers.
 #[cold]
-pub unsafe extern "C" fn al_shim_neg_int_val(vmx: *mut VM, a: u64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_neg_int_val(vmx: *mut VM, a: u64) -> u64 {
     // SAFETY: the operand reference is transferred per the contract above; the
     // drop balances it exactly once.
     let a = unsafe { Value::from_bits(a) };
@@ -179,7 +179,7 @@ pub unsafe extern "C" fn al_shim_neg_int_val(vmx: *mut VM, a: u64) -> u64 {
 /// `payload` must point at `len` initialized value words whose references
 /// the caller owns and transfers to this call.
 #[cold]
-pub unsafe extern "C" fn al_shim_enum_alloc(
+unsafe extern "C" fn al_shim_enum_alloc(
     vmx: *mut VM,
     packed: u64,
     enum_name: u64,
@@ -237,7 +237,7 @@ pub unsafe extern "C" fn al_shim_enum_alloc(
 /// at `len` initialized value words whose references the caller owns and
 /// transfers to this call.
 #[cold]
-pub unsafe extern "C" fn al_shim_make_array(vmx: *mut VM, elems: *const u64, len: i64) -> u64 {
+unsafe extern "C" fn al_shim_make_array(vmx: *mut VM, elems: *const u64, len: i64) -> u64 {
     let n = len as usize;
     // SAFETY: `elems` points at `n` initialized value words and `Value` is
     // repr(transparent) over u64. Borrowed: the array takes its own reference.
@@ -261,7 +261,7 @@ pub unsafe extern "C" fn al_shim_make_array(vmx: *mut VM, elems: *const u64, len
 /// # Safety
 /// Same contract as [`al_shim_make_array`].
 #[cold]
-pub unsafe extern "C" fn al_shim_make_tuple(vmx: *mut VM, elems: *const u64, len: i64) -> u64 {
+unsafe extern "C" fn al_shim_make_tuple(vmx: *mut VM, elems: *const u64, len: i64) -> u64 {
     let n = len as usize;
     // SAFETY: see `al_shim_make_array`; identical contract.
     let vals: &[Value] = if n == 0 {
@@ -297,7 +297,7 @@ fn seq_root_total(vm: &mut VM, v: Value) -> Value {
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `seq` must carry
 /// one owned reference the caller transfers.
-pub unsafe extern "C" fn al_shim_seq_len(vmx: *mut VM, seq: u64) -> u64 {
+unsafe extern "C" fn al_shim_seq_len(vmx: *mut VM, seq: u64) -> u64 {
     // SAFETY: owned word per the contract above.
     let v = unsafe { Value::from_bits(seq) };
     let n = match v.kind() {
@@ -318,7 +318,7 @@ pub unsafe extern "C" fn al_shim_seq_len(vmx: *mut VM, seq: u64) -> u64 {
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `bin` must carry
 /// one owned reference the caller transfers.
-pub unsafe extern "C" fn al_shim_bin_byte_size(vmx: *mut VM, bin: u64) -> u64 {
+unsafe extern "C" fn al_shim_bin_byte_size(vmx: *mut VM, bin: u64) -> u64 {
     // SAFETY: owned word per the contract above.
     let v = unsafe { Value::from_bits(bin) };
     let n = match v.kind() {
@@ -339,7 +339,7 @@ pub unsafe extern "C" fn al_shim_bin_byte_size(vmx: *mut VM, bin: u64) -> u64 {
 /// `vmx` must point at the running scheduler's live `VM`; `buf` must point
 /// at `len >= 1` initialized value words whose references the caller owns
 /// and transfers to this call.
-pub unsafe extern "C" fn al_shim_seq_append(vmx: *mut VM, buf: *const u64, len: i64) -> u64 {
+unsafe extern "C" fn al_shim_seq_append(vmx: *mut VM, buf: *const u64, len: i64) -> u64 {
     let n = len as usize;
     // SAFETY: `buf` points at `n` initialized value words, borrowed here; the
     // tree takes its own reference per element.
@@ -363,7 +363,7 @@ pub unsafe extern "C" fn al_shim_seq_append(vmx: *mut VM, buf: *const u64, len: 
 ///
 /// # Safety
 /// Same contract as [`al_shim_seq_append`].
-pub unsafe extern "C" fn al_shim_seq_prepend(vmx: *mut VM, buf: *const u64, len: i64) -> u64 {
+unsafe extern "C" fn al_shim_seq_prepend(vmx: *mut VM, buf: *const u64, len: i64) -> u64 {
     let n = len as usize;
     // SAFETY: see `al_shim_seq_append`; identical contract.
     let words: &[Value] = unsafe { std::slice::from_raw_parts(buf.cast::<Value>(), n) };
@@ -387,7 +387,7 @@ pub unsafe extern "C" fn al_shim_seq_prepend(vmx: *mut VM, buf: *const u64, len:
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `buf` must carry
 /// one owned reference the caller transfers.
-pub unsafe extern "C" fn al_shim_http_parse_head(vmx: *mut VM, buf: u64, off: i64) -> u64 {
+unsafe extern "C" fn al_shim_http_parse_head(vmx: *mut VM, buf: u64, off: i64) -> u64 {
     // SAFETY: owned word per the contract above.
     let v = unsafe { Value::from_bits(buf) };
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
@@ -408,7 +408,7 @@ pub unsafe extern "C" fn al_shim_http_parse_head(vmx: *mut VM, buf: u64, off: i6
 ///
 /// # Safety
 /// `headers` must carry one owned reference the caller transfers.
-pub unsafe extern "C" fn al_shim_http_headers_valid(headers: u64) -> u64 {
+unsafe extern "C" fn al_shim_http_headers_valid(headers: u64) -> u64 {
     // SAFETY: owned word per the contract above.
     let v = unsafe { Value::from_bits(headers) };
     let r = super::http::headers_valid(&v).unwrap_or_else(|_| {
@@ -424,7 +424,7 @@ pub unsafe extern "C" fn al_shim_http_headers_valid(headers: u64) -> u64 {
 /// # Safety
 /// `headers` and `name` must each carry one owned reference the caller
 /// transfers.
-pub unsafe extern "C" fn al_shim_http_header_has(headers: u64, name: u64) -> u64 {
+unsafe extern "C" fn al_shim_http_header_has(headers: u64, name: u64) -> u64 {
     // SAFETY: owned words per the contract above.
     let (h, n) = unsafe { (Value::from_bits(headers), Value::from_bits(name)) };
     let r = super::http::header_has(&h, &super::bin_ref(&n)).unwrap_or_else(|_| {
@@ -442,7 +442,7 @@ pub unsafe extern "C" fn al_shim_http_header_has(headers: u64, name: u64) -> u64
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `reason` and
 /// `headers` must each carry one owned reference the caller transfers.
-pub unsafe extern "C" fn al_shim_http_serialize_head(
+unsafe extern "C" fn al_shim_http_serialize_head(
     vmx: *mut VM,
     code: i64,
     reason: u64,
@@ -468,7 +468,7 @@ pub unsafe extern "C" fn al_shim_http_serialize_head(
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `headers` must
 /// carry one owned reference the caller transfers.
-pub unsafe extern "C" fn al_shim_http_framing(vmx: *mut VM, headers: u64) -> u64 {
+unsafe extern "C" fn al_shim_http_framing(vmx: *mut VM, headers: u64) -> u64 {
     // SAFETY: owned word per the contract above.
     let v = unsafe { Value::from_bits(headers) };
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
@@ -485,12 +485,12 @@ pub unsafe extern "C" fn al_shim_http_framing(vmx: *mut VM, headers: u64) -> u64
 }
 
 /// [`div_int`] on unboxed `i64`s.
-pub extern "C" fn al_shim_div_int(a: i64, b: i64) -> i64 {
+pub(crate) extern "C" fn al_shim_div_int(a: i64, b: i64) -> i64 {
     div_int(a, b)
 }
 
 /// [`mod_int`] on unboxed `i64`s.
-pub extern "C" fn al_shim_mod_int(a: i64, b: i64) -> i64 {
+pub(crate) extern "C" fn al_shim_mod_int(a: i64, b: i64) -> i64 {
     mod_int(a, b)
 }
 
@@ -504,7 +504,7 @@ pub extern "C" fn al_shim_mod_int(a: i64, b: i64) -> i64 {
 /// `vmx` must point at the running scheduler's live `VM`, and `slot` must be
 /// in range for its global area; the emitter guarantees both. The returned
 /// word carries no reference the caller owns.
-pub unsafe extern "C" fn al_shim_push_global(vmx: *mut VM, slot: i64) -> u64 {
+unsafe extern "C" fn al_shim_push_global(vmx: *mut VM, slot: i64) -> u64 {
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
     vm.globals[slot as usize].to_bits()
@@ -526,7 +526,7 @@ pub unsafe extern "C" fn al_shim_push_global(vmx: *mut VM, slot: i64) -> u64 {
 /// `argc` initialized value words whose references the caller owns and
 /// transfers; `op_code` must be `op as u8` for an op
 /// [`is_native_bridge_op`](crate::bytecode::is_native_bridge_op) admits.
-pub unsafe extern "C" fn al_shim_op(
+unsafe extern "C" fn al_shim_op(
     vmx: *mut VM,
     op_code: i64,
     operand: i64,
@@ -556,6 +556,48 @@ pub unsafe extern "C" fn al_shim_op(
     }
 }
 
+/// The bridge for [`is_native_try_op`](crate::bytecode::is_native_try_op)
+/// opcodes: the ops with a reachable runtime error.
+///
+/// Like [`al_shim_op`], but returns a [`NativeStatus`] rather than the value,
+/// because the op can fail on user data. On `Done` the result is on the value
+/// stack for the caller to pop; otherwise the error is parked in the VM and
+/// the status unwinds the native frames.
+///
+/// # Safety
+/// As [`al_shim_op`], with `op_code` one
+/// [`is_native_try_op`](crate::bytecode::is_native_try_op) admits.
+unsafe extern "C" fn al_shim_try_op(
+    vmx: *mut VM,
+    op_code: i64,
+    operand: i64,
+    buf: *const u64,
+    argc: i64,
+) -> u64 {
+    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
+    let vm = unsafe { &mut *vmx };
+    for i in 0..argc as usize {
+        // SAFETY: `buf` holds `argc` initialized owned words, transferred here.
+        vm.stack
+            .push(unsafe { Value::from_bits(buf.add(i).read()) });
+    }
+    match vm.run_try_op(op_code as u8, operand as i32) {
+        Ok(()) => NativeStatus::Done as u64,
+        Err(e) => vm.status_from_outcome(Err(e)) as u64,
+    }
+}
+
+impl VM {
+    /// Dispatch an [`is_native_try_op`](crate::bytecode::is_native_try_op)
+    /// opcode to its interpreter method.
+    fn run_try_op(&mut self, op_code: u8, _operand: i32) -> VmResult<()> {
+        match op_code {
+            c if c == Op::ArraySlice as u8 => self.seq_slice(),
+            _ => proof_violation("run_try_op on an op is_native_try_op excludes"),
+        }
+    }
+}
+
 /// The bridge for [`is_native_park_op`](crate::bytecode::is_native_park_op)
 /// opcodes: the ops that can suspend the process.
 ///
@@ -577,7 +619,7 @@ pub unsafe extern "C" fn al_shim_op(
 /// `argc` initialized value words whose references the caller transfers;
 /// `op_code` must be one [`is_native_park_op`](crate::bytecode::is_native_park_op)
 /// admits, and both ordinals must name resume points of the running body.
-pub unsafe extern "C" fn al_shim_park_op(
+unsafe extern "C" fn al_shim_park_op(
     vmx: *mut VM,
     op_code: i64,
     buf: *const u64,
@@ -613,7 +655,7 @@ impl VM {
     /// Dispatch an [`is_native_park_op`](crate::bytecode::is_native_park_op)
     /// opcode to its interpreter method. Mirrors the interpreter's `park!`
     /// arms; the two share the method bodies.
-    pub(super) fn run_park_op(&mut self, op_code: u8, reds: &mut i32) -> VmResult<Option<Parked>> {
+    fn run_park_op(&mut self, op_code: u8, reds: &mut i32) -> VmResult<Option<Parked>> {
         match op_code {
             c if c == Op::FileRead as u8 => self.file_read(reds),
             c if c == Op::FileWrite as u8 => self.file_write(reds),
@@ -635,12 +677,7 @@ impl VM {
     /// opcode to its interpreter method. `operand` is the op's flattened
     /// immediate (unused by ops without one). Mirrors the interpreter's
     /// `run_slice` arms exactly; the two share the method bodies.
-    pub(super) fn run_bridge_op(
-        &mut self,
-        op_code: u8,
-        operand: i32,
-        reds: &mut i32,
-    ) -> VmResult<()> {
+    fn run_bridge_op(&mut self, op_code: u8, operand: i32, reds: &mut i32) -> VmResult<()> {
         match op_code {
             c if c == Op::Index as u8 => self.seq_index(),
             c if c == Op::IndexOr as u8 => self.seq_index_or(operand),
@@ -711,6 +748,36 @@ impl VM {
             c if c == Op::Gt as u8 => self.compare_push(|o| o.is_gt()),
             c if c == Op::Lte as u8 => self.compare_push(|o| o.is_le()),
             c if c == Op::Gte as u8 => self.compare_push(|o| o.is_ge()),
+            // The checked twins of the proof-dependent fast paths: the
+            // emitter sends a site here when the type could not be proven, so
+            // the unchecked shim would have been unsound.
+            c if c == Op::TupleIndex as u8 => self.tuple_index(operand),
+            c if c == Op::Append as u8 => self.seq_append(operand),
+            c if c == Op::Prepend as u8 => self.seq_prepend(operand),
+            c if c == Op::ArrayLen as u8 => self.seq_len(),
+            c if c == Op::BinByteSize as u8 => self.bin_byte_size(),
+            c if c == Op::HttpParseHead as u8 => self.http_parse_head(),
+            c if c == Op::HttpHeadersValid as u8 => self.http_headers_valid(),
+            c if c == Op::HttpFraming as u8 => self.http_framing(),
+            c if c == Op::HttpHeaderHas as u8 => self.http_header_has(),
+            c if c == Op::HttpSerializeHead as u8 => self.http_serialize_head(),
+            c if c == Op::AddStr as u8 => self.str_concat2(),
+            c if c == Op::GetField as u8 => self.get_field(operand),
+            c if c == Op::BinFromInt as u8 => self.bin_from_int(),
+            c if c == Op::BinReadInt as u8 => self.bin_read_int(),
+            c if c == Op::BinTake as u8 => self.bin_take(),
+            c if c == Op::BinView as u8 => self.bin_view(),
+            // Pushes (codepoint, nbits); Core sees one `(Int, Int)`, and the
+            // bytecode emitter follows the op with a `MakeTuple 2`.
+            c if c == Op::BinReadUtf8 as u8 => {
+                self.bin_read_utf8()?;
+                self.make_tuple(2)
+            }
+            c if c == Op::HttpHeaderGet as u8 => self.http_header_get(),
+            c if c == Op::StackDepth as u8 => self.stack_depth(),
+            c if c == Op::TcpLocalAddr as u8 => self.tcp_local_addr(),
+            c if c == Op::ProcessSpawn as u8 => self.process_spawn(reds),
+            c if c == Op::Argv as u8 => self.argv(),
             c if c == Op::TcpListen as u8 => self.tcp_listen(),
             c if c == Op::TcpClose as u8 => self.tcp_close(reds),
             c if c == Op::TcpCloseServer as u8 => self.tcp_close_server(),
@@ -721,7 +788,10 @@ impl VM {
             // returns exactly one value, so it must do the same.
             c if c == Op::Print as u8 => {
                 self.print_op(reds)?;
-                self.stack.push(Value::nil());
+                // `Op::PushNil` pushes the prelude's `Nil` *constructor*, not
+                // the primitive nil word — callers match on it as an enum.
+                let nil = self.make_nil()?;
+                self.stack.push(nil);
                 Ok(())
             }
             _ => proof_violation("run_bridge_op on an op is_native_bridge_op excludes"),
@@ -739,7 +809,7 @@ impl VM {
 /// `vmx` must point at the running scheduler's live `VM`, and `idx` must be in
 /// range for the running closure; the emitter guarantees both. The returned
 /// word carries no reference the caller owns.
-pub unsafe extern "C" fn al_shim_push_capture(vmx: *mut VM, idx: i64) -> u64 {
+unsafe extern "C" fn al_shim_push_capture(vmx: *mut VM, idx: i64) -> u64 {
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
     match vm
@@ -760,7 +830,7 @@ pub unsafe extern "C" fn al_shim_push_capture(vmx: *mut VM, idx: i64) -> u64 {
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`. The returned word
 /// carries no reference the caller owns.
-pub unsafe extern "C" fn al_shim_push_self(vmx: *mut VM) -> u64 {
+unsafe extern "C" fn al_shim_push_self(vmx: *mut VM) -> u64 {
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
     vm.frame().captures.to_bits()
@@ -768,7 +838,7 @@ pub unsafe extern "C" fn al_shim_push_self(vmx: *mut VM) -> u64 {
 
 /// Every shim as `(symbol name, address)` for `JITBuilder::symbol`. These
 /// names are what the CLIF emitter's declared externals resolve against.
-pub fn shim_symbols() -> [(&'static str, *const u8); 27] {
+pub(crate) fn shim_symbols() -> [(&'static str, *const u8); 28] {
     [
         ("al_shim_push_global", al_shim_push_global as *const u8),
         ("al_shim_int_box", al_shim_int_box as *const u8),
@@ -809,6 +879,7 @@ pub fn shim_symbols() -> [(&'static str, *const u8); 27] {
         ("al_shim_push_capture", al_shim_push_capture as *const u8),
         ("al_shim_push_self", al_shim_push_self as *const u8),
         ("al_shim_park_op", al_shim_park_op as *const u8),
+        ("al_shim_try_op", al_shim_try_op as *const u8),
     ]
 }
 

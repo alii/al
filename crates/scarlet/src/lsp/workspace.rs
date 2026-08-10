@@ -53,11 +53,11 @@ pub struct Workspace {
     /// URIs the client has open in a tab, a subset of `documents` (which also
     /// holds the whole-workspace scan). Only these get published diagnostics or
     /// get re-analysed on a watched-file change.
-    pub(super) open: HashSet<String>,
+    open: HashSet<String>,
     /// Diagnostics produced when a position query re-roots the entry, staged
     /// for the transport layer to publish. Without them an importer's Problems
     /// panel goes stale after an in-memory edit to one of its imports.
-    pub(super) pending_diagnostics: Vec<(String, Vec<Json>)>,
+    pending_diagnostics: Vec<(String, Vec<Json>)>,
 }
 
 impl Workspace {
@@ -190,7 +190,7 @@ impl Workspace {
     /// file resolves to the canonical module its callers reference, so a query
     /// from its own declaration shares the `DefId` their reverse edges target
     /// rather than the `main` entry identity a re-rooted analysis would assign.
-    pub(super) fn query_module_path(&self, uri: &str) -> ModulePath {
+    fn query_module_path(&self, uri: &str) -> ModulePath {
         if let Some(path) = uri_to_path(uri)
             && let Some(session) = self.session_for(uri)
             && let Some(mpath) = session.module_path_for_source(&path)
@@ -234,7 +234,7 @@ impl Workspace {
             .filter(|x| x.kind.is_reference_site())
     }
 
-    pub(super) fn analyze_document(&mut self, uri: &str, text: &str) -> Vec<Json> {
+    fn analyze_document(&mut self, uri: &str, text: &str) -> Vec<Json> {
         self.ensure_workspace_scanned();
         self.analyze_text(uri, text)
     }
@@ -242,7 +242,7 @@ impl Workspace {
     /// One-time recursive scan of every workspace root for `.scrl` files.
     /// Without it, a file outside the open file's import closure is never
     /// compiled and its references stay invisible to workspace-wide queries.
-    pub(super) fn ensure_workspace_scanned(&mut self) {
+    fn ensure_workspace_scanned(&mut self) {
         if self.scanned {
             return;
         }

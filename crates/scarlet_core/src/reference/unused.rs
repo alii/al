@@ -91,7 +91,7 @@ impl ReferenceGraph {
     /// The reachable set under the full dead-code root rule: every `pub`
     /// definition workspace-wide plus everything the entry module's top-level
     /// body references.
-    pub fn reachable_from_entry(&self, entry: ModuleId) -> HashSet<DefId> {
+    fn reachable_from_entry(&self, entry: ModuleId) -> HashSet<DefId> {
         self.reachable(self.entry_toplevel_roots(entry))
     }
 
@@ -154,7 +154,7 @@ impl ReferenceGraph {
     /// Only definitions owned by `entry` are reported, so prelude / `@vm` /
     /// stdlib definitions are never flagged. Output is sorted by source
     /// position so it flows stably through `publishDiagnostics`.
-    pub fn unused_diagnostics(&self, entry: ModuleId) -> Vec<Diagnostic> {
+    fn unused_diagnostics(&self, entry: ModuleId) -> Vec<Diagnostic> {
         let Some(mr) = self.modules.get(&entry) else {
             return Vec::new();
         };

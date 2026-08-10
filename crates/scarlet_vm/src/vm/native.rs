@@ -52,9 +52,9 @@ use super::{CallFrame, Step, VM, VmError, VmResult};
 ///   (`Done` = dispatch the new top frame / slice finished, `Yield`,
 ///   `Error`).
 #[repr(C)]
-pub struct PreparedCall {
-    pub entry: *const u8,
-    pub aux: u64,
+pub(crate) struct PreparedCall {
+    entry: *const u8,
+    aux: u64,
 }
 
 impl PreparedCall {
@@ -324,7 +324,7 @@ unsafe fn push_args(vm: &mut VM, args: *const u64, argc: i64) {
 /// valid for `count` reads of owned value words (it may be dangling when
 /// `count == 0`).
 #[allow(unsafe_code)] // the closure-allocation seam; contract above
-pub unsafe extern "C" fn al_rt_make_closure(
+unsafe extern "C" fn al_rt_make_closure(
     vmx: *mut VM,
     func_idx: i64,
     caps: *const u64,
@@ -356,7 +356,7 @@ pub unsafe extern "C" fn al_rt_make_closure(
 /// compiled function's, with the next iteration's arguments already written
 /// into the argument slots and `stack.len() == base_slot + locals`.
 #[allow(unsafe_code)] // the self-tail back-edge seam; contract above
-pub unsafe extern "C" fn al_rt_checkpoint(vmx: *mut VM) -> NativeStatus {
+pub(crate) unsafe extern "C" fn al_rt_checkpoint(vmx: *mut VM) -> NativeStatus {
     // On exhaustion the frame must resume at its head: a self-tail loop's
     // back-edge state is exactly "params rebound in slots, enter at 0".
 
@@ -377,7 +377,7 @@ pub unsafe extern "C" fn al_rt_checkpoint(vmx: *mut VM) -> NativeStatus {
 /// `vmx` must point at the running scheduler's live `VM` with the compiled
 /// function's frame on top.
 #[allow(unsafe_code)] // the frame-slot access seam; contract above
-pub unsafe extern "C" fn al_rt_frame_base(vmx: *mut VM) -> *mut u64 {
+pub(crate) unsafe extern "C" fn al_rt_frame_base(vmx: *mut VM) -> *mut u64 {
     if std::env::var("ALTRACE2").is_ok() {
         let vm2 = unsafe { &*vmx };
         eprintln!(
@@ -405,7 +405,7 @@ pub unsafe extern "C" fn al_rt_frame_base(vmx: *mut VM) -> *mut u64 {
 /// `vmx` must point at the running scheduler's live `VM` with the returning
 /// compiled function's frame on top; `result` must be an owned value word.
 #[allow(unsafe_code)] // the native return seam; contract above
-pub unsafe extern "C" fn al_rt_ret_transfer(vmx: *mut VM, result: u64) -> PreparedCall {
+pub(crate) unsafe extern "C" fn al_rt_ret_transfer(vmx: *mut VM, result: u64) -> PreparedCall {
     // SAFETY: `vmx` is the running scheduler's live VM per the contract.
     let vm = unsafe { &mut *vmx };
     let Some(frame) = vm.frames.pop() else {
@@ -447,7 +447,7 @@ pub unsafe extern "C" fn al_rt_ret_transfer(vmx: *mut VM, result: u64) -> Prepar
 /// `vmx` must point at the running scheduler's live `VM`; `args` must point
 /// at `argc` initialized owned value words the caller transfers.
 #[allow(unsafe_code)] // the call seam; contracts above
-pub unsafe extern "C" fn al_rt_prepare_call(
+pub(crate) unsafe extern "C" fn al_rt_prepare_call(
     vmx: *mut VM,
     target: i64,
     resume: i64,
@@ -477,7 +477,7 @@ pub unsafe extern "C" fn al_rt_prepare_call(
 /// As [`al_rt_prepare_call`], plus: `callee` must be the bits of a `Value`
 /// whose reference the caller owns and transfers.
 #[allow(unsafe_code)] // the dynamic-call seam; contracts above
-pub unsafe extern "C" fn al_rt_prepare_call_value(
+unsafe extern "C" fn al_rt_prepare_call_value(
     vmx: *mut VM,
     callee: u64,
     resume: i64,
@@ -503,7 +503,7 @@ pub unsafe extern "C" fn al_rt_prepare_call_value(
 /// # Safety
 /// As [`al_rt_prepare_call`].
 #[allow(unsafe_code)] // the tail-call seam; contracts above
-pub unsafe extern "C" fn al_rt_prepare_tail(
+pub(crate) unsafe extern "C" fn al_rt_prepare_tail(
     vmx: *mut VM,
     target: i64,
     args: *const u64,
@@ -529,7 +529,7 @@ pub unsafe extern "C" fn al_rt_prepare_tail(
 /// # Safety
 /// As [`al_rt_prepare_call_value`].
 #[allow(unsafe_code)] // the dynamic tail-call seam; contracts above
-pub unsafe extern "C" fn al_rt_prepare_tail_value(
+unsafe extern "C" fn al_rt_prepare_tail_value(
     vmx: *mut VM,
     callee: u64,
     args: *const u64,
@@ -554,7 +554,7 @@ pub unsafe extern "C" fn al_rt_prepare_tail_value(
 /// `vmx` must point at the running scheduler's live `VM` whose stack top is
 /// the callee's result.
 #[allow(unsafe_code)] // the continuation result seam; contract above
-pub unsafe extern "C" fn al_rt_pop(vmx: *mut VM) -> u64 {
+pub(crate) unsafe extern "C" fn al_rt_pop(vmx: *mut VM) -> u64 {
     // SAFETY: `vmx` is the running scheduler's live VM per the contract.
     let vm = unsafe { &mut *vmx };
     if std::env::var("ALTRACE").is_ok() {
@@ -573,7 +573,7 @@ pub unsafe extern "C" fn al_rt_pop(vmx: *mut VM) -> u64 {
 
 /// Every `al_rt_*` boundary shim as a `(symbol name, address)` pair for JIT
 /// symbol registration.
-pub fn rt_symbols() -> [(&'static str, *const u8); 9] {
+pub(crate) fn rt_symbols() -> [(&'static str, *const u8); 9] {
     [
         ("al_rt_make_closure", al_rt_make_closure as *const u8),
         ("al_rt_frame_base", al_rt_frame_base as *const u8),

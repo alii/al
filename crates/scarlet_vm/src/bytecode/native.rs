@@ -57,109 +57,213 @@ pub enum NativeStatus {
     TailCall = 4,
 }
 
-/// The pure, single-result opcodes JIT-compiled code lowers to one `al_shim_op`
-/// call instead of a dedicated shim or an inline sequence. Each runs the
-/// interpreter's own op method over the value stack, so native and interpreted
-/// execution share one implementation and cannot diverge. Parking ops are
-/// excluded — a suspension cannot cross a native frame — as are ops already
-/// lowered inline (`nop_of`) or through a bespoke shim, and the binary-pattern
-/// segment ops, some of which push two results.
+/// How compiled code covers each opcode.
 ///
-/// The gate, the use scan, the emitter (all in `scarlet_core::core_ir::clif`) and
-/// `VM::run_bridge_op` must agree on this set; this predicate is the single
-/// authority they share.
-pub fn is_native_bridge_op(op: Op) -> bool {
-    matches!(
-        op,
-        Op::Index
-            | Op::IndexOr
-            | Op::ElemAt
-            | Op::SeqDrop
-            | Op::ArrayConcat
-            | Op::MakeRange
-            | Op::MapGet
-            | Op::MapHas
-            | Op::MapKeys
-            | Op::MapValues
-            | Op::MapSize
-            | Op::MapNew
-            | Op::MapSet
-            | Op::MapDelete
-            | Op::MapToList
-            | Op::EnvMap
-            | Op::StrSplit
-            | Op::StrLen
-            | Op::StrContains
-            | Op::StrTrim
-            | Op::IntToString
-            | Op::ToString
-            | Op::StrConcatN
-            | Op::BinFromString
-            | Op::BinToString
-            | Op::BinBitSize
-            | Op::BinSlice
-            | Op::BinAppend
-            | Op::BinConcatN
-            | Op::BinMatchPrefix
-            | Op::BinIndexOf
-            | Op::BinByteAt
-            | Op::BinParseInt
-            | Op::BinEqIgnoreAsciiCase
-            | Op::BinToAsciiLower
-            | Op::BinFromIntAscii
-            | Op::AddFloat
-            | Op::SubFloat
-            | Op::MulFloat
-            | Op::DivFloat
-            | Op::NegFloat
-            | Op::LtFloat
-            | Op::GtFloat
-            | Op::LteFloat
-            | Op::GteFloat
-            | Op::FloatFloor
-            | Op::FloatCeil
-            | Op::FloatRound
-            | Op::FloatTruncate
-            | Op::FloatFromInt
-            | Op::FloatToString
-            | Op::Monotonic
-            | Op::IpParse
-            | Op::HttpChunkDecode
-            | Op::TcpListen
-            | Op::TcpClose
-            | Op::TcpCloseServer
-            | Op::SpawnLocal
-            | Op::SpawnOnEach
-            | Op::Print
-            | Op::Add
-            | Op::Sub
-            | Op::Mul
-            | Op::Div
-            | Op::Mod
-            | Op::Neg
-    )
+/// Exhaustive by construction: [`op_coverage`] matches every `Op` variant, so
+/// adding an opcode without deciding how native code runs it is a compile
+/// error rather than a `unsupported primop` panic discovered at runtime. The
+/// three `is_native_*_op` predicates are views of this one classification, so
+/// they cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpCoverage {
+    /// The emitter lowers it directly — an inline instruction sequence or a
+    /// dedicated shim.
+    Inline,
+    /// One `al_shim_op` call: pure, single-result, cannot fail.
+    Bridge,
+    /// One `al_shim_try_op` call: can raise a runtime error on user data, so
+    /// the caller unwinds on a non-`Done` status.
+    Try,
+    /// One `al_shim_park_op` call guarded by two resume ordinals: can suspend
+    /// the process.
+    Park,
+    /// Never reaches the native backend as a Core IR primop. The bytecode
+    /// backend emits these for a Core *construct* — a call, a match, a drop, a
+    /// constructor, a closure — or the peephole pass fuses them, and the
+    /// emitter compiles the construct, not the opcode.
+    NotAPrimOp,
 }
 
-/// The opcodes that can suspend the process. Compiled code lowers each to one
-/// `al_shim_park_op` call guarded by two resume ordinals — one that re-runs the
-/// op, one that continues past it — chosen by the `Resume` the op returns.
-///
-/// Separate from [`is_native_bridge_op`] because these need that resume
-/// scaffolding; the two sets must stay disjoint.
-pub fn is_native_park_op(op: Op) -> bool {
-    matches!(
-        op,
+/// The native lowering strategy for `op`. See [`OpCoverage`].
+pub fn op_coverage(op: Op) -> OpCoverage {
+    match op {
+        Op::PushGlobal
+        | Op::PushTrue
+        | Op::PushFalse
+        | Op::AddInt
+        | Op::SubInt
+        | Op::MulInt
+        | Op::DivInt
+        | Op::ModInt
+        | Op::NegInt
+        | Op::Eq
+        | Op::Neq
+        | Op::Lt
+        | Op::Gt
+        | Op::Lte
+        | Op::Gte
+        | Op::LtInt
+        | Op::GtInt
+        | Op::LteInt
+        | Op::GteInt
+        | Op::EqInt
+        | Op::NeqInt
+        | Op::Not
+        | Op::MakeArray
+        | Op::MakeTuple
+        | Op::TupleIndex
+        | Op::ArrayLen
+        | Op::Prepend
+        | Op::Append
+        | Op::GetFieldUnchecked
+        | Op::PushCapture
+        | Op::PushSelf
+        | Op::BinByteSize
+        | Op::HttpParseHead
+        | Op::HttpFraming
+        | Op::HttpHeaderHas
+        | Op::HttpHeadersValid
+        | Op::HttpSerializeHead => OpCoverage::Inline,
+        Op::Add
+        | Op::Sub
+        | Op::Mul
+        | Op::Div
+        | Op::Mod
+        | Op::Neg
+        | Op::AddFloat
+        | Op::SubFloat
+        | Op::MulFloat
+        | Op::DivFloat
+        | Op::NegFloat
+        | Op::AddStr
+        | Op::LtFloat
+        | Op::GtFloat
+        | Op::LteFloat
+        | Op::GteFloat
+        | Op::MakeRange
+        | Op::Index
+        | Op::IndexOr
+        | Op::ElemAt
+        | Op::ArrayConcat
+        | Op::SeqDrop
+        | Op::GetField
+        | Op::ToString
+        | Op::StrConcatN
+        | Op::StrSplit
+        | Op::StrLen
+        | Op::StrContains
+        | Op::StrTrim
+        | Op::IntToString
+        | Op::BinFromString
+        | Op::BinToString
+        | Op::BinBitSize
+        | Op::BinSlice
+        | Op::BinAppend
+        | Op::BinConcatN
+        | Op::BinFromInt
+        | Op::BinReadInt
+        | Op::BinTake
+        | Op::BinReadUtf8
+        | Op::BinMatchPrefix
+        | Op::BinView
+        | Op::BinIndexOf
+        | Op::BinByteAt
+        | Op::BinParseInt
+        | Op::BinEqIgnoreAsciiCase
+        | Op::BinToAsciiLower
+        | Op::BinFromIntAscii
+        | Op::HttpChunkDecode
+        | Op::HttpHeaderGet
+        | Op::FloatFloor
+        | Op::FloatCeil
+        | Op::FloatRound
+        | Op::FloatTruncate
+        | Op::FloatFromInt
+        | Op::FloatToString
+        | Op::Print
+        | Op::StackDepth
+        | Op::TcpListen
+        | Op::TcpClose
+        | Op::TcpCloseServer
+        | Op::TcpLocalAddr
+        | Op::IpParse
+        | Op::ProcessSpawn
+        | Op::SpawnLocal
+        | Op::SpawnOnEach
+        | Op::Monotonic
+        | Op::Argv
+        | Op::EnvMap
+        | Op::MapGet
+        | Op::MapHas
+        | Op::MapKeys
+        | Op::MapValues
+        | Op::MapSize
+        | Op::MapNew
+        | Op::MapSet
+        | Op::MapDelete
+        | Op::MapToList => OpCoverage::Bridge,
+        Op::ArraySlice => OpCoverage::Try,
         Op::FileRead
-            | Op::FileWrite
-            | Op::TcpAccept
-            | Op::TcpConnect
-            | Op::TcpRead
-            | Op::TcpReadUntil
-            | Op::TcpWrite
-            | Op::TcpWriteParts
-            | Op::DnsResolve
-            | Op::Sleep
-    )
+        | Op::FileWrite
+        | Op::TcpAccept
+        | Op::TcpConnect
+        | Op::TcpRead
+        | Op::TcpReadUntil
+        | Op::TcpWrite
+        | Op::TcpWriteParts
+        | Op::DnsResolve
+        | Op::Sleep => OpCoverage::Park,
+        Op::PushConst
+        | Op::PushLocal
+        | Op::StoreLocal
+        | Op::PushNil
+        | Op::Pop
+        | Op::Dup
+        | Op::Jump
+        | Op::JumpIfFalse
+        | Op::Call
+        | Op::TailCall
+        | Op::CallSelf
+        | Op::TailCallSelf
+        | Op::CallKnown
+        | Op::TailCallKnown
+        | Op::Ret
+        | Op::SubIntLC
+        | Op::AddIntLC
+        | Op::JumpGeIntLC
+        | Op::JumpNeIntLC
+        | Op::Nop
+        | Op::MakeEnumPayload
+        | Op::MatchEnum
+        | Op::UnwrapEnum
+        | Op::SwitchTag
+        | Op::MakeClosure
+        | Op::Drop
+        | Op::Reuse
+        | Op::Halt => OpCoverage::NotAPrimOp,
+    }
+}
+
+/// The opcodes lowered to one `al_shim_op` call: pure, single-result, and
+/// unable to fail. Each runs the interpreter's own op method over the value
+/// stack, so native and interpreted execution share one implementation and
+/// cannot diverge.
+pub fn is_native_bridge_op(op: Op) -> bool {
+    op_coverage(op) == OpCoverage::Bridge
+}
+
+/// The opcodes with a reachable runtime error — as opposed to the type
+/// mismatches the checker already excludes. Lowered to one `al_shim_try_op`
+/// call that unwinds on a non-`Done` status, like a failing call.
+pub fn is_native_try_op(op: Op) -> bool {
+    op_coverage(op) == OpCoverage::Try
+}
+
+/// The opcodes that can suspend the process. Lowered to one `al_shim_park_op`
+/// call guarded by two resume ordinals — one that re-runs the op, one that
+/// continues past it — chosen by the `Resume` the op returns.
+pub fn is_native_park_op(op: Op) -> bool {
+    op_coverage(op) == OpCoverage::Park
 }
 
 /// What the pinned register (x86_64 r15, aarch64 x21) points at while a
@@ -176,15 +280,14 @@ pub fn is_native_park_op(op: Op) -> bool {
 pub struct NativeCtx {
     /// Offset 0, the hottest load. Dormant today: shims spend the VM's own
     /// counter until reds checks move into generated code.
-    pub reds: i64,
+    reds: i64,
     /// Offset 8. This scheduler's `&mut VM`, opaque at codegen time.
     pub vm: *mut core::ffi::c_void,
 }
 
 impl NativeCtx {
-    /// Load offsets baked into generated code (`core_ir::clif`). Reordering
-    /// the fields without updating these is silent memory corruption.
-    pub const REDS_OFFSET: i32 = 0;
+    /// Load offset baked into generated code (`core_ir::clif`). Reordering
+    /// the fields without updating this is silent memory corruption.
     pub const VM_OFFSET: i32 = 8;
 
     pub fn new() -> NativeCtx {
@@ -239,7 +342,7 @@ impl NativeTable {
     /// Publish the module's entry trampoline. Must happen before the first
     /// [`NativeTable::set`], so a scheduler that sees an entry sees the
     /// bridge it must be called through.
-    pub fn set_trampoline(&self, code: *const u8) {
+    pub(crate) fn set_trampoline(&self, code: *const u8) {
         self.trampoline
             .store(code.cast_mut().cast(), Ordering::Release);
     }
@@ -247,16 +350,17 @@ impl NativeTable {
     /// The SystemV bridge entries are called through, null when nothing was
     /// compiled.
     #[inline]
-    pub fn trampoline(&self) -> *const u8 {
+    pub(crate) fn trampoline(&self) -> *const u8 {
         self.trampoline.load(Ordering::Acquire).cast_const().cast()
     }
 
     /// Number of slots (== the function count the table was sized for).
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.entries.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
@@ -266,7 +370,7 @@ impl NativeTable {
     ///
     /// `Release` pairs with [`NativeTable::get`]'s `Acquire`: a scheduler that
     /// observes the pointer also observes the finalised code and icache flush.
-    pub fn set(&self, fn_idx: FuncIdx, entry: NativeEntry) {
+    pub(crate) fn set(&self, fn_idx: FuncIdx, entry: NativeEntry) {
         debug_assert!(
             !self.trampoline().is_null(),
             "publish the trampoline before the first entry"
@@ -290,7 +394,7 @@ impl NativeTable {
 
     /// Every populated slot, in `FuncIdx` order — the perf-map writer and
     /// `dis --native` walk this.
-    pub fn compiled(&self) -> impl Iterator<Item = (FuncIdx, NativeEntry)> + '_ {
+    fn compiled(&self) -> impl Iterator<Item = (FuncIdx, NativeEntry)> + '_ {
         (0..self.entries.len())
             .map(FuncIdx::from_usize)
             .filter_map(|idx| self.get(idx).map(|entry| (idx, entry)))
@@ -309,12 +413,18 @@ impl std::fmt::Debug for NativeTable {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NativeMode {
     /// Interpret everything; no function is handed to the native backend.
+    ///
+    /// A testing mode, not a supported way to run a program. It is the
+    /// reference the differential tests check compiled output against — the
+    /// only independent check that the native backend is right — which is the
+    /// reason the bytecode interpreter still exists.
     Off,
-    /// Compile every eligible function. The default when `SCARLET_NATIVE` is unset.
+    /// Compile every function. The default, and the only production mode: a
+    /// body that fails to compile aborts the run rather than falling back.
     #[default]
     Native,
-    /// Compile a seeded random subset, to shake out native/interpreter
-    /// boundary bugs.
+    /// Compile a seeded random subset, so interpreted and compiled frames
+    /// interleave. A testing mode, for native/interpreter boundary bugs.
     Mix,
 }
 
@@ -333,7 +443,7 @@ impl NativeMode {
 pub struct NativeConfig {
     pub mode: NativeMode,
     /// Subset seed. Meaningful only under [`NativeMode::Mix`]; zero otherwise.
-    pub seed: u64,
+    seed: u64,
 }
 
 /// The outcome of parsing the two env values, side-effect free so tests can
@@ -451,8 +561,8 @@ pub fn log_selected(idx: FuncIdx, name: &str) {
 /// 100ms-per-unit budget.
 #[derive(Debug, Default)]
 pub struct UnitStats {
-    pub selected: usize,
-    pub elapsed: std::time::Duration,
+    selected: usize,
+    elapsed: std::time::Duration,
 }
 
 impl UnitStats {

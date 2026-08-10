@@ -123,9 +123,9 @@ pub enum AbiSlot {
 }
 
 impl AbiSlot {
-    pub const COUNT: usize = AbiSlot::H1ChunkedBad as usize + 1;
+    pub(crate) const COUNT: usize = AbiSlot::H1ChunkedBad as usize + 1;
 
-    pub const ALL: [AbiSlot; AbiSlot::COUNT] = {
+    pub(crate) const ALL: [AbiSlot; AbiSlot::COUNT] = {
         use AbiSlot::*;
         [
             ResultOk,
@@ -242,7 +242,7 @@ impl AbiSlot {
     }
 
     #[inline]
-    pub const fn index(self) -> usize {
+    pub(crate) const fn index(self) -> usize {
         self as usize
     }
 
@@ -271,7 +271,7 @@ impl AbiSlot {
 
 /// Every slot `op` may construct. A front end need only bind the slots for the
 /// ops it actually emits.
-pub fn slots_for(op: Op) -> &'static [AbiSlot] {
+pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
     use AbiSlot as S;
     match op {
         Op::FileRead | Op::FileWrite => &[
@@ -420,7 +420,7 @@ pub enum NetFailure {
     Errno(i32),
 }
 
-pub fn classify_fs(e: &std::io::Error) -> FsFailure {
+pub(crate) fn classify_fs(e: &std::io::Error) -> FsFailure {
     match e.raw_os_error() {
         Some(libc::ENOENT) => FsFailure::Path(AbiSlot::FsEnoent),
         Some(libc::EACCES) => FsFailure::Path(AbiSlot::FsEacces),
@@ -436,7 +436,7 @@ pub fn classify_fs(e: &std::io::Error) -> FsFailure {
     }
 }
 
-pub fn classify_net(e: &std::io::Error) -> NetFailure {
+pub(crate) fn classify_net(e: &std::io::Error) -> NetFailure {
     match e.raw_os_error() {
         Some(libc::ETIMEDOUT) => NetFailure::Bare(AbiSlot::NetEtimedout),
         Some(libc::ECONNREFUSED) => NetFailure::Bare(AbiSlot::NetEconnrefused),

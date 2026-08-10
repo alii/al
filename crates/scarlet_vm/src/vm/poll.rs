@@ -79,7 +79,7 @@ pub(super) enum Wait {
 impl Wait {
     /// Park until socket `id` becomes ready, then re-run the instruction.
     /// Interest direction was fixed at registration; a wait only names the fd.
-    pub(super) fn rerun_on(id: i32) -> Self {
+    fn rerun_on(id: i32) -> Self {
         Wait::Io {
             fd: id,
             deadline: None,
@@ -406,7 +406,7 @@ impl VM {
     /// Deliver finished blocking-pool jobs, waking the process parked under
     /// each `job_id`. Returns whether anything was woken. Whatever process was
     /// current is detached around the delivery and restored after.
-    pub(super) fn drain_completions(&mut self) -> VmResult<bool> {
+    fn drain_completions(&mut self) -> VmResult<bool> {
         let drained: Vec<Completion> = {
             let mut q = lock(&self.runtime.slots[self.scheduler_index].completions);
             if q.is_empty() {

@@ -43,7 +43,7 @@ pub struct WorkspaceEdit {
 /// `import a.{X as Y}` stays on `Y` and never rewrites `X`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedRename {
-    pub def: DefId,
+    def: DefId,
     pub range: Span,
     pub placeholder: String,
 }
@@ -103,7 +103,7 @@ impl RenameError {
 }
 
 /// Validate a proposed new name. Must mirror the scanner's identifier grammar.
-pub(crate) fn is_valid_identifier(name: &str) -> bool {
+fn is_valid_identifier(name: &str) -> bool {
     let mut bytes = name.bytes();
     let Some(first) = bytes.next() else {
         return false;
@@ -160,7 +160,7 @@ impl ReferenceGraph {
 
     /// Project `def -> new_name` into a `WorkspaceEdit`, resolving each
     /// [`ModuleId`] to a URI through `uri_of`.
-    pub(crate) fn rename_with<F>(
+    fn rename_with<F>(
         &self,
         def: DefId,
         new_name: &str,

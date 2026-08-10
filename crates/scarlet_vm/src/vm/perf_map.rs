@@ -14,14 +14,14 @@ use std::io::Write;
 use std::sync::{Mutex, OnceLock};
 
 /// Whether `SCARLET_PERF_MAP=1` asked for a perf map. Read once per process.
-pub fn enabled() -> bool {
+fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("SCARLET_PERF_MAP").is_ok_and(|v| v == "1"))
 }
 
 /// The per-process map path perf reads. Literal `/tmp`, not the platform
 /// temp dir: the path is perf's contract.
-pub fn path() -> String {
+fn path() -> String {
     format!("/tmp/perf-{}.map", std::process::id())
 }
 
@@ -51,7 +51,7 @@ fn file() -> Option<&'static Mutex<File>> {
 }
 
 /// Append the symbol line for one finalized function body.
-pub fn record(start: usize, size: usize, name: &str) {
+pub(crate) fn record(start: usize, size: usize, name: &str) {
     if let Some(file) = file() {
         // A poisoned lock means a panic mid-write; the map is best-effort,
         // so keep appending regardless.

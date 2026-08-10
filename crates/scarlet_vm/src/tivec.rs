@@ -65,11 +65,8 @@ impl<I: Idx, T> TiVec<I, T> {
         i.index() < self.raw.len()
     }
 
-    pub fn iter(&self) -> std::slice::Iter<'_, T> {
-        self.raw.iter()
-    }
-
-    pub fn as_slice(&self) -> &[T] {
+    #[cfg(test)]
+    fn as_slice(&self) -> &[T] {
         &self.raw
     }
 

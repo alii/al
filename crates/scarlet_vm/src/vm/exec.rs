@@ -75,7 +75,7 @@ impl VM {
     /// reductions. One budget governs a whole scheduling slice no matter which
     /// backend spends it: a native re-entry resumes the same count, and on a
     /// `Done` exit the remainder goes back to `native_reds`.
-    pub(super) fn execute_slice_budgeted(&mut self, budget: i32) -> VmResult<Step> {
+    fn execute_slice_budgeted(&mut self, budget: i32) -> VmResult<Step> {
         #[cfg(feature = "op-histogram")]
         super::op_histogram::maybe_dump(&self.program);
 
@@ -687,9 +687,7 @@ impl VM {
                     self.stack.push(val);
                 }
                 Op::Print => self.print_op(&mut reds)?,
-                Op::StackDepth => {
-                    self.stack.push(Value::small_int(self.frames.len() as i64));
-                }
+                Op::StackDepth => self.stack_depth()?,
                 Op::Monotonic => self.monotonic()?,
                 Op::Argv => self.argv()?,
                 Op::EnvMap => self.env_map()?,
@@ -1045,7 +1043,7 @@ impl VM {
     /// constructor's operands. A live address means ownership transfers to the
     /// constructor, which overwrites the cell in place.
     #[inline]
-    pub(super) fn take_reuse_addr(&mut self) -> VmResult<ReuseAddr> {
+    fn take_reuse_addr(&mut self) -> VmResult<ReuseAddr> {
         Ok(self.pop()?.into_reuse_addr())
     }
 
@@ -1194,6 +1192,12 @@ impl VM {
         let val = self.pop()?;
         println!("{}", inspect(&val, &self.program));
         *reds -= IO_REDUCTION_COST;
+        Ok(())
+    }
+
+    /// `Op::StackDepth` — the current call depth.
+    pub(super) fn stack_depth(&mut self) -> VmResult<()> {
+        self.stack.push(Value::small_int(self.frames.len() as i64));
         Ok(())
     }
 

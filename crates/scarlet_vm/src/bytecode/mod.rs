@@ -19,8 +19,8 @@
 //! [`crate::vm::exec`], and `scarlet_core::bytecode::builtin_op` if it is exposed
 //! as a `@vm` intrinsic.
 
-pub mod bits;
-pub mod hamt;
+pub(crate) mod bits;
+pub(crate) mod hamt;
 pub mod native;
 pub(crate) mod scratch;
 pub mod seq;
@@ -28,7 +28,8 @@ pub mod value;
 use std::sync::Arc;
 
 pub use native::{
-    NativeCtx, NativeEntry, NativeStatus, NativeTable, is_native_bridge_op, is_native_park_op,
+    NativeCtx, NativeEntry, NativeStatus, NativeTable, OpCoverage, is_native_bridge_op,
+    is_native_park_op, is_native_try_op, op_coverage,
 };
 pub use value::{
     Arena, BinaryRef, ClosureRef, EnumRef, HeapTag, MapBacking, MapRef, SeqRef, SocketValue, Value,
@@ -713,7 +714,7 @@ const _: () = assert!(std::mem::align_of::<Instruction>() == 8);
 // against shift extraction than against SROA'd struct fields.
 #[allow(unsafe_code)]
 #[inline(always)]
-pub fn fetch(code: &[Instruction], i: usize) -> Option<Instruction> {
+pub(crate) fn fetch(code: &[Instruction], i: usize) -> Option<Instruction> {
     if i >= code.len() {
         return None;
     }

@@ -92,7 +92,7 @@ pub(super) fn symbol_kind(e: reference::EntityKind) -> i32 {
 
 /// LSP `CompletionItemKind` wire number for an [`EntityKind`]. Here, not on
 /// `EntityKind`, because `scarlet_core` is protocol-agnostic.
-pub(super) fn completion_kind(e: reference::EntityKind) -> i32 {
+fn completion_kind(e: reference::EntityKind) -> i32 {
     use reference::EntityKind;
     match e {
         EntityKind::Function => 3,
@@ -224,7 +224,7 @@ pub(super) fn workspace_edit_json(we: &reference::rename::WorkspaceEdit) -> Json
 
 /// The on-disk path of stdlib module `m`, found by walking up from `near` for
 /// the stdlib-root marker (inverse of `module::detect_stdlib_module`).
-pub(super) fn stdlib_file(m: &ModulePath, near: &Path) -> Option<PathBuf> {
+fn stdlib_file(m: &ModulePath, near: &Path) -> Option<PathBuf> {
     let mut p = module::find_stdlib_root(near)?;
     for seg in m {
         p.push(seg);

@@ -546,7 +546,7 @@ use std::sync::Mutex;
 
 // bench_typed's speed depends on `AddInt`/`SubInt`/`EqInt` firing instead of
 // tag-dispatching `Add`/`Sub`/`Eq`. Catches lowered locals carrying unbound
-// type-vars, where `resolved_prim` never sees the concrete `Int`.
+// type-vars, where type resolution never sees the concrete `Int`.
 #[test]
 fn core_ir_lower_selects_typed_int_ops() {
     use bytecode::Op;
@@ -683,9 +683,8 @@ fn compile_native(src: &str, must_native: &[&str]) -> bytecode::Program {
         None,
         Some(&scarlet::STDLIB),
         Box::new(move |idx, f, pool| {
-            if let Some(p) = clif::plan(idx, f, pool, scarlet::STDLIB.prelude) {
-                sink.borrow_mut().push(p);
-            }
+            sink.borrow_mut()
+                .push(clif::plan(idx, f, pool, scarlet::STDLIB.prelude));
         }),
     );
     assert!(
@@ -701,19 +700,17 @@ fn compile_native(src: &str, must_native: &[&str]) -> bytecode::Program {
         let mut defs = Vec::with_capacity(plans.len());
         for plan in &plans {
             let body = clif::compile(&mut module, plan, &program).expect("clif define");
-            if let Some(body) = body {
-                let name = program
-                    .functions
-                    .get(body.func_idx.index())
-                    .map(|f| f.name.to_string())
-                    .unwrap_or_default();
-                defs.push(vm::jit::JitDef {
-                    fn_idx: body.func_idx,
-                    func_id: body.func_id,
-                    name,
-                    code_size: body.code_size,
-                });
-            }
+            let name = program
+                .functions
+                .get(body.func_idx.index())
+                .map(|f| f.name.to_string())
+                .unwrap_or_default();
+            defs.push(vm::jit::JitDef {
+                fn_idx: body.func_idx,
+                func_id: body.func_id,
+                name,
+                code_size: body.code_size,
+            });
         }
         vm::jit::finalize_into(&mut module, &defs, &program.native).expect("jit finalize");
         // Dropping the module keeps the executable mapping alive, so the

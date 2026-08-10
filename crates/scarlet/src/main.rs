@@ -286,9 +286,8 @@ fn main() -> process::ExitCode {
                         base,
                         pre,
                         Box::new(move |idx, f, pool| {
-                            if let Some(p) = clif::plan(idx, f, pool, STDLIB.prelude) {
-                                sink.borrow_mut().push(p);
-                            }
+                            sink.borrow_mut()
+                                .push(clif::plan(idx, f, pool, STDLIB.prelude));
                         }),
                     )
                 });
@@ -367,9 +366,8 @@ fn cmd_run(args: RunArgs) {
             base,
             pre,
             Box::new(move |idx, f, pool| {
-                if let Some(p) = clif::plan(idx, f, pool, STDLIB.prelude) {
-                    sink.borrow_mut().push(p);
-                }
+                sink.borrow_mut()
+                    .push(clif::plan(idx, f, pool, STDLIB.prelude));
             }),
         )
     });
@@ -400,45 +398,48 @@ fn publish_native(plans: Vec<clif::NativePlan>, program: &bytecode::Program) {
         return;
     }
     let t0 = std::time::Instant::now();
+    // No degraded mode: every body compiles, so a failure here is a compiler
+    // bug. Reporting it beats shipping a build that silently interprets.
     let mut module = match vm::jit::jit_module() {
         Ok(m) => m,
-        Err(e) => {
-            if bytecode::native::debug() {
-                eprintln!("al-native: {e}; interpreting everything");
-            }
-            return;
-        }
+        Err(e) => die(format!("native backend unavailable: {e}")),
     };
     let mut defs = Vec::with_capacity(plans.len());
     for plan in &plans {
-        match clif::compile(&mut module, plan, program) {
-            Ok(Some(body)) => {
-                let name = program
-                    .functions
-                    .get(body.func_idx.index())
-                    .map(|f| f.name.to_string())
-                    .unwrap_or_default();
-                defs.push(vm::jit::JitDef {
-                    fn_idx: body.func_idx,
-                    func_id: body.func_id,
-                    name,
-                    code_size: body.code_size,
-                });
-            }
-            Ok(None) => {}
-            Err(e) => {
-                if bytecode::native::debug() {
-                    eprintln!("al-native: define failed: {e}; interpreting everything");
-                }
-                return;
-            }
-        }
+        let body = match clif::compile(&mut module, plan, program) {
+            Ok(body) => body,
+            Err(e) => die(format!("native compile failed: {e}")),
+        };
+        let name = program
+            .functions
+            .get(body.func_idx.index())
+            .map(|f| f.name.to_string())
+            .unwrap_or_default();
+        defs.push(vm::jit::JitDef {
+            fn_idx: body.func_idx,
+            func_id: body.func_id,
+            name,
+            code_size: body.code_size,
+        });
     }
     if let Err(e) = vm::jit::finalize_into(&mut module, &defs, &program.native) {
-        if bytecode::native::debug() {
-            eprintln!("al-native: finalize failed: {e}; interpreting everything");
+        die(format!("native finalize failed: {e}"));
+    }
+    // Everything the mode selected must now have an entry. A gap would mean a
+    // body quietly ran interpreted, which is exactly the degraded mode this
+    // path no longer has.
+    for plan in &plans {
+        if program.native.get(plan.func_idx).is_none() {
+            let name = program
+                .functions
+                .get(plan.func_idx.index())
+                .map(|f| f.name.to_string())
+                .unwrap_or_default();
+            die(format!(
+                "native entry missing for fn#{} {name}",
+                plan.func_idx.index()
+            ));
         }
-        return;
     }
     if bytecode::native::debug() {
         let ms = t0.elapsed().as_secs_f64() * 1000.0;

@@ -11,7 +11,7 @@ use crate::type_def::TypeId;
 use crate::typed_ir::GlobalSlot;
 use crate::types::{DefinitionLocation, Scheme, TypeInfo};
 
-pub mod stdlib;
+pub(crate) mod stdlib;
 
 // Module identity lives in `scarlet_syntax::module_path` because a `Diagnostic`
 // carries the key of the module it points into. Re-exported here, where
@@ -97,8 +97,8 @@ pub fn collect_scrl_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// that holds the value.
 #[derive(Debug, Clone)]
 pub struct ExportedValue {
-    pub scheme: Scheme,
-    pub local_slot: Option<GlobalSlot>,
+    pub(crate) scheme: Scheme,
+    pub(crate) local_slot: Option<GlobalSlot>,
     /// A function's parameter names, in order. Empty for anything else.
     ///
     /// Documentation, not semantics: Scarlet rejects labelled arguments outside a
@@ -106,9 +106,9 @@ pub struct ExportedValue {
     /// stay out of `TypeNode::Fun` — otherwise unification would have to decide
     /// whether `fn(path String)` equals `fn(p String)`. Constructor field
     /// labels *are* semantic and live in the type instead.
-    pub param_names: Vec<String>,
+    pub(crate) param_names: Vec<String>,
     /// The declaration's own doc comment, carried across module boundaries.
-    pub doc: Option<String>,
+    pub(crate) doc: Option<String>,
 }
 
 /// A module's exported type: its `TypeInfo` plus the declaration site and doc,
@@ -116,12 +116,12 @@ pub struct ExportedValue {
 /// compiled from source or hydrated from the precompiled stdlib blob.
 #[derive(Debug, Clone)]
 pub struct ExportedType {
-    pub info: TypeInfo,
+    pub(crate) info: TypeInfo,
     /// The `type` declaration's own location. `None` only for types with no
     /// source declaration to point at.
-    pub def: Option<DefinitionLocation>,
+    pub(crate) def: Option<DefinitionLocation>,
     /// The declaration's own doc comment, carried across module boundaries.
-    pub doc: Option<String>,
+    pub(crate) doc: Option<String>,
 }
 
 /// What an importer sees of a compiled module: its `pub` types and values, plus
@@ -129,20 +129,20 @@ pub struct ExportedType {
 /// error rather than "not found".
 #[derive(Debug, Clone)]
 pub struct ModuleInterface {
-    pub path: ModulePath,
-    pub types: IndexMap<String, ExportedType>,
-    pub values: IndexMap<String, ExportedValue>,
+    pub(crate) path: ModulePath,
+    pub(crate) types: IndexMap<String, ExportedType>,
+    pub(crate) values: IndexMap<String, ExportedValue>,
     /// `BTreeSet` so iteration is sorted: `static_ir::flatten` interns these
     /// in iteration order into the reproducible stdlib blob.
-    pub private_names: BTreeSet<String>,
+    pub(crate) private_names: BTreeSet<String>,
     /// The module's own doc comment: the `/** */` block at line 0 of its
     /// source. Unlike every other doc, this one is carried through the
     /// precompiled stdlib blob so hovering `scarlet/scheduler` shows its prose.
-    pub doc: Option<String>,
+    pub(crate) doc: Option<String>,
 }
 
 impl ModuleInterface {
-    pub fn new(path: ModulePath) -> Self {
+    pub(crate) fn new(path: ModulePath) -> Self {
         ModuleInterface {
             path,
             types: IndexMap::new(),
@@ -167,7 +167,7 @@ const fn align_to_range(n: i32) -> i32 {
 /// the range start and whether an existing assignment was reused so the two
 /// cannot be mismatched. [`Self::note_usage`] consumes the token.
 #[must_use = "hand the reservation back via note_usage once ids are allocated"]
-pub struct IdRangeReservation {
+pub(crate) struct IdRangeReservation {
     base: TypeId,
     /// `true` when an existing assignment was reused. A fresh allocation sits
     /// at `id_high_water`, so overflowing it only spills into unallocated
@@ -177,14 +177,14 @@ pub struct IdRangeReservation {
 
 impl IdRangeReservation {
     /// Start of the reserved range: the module's first nominal type id.
-    pub fn base(&self) -> TypeId {
+    pub(crate) fn base(&self) -> TypeId {
         self.base
     }
 
     /// Record that the module allocated `used` type ids from this range.
     /// Overflowing a reused range raises the overflow flag; either way the
     /// high-water mark is bumped past the spillover.
-    pub fn note_usage(self, table: &mut ModuleTable, used: i32) {
+    pub(crate) fn note_usage(self, table: &mut ModuleTable, used: i32) {
         if used > MODULE_TYPE_ID_RANGE {
             if self.reused {
                 table.id_range_overflow = true;
@@ -239,10 +239,10 @@ pub enum ModuleOrigin {
 /// recompiling a module has to hand out the same type ids it had before.
 #[derive(Debug)]
 pub struct CachedModule {
-    pub iface: ModuleInterface,
-    pub origin: ModuleOrigin,
+    pub(crate) iface: ModuleInterface,
+    pub(crate) origin: ModuleOrigin,
     /// Direct importers of this module (reverse edges of the import graph).
-    pub dependents: HashSet<ModuleKey>,
+    pub(crate) dependents: HashSet<ModuleKey>,
 }
 
 impl CachedModule {
@@ -255,7 +255,7 @@ impl CachedModule {
     }
 
     /// Resolved on-disk path this module was compiled from, if any.
-    pub fn source_path(&self) -> Option<&Path> {
+    pub(crate) fn source_path(&self) -> Option<&Path> {
         match &self.origin {
             ModuleOrigin::File { path, .. } => Some(path),
             _ => None,
@@ -264,7 +264,7 @@ impl CachedModule {
 
     /// Arena watermark captured before this module's body was analysed. `None`
     /// for embedded/hydrated modules, which are never invalidated.
-    pub fn watermark(&self) -> Option<Watermark> {
+    pub(crate) fn watermark(&self) -> Option<Watermark> {
         match &self.origin {
             ModuleOrigin::File { watermark, .. } => Some(*watermark),
             _ => None,
@@ -273,7 +273,7 @@ impl CachedModule {
 
     /// Reference-graph data collected while this module's body was analysed.
     /// `None` for hydrated stdlib modules.
-    pub fn module_refs(&self) -> Option<&Rc<ModuleReferences>> {
+    pub(crate) fn module_refs(&self) -> Option<&Rc<ModuleReferences>> {
         match &self.origin {
             ModuleOrigin::Embedded { refs } | ModuleOrigin::File { refs, .. } => Some(refs),
             ModuleOrigin::Hydrated => None,
@@ -325,45 +325,46 @@ impl Default for ModuleTable {
 }
 
 impl ModuleTable {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn into_loaded(self) -> IndexMap<String, ModuleInterface> {
+    pub(crate) fn into_loaded(self) -> IndexMap<String, ModuleInterface> {
         self.loaded
             .into_iter()
             .map(|(k, v)| (k.as_str().to_string(), v.iface))
             .collect()
     }
 
-    pub fn is_loading(&self, key: &ModuleKey) -> bool {
+    pub(crate) fn is_loading(&self, key: &ModuleKey) -> bool {
         self.loading.contains(key)
     }
 
-    pub fn mark_loading(&mut self, key: &ModuleKey) {
+    pub(crate) fn mark_loading(&mut self, key: &ModuleKey) {
         self.loading.insert(key.clone());
     }
 
-    pub fn unmark_all_loading(&mut self) {
+    pub(crate) fn unmark_all_loading(&mut self) {
         self.loading.clear();
     }
 
-    pub fn insert_hydrated(&mut self, key: ModuleKey, iface: ModuleInterface) {
+    #[cfg(test)]
+    fn insert_hydrated(&mut self, key: ModuleKey, iface: ModuleInterface) {
         self.loading.remove(&key);
         self.loaded.insert(key, CachedModule::hydrated(iface));
     }
 
-    pub fn insert_cached(&mut self, key: ModuleKey, cm: CachedModule) {
+    pub(crate) fn insert_cached(&mut self, key: ModuleKey, cm: CachedModule) {
         self.loading.remove(&key);
         self.loaded.insert(key, cm);
     }
 
-    pub fn get(&self, key: &ModuleKey) -> Option<&ModuleInterface> {
+    pub(crate) fn get(&self, key: &ModuleKey) -> Option<&ModuleInterface> {
         self.loaded.get(key).map(|c| &c.iface)
     }
 
     /// `get`, falling through to `static_fallback` and caching the hydrate.
-    pub fn get_or_hydrate(&mut self, key: &ModuleKey) -> Option<&ModuleInterface> {
+    pub(crate) fn get_or_hydrate(&mut self, key: &ModuleKey) -> Option<&ModuleInterface> {
         if !self.loaded.contains_key(key)
             && let Some(s) = self.static_fallback
             && let Some(iface) = s.lookup_module(key.as_str())
@@ -376,34 +377,34 @@ impl ModuleTable {
 
     /// Record that `importer` directly depends on `importee` so a change to
     /// `importee` cascades to `importer` on invalidate.
-    pub fn record_dependent(&mut self, importee: &ModuleKey, importer: &ModuleKey) {
+    pub(crate) fn record_dependent(&mut self, importee: &ModuleKey, importer: &ModuleKey) {
         if let Some(cm) = self.loaded.get_mut(importee) {
             cm.dependents.insert(importer.clone());
         }
     }
 
     /// Read the on-disk (or overlaid) content for a previously-resolved file.
-    pub fn read_source(&self, path: &Path) -> std::io::Result<String> {
+    pub(crate) fn read_source(&self, path: &Path) -> std::io::Result<String> {
         if let Some(t) = self.overlays.get(path) {
             return Ok(t.clone());
         }
         std::fs::read_to_string(path)
     }
 
-    pub fn set_overlay(&mut self, path: PathBuf, src: String) {
+    pub(crate) fn set_overlay(&mut self, path: PathBuf, src: String) {
         self.overlays.insert(path, src);
     }
 
-    pub fn clear_overlay(&mut self, path: &Path) {
+    pub(crate) fn clear_overlay(&mut self, path: &Path) {
         self.overlays.remove(path);
     }
 
-    pub fn set_static_fallback(&mut self, s: &'static crate::static_ir::StaticStdlib) {
+    pub(crate) fn set_static_fallback(&mut self, s: &'static crate::static_ir::StaticStdlib) {
         self.static_fallback = Some(s);
     }
 
     /// Iterate cached user modules (those compiled from a file on disk).
-    pub fn user_modules(&self) -> impl Iterator<Item = (&ModuleKey, &CachedModule)> {
+    pub(crate) fn user_modules(&self) -> impl Iterator<Item = (&ModuleKey, &CachedModule)> {
         self.loaded
             .iter()
             .filter(|(_, cm)| matches!(cm.origin, ModuleOrigin::File { .. }))
@@ -415,7 +416,7 @@ impl ModuleTable {
     /// case is stat-gated: an unmoved `(mtime, len)` skips the read and hash.
     /// An edit that preserves both is missed here and covered instead by the
     /// LSP's `didChangeWatchedFiles` -> `invalidate_path`.
-    pub fn source_changed(&mut self, key: &ModuleKey) -> bool {
+    pub(crate) fn source_changed(&mut self, key: &ModuleKey) -> bool {
         let (path, expected_hash, cached_stat) = match self.loaded.get(key).map(|cm| &cm.origin) {
             Some(ModuleOrigin::File {
                 path,
@@ -462,14 +463,14 @@ impl ModuleTable {
     }
 
     /// Iterate every cached module, user and hydrated stdlib alike.
-    pub fn loaded_modules(&self) -> impl Iterator<Item = (&ModuleKey, &CachedModule)> {
+    pub(crate) fn loaded_modules(&self) -> impl Iterator<Item = (&ModuleKey, &CachedModule)> {
         self.loaded.iter()
     }
 
     /// Persisted reference data for the module whose *canonical* path is
     /// `path`. Lookup, not mint: a non-canonical path simply misses. `None`
     /// for hydrated stdlib modules, which carry none.
-    pub fn module_refs_by_path(&self, path: &ModulePath) -> Option<&ModuleReferences> {
+    pub(crate) fn module_refs_by_path(&self, path: &ModulePath) -> Option<&ModuleReferences> {
         self.loaded
             .get(&ModuleKey::of(path))
             .and_then(|c| c.module_refs())
@@ -481,7 +482,7 @@ impl ModuleTable {
     /// `next_type_id`, so the first user module lands past every stdlib id.
     /// Hand the returned token back via [`IdRangeReservation::note_usage`] once
     /// the module's body has allocated its ids.
-    pub fn id_base_for(&mut self, key: &ModuleKey, floor: TypeId) -> IdRangeReservation {
+    pub(crate) fn id_base_for(&mut self, key: &ModuleKey, floor: TypeId) -> IdRangeReservation {
         if let Some(&b) = self.id_bases.get(key) {
             return IdRangeReservation {
                 base: b,
@@ -501,25 +502,25 @@ impl ModuleTable {
     /// `next_type_id` is bumped to at least this after `process_imports`, so it
     /// clears blocks whose owners were cache hits and contributed nothing to
     /// `next_type_id` this pass.
-    pub fn id_high_water(&self) -> TypeId {
+    pub(crate) fn id_high_water(&self) -> TypeId {
         self.id_high_water
     }
 
     /// Drop every per-module id assignment. Called on overflow fallback so the
     /// subsequent full recompile re-allocates ranges sized to current usage.
-    pub fn reset_id_bases(&mut self) {
+    pub(crate) fn reset_id_bases(&mut self) {
         self.id_bases.clear();
         self.id_high_water = TypeId::NONE;
         self.id_range_overflow = false;
     }
 
     /// Look up a previously assigned id_base without allocating.
-    pub fn id_base_of(&self, key: &ModuleKey) -> Option<TypeId> {
+    pub(crate) fn id_base_of(&self, key: &ModuleKey) -> Option<TypeId> {
         self.id_bases.get(key).copied()
     }
 
     /// Module bodies actually compiled. Telemetry only.
-    pub fn compile_count(&self) -> u32 {
+    pub(crate) fn compile_count(&self) -> u32 {
         self.compile_count
     }
 
@@ -528,7 +529,7 @@ impl ModuleTable {
     }
 
     /// Did a recompiled module allocate past its reserved type-id range?
-    pub fn id_range_overflow(&self) -> bool {
+    pub(crate) fn id_range_overflow(&self) -> bool {
         self.id_range_overflow
     }
 
@@ -539,7 +540,7 @@ impl ModuleTable {
     /// caller truncates every arena to it and their cached `ArenaSlice`/`Ty`
     /// indices would dangle. Their recompile is still id-stable: `id_bases`
     /// survives eviction.
-    pub fn invalidate(&mut self, key: &ModuleKey) -> Option<Watermark> {
+    pub(crate) fn invalidate(&mut self, key: &ModuleKey) -> Option<Watermark> {
         use std::collections::VecDeque;
         let mut closure: HashSet<ModuleKey> = HashSet::new();
         let mut q: VecDeque<ModuleKey> = VecDeque::new();
@@ -573,7 +574,7 @@ impl ModuleTable {
     /// Evict every user module (those with a watermark) and return the
     /// earliest watermark among them. Used as the overflow fallback when a
     /// recompiled module no longer fits its reserved id range.
-    pub fn invalidate_all(&mut self) -> Option<Watermark> {
+    pub(crate) fn invalidate_all(&mut self) -> Option<Watermark> {
         let min_wm = self
             .loaded
             .values()
@@ -604,7 +605,7 @@ fn file_stat(path: &Path) -> Option<FileStat> {
 type FileStat = (std::time::SystemTime, u64, u64);
 
 /// FNV-1a 64-bit hash over source bytes for cheap change-detection.
-pub fn source_hash(s: &str) -> u64 {
+pub(crate) fn source_hash(s: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in s.bytes() {
         h = (h ^ b as u64).wrapping_mul(0x100000001b3);
@@ -626,24 +627,25 @@ pub struct ResolvedModule {
     pub source: ModuleSource,
     /// [`file_module_path`] of the file an on-disk module resolved to; for
     /// embedded stdlib the written `scarlet/...` path, which *is* its identity.
-    pub canon: ModulePath,
-    pub key: ModuleKey,
+    pub(crate) canon: ModulePath,
+    pub(crate) key: ModuleKey,
 }
 
 /// Resolve an import path as written to its source and canonical identity.
 /// `base_dir` is the directory of the importing file, used for `./` and `../`
 /// relative imports.
-pub fn resolve(path: &ImportPath, base_dir: Option<&Path>) -> Result<ResolvedModule, ResolveError> {
+#[cfg(test)]
+fn resolve(path: &ImportPath, base_dir: Option<&Path>) -> Result<ResolvedModule, ResolveError> {
     resolve_with(path, base_dir, None)
 }
 
-/// [`resolve`], with an optional on-disk stdlib source root. When set and the
+/// [`resolve_with`] resolves with an optional on-disk stdlib source root. When set and the
 /// path is a stdlib module whose `.scrl` file exists under the root, the module
 /// resolves as a regular `File` source — identity unchanged — so a session
 /// editing the stdlib itself compiles, caches and invalidates stdlib modules
 /// exactly like any other on-disk module instead of reading the embedded
 /// build-time snapshot.
-pub fn resolve_with(
+pub(crate) fn resolve_with(
     path: &ImportPath,
     base_dir: Option<&Path>,
     stdlib_root: Option<&Path>,
@@ -693,7 +695,7 @@ pub fn resolve_canonical(path: &ModulePath) -> Result<ResolvedModule, ResolveErr
 
 /// [`resolve_canonical`] with an optional on-disk stdlib root — see
 /// [`resolve_with`].
-pub fn resolve_canonical_with(
+fn resolve_canonical_with(
     path: &ModulePath,
     stdlib_root: Option<&Path>,
 ) -> Result<ResolvedModule, ResolveError> {

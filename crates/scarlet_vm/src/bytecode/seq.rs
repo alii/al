@@ -24,8 +24,8 @@
 //! an operation replaces the O(log32 n) nodes on the root-to-target path and
 //! shares every untouched subtree, so the previous version stays valid.
 //!
-//! `from_slice` O(n) · `len` O(1) · `get`/`update` O(log32 n) ·
-//! `push_back`/`push_front`/`pop_front` amortized O(1) · `take`/`skip` and
+//! `from_slice` O(n) · `len` O(1) · `get` O(log32 n) ·
+//! `push_back`/`push_front` amortized O(1) · `take`/`skip` and
 //! `concat` O(log n) · `iter` O(n) total.
 
 use super::value::*;
@@ -143,15 +143,6 @@ fn leaf_from<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
     seq_leaf_in(a, items)
 }
 
-/// A leaf, or nil for an empty slice.
-fn opt_leaf_from<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
-    if items.is_empty() {
-        Value::nil()
-    } else {
-        leaf_from(a, items)
-    }
-}
-
 /// Build a branch at height `shift` over `children`, all at `shift - BITS`.
 fn branch_from<A: Arena + ?Sized>(a: &mut A, shift: usize, children: &[Value]) -> Value {
     debug_assert!(!children.is_empty() && children.len() <= B);
@@ -165,11 +156,11 @@ fn branch_from<A: Arena + ?Sized>(a: &mut A, shift: usize, children: &[Value]) -
 }
 
 #[inline]
-pub fn len(root: &Value) -> usize {
+pub(crate) fn len(root: &Value) -> usize {
     root_parts(root).0
 }
 
-pub fn get(root: &Value, i: usize) -> Option<Value> {
+pub(crate) fn get(root: &Value, i: usize) -> Option<Value> {
     let (len, _, head, tree, tail) = root_parts(root);
     if i >= len {
         return None;
@@ -203,7 +194,7 @@ pub fn get(root: &Value, i: usize) -> Option<Value> {
     }
 }
 
-pub fn empty_in<A: Arena + ?Sized>(a: &mut A) -> Value {
+pub(crate) fn empty_in<A: Arena + ?Sized>(a: &mut A) -> Value {
     root_in(a, 0, 0, Value::nil(), Value::nil(), Value::nil())
 }
 
@@ -234,7 +225,7 @@ fn pack_tree<A: Arena + ?Sized>(a: &mut A, mut nodes: Vec<Value>) -> (Value, usi
 }
 
 /// Bulk build: a strict (fully packed) tree plus a tail. O(n).
-pub fn from_slice<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
+pub(crate) fn from_slice<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
     let n = items.len();
     if n == 0 {
         return empty_in(a);
@@ -253,7 +244,7 @@ pub fn from_slice<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
 /// Bulk build `start..end` as boxed integers: same tree shape as
 /// [`from_slice`], but elements go straight into arena leaves 32 at a time, so
 /// the Range→Array path never materializes an n-element host `Vec<Value>`.
-pub fn from_int_range<A: Arena + ?Sized>(a: &mut A, start: i64, end: i64) -> Value {
+pub(crate) fn from_int_range<A: Arena + ?Sized>(a: &mut A, start: i64, end: i64) -> Value {
     let n = range_len(start, end) as usize;
     if n == 0 {
         return empty_in(a);
@@ -327,81 +318,6 @@ fn push_end<A: Arena + ?Sized, const FRONT: bool>(a: &mut A, root: &Value, x: Va
     }
 }
 
-/// Remove the first element, returning `(element, rest)`. Amortized O(1).
-pub fn pop_front<A: Arena + ?Sized>(a: &mut A, root: &Value) -> Option<(Value, Value)> {
-    let (len, shift, head, tree, tail) = root_parts(root);
-    if len == 0 {
-        return None;
-    }
-    if !head.is_nil() {
-        let elems = leaf_elems(&head);
-        let e = elems[0].clone();
-        let new_head = opt_leaf_from(a, &elems[1..]);
-        return Some((e, root_in(a, len - 1, shift, new_head, tree, tail)));
-    }
-    if !tree.is_nil() {
-        let (leaf, rest) = tree_pop_leftmost(a, &tree, shift);
-        let (new_tree, new_shift) = collapse(rest, shift);
-        let elems = leaf_elems(&leaf);
-        let e = elems[0].clone();
-        let new_head = opt_leaf_from(a, &elems[1..]);
-        return Some((e, root_in(a, len - 1, new_shift, new_head, new_tree, tail)));
-    }
-    let elems = leaf_elems(&tail);
-    let e = elems[0].clone();
-    let new_tail = opt_leaf_from(a, &elems[1..]);
-    Some((
-        e,
-        root_in(a, len - 1, 0, Value::nil(), Value::nil(), new_tail),
-    ))
-}
-
-/// Replace element `i`, path-copying the spine. O(log32 n).
-pub fn update<A: Arena + ?Sized>(a: &mut A, root: &Value, i: usize, x: Value) -> Option<Value> {
-    let (len, shift, head, tree, tail) = root_parts(root);
-    if i >= len {
-        return None;
-    }
-    let hl = node_len(&head);
-    if i < hl {
-        let new_head = leaf_replace(a, &head, i, x);
-        return Some(root_in(a, len, shift, new_head, tree, tail));
-    }
-    let idx = i - hl;
-    let tree_len = node_len(&tree);
-    if idx < tree_len {
-        let new_tree = tree_update(a, &tree, idx, x);
-        return Some(root_in(a, len, shift, head, new_tree, tail));
-    }
-    let new_tail = leaf_replace(a, &tail, idx - tree_len, x);
-    Some(root_in(a, len, shift, head, tree, new_tail))
-}
-
-fn leaf_replace<A: Arena + ?Sized>(a: &mut A, leaf: &Value, i: usize, x: Value) -> Value {
-    let mut buf = Buf::new();
-    buf.extend(leaf_elems(leaf));
-    buf[i] = x;
-    leaf_from(a, &buf)
-}
-
-fn tree_update<A: Arena + ?Sized>(a: &mut A, node: &Value, idx: usize, x: Value) -> Value {
-    match SeqNodeRef::of(node) {
-        SeqNodeRef::Leaf(_) => leaf_replace(a, node, idx, x),
-        SeqNodeRef::Branch {
-            shift,
-            sizes,
-            children,
-        } => {
-            let (k, before) = size_slot(sizes, idx, shift);
-            let child = tree_update(a, &children[k], idx - before, x);
-            let mut buf = Buf::new();
-            buf.extend(children);
-            buf[k] = child;
-            branch_from(a, shift, &buf)
-        }
-    }
-}
-
 /// Push a full leaf under the right, or left when `FRONT`, edge of `tree`,
 /// growing the root when that spine is full.
 fn tree_push_leaf<A: Arena + ?Sized, const FRONT: bool>(
@@ -472,25 +388,6 @@ fn try_push<A: Arena + ?Sized, const FRONT: bool>(
     None
 }
 
-/// Detach the leftmost leaf. `rest` is a node at the same height as `node`,
-/// or nil.
-fn tree_pop_leftmost<A: Arena + ?Sized>(a: &mut A, node: &Value, shift: usize) -> (Value, Value) {
-    if shift == 0 {
-        return (node.clone(), Value::nil());
-    }
-    let (_, children) = branch_parts(node);
-    let (leaf, sub) = tree_pop_leftmost(a, &children[0], shift - BITS);
-    if sub.is_nil() && children.len() == 1 {
-        return (leaf, Value::nil());
-    }
-    let mut buf = Buf::new();
-    if !sub.is_nil() {
-        buf.push(sub);
-    }
-    buf.extend(&children[1..]);
-    (leaf, branch_from(a, shift, &buf))
-}
-
 /// Drop redundant single-child levels off the top of a tree.
 fn collapse(mut node: Value, mut shift: usize) -> (Value, usize) {
     if node.is_nil() {
@@ -511,7 +408,7 @@ fn collapse(mut node: Value, mut shift: usize) -> (Value, usize) {
 }
 
 /// The first `n` elements. O(log32 n) path copy.
-pub fn take<A: Arena + ?Sized>(a: &mut A, root: &Value, n: usize) -> Value {
+pub(crate) fn take<A: Arena + ?Sized>(a: &mut A, root: &Value, n: usize) -> Value {
     let (len, shift, head, tree, tail) = root_parts(root);
     if n == 0 {
         return empty_in(a);
@@ -536,7 +433,7 @@ pub fn take<A: Arena + ?Sized>(a: &mut A, root: &Value, n: usize) -> Value {
 }
 
 /// All but the first `n` elements. O(log32 n) path copy.
-pub fn skip<A: Arena + ?Sized>(a: &mut A, root: &Value, n: usize) -> Value {
+pub(crate) fn skip<A: Arena + ?Sized>(a: &mut A, root: &Value, n: usize) -> Value {
     let (len, shift, head, tree, tail) = root_parts(root);
     if n == 0 {
         return root.clone();
@@ -622,7 +519,7 @@ fn tree_drop<A: Arena + ?Sized>(a: &mut A, node: &Value, m: usize) -> Value {
 /// Concatenate two arrays. O(log n): the RRB merge walks `l`'s right spine and
 /// `r`'s left spine, rebalancing each level within the `E_MAX` slack so lookup
 /// depth stays logarithmic however many concatenations built the vector.
-pub fn concat<A: Arena + ?Sized>(a: &mut A, l: &Value, r: &Value) -> Value {
+pub(crate) fn concat<A: Arena + ?Sized>(a: &mut A, l: &Value, r: &Value) -> Value {
     let (llen, lshift, lhead, ltree, ltail) = root_parts(l);
     let (rlen, rshift, rhead, rtree, rtail) = root_parts(r);
     if llen == 0 {
@@ -918,7 +815,7 @@ impl ExactSizeIterator for SeqIter {}
 
 /// Validate every structural invariant of an array; test builds only.
 #[cfg(test)]
-pub fn check_invariants(root: &Value) {
+pub(crate) fn check_invariants(root: &Value) {
     let (len, shift, head, tree, tail) = root_parts(root);
     for buf in [&head, &tail] {
         if !buf.is_nil() {

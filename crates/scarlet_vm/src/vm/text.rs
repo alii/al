@@ -505,7 +505,7 @@ impl IntAscii {
     }
 
     #[allow(clippy::expect_used)]
-    pub(super) fn as_str(&self) -> &str {
+    fn as_str(&self) -> &str {
         std::str::from_utf8(self.as_bytes()).expect("int_to_ascii writes only ASCII")
     }
 }

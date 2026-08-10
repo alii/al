@@ -83,14 +83,14 @@ mod migrate;
 pub mod native;
 /// Public because the JIT finalize step registers these symbols with the
 /// builder and generated code calls them.
-pub mod native_shims;
+pub(crate) mod native_shims;
 /// Dispatch counters. Absent from a default build, which leaves stderr
 /// untouched.
 #[cfg(feature = "op-histogram")]
-pub mod op_histogram;
+mod op_histogram;
 /// The `SCARLET_PERF_MAP=1` perf-map writer: one `/tmp/perf-<pid>.map` symbol line
 /// per JIT-compiled body.
-pub mod perf_map;
+pub(crate) mod perf_map;
 mod poll;
 mod sched;
 mod templates;
@@ -135,11 +135,11 @@ pub enum VmError {
 
 impl VmError {
     #[cold]
-    pub(super) fn internal(msg: impl Into<Cow<'static, str>>) -> Self {
+    fn internal(msg: impl Into<Cow<'static, str>>) -> Self {
         Self::Internal(msg.into())
     }
     #[cold]
-    pub(super) fn type_mismatch(op: &'static str, expected: &'static str, got: &Value) -> Self {
+    fn type_mismatch(op: &'static str, expected: &'static str, got: &Value) -> Self {
         Self::TypeMismatch {
             op,
             expected,

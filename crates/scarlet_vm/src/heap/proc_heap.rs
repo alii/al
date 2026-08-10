@@ -80,7 +80,7 @@ impl ProcHeap {
     /// Returns a pointer to the HEADER, not the refcount slot in front of it,
     /// so header-relative offsets are unchanged. The count starts at 1.
     #[inline]
-    pub fn alloc_object(&self, words: usize) -> NonNull<u64> {
+    pub(crate) fn alloc_object(&self, words: usize) -> NonNull<u64> {
         #[cfg(feature = "alloc-counter")]
         ALLOC_COUNT.set(ALLOC_COUNT.get().wrapping_add(1));
         let raw = self.alloc_raw(RC_PREFIX_WORDS + words);
@@ -120,14 +120,14 @@ impl ProcHeap {
     /// `root` into a fresh child heap, returning the child heap and its own
     /// root. Sharing is preserved, `Binary` backings are shared by `Arc` bump,
     /// frozen references are shared untouched, and the parent is left intact.
-    pub fn spawn(root: &Value) -> (ProcHeap, Value) {
+    pub(crate) fn spawn(root: &Value) -> (ProcHeap, Value) {
         (ProcHeap, rc_copy_graph(root))
     }
 
     /// Publish the graph reachable from `root` into the frozen area — the
     /// crate's only mint of a [`FrozenConst`] from an arbitrary runtime value.
     /// Already-frozen references pass through; mortal graphs are deep-copied.
-    pub fn publish_frozen(builder: &mut FrozenBuilder, root: &Value) -> FrozenConst {
+    pub(crate) fn publish_frozen(builder: &mut FrozenBuilder, root: &Value) -> FrozenConst {
         FrozenConst::from_publish(rc_publish_graph(root, builder))
     }
 }

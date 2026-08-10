@@ -21,7 +21,7 @@ pub enum Constraint {
 }
 
 impl Constraint {
-    pub fn allowed_types(&self) -> &'static [Prim] {
+    fn allowed_types(&self) -> &'static [Prim] {
         const ADDABLE: &[Prim] = &[Prim::Int, Prim::Float, Prim::String];
         const NUMERIC: &[Prim] = &[Prim::Int, Prim::Float];
         match self {
@@ -30,7 +30,7 @@ impl Constraint {
         }
     }
 
-    pub fn name(&self) -> &'static str {
+    fn name(&self) -> &'static str {
         match self {
             Constraint::Addable => "addable",
             Constraint::Numeric => "numeric",
@@ -40,7 +40,7 @@ impl Constraint {
     /// Greatest lower bound: the constraint admitting exactly the types both
     /// admit, or `None` when their allowed sets are disjoint. Deliberately
     /// exhaustive over pairs so a new variant must spell out its intersections.
-    pub fn intersect(self, other: Constraint) -> Option<Constraint> {
+    fn intersect(self, other: Constraint) -> Option<Constraint> {
         match (self, other) {
             (Constraint::Addable, Constraint::Addable) => Some(Constraint::Addable),
             (Constraint::Numeric, Constraint::Numeric)
@@ -77,7 +77,7 @@ impl Ty {
     pub const NONE: Ty = Ty(u32::MAX);
 
     #[inline]
-    pub const fn idx(self) -> usize {
+    const fn idx(self) -> usize {
         self.0 as usize
     }
 }
@@ -326,7 +326,7 @@ pub enum UnifyError {
 }
 
 impl UnifyError {
-    pub fn flip(self) -> Self {
+    fn flip(self) -> Self {
         match self {
             UnifyError::CouldNotUnify {
                 expected,
@@ -341,7 +341,7 @@ impl UnifyError {
         }
     }
 
-    pub fn into_diagnostic(self, engine: &mut InferEngine, span: Span) -> Diagnostic {
+    fn into_diagnostic(self, engine: &mut InferEngine, span: Span) -> Diagnostic {
         let message = match self {
             UnifyError::CouldNotUnify {
                 expected,
@@ -755,11 +755,12 @@ impl InferEngine {
         self.push(TypeNode::Tuple { elems })
     }
 
-    pub fn mk_bound(&mut self, index: u32) -> Ty {
+    fn mk_bound(&mut self, index: u32) -> Ty {
         self.push(TypeNode::Bound(index))
     }
 
-    pub fn icon_int(&mut self) -> Ty {
+    #[cfg(test)]
+    pub(crate) fn icon_int(&mut self) -> Ty {
         let id = self.prim_ids.int;
         self.nullary_con(NullaryPrim::Int, id, pn::INT)
     }
@@ -767,14 +768,15 @@ impl InferEngine {
         let id = self.prim_ids.float;
         self.nullary_con(NullaryPrim::Float, id, pn::FLOAT)
     }
-    pub fn icon_string(&mut self) -> Ty {
+    #[cfg(test)]
+    pub(crate) fn icon_string(&mut self) -> Ty {
         let id = self.prim_ids.string;
         self.nullary_con(NullaryPrim::String, id, pn::STRING)
     }
 
     // --- Annotation name tracking ---
 
-    pub fn name_var(&mut self, t: Ty, name: StrId) {
+    pub(crate) fn name_var(&mut self, t: Ty, name: StrId) {
         if let TypeNode::Var(id) = self.node(t) {
             self.used_names.insert(name);
             self.var_names.insert(id, name);
@@ -835,7 +837,7 @@ impl InferEngine {
     /// Mint a fresh rigid generic variable. The hydrator uses this so repeated
     /// occurrences of one type parameter share an identity that still cannot be
     /// solved to a concrete type while checking the body.
-    pub fn fresh_generic_var(&mut self) -> (Ty, i32) {
+    pub(crate) fn fresh_generic_var(&mut self) -> (Ty, i32) {
         let id = self.next_var_id;
         self.alloc_var(TyVarState::Generic {
             id,
@@ -914,17 +916,6 @@ impl InferEngine {
                     constraint: None,
                 }
             }
-        }
-    }
-
-    /// Which primitive `t` resolves to, if any. `None` for an unbound var, a
-    /// constrained but unsolved var, and every other constructor.
-    pub fn resolved_prim(&mut self, t: Ty) -> Option<Prim> {
-        let rep = self.find(t);
-        if let TypeNode::Con { id, .. } = self.node(rep) {
-            self.as_prim(id)
-        } else {
-            None
         }
     }
 
@@ -1690,7 +1681,7 @@ impl InferEngine {
 
     // --- Error helpers ---
 
-    pub fn error_at_span(&mut self, message: String, s: Span) {
+    pub(crate) fn error_at_span(&mut self, message: String, s: Span) {
         self.diagnostics
             .push(Diagnostic::error(s, DiagnosticCode::TypeError, message));
     }

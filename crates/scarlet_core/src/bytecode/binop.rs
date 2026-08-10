@@ -44,7 +44,7 @@ pub enum BinopKind {
 }
 
 impl BinopKind {
-    pub fn of(op: BinaryOp) -> BinopKind {
+    pub(crate) fn of(op: BinaryOp) -> BinopKind {
         use BinaryOp as B;
         match op {
             B::And => BinopKind::ShortCircuit(ShortCircuitOp::And),

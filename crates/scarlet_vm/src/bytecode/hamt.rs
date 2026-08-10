@@ -57,17 +57,17 @@ fn compact(bitmap: u32, bit: u32) -> usize {
 }
 
 /// The empty map.
-pub fn empty<A: Arena + ?Sized>(a: &mut A) -> Value {
+pub(crate) fn empty<A: Arena + ?Sized>(a: &mut A) -> Value {
     hamt_map_in(a, 0, Value::nil())
 }
 
 /// Entry count.
-pub fn size(map: &Value) -> usize {
+pub(crate) fn size(map: &Value) -> usize {
     HamtMapRef::of(map).size
 }
 
 /// Look up `key` (whose [`hash_value`] is `hash`); `None` if absent.
-pub fn get(map: &Value, key: &Value, hash: u64) -> Option<Value> {
+pub(crate) fn get(map: &Value, key: &Value, hash: u64) -> Option<Value> {
     let root = HamtMapRef::of(map).root;
     if root.is_nil() {
         return None;
@@ -138,14 +138,14 @@ fn for_each_entry(node: &Value, f: &mut impl FnMut(Value, Value)) {
 
 /// Visit every `(key, value)` in `map`. The visited `Value`s are owned
 /// (counted) references the caller takes ownership of.
-pub fn for_each(map: &Value, mut f: impl FnMut(Value, Value)) {
+pub(crate) fn for_each(map: &Value, mut f: impl FnMut(Value, Value)) {
     let m = HamtMapRef::of(map);
     for_each_entry(&m.root, &mut f);
 }
 
 /// Collect every `(key, value)` into host memory. The returned `Value`s are
 /// owned (counted) references the caller takes ownership of.
-pub fn collect_entries(map: &Value) -> Vec<(Value, Value)> {
+pub(crate) fn collect_entries(map: &Value) -> Vec<(Value, Value)> {
     let m = HamtMapRef::of(map);
     let mut out = Vec::with_capacity(m.size);
     for_each_entry(&m.root, &mut |k, v| out.push((k, v)));
@@ -154,7 +154,7 @@ pub fn collect_entries(map: &Value) -> Vec<(Value, Value)> {
 
 /// `map` with `key` bound to `value` — a new map sharing all untouched
 /// subtrees. Overwrites an existing binding (size unchanged) or adds a new one.
-pub fn insert<A: Arena + ?Sized>(
+pub(crate) fn insert<A: Arena + ?Sized>(
     a: &mut A,
     map: &Value,
     key: Value,
@@ -299,7 +299,7 @@ enum Removed {
 
 /// `map` without `key`. Returns `map` unchanged (same value) if the key is
 /// absent, so the caller can skip rebuilding the root.
-pub fn remove<A: Arena + ?Sized>(a: &mut A, map: &Value, key: &Value, hash: u64) -> Value {
+pub(crate) fn remove<A: Arena + ?Sized>(a: &mut A, map: &Value, key: &Value, hash: u64) -> Value {
     let m = HamtMapRef::of(map);
     if m.root.is_nil() {
         return map.clone();
@@ -390,7 +390,7 @@ fn is_leaf(node: &Value) -> bool {
 }
 
 /// Order-independent hash of a HAMT's entries.
-pub fn hamt_hash(m: MapRef<'_>) -> u64 {
+pub(crate) fn hamt_hash(m: MapRef<'_>) -> u64 {
     let mut acc = 0u64;
     let root = m.as_hamt().root;
     for_each_entry(&root, &mut |k, v| {
@@ -405,7 +405,11 @@ pub fn hamt_hash(m: MapRef<'_>) -> u64 {
 /// Whether a HAMT-backed map holds exactly `size` entries, every one of which
 /// satisfies `f`. Serves the cross-backing (`Env` vs `Hamt`) arm of
 /// [`super::value::values_equal`].
-pub fn hamt_matches(m: MapRef<'_>, size: usize, mut f: impl FnMut(Value, Value) -> bool) -> bool {
+pub(crate) fn hamt_matches(
+    m: MapRef<'_>,
+    size: usize,
+    mut f: impl FnMut(Value, Value) -> bool,
+) -> bool {
     let h = m.as_hamt();
     h.size == size && try_for_each_entry(&h.root, &mut f)
 }
@@ -413,7 +417,7 @@ pub fn hamt_matches(m: MapRef<'_>, size: usize, mut f: impl FnMut(Value, Value) 
 /// Structural equality of two HAMT-backed maps. Entry values are deferred onto
 /// the caller's `values_equal` worklist rather than compared by a nested call,
 /// so deeply nested maps do not stack one native frame per level.
-pub fn hamts_equal(a: MapRef<'_>, b: MapRef<'_>, pending: &mut EqPending) -> bool {
+pub(crate) fn hamts_equal(a: MapRef<'_>, b: MapRef<'_>, pending: &mut EqPending) -> bool {
     let (a, b) = (a.as_hamt(), b.as_hamt());
     if a.size != b.size {
         return false;

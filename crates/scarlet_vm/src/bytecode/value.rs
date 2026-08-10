@@ -868,8 +868,8 @@ pub enum ValueView<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SocketValue {
-    pub id: i32,
-    pub is_listener: bool,
+    pub(crate) id: i32,
+    pub(crate) is_listener: bool,
 }
 
 impl Value {
@@ -900,7 +900,7 @@ impl Value {
     /// `obj` must point at a live header whose header word is written. The
     /// result takes ownership of one reference count.
     #[inline]
-    pub unsafe fn from_object_ptr(obj: NonNull<u64>) -> Value {
+    pub(crate) unsafe fn from_object_ptr(obj: NonNull<u64>) -> Value {
         let addr = obj.as_ptr() as usize as u64;
         debug_assert!(addr & !PAYLOAD == 0, "arena pointer exceeds 48 bits");
         debug_assert!(addr.is_multiple_of(8), "unaligned arena pointer");
@@ -929,7 +929,7 @@ impl Value {
     /// in the graph. The callback gets a shared reference, so this is the one
     /// walk that is sound on frozen objects shared across threads.
     #[inline]
-    pub fn for_each_child_ref(&self, mut f: impl FnMut(&Value)) {
+    pub(crate) fn for_each_child_ref(&self, mut f: impl FnMut(&Value)) {
         if !self.is_heap() {
             return;
         }
@@ -948,7 +948,7 @@ impl Value {
 
     /// The object tag of a heap-backed value.
     #[inline]
-    pub fn heap_tag(&self) -> Option<HeapTag> {
+    pub(crate) fn heap_tag(&self) -> Option<HeapTag> {
         if self.is_heap() {
             // SAFETY: heap values point at live arena objects.
             Some(header_tag(unsafe { *self.heap_obj() }))
@@ -1001,7 +1001,7 @@ impl Value {
     /// transfers to the returned [`ReuseAddr`], and from there to whatever
     /// `*_reuse_in` constructor consumes it.
     #[inline(always)]
-    pub fn into_reuse_addr(self) -> ReuseAddr {
+    pub(crate) fn into_reuse_addr(self) -> ReuseAddr {
         if !self.is_heap() || self.is_immortal() {
             return ReuseAddr::none();
         }
@@ -1026,15 +1026,15 @@ impl Value {
         ((self.0 & PAYLOAD) as i64) << 16 >> 16
     }
     #[inline(always)]
-    pub fn is_bool(&self) -> bool {
+    fn is_bool(&self) -> bool {
         (self.0 & HDR_MASK) == HDR_BOOL
     }
     #[inline(always)]
-    pub fn is_nil(&self) -> bool {
+    pub(crate) fn is_nil(&self) -> bool {
         self.0 == HDR_NIL
     }
     #[inline(always)]
-    pub fn is_socket(&self) -> bool {
+    fn is_socket(&self) -> bool {
         (self.0 & HDR_MASK) == HDR_SOCKET
     }
     #[inline(always)]
@@ -1042,12 +1042,13 @@ impl Value {
         (self.0 & (SIGN | QNAN)) == (SIGN | QNAN)
     }
     #[inline(always)]
-    pub fn is_int(&self) -> bool {
+    #[cfg(test)]
+    fn is_int(&self) -> bool {
         self.is_small_int() || self.is_tag(HeapTag::BigInt)
     }
     /// Whether `i` fits the 48-bit immediate integer range (no arena spill).
     #[inline(always)]
-    pub fn fits_small_int(i: i64) -> bool {
+    pub(crate) fn fits_small_int(i: i64) -> bool {
         (SMALL_INT_MIN..=SMALL_INT_MAX).contains(&i)
     }
 
@@ -1062,7 +1063,7 @@ impl Value {
         Value(HDR_INT | (i as u64 & PAYLOAD))
     }
     #[inline(always)]
-    pub fn float(f: f64) -> Value {
+    pub(crate) fn float(f: f64) -> Value {
         // Scarlet has no NaN/Inf, and a real NaN would collide with the tag space.
         let f = if f.is_finite() { f } else { 0.0 };
         Value(f.to_bits())
@@ -1076,7 +1077,7 @@ impl Value {
         Value(HDR_NIL)
     }
     #[inline]
-    pub fn socket(s: SocketValue) -> Value {
+    pub(crate) fn socket(s: SocketValue) -> Value {
         let listener = if s.is_listener {
             SOCKET_LISTENER_BIT
         } else {
@@ -1127,7 +1128,7 @@ impl Value {
 
     /// Concatenate `parts` into a fresh arena Str with no host `String` in
     /// between. Allocation: `2 + total_len.div_ceil(8)` words.
-    pub fn str_from_parts_in<A: Arena + ?Sized>(a: &mut A, parts: &[&str]) -> Value {
+    pub(crate) fn str_from_parts_in<A: Arena + ?Sized>(a: &mut A, parts: &[&str]) -> Value {
         let blen: usize = parts.iter().map(|s| s.len()).sum();
         let payload = 1 + blen.div_ceil(8);
         let obj = alloc_obj(a, HeapTag::Str, payload, false);
@@ -1153,7 +1154,7 @@ impl Value {
     }
 
     /// Allocation: 3 words.
-    pub fn range_in<A: Arena + ?Sized>(a: &mut A, start: i64, end: i64) -> Value {
+    pub(crate) fn range_in<A: Arena + ?Sized>(a: &mut A, start: i64, end: i64) -> Value {
         let obj = alloc_obj(a, HeapTag::Range, 2, false);
         // SAFETY: freshly allocated 2-word payload; header written by
         // `alloc_obj`.
@@ -1185,7 +1186,7 @@ impl Value {
 
     /// A `Map(String, String)` reading through to the host environment.
     /// Allocation: 2 words; entries are served live from `std::env`.
-    pub fn env_map_in<A: Arena + ?Sized>(a: &mut A) -> Value {
+    pub(crate) fn env_map_in<A: Arena + ?Sized>(a: &mut A) -> Value {
         let obj = alloc_obj(a, HeapTag::Map, 1, false);
         // SAFETY: freshly allocated 1-word payload for the backing tag; header
         // written by `alloc_obj`.
@@ -1332,7 +1333,11 @@ impl Value {
     }
 
     #[inline]
-    pub fn binary_bits_in<A: Arena + ?Sized>(a: &mut A, bytes: Vec<u8>, bit_len: u64) -> Value {
+    pub(crate) fn binary_bits_in<A: Arena + ?Sized>(
+        a: &mut A,
+        bytes: Vec<u8>,
+        bit_len: u64,
+    ) -> Value {
         debug_assert!(bit_len.div_ceil(8) as usize == bytes.len());
         Value::binary_from_arc_in(a, Arc::from(bytes), bit_len)
     }
@@ -1340,7 +1345,7 @@ impl Value {
     /// Whole-buffer binary copied from a slice: one allocation and one copy,
     /// where going through a `Vec<u8>` would copy twice.
     #[inline]
-    pub fn binary_from_slice_in<A: Arena + ?Sized>(a: &mut A, bytes: &[u8]) -> Value {
+    pub(crate) fn binary_from_slice_in<A: Arena + ?Sized>(a: &mut A, bytes: &[u8]) -> Value {
         let bit_len = (bytes.len() as u64) * 8;
         Value::binary_from_arc_in(a, Arc::from(bytes), bit_len)
     }
@@ -1349,7 +1354,7 @@ impl Value {
     /// source byte copied once. Every window but the last must be whole bytes.
     /// The last window's final byte may carry a neighbouring view's bits past
     /// `bit_len`; those are masked to zero here.
-    pub fn binary_concat_parts_in<A: Arena + ?Sized>(
+    pub(crate) fn binary_concat_parts_in<A: Arena + ?Sized>(
         a: &mut A,
         parts: &[&[u8]],
         bit_len: u64,
@@ -1381,7 +1386,7 @@ impl Value {
 
     /// Whole-buffer binary over an already-shared backing, no byte copy.
     #[inline]
-    pub fn binary_from_arc_in<A: Arena + ?Sized>(
+    pub(crate) fn binary_from_arc_in<A: Arena + ?Sized>(
         a: &mut A,
         backing: Arc<[u8]>,
         bit_len: u64,
@@ -1392,7 +1397,7 @@ impl Value {
 
     /// A zero-copy sub-view `[bit_offset, bit_offset + bit_len)` into a shared
     /// backing. Only the 6-word box is allocated, so slicing is O(1).
-    pub fn binary_view_in<A: Arena + ?Sized>(
+    pub(crate) fn binary_view_in<A: Arena + ?Sized>(
         a: &mut A,
         backing: Arc<[u8]>,
         bit_offset: u64,
@@ -1446,7 +1451,7 @@ impl Value {
         }
     }
     #[inline(always)]
-    pub fn as_float(&self) -> Option<f64> {
+    pub(crate) fn as_float(&self) -> Option<f64> {
         if self.is_float() {
             Some(f64::from_bits(self.0))
         } else {
@@ -1455,7 +1460,7 @@ impl Value {
     }
     /// Float payload under [`Value::as_int_typed`]'s contract: misuse aborts.
     #[inline(always)]
-    pub fn as_float_typed(&self) -> f64 {
+    pub(crate) fn as_float_typed(&self) -> f64 {
         if self.is_float() {
             f64::from_bits(self.0)
         } else {
@@ -1471,7 +1476,7 @@ impl Value {
         }
     }
     #[inline]
-    pub fn as_socket(&self) -> Option<SocketValue> {
+    pub(crate) fn as_socket(&self) -> Option<SocketValue> {
         if self.is_socket() {
             Some(decode_socket(self.0))
         } else {
@@ -1488,7 +1493,7 @@ impl Value {
         }
     }
     #[inline]
-    pub fn as_range(&self) -> Option<(i64, i64)> {
+    pub(crate) fn as_range(&self) -> Option<(i64, i64)> {
         if self.is_tag(HeapTag::Range) {
             let obj = self.heap_obj();
             // SAFETY: tag-checked; Range payload is two i64 words.
@@ -1519,7 +1524,7 @@ impl Value {
         }
     }
     #[inline]
-    pub fn as_binary(&self) -> Option<BinaryRef<'_>> {
+    pub(crate) fn as_binary(&self) -> Option<BinaryRef<'_>> {
         if self.is_tag(HeapTag::Binary) {
             Some(BinaryRef {
                 obj: self.heap_obj(),
@@ -1557,7 +1562,7 @@ impl Value {
     /// already in cache — so a compiler bug aborts instead of reading
     /// arbitrary heap words.
     #[inline(always)]
-    pub fn enum_field_typed(&self, idx: usize) -> Value {
+    pub(crate) fn enum_field_typed(&self, idx: usize) -> Value {
         match self.as_enum() {
             Some(e) if idx < e.payload().len() => {
                 // SAFETY: tag-checked Enum with `idx` bounded by the payload
@@ -1691,7 +1696,7 @@ unsafe fn binary_backing_reborrow(obj: *const u64) -> ManuallyDrop<Arc<[u8]>> {
 
 impl<'a> BinaryRef<'a> {
     #[inline]
-    pub fn bit_offset(&self) -> u64 {
+    pub(crate) fn bit_offset(&self) -> u64 {
         // SAFETY: constructed from a tag-checked Binary value.
         unsafe { payload_word(self.obj, 2) }
     }
@@ -1702,13 +1707,13 @@ impl<'a> BinaryRef<'a> {
     }
     /// The full shared backing buffer, not just this view's window.
     #[inline]
-    pub fn backing(&self) -> &'a [u8] {
+    pub(crate) fn backing(&self) -> &'a [u8] {
         // SAFETY: the box holds a strong count released only when it is
         // freed, so the bytes outlive any borrow of it.
         unsafe { &*binary_backing_raw(self.obj) }
     }
     /// Clone the backing `Arc` — a count bump, no byte copy.
-    pub fn backing_arc(&self) -> Arc<[u8]> {
+    pub(crate) fn backing_arc(&self) -> Arc<[u8]> {
         // SAFETY: tag-checked Binary, so the Arc words are intact.
         unsafe { Arc::clone(&binary_backing_reborrow(self.obj)) }
     }
@@ -1716,7 +1721,7 @@ impl<'a> BinaryRef<'a> {
     /// The whole logical bytes, excluding any partial trailing byte. Borrows
     /// the backing when the view is byte-aligned, else re-aligns into a copy.
     #[inline]
-    pub fn full_bytes(&self) -> Cow<'a, [u8]> {
+    pub(crate) fn full_bytes(&self) -> Cow<'a, [u8]> {
         let full = (self.bit_len() / 8) as usize;
         if self.bit_offset().is_multiple_of(8) {
             let start = (self.bit_offset() / 8) as usize;
@@ -1741,7 +1746,7 @@ impl<'a> BinaryRef<'a> {
 
     /// Whether the logical bits at `at` begin with all of `prefix`'s. Out of
     /// range is `false`, never an error.
-    pub fn starts_with_at(&self, at: u64, prefix: &BinaryRef<'_>) -> bool {
+    pub(crate) fn starts_with_at(&self, at: u64, prefix: &BinaryRef<'_>) -> bool {
         if at + prefix.bit_len() > self.bit_len() {
             return false;
         }
@@ -1760,7 +1765,7 @@ impl<'a> BinaryRef<'a> {
     }
 
     /// Logical-bit equality, regardless of backing identity or offsets.
-    pub fn bits_eq(&self, other: &BinaryRef<'_>) -> bool {
+    fn bits_eq(&self, other: &BinaryRef<'_>) -> bool {
         if self.bit_len() != other.bit_len() {
             return false;
         }
@@ -1799,7 +1804,7 @@ impl<'a> ClosureRef<'a> {
         unsafe { payload_word(self.obj, 0) as u32 as i32 }
     }
     #[inline]
-    pub fn captures(&self) -> &'a [Value] {
+    pub(crate) fn captures(&self) -> &'a [Value] {
         // SAFETY: as above; count word bounds the slice.
         unsafe {
             let n = payload_word(self.obj, 1) as usize;
@@ -1818,7 +1823,7 @@ pub struct MapRef<'a> {
 
 impl MapRef<'_> {
     #[inline]
-    pub fn backing(&self) -> MapBacking {
+    pub(crate) fn backing(&self) -> MapBacking {
         // SAFETY: constructed from a tag-checked Map value; word 0 is the
         // backing discriminant for every Map layout.
         map_backing(unsafe { payload_word(self.obj, 0) })
@@ -1887,18 +1892,18 @@ impl<'a> EnumRef<'a> {
     }
     /// The `Str` value holding the enum type name (for re-construction).
     #[inline]
-    pub fn enum_name_value(&self) -> Value {
+    pub(crate) fn enum_name_value(&self) -> Value {
         // SAFETY: as above.
         unsafe { payload_value(self.obj, 2) }
     }
     #[inline]
-    pub fn variant_name_value(&self) -> Value {
+    pub(crate) fn variant_name_value(&self) -> Value {
         // SAFETY: as above.
         unsafe { payload_value(self.obj, 3) }
     }
     /// The `Tuple`-of-`Str` value holding the field labels.
     #[inline]
-    pub fn labels_value(&self) -> Value {
+    pub(crate) fn labels_value(&self) -> Value {
         // SAFETY: as above.
         unsafe { payload_value(self.obj, 4) }
     }
@@ -1914,7 +1919,7 @@ impl<'a> EnumRef<'a> {
     }
     /// Field labels parallel to `payload()`; empty for nullary constructors.
     #[inline]
-    pub fn field_labels(&self) -> &'a [Value] {
+    pub(crate) fn field_labels(&self) -> &'a [Value] {
         let labels = self.labels_value();
         // SAFETY: labels is a Tuple by construction.
         unsafe {
@@ -1969,7 +1974,7 @@ impl<'a> SeqRef<'a> {
 /// for the walk, and a `&mut Value` also requires no other live reference to
 /// that slot.
 #[inline]
-pub(crate) unsafe fn for_each_child_slot<F: FnMut(*mut Value)>(obj: *const u64, f: &mut F) {
+unsafe fn for_each_child_slot<F: FnMut(*mut Value)>(obj: *const u64, f: &mut F) {
     // SAFETY (whole body): every slot index stays within the payload length
     // the header declares, per the layouts in the module docs.
     unsafe {
@@ -2060,7 +2065,7 @@ pub(crate) unsafe fn binary_clone_backing(obj: *const u64) {
 ///
 /// `obj` must point at a `Binary` box whose Arc words are intact and whose
 /// count has not already been released.
-pub(crate) unsafe fn binary_drop_backing(obj: *const u64) {
+unsafe fn binary_drop_backing(obj: *const u64) {
     // No reborrow guard: this is the one place that consumes the box's
     // count, so the reconstructed Arc is dropped for real.
     unsafe {
@@ -2114,7 +2119,7 @@ pub(crate) unsafe fn rc_increment(obj: *const u64) {
 /// # Safety
 /// `obj` must be a mortal heap object with an initialized refcount slot.
 #[inline]
-pub(crate) unsafe fn rc_decrement_is_zero(obj: *const u64) -> bool {
+unsafe fn rc_decrement_is_zero(obj: *const u64) -> bool {
     unsafe {
         let p = rc_slot(obj);
         if *p == u64::MAX {
@@ -2208,7 +2213,7 @@ pub fn reset_freed_objects_total() {
 /// # Safety
 /// `slot` must be a writable object payload word; `child` a valid value.
 #[inline]
-pub(crate) unsafe fn store_child(slot: *mut u64, child: &Value) {
+unsafe fn store_child(slot: *mut u64, child: &Value) {
     if child.is_heap() && !child.is_immortal() {
         // SAFETY: mortal heap child has a refcount slot.
         unsafe { rc_increment(child.heap_obj()) };
@@ -2222,7 +2227,7 @@ pub(crate) unsafe fn store_child(slot: *mut u64, child: &Value) {
 /// # Safety
 /// `slot` must be a writable object payload word.
 #[inline]
-pub(crate) unsafe fn move_child(slot: *mut u64, child: Value) {
+unsafe fn move_child(slot: *mut u64, child: Value) {
     unsafe { slot.write(child.0) };
     std::mem::forget(child); // ownership now lives in the slot
 }
@@ -2233,7 +2238,7 @@ pub(crate) unsafe fn move_child(slot: *mut u64, child: Value) {
 /// # Safety
 /// `bits` must come from a live value (`to_bits`/`from_object_ptr`).
 #[inline]
-pub(crate) unsafe fn owned_from_bits(bits: u64) -> Value {
+unsafe fn owned_from_bits(bits: u64) -> Value {
     // Pure bit math: immortal and immediate values need no count, and their
     // object is never read.
     if bits & (SIGN | QNAN) == (SIGN | QNAN) && bits & VALUE_IMMORTAL == 0 {
@@ -2250,7 +2255,7 @@ pub(crate) unsafe fn owned_from_bits(bits: u64) -> Value {
 /// and nearly every call is an immediate or a frozen constant — hence the
 /// `#[cold]` split.
 #[inline]
-pub(crate) fn release_bits(bits: u64) {
+fn release_bits(bits: u64) {
     // Pure bit math, and crucially it never reads the object: a frozen value
     // can be released after its frozen area is gone.
     if bits & (SIGN | QNAN) != (SIGN | QNAN) || bits & VALUE_IMMORTAL != 0 {
@@ -2271,7 +2276,7 @@ pub(crate) fn release_bits(bits: u64) {
 /// Mask for the mortal-heap drop gate the native backend emits inline:
 /// `bits & NATIVE_MORTAL_GATE_MASK == NATIVE_MORTAL_HEAP_BITS`. This is
 /// [`release_bits`]' fast-path test, exported as bit constants.
-pub const NATIVE_MORTAL_GATE_MASK: u64 = SIGN | QNAN | VALUE_IMMORTAL;
+pub(crate) const NATIVE_MORTAL_GATE_MASK: u64 = SIGN | QNAN | VALUE_IMMORTAL;
 /// Expected gate result for a mortal heap value; see [`NATIVE_MORTAL_GATE_MASK`].
 pub const NATIVE_MORTAL_HEAP_BITS: u64 = SIGN | QNAN;
 /// Mask recovering the object header pointer from a heap value word.
@@ -2762,7 +2767,7 @@ pub fn hash_value(v: &Value) -> u64 {
 /// # Safety
 /// `obj` must point at a live heap object the calling thread owns exclusively
 /// — the cell may be written.
-pub unsafe fn freeze_enum_hash(obj: *const u64) {
+pub(crate) unsafe fn freeze_enum_hash(obj: *const u64) {
     unsafe {
         if header_tag(*obj) == HeapTag::Enum {
             let r = EnumRef {
@@ -3307,40 +3312,6 @@ mod tests {
     }
 
     #[test]
-    fn seq_pop_front_drains_everything() {
-        let mut h = ProcHeap::new();
-        let items = ints(1100);
-        let mut root = seq::from_slice(&mut h, &items);
-        let mut model: Vec<Value> = items;
-        while !model.is_empty() {
-            let (e, rest) = seq::pop_front(&mut h, &root).unwrap();
-            let m = model.remove(0);
-            assert_eq!(e.to_bits(), m.to_bits());
-            root = rest;
-            if model.len().is_multiple_of(97) {
-                assert_matches_model(&root, &model);
-            }
-        }
-        assert!(seq::pop_front(&mut h, &root).is_none());
-    }
-
-    #[test]
-    fn seq_update_replaces_in_place_persistently() {
-        let mut h = ProcHeap::new();
-        let items = ints(1100);
-        let root = seq::from_slice(&mut h, &items);
-        let marker = Value::small_int(-777);
-        for i in [0usize, 1, 31, 32, 500, 1063, 1064, 1099] {
-            let updated = seq::update(&mut h, &root, i, marker.clone()).unwrap();
-            let mut model: Vec<Value> = items.clone();
-            model[i] = marker.clone();
-            assert_matches_model(&updated, &model);
-            assert_eq!(seq::get(&root, i).unwrap().as_int(), Some(i as i64));
-        }
-        assert!(seq::update(&mut h, &root, 1100, marker.clone()).is_none());
-    }
-
-    #[test]
     fn seq_take_skip_match_slices() {
         let mut h = ProcHeap::new();
         let items = ints(1100);
@@ -3432,7 +3403,7 @@ mod tests {
                 h = ProcHeap::new();
                 root = seq::from_slice(&mut h, &model);
             }
-            match rng() % 8 {
+            match rng() % 6 {
                 0 | 1 => {
                     let x = Value::small_int(step as i64);
                     root = seq::push_back(&mut h, &root, x.clone());
@@ -3444,29 +3415,11 @@ mod tests {
                     model.insert(0, x);
                 }
                 3 => {
-                    let popped = seq::pop_front(&mut h, &root);
-                    if model.is_empty() {
-                        assert!(popped.is_none());
-                    } else {
-                        let (e, rest) = popped.unwrap();
-                        assert_eq!(e.to_bits(), model.remove(0).to_bits());
-                        root = rest;
-                    }
-                }
-                4 => {
-                    if !model.is_empty() {
-                        let i = rng() % model.len();
-                        let x = Value::small_int(9000 + step as i64);
-                        root = seq::update(&mut h, &root, i, x.clone()).unwrap();
-                        model[i] = x;
-                    }
-                }
-                5 => {
                     let n = rng() % (model.len() + 2);
                     root = seq::take(&mut h, &root, n);
                     model.truncate(n.min(model.len()));
                 }
-                6 => {
+                4 => {
                     let n = rng() % (model.len() + 2);
                     root = seq::skip(&mut h, &root, n);
                     let cut = n.min(model.len());

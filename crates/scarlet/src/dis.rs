@@ -46,7 +46,7 @@ pub fn disassemble_native(
             continue;
         }
         match clif::compile(&mut module, &plan, program) {
-            Ok(Some(body)) => {
+            Ok(body) => {
                 let _ = writeln!(
                     out,
                     "\nnative fn#{idx} {} ({} bytes)",
@@ -56,13 +56,6 @@ pub fn disassemble_native(
                 if !body.clif.ends_with('\n') {
                     let _ = writeln!(out);
                 }
-            }
-            Ok(None) => {
-                let _ = writeln!(
-                    out,
-                    "\n; native fn#{idx} {}: not compiled (a constant or match arm is outside coverage)",
-                    f.name
-                );
             }
             Err(e) => return Err(format!("native compile of {} failed: {e}", f.name)),
         }

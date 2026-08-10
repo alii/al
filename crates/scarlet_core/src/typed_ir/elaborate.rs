@@ -41,12 +41,12 @@ type Step = (usize, Option<GlobalSlot>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrShape {
     /// The failure variant (`None`/`Err`).
-    pub fail: VariantRef,
+    pub(crate) fail: VariantRef,
     /// The success variant (`Some`/`Ok`), always arity 1.
-    pub ok: VariantRef,
+    pub(crate) ok: VariantRef,
     /// Whether the failure variant carries a payload (`Result` yes, `Option`
     /// no).
-    pub err_has_payload: bool,
+    pub(crate) err_has_payload: bool,
 }
 
 /// Abort: the check walk did not answer a question elaboration had to ask, so
@@ -469,14 +469,14 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// function's tail, an `if` arm, a `match` arm's body. Control-flow forms
     /// take `result_ty` rather than their own inferred type, because a function
     /// body's block has no type of its own to recover.
-    pub fn expr_as(&mut self, e: &ast::Expression, result_ty: Ty) -> TypedExpr {
+    fn expr_as(&mut self, e: &ast::Expression, result_ty: Ty) -> TypedExpr {
         let own = self.take_ty(e.span());
         self.dispatch(e, own, result_ty)
     }
 
     /// Elaborate `e` in value position: its type is the one the check walk
     /// inferred for it.
-    pub fn expr(&mut self, e: &ast::Expression) -> TypedExpr {
+    fn expr(&mut self, e: &ast::Expression) -> TypedExpr {
         let own = self.take_ty(e.span());
         self.dispatch(e, own, own)
     }
@@ -1049,7 +1049,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// expression, or [`TypedExpr::Nil`] when it ends in a statement.
     ///
     /// See [`Frame`] for why the spine is assembled flat and folded once.
-    pub fn block(&mut self, be: &ast::BlockExpression, result_ty: Ty) -> TypedExpr {
+    fn block(&mut self, be: &ast::BlockExpression, result_ty: Ty) -> TypedExpr {
         let is_top = std::mem::replace(&mut self.at_toplevel, false);
         // Module toplevel: `fn`/`const` decls are order-free and mutually
         // recursive, so they run in the check walk's dependency (SCC) order.

@@ -61,7 +61,7 @@ impl ReferenceKind {
     /// Whether this occurrence evaluates its target, as opposed to declaring
     /// it or naming a module. Drives the xref reverse index and the
     /// unused/dead-code check.
-    pub fn is_use_site(self) -> bool {
+    fn is_use_site(self) -> bool {
         matches!(self, ReferenceKind::Qualified | ReferenceKind::Unqualified)
     }
 
@@ -90,12 +90,12 @@ pub struct ModuleInterner {
 }
 
 impl ModuleInterner {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Intern `path`, returning its stable id (creating one on first sight).
-    pub fn intern(&mut self, path: &ModulePath) -> ModuleId {
+    pub(crate) fn intern(&mut self, path: &ModulePath) -> ModuleId {
         let key = ModuleKey::of(path);
         if let Some(&id) = self.by_key.get(&key) {
             return id;
@@ -107,23 +107,23 @@ impl ModuleInterner {
     }
 
     /// Look up an already-interned path by value.
-    pub fn lookup(&self, path: &ModulePath) -> Option<ModuleId> {
+    fn lookup(&self, path: &ModulePath) -> Option<ModuleId> {
         self.by_key.get(&ModuleKey::of(path)).copied()
     }
 
     /// Look up by canonical key directly (what `ModuleTable` keys on).
-    pub fn lookup_key(&self, key: &ModuleKey) -> Option<ModuleId> {
+    fn lookup_key(&self, key: &ModuleKey) -> Option<ModuleId> {
         self.by_key.get(key).copied()
     }
 
     /// Resolve an id back to its path.
-    pub fn path(&self, id: ModuleId) -> Option<&ModulePath> {
+    fn path(&self, id: ModuleId) -> Option<&ModulePath> {
         self.paths.get(id.0 as usize)
     }
 
     /// Every interned module in id order. Infallible, so a caller mirroring
     /// the id assignment cannot skip an id and renumber every later one.
-    pub fn iter(&self) -> impl Iterator<Item = (ModuleId, &ModulePath)> {
+    fn iter(&self) -> impl Iterator<Item = (ModuleId, &ModulePath)> {
         self.paths
             .iter()
             .enumerate()
@@ -131,16 +131,13 @@ impl ModuleInterner {
     }
 
     /// Every interned path in id order: the `i`th item is `ModuleId(i)`'s.
-    pub fn paths(&self) -> impl Iterator<Item = &ModulePath> {
+    pub(crate) fn paths(&self) -> impl Iterator<Item = &ModulePath> {
         self.iter().map(|(_, p)| p)
     }
 
-    pub fn len(&self) -> usize {
+    #[cfg(test)]
+    fn len(&self) -> usize {
         self.paths.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.paths.is_empty()
     }
 }
 
@@ -154,7 +151,7 @@ pub struct DefId {
 }
 
 impl DefId {
-    pub fn new(module: ModuleId, span: Span, entity: EntityKind) -> Self {
+    pub(crate) fn new(module: ModuleId, span: Span, entity: EntityKind) -> Self {
         DefId {
             module,
             span,
@@ -209,7 +206,7 @@ pub enum DefinitionKind {
 impl DefinitionKind {
     /// The [`EntityKind`] this payload belongs to. Must agree with the
     /// `DefId.entity` of the definition carrying it.
-    pub fn entity(&self) -> EntityKind {
+    pub(crate) fn entity(&self) -> EntityKind {
         match self {
             DefinitionKind::Value { .. } => EntityKind::Value,
             DefinitionKind::Function { .. } => EntityKind::Function,
@@ -228,14 +225,14 @@ pub struct Definition {
     pub defid: DefId,
     pub name: String,
     pub doc: Option<String>,
-    pub kind: DefinitionKind,
+    kind: DefinitionKind,
     pub is_pub: bool,
 }
 
 impl Definition {
     /// Build a definition from its location and payload. The `DefId` is
     /// derived here, so its entity always agrees with the payload.
-    pub fn new(
+    pub(crate) fn new(
         module: ModuleId,
         span: Span,
         name: impl Into<String>,
@@ -273,7 +270,7 @@ impl Definition {
     }
 
     /// For a constructor, the declaring type's `DefId`. Otherwise `None`.
-    pub fn ctor_of(&self) -> Option<DefId> {
+    fn ctor_of(&self) -> Option<DefId> {
         match self.kind {
             DefinitionKind::Constructor { ctor_of, .. } => ctor_of,
             _ => None,
@@ -282,7 +279,7 @@ impl Definition {
 
     /// For an import-alias binding, the definition it stands for. Otherwise
     /// `None`.
-    pub fn alias_of(&self) -> Option<DefId> {
+    fn alias_of(&self) -> Option<DefId> {
         match self.kind {
             DefinitionKind::Value { alias_of } => alias_of,
             _ => None,
@@ -291,7 +288,7 @@ impl Definition {
 
     /// The full extent of the declaration: the whole `import ...` statement
     /// for a module alias, the declaring identifier otherwise.
-    pub fn decl_span(&self) -> Span {
+    fn decl_span(&self) -> Span {
         match self.kind {
             DefinitionKind::ModuleAlias { decl_span, .. } => decl_span,
             _ => self.defid.span,
@@ -326,7 +323,7 @@ pub struct Reference {
 }
 
 impl Reference {
-    pub fn new(span: Span, kind: ReferenceKind, target: DefId) -> Self {
+    pub(crate) fn new(span: Span, kind: ReferenceKind, target: DefId) -> Self {
         Reference { span, kind, target }
     }
 }
@@ -345,7 +342,7 @@ pub struct ResolvedRef {
 /// bare top-level expression.
 #[derive(Debug, Clone, Copy)]
 pub struct Occurrence {
-    pub owner: Option<DefId>,
+    owner: Option<DefId>,
     pub reference: Reference,
 }
 
@@ -378,14 +375,14 @@ struct LineEntry {
 
 /// What the cursor is sitting on, as resolved by
 /// [`ModuleReferences::cursor_hit`].
-pub(crate) struct CursorHit {
-    pub(crate) target: DefId,
-    pub(crate) range: Span,
-    pub(crate) kind: ReferenceKind,
+struct CursorHit {
+    target: DefId,
+    range: Span,
+    kind: ReferenceKind,
 }
 
 impl ModuleReferences {
-    pub fn new(module: ModuleId) -> Self {
+    pub(crate) fn new(module: ModuleId) -> Self {
         ModuleReferences {
             module,
             doc: None,
@@ -396,21 +393,21 @@ impl ModuleReferences {
         }
     }
 
-    pub fn module(&self) -> ModuleId {
+    fn module(&self) -> ModuleId {
         self.module
     }
 
-    pub fn set_doc(&mut self, doc: Option<String>) {
+    pub(crate) fn set_doc(&mut self, doc: Option<String>) {
         self.doc = doc;
     }
 
-    pub fn doc(&self) -> Option<&str> {
+    fn doc(&self) -> Option<&str> {
         self.doc.as_deref()
     }
 
     /// Register a declared name. Re-declaring the same `DefId` overwrites the
     /// previous record, re-keying `name_to_defs` if the name changed.
-    pub fn add_definition(&mut self, def: Definition) {
+    pub(crate) fn add_definition(&mut self, def: Definition) {
         let defid = def.defid;
         let name = def.name.clone();
         if let Some(old) = self.definitions.insert(defid, def) {
@@ -431,16 +428,16 @@ impl ModuleReferences {
 
     /// Record an occurrence. `owner` is the definition this occurrence is
     /// nested within, used for dead-code reachability.
-    pub fn add_reference(&mut self, owner: Option<DefId>, reference: Reference) {
+    pub(crate) fn add_reference(&mut self, owner: Option<DefId>, reference: Reference) {
         self.occurrences.push(Occurrence { owner, reference });
         self.line_index.take();
     }
 
-    pub fn definitions(&self) -> impl Iterator<Item = &Definition> {
+    fn definitions(&self) -> impl Iterator<Item = &Definition> {
         self.definitions.values()
     }
 
-    pub fn definition(&self, id: DefId) -> Option<&Definition> {
+    pub(crate) fn definition(&self, id: DefId) -> Option<&Definition> {
         self.definitions.get(&id)
     }
 
@@ -454,7 +451,7 @@ impl ModuleReferences {
     }
 
     /// The definition a position resolves to. `None` if nothing covers it.
-    pub fn resolve_position(&self, line: i32, col: i32) -> Option<DefId> {
+    pub(crate) fn resolve_position(&self, line: i32, col: i32) -> Option<DefId> {
         self.cursor_hit(line, col).map(|h| h.target)
     }
 
@@ -462,7 +459,7 @@ impl ModuleReferences {
     /// a tie. A position on a declaration's own name resolves to itself as
     /// [`ReferenceKind::Definition`] even with no `Definition` occurrence
     /// recorded.
-    pub(crate) fn cursor_hit(&self, line: i32, col: i32) -> Option<CursorHit> {
+    fn cursor_hit(&self, line: i32, col: i32) -> Option<CursorHit> {
         let index = self.line_index.get_or_init(|| self.build_line_index());
         index
             .get(&line)?
@@ -518,31 +515,31 @@ pub struct ReferenceGraphBuilder {
 }
 
 impl ReferenceGraphBuilder {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Intern `path`, returning its stable id (creating one on first sight).
-    pub fn intern_module(&mut self, path: &ModulePath) -> ModuleId {
+    pub(crate) fn intern_module(&mut self, path: &ModulePath) -> ModuleId {
         self.interner.intern(path)
     }
 
     /// Install (or replace) a module's references. Takes an `Rc` because every
     /// `check` re-inserts every unchanged module's refs.
-    pub fn insert(&mut self, refs: Rc<ModuleReferences>) {
+    pub(crate) fn insert(&mut self, refs: Rc<ModuleReferences>) {
         self.modules.insert(refs.module(), refs);
     }
 
     /// Test-only sugar over [`Self::insert`] for freshly built refs.
     #[cfg(test)]
-    pub(crate) fn insert_module(&mut self, refs: ModuleReferences) {
+    fn insert_module(&mut self, refs: ModuleReferences) {
         self.insert(Rc::new(refs));
     }
 
     /// Compute the workspace reverse index from the final module set and seal
     /// the graph. Building it whole, once, guarantees no stale edge survives a
     /// module eviction.
-    pub fn finish(self) -> ReferenceGraph {
+    pub(crate) fn finish(self) -> ReferenceGraph {
         let mut refs_by_def: HashMap<DefId, Vec<ResolvedRef>> = HashMap::new();
         for (&module, mr) in &self.modules {
             for occ in mr.occurrences() {
@@ -578,7 +575,7 @@ pub struct ReferenceGraph {
 
 impl ReferenceGraph {
     /// The empty graph, a placeholder until a real one is built.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 

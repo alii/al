@@ -56,7 +56,7 @@ pub(super) fn for_each_socket(v: &Value, visit: &mut impl FnMut(SocketValue)) {
 /// closure. Frames of a recursive function share one closure object, so
 /// closures are walked once each by address. A socket reachable from several
 /// roots is still visited once per root; callers dedup ids.
-pub(super) fn for_each_process_socket(p: &Process, visit: &mut impl FnMut(SocketValue)) {
+fn for_each_process_socket(p: &Process, visit: &mut impl FnMut(SocketValue)) {
     for v in &p.stack {
         for_each_socket(v, visit);
     }

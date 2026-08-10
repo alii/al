@@ -38,20 +38,20 @@ use crate::types::{InferEngine, TypeBody, TypeInfo};
 /// Everything `precompile_stdlib` extracts. Consumed only by build.rs.
 #[derive(Debug, Clone)]
 pub struct PrecompileOutput {
-    pub blob: PrecompiledBlob,
-    pub prelude: PreludeBindings,
+    pub(crate) blob: PrecompiledBlob,
+    pub(crate) prelude: PreludeBindings,
     /// `BTreeSet` so `flatten` copies it out sorted; `is_reserved` binary-searches.
-    pub reserved: BTreeSet<String>,
-    pub next_type_id: crate::type_def::TypeId,
+    pub(crate) reserved: BTreeSet<String>,
+    pub(crate) next_type_id: crate::type_def::TypeId,
 }
 
 /// The variable-size data, flattened by `static_ir::flatten`.
 #[derive(Debug, Clone)]
 pub struct PrecompiledBlob {
-    pub interfaces: IndexMap<String, ModuleInterface>,
-    pub type_info: IndexMap<String, TypeInfo>,
-    pub program: Program,
-    pub local_count: i32,
+    pub(crate) interfaces: IndexMap<String, ModuleInterface>,
+    pub(crate) type_info: IndexMap<String, TypeInfo>,
+    pub(crate) program: Program,
+    pub(crate) local_count: i32,
 }
 
 /// Compile the whole embedded stdlib and snapshot the result. The

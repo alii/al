@@ -6,10 +6,10 @@
 
 pub mod clif;
 pub mod emit;
-pub mod lower;
+pub(crate) mod lower;
 pub mod native_frame;
 pub use scarlet_vm::native_rc;
-pub mod perceus;
+pub(crate) mod perceus;
 
 use std::fmt;
 
@@ -59,14 +59,14 @@ impl CodeAddr {
     /// The jump-operand encoding, read back by the VM relative to
     /// `Function.code_start`.
     #[inline]
-    pub fn to_operand(self) -> i32 {
+    fn to_operand(self) -> i32 {
         self.0 as i32
     }
 
     /// The address of the following instruction. A `SwitchTag` jump table sits
     /// at `switch.next()`.
     #[inline]
-    pub fn next(self) -> CodeAddr {
+    fn next(self) -> CodeAddr {
         CodeAddr(self.0 + 1)
     }
 }
@@ -76,7 +76,7 @@ impl CodeAddr {
 /// be handed a type that answers `is_heap` `false` because inference lost it.
 #[derive(Debug, Clone)]
 pub struct CoreBind {
-    pub id: LocalId,
+    id: LocalId,
     pub ty: RTy,
     /// `Some(slot)` when this bind is a module-toplevel decl that must land in
     /// that entry-frame slot: already-emitted fn bodies address it as
@@ -84,12 +84,12 @@ pub struct CoreBind {
     ///
     /// On the bind rather than in a `LocalId`-keyed side table, which would
     /// desync the moment a pass renumbers or drops a bind.
-    pub global: Option<GlobalSlot>,
+    global: Option<GlobalSlot>,
 }
 
 impl CoreBind {
     /// Fresh bind, pinned to no slot. `lower` pins [`Self::global`] afterwards.
-    pub fn new(id: LocalId, ty: RTy) -> Self {
+    fn new(id: LocalId, ty: RTy) -> Self {
         CoreBind {
             id,
             ty,
@@ -103,23 +103,23 @@ impl CoreBind {
 /// `type_id`, `variant_idx`, arity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VariantRef {
-    pub type_id: TypeId,
-    pub variant_idx: u16,
-    pub type_name: StrId,
-    pub variant_name: StrId,
+    pub(crate) type_id: TypeId,
+    pub(crate) variant_idx: u16,
+    pub(crate) type_name: StrId,
+    pub(crate) variant_name: StrId,
 }
 
 /// Heap-cell shape for Perceus reuse pairing. A `Drop` may only hand its cell
 /// to a `Ctor` of the same shape, so the overwrite needs no resize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReuseShape {
-    pub tag: HeapTag,
-    pub words: u16,
+    tag: HeapTag,
+    words: u16,
 }
 
 impl ReuseShape {
     #[allow(clippy::expect_used)] // ctor arity is bounded far below u16::MAX upstream
-    pub fn enum_(arity: usize) -> Self {
+    fn enum_(arity: usize) -> Self {
         ReuseShape {
             tag: HeapTag::Enum,
             words: u16::try_from(arity).expect("constructor arity exceeds u16"),
@@ -201,7 +201,7 @@ pub enum Atom {
 
 impl Atom {
     /// A `PrimOp` with no immediate.
-    pub fn prim(op: Op, args: Vec<LocalId>) -> Self {
+    fn prim(op: Op, args: Vec<LocalId>) -> Self {
         Atom::PrimOp {
             op,
             args,
@@ -211,7 +211,7 @@ impl Atom {
 
     /// The locals this atom reads, in push order. `Ctor`'s `reuse` is not one:
     /// it names a slot to overwrite, not a value pushed on the stack.
-    pub fn operands(&self) -> impl Iterator<Item = LocalId> + '_ {
+    fn operands(&self) -> impl Iterator<Item = LocalId> + '_ {
         let (pushed, trailing): (&[LocalId], Option<LocalId>) = match self {
             Atom::Local(x) => (&[], Some(*x)),
             Atom::Const(_) => (&[], None),
@@ -226,7 +226,7 @@ impl Atom {
         pushed.iter().copied().chain(trailing)
     }
 
-    pub fn for_each_operand(&self, f: impl FnMut(LocalId)) {
+    fn for_each_operand(&self, f: impl FnMut(LocalId)) {
         self.operands().for_each(f);
     }
 }
@@ -246,19 +246,11 @@ pub enum CorePat {
 
 impl CorePat {
     /// The locals this pattern introduces, in binding order.
-    pub fn binds(&self) -> std::slice::Iter<'_, CoreBind> {
+    fn binds(&self) -> std::slice::Iter<'_, CoreBind> {
         match self {
             CorePat::Wild | CorePat::Lit(_) => <&[CoreBind]>::default().iter(),
             CorePat::Bind(b) => std::slice::from_ref(b).iter(),
             CorePat::Ctor { fields, .. } => fields.iter(),
-        }
-    }
-
-    pub fn binds_mut(&mut self) -> std::slice::IterMut<'_, CoreBind> {
-        match self {
-            CorePat::Wild | CorePat::Lit(_) => <&mut [CoreBind]>::default().iter_mut(),
-            CorePat::Bind(b) => std::slice::from_mut(b).iter_mut(),
-            CorePat::Ctor { fields, .. } => fields.iter_mut(),
         }
     }
 }
@@ -328,7 +320,7 @@ impl CoreExpr {
     /// by construction. The walk steps over the `Drop`s Perceus interleaves and
     /// stops at the first join point. `emit_toplevel` takes no pinning
     /// argument, so a pinning that disagrees with the IR cannot exist.
-    pub fn toplevel_globals(&self) -> Vec<(LocalId, GlobalSlot)> {
+    fn toplevel_globals(&self) -> Vec<(LocalId, GlobalSlot)> {
         let mut out = Vec::new();
         let mut cur = self;
         loop {
@@ -352,9 +344,9 @@ impl CoreExpr {
 /// One lowered function.
 #[derive(Debug, Clone)]
 pub struct CoreFn {
-    pub name: StrId,
+    pub(crate) name: StrId,
     pub params: Vec<CoreBind>,
-    pub body: CoreExpr,
+    pub(crate) body: CoreExpr,
     pub ret_ty: RTy,
 }
 
@@ -364,7 +356,7 @@ pub struct CoreFn {
 pub struct CoreProgram {
     pub fns: Vec<CoreFn>,
     pub consts: Vec<Value>,
-    pub toplevel: CoreExpr,
+    pub(crate) toplevel: CoreExpr,
 }
 
 impl Default for CoreProgram {
@@ -581,15 +573,15 @@ pub(crate) mod testkit {
     use super::*;
     use crate::core_ir::emit::EmitCtx;
 
-    pub fn bind(id: u32, ty: RTy) -> CoreBind {
+    pub(crate) fn bind(id: u32, ty: RTy) -> CoreBind {
         CoreBind::new(LocalId(id), ty)
     }
 
-    pub fn local(id: u32) -> LocalId {
+    pub(crate) fn local(id: u32) -> LocalId {
         LocalId(id)
     }
 
-    pub fn vref(tid: i32, idx: u16) -> VariantRef {
+    pub(crate) fn vref(tid: i32, idx: u16) -> VariantRef {
         VariantRef {
             type_id: TypeId(tid),
             variant_idx: idx,
@@ -599,11 +591,11 @@ pub(crate) mod testkit {
     }
 
     /// The single anonymous variant most reuse/drop tests scrutinise.
-    pub fn variant() -> VariantRef {
+    pub(crate) fn variant() -> VariantRef {
         vref(0, 0)
     }
 
-    pub fn ctor(fields: &[u32]) -> Atom {
+    pub(crate) fn ctor(fields: &[u32]) -> Atom {
         Atom::Ctor {
             variant: variant(),
             fields: fields.iter().copied().map(LocalId).collect(),
@@ -611,7 +603,7 @@ pub(crate) mod testkit {
         }
     }
 
-    pub fn func(params: Vec<CoreBind>, body: CoreExpr, ret_ty: RTy) -> CoreFn {
+    pub(crate) fn func(params: Vec<CoreBind>, body: CoreExpr, ret_ty: RTy) -> CoreFn {
         CoreFn {
             name: StrId::NONE,
             params,
@@ -623,11 +615,11 @@ pub(crate) mod testkit {
     /// Minimal [`EmitCtx`] double. `variant_count` decides `SwitchTag` vs the
     /// `MatchEnum` ladder.
     pub struct Ctx {
-        pub consts: Vec<i64>,
-        pub variant_count: Option<u8>,
+        consts: Vec<i64>,
+        variant_count: Option<u8>,
     }
 
-    pub fn ctx(variant_count: Option<u8>) -> Ctx {
+    pub(crate) fn ctx(variant_count: Option<u8>) -> Ctx {
         Ctx {
             consts: vec![],
             variant_count,

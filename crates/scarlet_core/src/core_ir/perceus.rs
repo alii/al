@@ -20,7 +20,7 @@ use crate::typed_ir::{RTy, ResolvedPool};
 /// classify a bind's `ty` as heap-shaped and to read a tuple's width. Its types
 /// are resolved by construction, so no unsolved variable can reach here and
 /// make `is_heap` answer `false` by accident.
-pub fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
+pub(crate) fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
     let CoreFn {
         name,
         params,

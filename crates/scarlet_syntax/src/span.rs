@@ -71,7 +71,7 @@ impl Span {
     }
 
     /// The smallest `Span` covering both, in either order.
-    pub fn union(&self, other: &Span) -> Span {
+    pub(crate) fn union(&self, other: &Span) -> Span {
         let (a_start, a_end) = self.endpoints();
         let (b_start, b_end) = other.endpoints();
         let (start_line, start_column) = a_start.min(b_start);

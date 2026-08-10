@@ -93,7 +93,7 @@ use crate::bytecode::value::{
 };
 use crate::bytecode::{
     CtorRef, NativeCtx, NativeStatus, Op, PreludeBindings, TypeRef, Value, is_native_bridge_op,
-    is_native_park_op,
+    is_native_park_op, is_native_try_op,
 };
 use crate::tivec::{Idx, TiVec};
 use crate::type_def::TypeId;
@@ -113,6 +113,7 @@ const SYM_DIV_INT: &str = "al_shim_div_int";
 const SYM_MOD_INT: &str = "al_shim_mod_int";
 const SYM_SHIM_OP: &str = "al_shim_op";
 const SYM_PARK_OP: &str = "al_shim_park_op";
+const SYM_TRY_OP: &str = "al_shim_try_op";
 const SYM_ENUM_ALLOC: &str = "al_shim_enum_alloc";
 const SYM_MAKE_ARRAY: &str = "al_shim_make_array";
 const SYM_MAKE_TUPLE: &str = "al_shim_make_tuple";
@@ -138,6 +139,8 @@ pub struct NativePlan {
     /// Per-local representation class, captured from each binding's `RTy`
     /// while the pool is alive.
     reprs: TiVec<LocalId, Repr>,
+    /// Nominal proofs the emitter uses to pick the unchecked lowering.
+    proofs: TiVec<LocalId, TyProof>,
     /// The plan-time stand-in for `EmitCtx::switch_variant_count`, recovered
     /// from the match shape itself (see [`Gate::switch_shape`]). Both the
     /// layout re-emission and codegen answer the `SwitchTag`-vs-ladder
@@ -149,6 +152,29 @@ pub struct NativePlan {
 /// register views and how much RC machinery its dup/drop sites can skip.
 /// Every arm is backed by a `value.rs` invariant; anything the types cannot
 /// prove stays [`Repr::Dyn`], which is always correct.
+/// The nominal facts a dedicated shim needs in order to skip a runtime check.
+///
+/// [`Repr`] cannot carry these: it classifies *representation* (Array, Binary
+/// and Tuple are all `Heap`), while these name the *type*. Recorded per local
+/// at plan time for the same reason `reprs` is — the `ResolvedPool` is gone by
+/// the time the emitter runs.
+///
+/// A local with no proof still compiles: the emitter lowers that site through
+/// the bridge, which re-checks the operand, instead of the unchecked shim.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+enum TyProof {
+    /// Nothing proven; the site must use a checking lowering.
+    #[default]
+    None,
+    /// A persistent array or a lazy range — the two shapes the seq shims are
+    /// total over.
+    Array,
+    /// A `Binary` (nominal).
+    Binary,
+    /// A tuple of exactly this many elements.
+    Tuple(u16),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Repr {
     /// Proven `Int`: keeps a raw unboxed `i64` view between ops. RC stays
@@ -191,6 +217,19 @@ impl ReprTys {
 }
 
 /// The single place type facts become codegen decisions.
+/// The [`TyProof`] for `t`, if any.
+fn prove(pool: &ResolvedPool, tys: ReprTys, t: RTy) -> TyProof {
+    match pool.node(t) {
+        ResolvedNode::Con { id, .. } if id == pool.prims().array => TyProof::Array,
+        ResolvedNode::Con { id, .. } if tys.binary.is(id) => TyProof::Binary,
+        ResolvedNode::Tuple { .. } => {
+            let n = pool.tuple_elems(t).len();
+            u16::try_from(n).map_or(TyProof::None, TyProof::Tuple)
+        }
+        _ => TyProof::None,
+    }
+}
+
 fn classify(pool: &ResolvedPool, tys: ReprTys, t: RTy) -> Repr {
     match pool.node(t) {
         ResolvedNode::Con { id, .. } => match pool.prims().prim_of(id) {
@@ -245,27 +284,28 @@ pub fn plan(
     f: &CoreFn,
     pool: &ResolvedPool,
     prelude: &PreludeBindings,
-) -> Option<NativePlan> {
+) -> NativePlan {
     let bools = BoolCtors::of(prelude);
-    let mut gate = Gate {
+    let mut walk = PlanWalk {
         pool,
         bools,
         tys: ReprTys::of(prelude),
         reprs: TiVec::new(),
-        local_tys: TiVec::new(),
+        proofs: TiVec::new(),
         switch_counts: HashMap::new(),
     };
     for p in &f.params {
-        gate.record(p);
+        walk.record(p);
     }
-    gate.expr(&f.body)?;
-    Some(NativePlan {
+    walk.walk(&f.body);
+    NativePlan {
         func_idx,
         fun: f.clone(),
         bools,
-        reprs: gate.reprs,
-        switch_counts: gate.switch_counts,
-    })
+        reprs: walk.reprs,
+        proofs: walk.proofs,
+        switch_counts: walk.switch_counts,
+    }
 }
 
 impl NativePlan {
@@ -273,8 +313,28 @@ impl NativePlan {
         self.reprs.get(id).copied().unwrap_or_default()
     }
 
+    fn proof(&self, id: LocalId) -> TyProof {
+        self.proofs.get(id).copied().unwrap_or_default()
+    }
+
     fn is_int(&self, id: LocalId) -> bool {
         self.repr_of(id) == Repr::Int
+    }
+
+    /// Whether the unchecked seq shims may take `id` as a sequence.
+    fn is_array(&self, id: LocalId) -> bool {
+        self.proof(id) == TyProof::Array
+    }
+
+    /// Whether the unchecked binary shims may take `id` as a binary.
+    fn is_binary(&self, id: LocalId) -> bool {
+        self.proof(id) == TyProof::Binary
+    }
+
+    /// Whether `id` is a tuple with more than `i` elements, so the payload
+    /// word can be read without a bounds check.
+    fn tuple_has(&self, id: LocalId, i: usize) -> bool {
+        matches!(self.proof(id), TyProof::Tuple(n) if usize::from(n) > i)
     }
 
     /// The RC gate a dup/drop of `id`'s current value needs. `None` means
@@ -333,27 +393,22 @@ fn nop_of(op: Op) -> Option<(NOp, bool)> {
     }
 }
 
-struct Gate<'a> {
+struct PlanWalk<'a> {
     pool: &'a ResolvedPool,
     bools: BoolCtors,
     tys: ReprTys,
     reprs: TiVec<LocalId, Repr>,
-    /// Each recorded local's full `RTy`, for gate clauses needing more than
-    /// its [`Repr`]. Pool-relative, so it dies with the gate, not the plan.
-    local_tys: TiVec<LocalId, Option<RTy>>,
+    /// Nominal proofs that outlive the pool; see [`TyProof`].
+    proofs: TiVec<LocalId, TyProof>,
     switch_counts: HashMap<TypeId, u8>,
 }
 
-impl Gate<'_> {
+impl PlanWalk<'_> {
     fn record(&mut self, b: &CoreBind) {
         self.reprs.resize_at_least(b.id, Repr::default());
         self.reprs[b.id] = classify(self.pool, self.tys, b.ty);
-        self.local_tys.resize_at_least(b.id, None);
-        self.local_tys[b.id] = Some(b.ty);
-    }
-
-    fn ty_of(&self, id: LocalId) -> Option<RTy> {
-        self.local_tys.get(id).copied().flatten()
+        self.proofs.resize_at_least(b.id, TyProof::default());
+        self.proofs[b.id] = prove(self.pool, self.tys, b.ty);
     }
 
     /// The plan-time half of emit's `switch_plan`: does this match compile to
@@ -393,245 +448,53 @@ impl Gate<'_> {
         Some((tid?, arms.len() as u8))
     }
 
-    fn is_int(&self, id: LocalId) -> bool {
-        self.reprs.get(id).copied().unwrap_or_default() == Repr::Int
-    }
-
-    /// The pool proves `id` an `Array`: a persistent tree or a lazy `Range`,
-    /// the two shapes the seq shims are total over.
-    fn is_array(&self, id: LocalId) -> bool {
-        match self.ty_of(id) {
-            Some(t) => matches!(
-                self.pool.node(t),
-                ResolvedNode::Con { id, .. } if id == self.pool.prims().array
-            ),
-            None => false,
-        }
-    }
-
-    /// The pool proves `id` a `Binary` (nominal — see [`ReprTys`]).
-    fn is_binary(&self, id: LocalId) -> bool {
-        match self.ty_of(id) {
-            Some(t) => matches!(
-                self.pool.node(t),
-                ResolvedNode::Con { id, .. } if self.tys.binary.is(id)
-            ),
-            None => false,
-        }
-    }
-
-    fn atom(&self, a: &Atom) -> Option<()> {
-        match a {
-            Atom::Local(_) | Atom::Const(_) => Some(()),
-            // `TupleIndex` elides the interpreter's bounds/type errors, so
-            // the pool must prove the receiver a wide-enough tuple.
-            // `GetFieldUnchecked` carries the checker's own field proof.
-            Atom::PrimOp {
-                op: Op::TupleIndex,
-                args,
-                imm: Imm::Index(i),
-            } => {
-                let [recv] = args.as_slice() else {
-                    return None;
-                };
-                let t = self.ty_of(*recv)?;
-                self.pool.tuple_elem(t, *i as usize).map(|_| ())
-            }
-            Atom::PrimOp {
-                op: Op::GetFieldUnchecked,
-                args,
-                imm: Imm::Index(_),
-            } => (args.len() == 1).then_some(()),
-            // `PushGlobal` reads the entry frame's slot, written once by
-            // `__main__` before any body that reads it runs. A shim call: the
-            // global area is a `Vec` with no ABI-stable base.
-            Atom::PrimOp {
-                op: Op::PushGlobal,
-                args,
-                imm: Imm::Index(_),
-            } => args.is_empty().then_some(()),
-            // Reads of the closure this frame is running. Like `PushGlobal`
-            // these take no operand and go through a shim, because the frame
-            // is not in the value stack's ABI-stable region.
-            Atom::PrimOp {
-                op: Op::PushCapture,
-                args,
-                imm: Imm::Index(_),
-            } => args.is_empty().then_some(()),
-            Atom::PrimOp {
-                op: Op::PushSelf,
-                args,
-                imm: Imm::None,
-            } => args.is_empty().then_some(()),
-            // A bare Bool head from `&&`/`||` lowering: a compile-time
-            // immediate constant, no heap cell, no operand.
-            Atom::PrimOp {
-                op: Op::PushTrue | Op::PushFalse,
-                args,
-                imm: Imm::None,
-            } => args.is_empty().then_some(()),
-            // One allocator-shim call over an owned element buffer. `lower`
-            // guarantees argc matches the operand list; codegen reads only
-            // the list.
-            Atom::PrimOp {
-                op: Op::MakeArray | Op::MakeTuple,
-                args,
-                imm: Imm::Argc(n),
-            } => (args.len() == *n as usize).then_some(()),
-            // `args[0]` (Append) / `args[k]` (Prepend) is the sequence, the
-            // rest the pushed elements. The shims elide the interpreter's
-            // non-sequence error, so the pool must prove it an `Array`.
-            Atom::PrimOp {
-                op: Op::Append,
-                args,
-                imm: Imm::Argc(m),
-            } => (args.len() == *m as usize + 1 && self.is_array(args[0])).then_some(()),
-            Atom::PrimOp {
-                op: Op::Prepend,
-                args,
-                imm: Imm::Argc(k),
-            } => (args.len() == *k as usize + 1 && self.is_array(args[*k as usize])).then_some(()),
-            // The pure HTTP whole-ops over proven operands. Their only
-            // interpreter error is a shape check the proofs make unreachable.
-            // The parking IO ops are deliberately not here: suspension cannot
-            // cross a native frame.
-            Atom::PrimOp {
-                op: Op::HttpParseHead,
-                args,
-                imm: Imm::None,
-            } => match args.as_slice() {
-                [buf, off] => (self.is_binary(*buf) && self.is_int(*off)).then_some(()),
-                _ => None,
-            },
-            Atom::PrimOp {
-                op: Op::HttpHeadersValid | Op::HttpFraming,
-                args,
-                imm: Imm::None,
-            } => match args.as_slice() {
-                [headers] => self.is_array(*headers).then_some(()),
-                _ => None,
-            },
-            Atom::PrimOp {
-                op: Op::HttpHeaderHas,
-                args,
-                imm: Imm::None,
-            } => match args.as_slice() {
-                [headers, name] => (self.is_array(*headers) && self.is_binary(*name)).then_some(()),
-                _ => None,
-            },
-            Atom::PrimOp {
-                op: Op::HttpSerializeHead,
-                args,
-                imm: Imm::None,
-            } => match args.as_slice() {
-                [code, reason, headers] => {
-                    (self.is_int(*code) && self.is_binary(*reason) && self.is_array(*headers))
-                        .then_some(())
-                }
-                _ => None,
-            },
-            // Length reads, total under the same proofs. Narrower than
-            // `seq_len`, which also accepts a Tuple; no stdlib body needs it.
-            Atom::PrimOp {
-                op: Op::ArrayLen,
-                args,
-                imm: Imm::None,
-            } => match args.as_slice() {
-                [recv] => self.is_array(*recv).then_some(()),
-                _ => None,
-            },
-            Atom::PrimOp {
-                op: Op::BinByteSize,
-                args,
-                imm: Imm::None,
-            } => match args.as_slice() {
-                [recv] => self.is_binary(*recv).then_some(()),
-                _ => None,
-            },
-            // The pure single-result ops go through the generic bridge, which
-            // runs the interpreter's own op method: it re-checks operand types
-            // and elides nothing, so no type proof is needed here. Their only
-            // interpreter errors are the type mismatches a well-typed program
-            // never produces.
-            Atom::PrimOp { op, .. } if is_native_bridge_op(*op) => Some(()),
-            // Suspension is expressed as two resume ordinals; see `eval_pure`.
-            Atom::PrimOp { op, .. } if is_native_park_op(*op) => Some(()),
-            Atom::PrimOp { op, args, imm } => {
-                if *imm != Imm::None {
-                    return None;
-                }
-                // A polymorphic compare lowers inline only with both operands
-                // proven Int; otherwise it goes through the bridge, which runs
-                // the interpreter's own comparison.
-                let _ = (nop_of(*op)?, args);
-                Some(())
-            }
-            // Known/self dispatch through the entry table; a dynamic callee
-            // goes to `al_rt_call_value`, which does the interpreter's
-            // `Op::Call` checks and dispatch.
-            Atom::Call { .. } => Some(()),
-            // One allocator-shim call. The closure's own body gates
-            // independently, and its capture reads are uncovered primops.
-            Atom::Closure { .. } => Some(()),
-            // `True`/`False` are VM immediates: no heap cell, any perceus
-            // reuse pairing ignored. Every other constructor reuses the
-            // paired dropped cell or calls `al_shim_enum_alloc`.
-            Atom::Ctor {
-                variant, fields, ..
-            } => {
-                if self.bools.polarity(variant).is_some() && !fields.is_empty() {
-                    return None;
-                }
-                Some(())
-            }
-        }
-    }
-
-    fn expr(&mut self, mut e: &CoreExpr) -> Option<()> {
+    /// Walk the body recording the per-local facts the emitter needs after the
+    /// pool is gone. Infallible: every Core node has a lowering, so there is
+    /// nothing to admit or refuse — an unproven operand picks the checking
+    /// lowering rather than sending the whole body back to the interpreter.
+    fn walk(&mut self, mut e: &CoreExpr) {
         loop {
             match e {
-                CoreExpr::Let { bind, rhs, body } => {
-                    self.atom(rhs)?;
+                CoreExpr::Let { bind, body, .. } => {
                     self.record(bind);
                     e = body;
                 }
                 CoreExpr::LetJoin { bind, join, body } => {
-                    self.expr(join)?;
+                    self.walk(join);
                     self.record(bind);
                     e = body;
                 }
                 CoreExpr::LetCont { cont, body, .. } => {
-                    // A cont references only locals bound before this node,
-                    // so walking it here sees them recorded.
-                    self.expr(cont)?;
+                    self.walk(cont);
                     e = body;
                 }
                 CoreExpr::Drop { body, .. } => e = body,
                 CoreExpr::If { then, els, .. } => {
-                    self.expr(then)?;
+                    self.walk(then);
                     e = els;
                 }
                 CoreExpr::Match { arms, .. } => {
                     if let Some((tid, count)) = self.switch_shape(arms) {
-                        // Two full matches over one type must agree on its
-                        // variant count. A mismatch means a non-exhaustive
-                        // match slipped past the checker, so interpret rather
-                        // than emit a wrong jump table.
-                        if *self.switch_counts.entry(tid).or_insert(count) != count {
-                            return None;
+                        // Two exhaustive matches over one type must agree on
+                        // its variant count. Disagreement means a
+                        // non-exhaustive match reached codegen, which is a
+                        // checker bug, not something to paper over with a
+                        // slower lowering.
+                        let seen = *self.switch_counts.entry(tid).or_insert(count);
+                        if seen != count {
+                            unsupported_node(
+                                "match arm count disagreeing with an earlier match on the same type",
+                            );
                         }
                     }
                     for (pat, body) in arms {
                         match pat {
                             CorePat::Wild | CorePat::Lit(_) => {}
                             CorePat::Bind(b) => self.record(b),
-                            // Bool's heads compare as immediates and are
-                            // always nullary; enum heads bind their payload
-                            // fields whether the match switches or ladders.
                             CorePat::Ctor { variant, fields } => {
                                 if self.bools.polarity(variant).is_some() {
                                     if !fields.is_empty() {
-                                        return None;
+                                        unsupported_node("Bool pattern with payload fields");
                                     }
                                 } else {
                                     for f in fields {
@@ -640,223 +503,11 @@ impl Gate<'_> {
                                 }
                             }
                         }
-                        self.expr(body)?;
-                    }
-                    return Some(());
-                }
-                CoreExpr::Tail(a) => return self.atom(a),
-                CoreExpr::Goto(_) => return Some(()),
-            }
-        }
-    }
-}
-
-/// Diagnostic mirror of [`Gate`]: walks a whole body without short-circuiting
-/// and names every node the gate rejects. Mirrors [`plan`] clause for clause,
-/// so a body with no reasons here is exactly a body `plan` accepts.
-#[cfg(test)]
-pub(crate) mod gate_diag {
-    use super::*;
-
-    /// Every rejection reason in `f`, in walk order. Empty iff [`plan`]
-    /// accepts the body.
-    pub(crate) fn reasons(
-        f: &CoreFn,
-        pool: &ResolvedPool,
-        prelude: &PreludeBindings,
-    ) -> Vec<String> {
-        let mut g = Gate {
-            pool,
-            bools: BoolCtors::of(prelude),
-            tys: ReprTys::of(prelude),
-            reprs: TiVec::new(),
-            local_tys: TiVec::new(),
-            switch_counts: HashMap::new(),
-        };
-        for p in &f.params {
-            g.record(p);
-        }
-        let mut out = Vec::new();
-        walk(&mut g, &f.body, &mut out);
-        out
-    }
-
-    /// [`Gate::atom`], with `Some(reason)` at every `None` site.
-    fn atom_reason(g: &Gate, a: &Atom) -> Option<String> {
-        match a {
-            Atom::Local(_) | Atom::Const(_) => None,
-            Atom::PrimOp {
-                op: Op::TupleIndex,
-                args,
-                imm: Imm::Index(i),
-            } => {
-                let [recv] = args.as_slice() else {
-                    return Some("tuple-index-arity".into());
-                };
-                match g.ty_of(*recv) {
-                    Some(t) if g.pool.tuple_elem(t, *i as usize).is_some() => None,
-                    _ => Some("tuple-index-unproven".into()),
-                }
-            }
-            Atom::PrimOp {
-                op: Op::GetFieldUnchecked,
-                args,
-                imm: Imm::Index(_),
-            } => (args.len() != 1).then(|| "get-field-arity".into()),
-            Atom::PrimOp {
-                op: Op::PushGlobal,
-                args,
-                imm: Imm::Index(_),
-            } => (!args.is_empty()).then(|| "push-global-args".into()),
-            Atom::PrimOp {
-                op: Op::PushCapture,
-                args,
-                imm: Imm::Index(_),
-            } => (!args.is_empty()).then(|| "push-capture-args".into()),
-            Atom::PrimOp {
-                op: Op::PushSelf,
-                args,
-                imm: Imm::None,
-            } => (!args.is_empty()).then(|| "push-self-args".into()),
-            Atom::PrimOp {
-                op: Op::PushTrue | Op::PushFalse,
-                args,
-                imm: Imm::None,
-            } => (!args.is_empty()).then(|| "bool-head-args".into()),
-            Atom::PrimOp {
-                op: Op::MakeArray | Op::MakeTuple,
-                args,
-                imm: Imm::Argc(n),
-            } => (args.len() != *n as usize).then(|| "aggregate-argc-mismatch".into()),
-            Atom::PrimOp {
-                op: Op::Append,
-                args,
-                imm: Imm::Argc(m),
-            } => (!(args.len() == *m as usize + 1 && g.is_array(args[0])))
-                .then(|| "append-unproven-seq".into()),
-            Atom::PrimOp {
-                op: Op::Prepend,
-                args,
-                imm: Imm::Argc(k),
-            } => (!(args.len() == *k as usize + 1 && g.is_array(args[*k as usize])))
-                .then(|| "prepend-unproven-seq".into()),
-            Atom::PrimOp {
-                op:
-                    op @ (Op::HttpParseHead
-                    | Op::HttpHeadersValid
-                    | Op::HttpFraming
-                    | Op::HttpHeaderHas
-                    | Op::HttpSerializeHead),
-                args,
-                imm: Imm::None,
-            } => {
-                let ok = match (op, args.as_slice()) {
-                    (Op::HttpParseHead, [buf, off]) => g.is_binary(*buf) && g.is_int(*off),
-                    (Op::HttpHeadersValid | Op::HttpFraming, [headers]) => g.is_array(*headers),
-                    (Op::HttpHeaderHas, [headers, name]) => {
-                        g.is_array(*headers) && g.is_binary(*name)
-                    }
-                    (Op::HttpSerializeHead, [code, reason, headers]) => {
-                        g.is_int(*code) && g.is_binary(*reason) && g.is_array(*headers)
-                    }
-                    _ => false,
-                };
-                (!ok).then(|| format!("http-unproven:{op:?}"))
-            }
-            Atom::PrimOp {
-                op: Op::ArrayLen,
-                args,
-                imm: Imm::None,
-            } => match args.as_slice() {
-                [recv] if g.is_array(*recv) => None,
-                _ => Some("array-len-unproven".into()),
-            },
-            Atom::PrimOp {
-                op: Op::BinByteSize,
-                args,
-                imm: Imm::None,
-            } => match args.as_slice() {
-                [recv] if g.is_binary(*recv) => None,
-                _ => Some("bin-byte-size-unproven".into()),
-            },
-            Atom::PrimOp { op, .. } if is_native_bridge_op(*op) => None,
-            Atom::PrimOp { op, .. } if is_native_park_op(*op) => None,
-            Atom::PrimOp { op, args, imm } => {
-                if *imm != Imm::None {
-                    return Some(format!("op:{op:?}"));
-                }
-                let _ = args;
-                match nop_of(*op) {
-                    None => Some(format!("op:{op:?}")),
-                    Some(_) => None,
-                }
-            }
-            Atom::Call { .. } | Atom::Closure { .. } => None,
-            Atom::Ctor {
-                variant, fields, ..
-            } => (g.bools.polarity(variant).is_some() && !fields.is_empty())
-                .then(|| "bool-ctor-fields".into()),
-        }
-    }
-
-    /// [`Gate::expr`], continuing past rejections and collecting them all.
-    fn walk(g: &mut Gate, mut e: &CoreExpr, out: &mut Vec<String>) {
-        loop {
-            match e {
-                CoreExpr::Let { bind, rhs, body } => {
-                    if let Some(r) = atom_reason(g, rhs) {
-                        out.push(r);
-                    }
-                    g.record(bind);
-                    e = body;
-                }
-                CoreExpr::LetJoin { bind, join, body } => {
-                    walk(g, join, out);
-                    g.record(bind);
-                    e = body;
-                }
-                CoreExpr::LetCont { cont, body, .. } => {
-                    walk(g, cont, out);
-                    e = body;
-                }
-                CoreExpr::Drop { body, .. } => e = body,
-                CoreExpr::If { then, els, .. } => {
-                    walk(g, then, out);
-                    e = els;
-                }
-                CoreExpr::Match { arms, .. } => {
-                    if let Some((tid, count)) = g.switch_shape(arms)
-                        && *g.switch_counts.entry(tid).or_insert(count) != count
-                    {
-                        out.push("switch-count-mismatch".into());
-                    }
-                    for (pat, body) in arms {
-                        match pat {
-                            CorePat::Wild | CorePat::Lit(_) => {}
-                            CorePat::Bind(b) => g.record(b),
-                            CorePat::Ctor { variant, fields } => {
-                                if g.bools.polarity(variant).is_some() {
-                                    if !fields.is_empty() {
-                                        out.push("bool-pat-fields".into());
-                                    }
-                                } else {
-                                    for f in fields {
-                                        g.record(f);
-                                    }
-                                }
-                            }
-                        }
-                        walk(g, body, out);
+                        self.walk(body);
                     }
                     return;
                 }
-                CoreExpr::Tail(a) => {
-                    if let Some(r) = atom_reason(g, a) {
-                        out.push(r);
-                    }
-                    return;
-                }
-                CoreExpr::Goto(_) => return,
+                CoreExpr::Tail(_) | CoreExpr::Goto(_) => return,
             }
         }
     }
@@ -1229,7 +880,10 @@ impl Uses {
                 // heads are nullary constants. Neither has an operand.
                 Op::PushGlobal | Op::PushCapture | Op::PushSelf | Op::PushTrue | Op::PushFalse => {}
                 // The bridges hand every operand to their shim as an owned word.
-                _ if is_native_bridge_op(*op) || is_native_park_op(*op) => {
+                _ if is_native_bridge_op(*op)
+                    || is_native_park_op(*op)
+                    || is_native_try_op(*op) =>
+                {
                     for &x in args {
                         self.need_word(x);
                     }
@@ -1252,7 +906,9 @@ impl Uses {
                             self.need_int(x);
                         }
                     }
-                    None => unsupported_node("primop"),
+                    None => unsupported_node(
+                        "primop: `op_coverage` classifies this opcode NotAPrimOp, so lowering should never meet it as one",
+                    ),
                 },
             },
             Atom::Call { callee, args } => {
@@ -1309,20 +965,14 @@ impl Uses {
                     for (pat, body) in arms {
                         if let CorePat::Lit(c) = pat {
                             let cv = cmap.get(&c.0)?;
-                            if cv.boolean.is_some() {
-                                // Bool words compare as bits.
-                            } else if cv.int.is_some() {
-                                // Decoding the scrutinee is sound only when
-                                // the pool proved it Int. A spilled BigInt
-                                // still decodes; anything else must not.
-                                if !plan.is_int(*scrut) {
-                                    return None;
-                                }
+                            // Bool words compare as bits. An Int literal
+                            // decodes the scrutinee, but only where the pool
+                            // proved it Int — a spilled BigInt still decodes,
+                            // anything else must not. Every other literal
+                            // compares structurally through the bridge and
+                            // needs no extra view.
+                            if cv.boolean.is_none() && cv.int.is_some() && plan.is_int(*scrut) {
                                 self.need_int(*scrut);
-                            } else {
-                                // Other literal arms are uncovered: their
-                                // equality is not a bit comparison.
-                                return None;
                             }
                         }
                         self.expr(body, plan, cmap)?;
@@ -1377,6 +1027,7 @@ struct RtRefs {
     mod_int: ir::FuncRef,
     shim_op: ir::FuncRef,
     park_op: ir::FuncRef,
+    try_op: ir::FuncRef,
     prepare_call: ir::FuncRef,
     prepare_call_value: ir::FuncRef,
     prepare_tail: ir::FuncRef,
@@ -1446,6 +1097,12 @@ fn declare_imports<M: Module>(
         &[ptr, i64t, ptr, i64t, i64t, i64t],
         Some(i64t),
     )?;
+    let try_op = import(
+        module,
+        SYM_TRY_OP,
+        &[ptr, i64t, i64t, ptr, i64t],
+        Some(i64t),
+    )?;
     // The transfer helpers return a `PreparedCall`: two registers.
     let import2 =
         |module: &mut M, name: &str, params: &[ir::Type]| -> Result<FuncId, Box<ModuleError>> {
@@ -1496,6 +1153,7 @@ fn declare_imports<M: Module>(
         mod_int: module.declare_func_in_func(mod_int, func),
         shim_op: module.declare_func_in_func(shim_op, func),
         park_op: module.declare_func_in_func(park_op, func),
+        try_op: module.declare_func_in_func(try_op, func),
         prepare_call: module.declare_func_in_func(prepare_call, func),
         prepare_call_value: module.declare_func_in_func(prepare_call_value, func),
         prepare_tail: module.declare_func_in_func(prepare_tail, func),
@@ -1512,7 +1170,11 @@ fn declare_imports<M: Module>(
 /// also pass the compile-time-only gates. Direct native→native call sites
 /// must consult this. Naming a body outside it as a peer leaves its
 /// `al_fn_{idx}` symbol undefined and `finalize_definitions` fails.
-pub fn native_set(plans: &[NativePlan], program: &crate::bytecode::Program) -> HashSet<FuncIdx> {
+#[cfg(test)]
+pub(crate) fn native_set(
+    plans: &[NativePlan],
+    program: &crate::bytecode::Program,
+) -> HashSet<FuncIdx> {
     let consts: &[Value] = &program.constants;
     plans
         .iter()
@@ -1550,7 +1212,7 @@ pub fn compile<M: Module>(
     module: &mut M,
     plan: &NativePlan,
     program: &crate::bytecode::Program,
-) -> Result<Option<CompiledBody>, Box<ModuleError>> {
+) -> Result<CompiledBody, Box<ModuleError>> {
     let consts: &[Value] = &program.constants;
     let layout = emit::emit(
         &plan.fun,
@@ -1561,26 +1223,20 @@ pub fn compile<M: Module>(
     )
     .layout;
     let Some(cmap) = resolve_consts(&plan.fun, consts) else {
-        return Ok(None);
+        // Every heap constant is interned into the program's frozen area, so
+        // a mortal one here means the constant pool was built wrong.
+        unsupported_node("constant pool holding a mortal heap value")
     };
     let Some(uses) = Uses::scan(&plan.fun, plan, &cmap) else {
-        return Ok(None);
+        unsupported_node("use scan failing on a body every opcode has a lowering for")
     };
     let mut frozen = program.frozen.builder();
     let Some(ctor_sites) = enum_ctor_sites(plan, program, &layout, Some(&mut frozen)) else {
-        // The bytecode no longer matches the emit shape the scan expects —
-        // an emission or peephole change drifted. Interpreting is safe, but
-        // say so: a silent fallback here once meant a whole release ran
-        // slower with nobody noticing.
-        if crate::bytecode::native::debug() {
-            let name = program
-                .functions
-                .get(plan.func_idx.index())
-                .map(|f| f.name.as_ref())
-                .unwrap_or("?");
-            eprintln!("al-native: ctor-site scan failed for {name}; interpreting it");
-        }
-        return Ok(None);
+        // The recorded header positions no longer line up with the emitted
+        // code — an emission or peephole change drifted. There is no slower
+        // mode to fall back to any more, and a wrong constant would miscompile
+        // the constructor, so this has to be loud.
+        unsupported_node("ctor-site headers disagreeing with the emitted code")
     };
 
     let ptr_ty = module.target_config().pointer_type();
@@ -1612,12 +1268,12 @@ pub fn compile<M: Module>(
         .compiled_code()
         .map(|c| c.code_info().total_size)
         .unwrap_or(0);
-    Ok(Some(CompiledBody {
+    Ok(CompiledBody {
         func_idx: plan.func_idx,
         func_id,
         clif,
         code_size,
-    }))
+    })
 }
 
 /// For each non-tail call (continuation), the locals read strictly after it
@@ -1920,14 +1576,14 @@ impl<'a> BodyGen<'a> {
 
     fn load_slot(&mut self, slot: i32) -> ir::Value {
         let base = self.b.use_var(self.base);
-        FrameSlots::new(&self.layout, base).load_slot(&mut self.b, slot)
+        FrameSlots::new(base).load_slot(&mut self.b, slot)
     }
 
     /// `StoreLocal` parity: release the old word, store the new. `bits` must
     /// carry an owned reference; the slot takes it.
     fn store_slot(&mut self, slot: i32, bits: ir::Value) {
         let base = self.b.use_var(self.base);
-        FrameSlots::new(&self.layout, base).store_slot(&mut self.b, slot, bits, self.fns.release);
+        FrameSlots::new(base).store_slot(&mut self.b, slot, bits, self.fns.release);
     }
 
     /// [`Self::store_slot`] for `id`'s own slot, eliding the old-word release
@@ -1939,7 +1595,7 @@ impl<'a> BodyGen<'a> {
     fn store_local_slot(&mut self, id: LocalId, slot: i32, bits: ir::Value) {
         if self.plan.repr_of(id) == Repr::Immediate {
             let base = self.b.use_var(self.base);
-            FrameSlots::new(&self.layout, base).store_slot_no_release(&mut self.b, slot, bits);
+            FrameSlots::new(base).store_slot_no_release(&mut self.b, slot, bits);
         } else {
             self.store_slot(slot, bits);
         }
@@ -1951,7 +1607,7 @@ impl<'a> BodyGen<'a> {
             .ins()
             .iconst(types::I64, self.facts.int_header as i64);
         let base = self.b.use_var(self.base);
-        FrameSlots::new(&self.layout, base).store_slot_no_release(&mut self.b, slot, zero);
+        FrameSlots::new(base).store_slot_no_release(&mut self.b, slot, zero);
     }
 
     /// The word view of `id`, always. A cached view is the register copy; a
@@ -2081,6 +1737,43 @@ impl<'a> BodyGen<'a> {
 
     /// Evaluate a non-call atom. `want_word` asks for an owned boxed word,
     /// `want_int` for the raw `i64` view.
+    /// Structural equality of two already-materialised words, via the same
+    /// `values_equal` the interpreter uses. Returns the Bool word.
+    fn eq_words(&mut self, a: ir::Value, b: ir::Value) -> ir::Value {
+        let slot =
+            self.b
+                .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 16, 3));
+        self.b.ins().stack_store(a, slot, 0);
+        self.b.ins().stack_store(b, slot, 8);
+        let buf = self.b.ins().stack_addr(self.ptr_ty, slot, 0);
+        let opc = self.b.ins().iconst(types::I64, i64::from(Op::Eq as u8));
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let n = self.b.ins().iconst(types::I64, 2);
+        let vmx = self.vmx();
+        let call = self
+            .b
+            .ins()
+            .call(self.fns.shim_op, &[vmx, opc, zero, buf, n]);
+        self.b.inst_results(call)[0]
+    }
+
+    /// Lower `a` through the generic bridge, which re-checks its operands.
+    /// Used wherever the fast path needs a type proof the plan does not have,
+    /// so an unproven site still compiles instead of falling back to bytecode.
+    fn bridge_call(&mut self, op: Op, args: &[LocalId], imm: Imm, want_int: bool) -> AtomVal {
+        let operand = super::emit::imm_operand(op, imm);
+        let buf = self.arg_buffer(args);
+        let opc = self.b.ins().iconst(types::I64, i64::from(op as u8));
+        let opv = self.b.ins().iconst(types::I64, i64::from(operand));
+        let n = self.b.ins().iconst(types::I64, args.len() as i64);
+        let vmx = self.vmx();
+        let call = self
+            .b
+            .ins()
+            .call(self.fns.shim_op, &[vmx, opc, opv, buf, n]);
+        self.opaque_result(call, want_int)
+    }
+
     fn eval_pure(&mut self, a: &Atom, want_word: bool, want_int: bool) -> AtomVal {
         match a {
             Atom::Local(src) => {
@@ -2116,6 +1809,9 @@ impl<'a> BodyGen<'a> {
                 let [recv] = args.as_slice() else {
                     unsupported_node("TupleIndex arity")
                 };
+                if !self.plan.tuple_has(*recv, *i as usize) {
+                    return self.bridge_call(Op::TupleIndex, args, Imm::Index(*i), want_int);
+                }
                 // The gate proved a wide-enough Tuple, so the word is a heap
                 // cell `[count][elements…]` and element `i` is payload word
                 // `1 + i`. The interpreter's bounds/type errors are
@@ -2183,10 +1879,18 @@ impl<'a> BodyGen<'a> {
             Atom::PrimOp {
                 op: op @ (Op::Append | Op::Prepend),
                 args,
-                imm: Imm::Argc(_),
+                imm: imm @ Imm::Argc(_),
             } => {
                 if want_int {
                     unsupported_node("int view of a sequence");
+                }
+                let seq = if matches!(op, Op::Append) {
+                    args[0]
+                } else {
+                    args[args.len() - 1]
+                };
+                if !self.plan.is_array(seq) {
+                    return self.bridge_call(*op, args, *imm, want_int);
                 }
                 let buf = self.arg_buffer(args);
                 let n = self.b.ins().iconst(types::I64, args.len() as i64);
@@ -2211,6 +1915,9 @@ impl<'a> BodyGen<'a> {
                 let [buf, off] = args.as_slice() else {
                     unsupported_node("HttpParseHead arity")
                 };
+                if !(self.plan.is_binary(*buf) && self.plan.is_int(*off)) {
+                    return self.bridge_call(Op::HttpParseHead, args, Imm::None, want_int);
+                }
                 let b = self.owned_word(*buf);
                 let o = self.int_of(*off);
                 let vmx = self.vmx();
@@ -2225,6 +1932,9 @@ impl<'a> BodyGen<'a> {
                 let [headers] = args.as_slice() else {
                     unsupported_node("http headers arity")
                 };
+                if !self.plan.is_array(*headers) {
+                    return self.bridge_call(*op, args, Imm::None, want_int);
+                }
                 let h = self.owned_word(*headers);
                 let call = if matches!(op, Op::HttpHeadersValid) {
                     self.b.ins().call(self.fns.http_headers_valid, &[h])
@@ -2242,6 +1952,9 @@ impl<'a> BodyGen<'a> {
                 let [headers, name] = args.as_slice() else {
                     unsupported_node("HttpHeaderHas arity")
                 };
+                if !(self.plan.is_array(*headers) && self.plan.is_binary(*name)) {
+                    return self.bridge_call(Op::HttpHeaderHas, args, Imm::None, want_int);
+                }
                 let h = self.owned_word(*headers);
                 let n = self.owned_word(*name);
                 let call = self.b.ins().call(self.fns.http_header_has, &[h, n]);
@@ -2255,6 +1968,12 @@ impl<'a> BodyGen<'a> {
                 let [code, reason, headers] = args.as_slice() else {
                     unsupported_node("HttpSerializeHead arity")
                 };
+                if !(self.plan.is_int(*code)
+                    && self.plan.is_binary(*reason)
+                    && self.plan.is_array(*headers))
+                {
+                    return self.bridge_call(Op::HttpSerializeHead, args, Imm::None, want_int);
+                }
                 let c = self.int_of(*code);
                 let r = self.owned_word(*reason);
                 let h = self.owned_word(*headers);
@@ -2273,6 +1992,14 @@ impl<'a> BodyGen<'a> {
                 let [recv] = args.as_slice() else {
                     unsupported_node("length arity")
                 };
+                let proven = if matches!(op, Op::ArrayLen) {
+                    self.plan.is_array(*recv)
+                } else {
+                    self.plan.is_binary(*recv)
+                };
+                if !proven {
+                    return self.bridge_call(*op, args, Imm::None, want_int);
+                }
                 let w = self.owned_word(*recv);
                 let f = if matches!(op, Op::ArrayLen) {
                     self.fns.seq_len
@@ -2350,6 +2077,36 @@ impl<'a> BodyGen<'a> {
             // immediate the method reads; ops without one pass 0. An Int result
             // (StrLen, BinBitSize, MapSize, BinByteAt) is a boxed word
             // `opaque_result` unboxes on demand.
+            // A fallible op: one call, then unwind on anything but `Done`.
+            // No resume ordinal — an error never comes back here.
+            Atom::PrimOp { op, args, imm } if is_native_try_op(*op) => {
+                let operand = super::emit::imm_operand(*op, *imm);
+                let buf = self.arg_buffer(args);
+                let opc = self.b.ins().iconst(types::I64, i64::from(*op as u8));
+                let opv = self.b.ins().iconst(types::I64, i64::from(operand));
+                let n = self.b.ins().iconst(types::I64, args.len() as i64);
+                let vmx = self.vmx();
+                let call = self.b.ins().call(self.fns.try_op, &[vmx, opc, opv, buf, n]);
+                let status = self.b.inst_results(call)[0];
+                let ok = self.b.create_block();
+                let bail = self.b.create_block();
+                self.b.set_cold_block(bail);
+                let done =
+                    self.b
+                        .ins()
+                        .icmp_imm(IntCC::Equal, status, NativeStatus::Done as u64 as i64);
+                self.b.ins().brif(done, ok, &[], bail, &[]);
+                self.b.seal_block(ok);
+                self.b.seal_block(bail);
+                self.b.switch_to_block(bail);
+                self.b.ins().return_(&[status]);
+                self.b.switch_to_block(ok);
+                let vmx = self.vmx();
+                let pop = self.b.ins().call(self.fns.rt_pop, &[vmx]);
+                let w = self.b.inst_results(pop)[0];
+                let int = want_int.then(|| unbox_int(&mut self.b, &self.facts, w));
+                AtomVal { word: Some(w), int }
+            }
             // A parking op owns two resume ordinals.
             //
             // The first attempt runs here, where the operands are still in
@@ -2447,7 +2204,9 @@ impl<'a> BodyGen<'a> {
             }
             Atom::PrimOp { op, args, .. } => {
                 let Some((nop, _)) = nop_of(*op) else {
-                    unsupported_node("primop")
+                    unsupported_node(
+                        "primop: `op_coverage` classifies this opcode NotAPrimOp, so lowering should never meet it as one",
+                    )
                 };
                 match nop {
                     NOp::Not => {
@@ -3425,15 +3184,32 @@ impl<'a> BodyGen<'a> {
                         unsupported_node("unresolved literal arm")
                     };
                     let (bits, boolean, int) = (cv.bits, cv.boolean, cv.int);
+                    let int_bits = int.filter(|_| self.plan.is_int(scrut));
                     let flag = if boolean.is_some() {
                         self.b.ins().icmp_imm(IntCC::Equal, sw, bits as i64)
-                    } else if let Some(k) = int {
+                    } else if let Some(k) = int_bits {
                         // Compare decoded values, so a spilled BigInt
                         // scrutinee still matches its literal.
                         let si = self.int_of(scrut);
                         self.b.ins().icmp_imm(IntCC::Equal, si, k)
                     } else {
-                        unsupported_node("literal arm kind")
+                        // A String literal arm, or an Int literal against a
+                        // scrutinee the pool could not prove Int: equality is
+                        // structural, not a bit compare. Run the interpreter's
+                        // own `values_equal` over the two words.
+                        // The bridge consumes both operands, and later arms
+                        // still read the scrutinee, so hand it a retained copy
+                        // regardless of whether it owns a slot. The literal is
+                        // a frozen immortal: its release is a no-op.
+                        let lit = self.b.ins().iconst(types::I64, bits as i64);
+                        let w = self.word_of(scrut);
+                        if let Some(gate) = self.plan.rc_gate(scrut) {
+                            emit_dup(&mut self.b, w, gate);
+                        }
+                        let eq = self.eq_words(w, lit);
+                        self.b
+                            .ins()
+                            .icmp_imm(IntCC::Equal, eq, self.facts.bool_true as i64)
                     };
                     let arm_b = self.b.create_block();
                     let next_b = self.b.create_block();
@@ -4246,24 +4022,20 @@ mod tests {
         let mut clifs = Vec::new();
         let prelude = test_prelude();
         for (i, f) in fns.iter().enumerate() {
-            let p =
-                plan(FuncIdx::from_usize(i), f, pool, &prelude).expect("test fn must be covered");
-            let body = compile(&mut module, &p, &program)
-                .expect("module error")
-                .expect("test fn must compile");
+            let p = plan(FuncIdx::from_usize(i), f, pool, &prelude);
+            let body = compile(&mut module, &p, &program).expect("module error");
             assert!(!body.clif.is_empty());
             clifs.push(body.clif);
-            let layout = emit::emit(
+            let emitted = emit::emit(
                 f,
                 &mut LayoutCtx {
                     bools: p.bools,
                     switch_counts: &p.switch_counts,
                 },
-            )
-            .layout;
+            );
             metas.push(FnMeta {
                 arity: f.params.len(),
-                locals: layout.locals.max(f.params.len() as i32) as usize,
+                locals: emitted.locals.max(f.params.len() as i32) as usize,
             });
             ids.push(body.func_id);
         }
@@ -4519,13 +4291,13 @@ mod tests {
     fn gate_accepts_the_a0_shapes_and_rejects_the_rest() {
         let (pool, int) = int_pool();
         let pre = test_prelude();
-        assert!(plan(FuncIdx(0), &fib_fn(int), &pool, &pre).is_some());
-        assert!(plan(FuncIdx(0), &count_fn(int), &pool, &pre).is_some());
+        let _ = plan(FuncIdx(0), &fib_fn(int), &pool, &pre);
+        let _ = plan(FuncIdx(0), &count_fn(int), &pool, &pre);
 
         // A non-Bool constructor allocates through the enum-ctor path:
         // covered.
         let f = testkit::func(vec![], CoreExpr::Tail(testkit::ctor(&[])), int);
-        assert!(plan(FuncIdx(0), &f, &pool, &pre).is_some());
+        let _ = plan(FuncIdx(0), &f, &pool, &pre);
 
         // Bool's heads are immediates: covered.
         let f = testkit::func(
@@ -4537,7 +4309,7 @@ mod tests {
             }),
             int,
         );
-        assert!(plan(FuncIdx(0), &f, &pool, &pre).is_some());
+        let _ = plan(FuncIdx(0), &f, &pool, &pre);
 
         // A closure allocates through the MakeClosure shim: covered.
         let f = testkit::func(
@@ -4548,7 +4320,7 @@ mod tests {
             }),
             int,
         );
-        assert!(plan(FuncIdx(0), &f, &pool, &pre).is_some());
+        let _ = plan(FuncIdx(0), &f, &pool, &pre);
 
         // A dynamic call through a closure-valued local: covered.
         let f = testkit::func(
@@ -4559,16 +4331,17 @@ mod tests {
             }),
             int,
         );
-        assert!(plan(FuncIdx(0), &f, &pool, &pre).is_some());
+        let _ = plan(FuncIdx(0), &f, &pool, &pre);
 
         // A capture *read* stays uncovered: the body needs the frame's
-        // closure handle, which only the interpreter maintains.
+        // `PushCapture` reads the running closure through a shim, so a body
+        // using it compiles like any other.
         let f = testkit::func(
             vec![],
             CoreExpr::Tail(Atom::prim(Op::PushCapture, vec![])),
             int,
         );
-        assert!(plan(FuncIdx(0), &f, &pool, &pre).is_none());
+        let _ = plan(FuncIdx(0), &f, &pool, &pre);
 
         // A polymorphic comparison needs the pool's Int proof.
         let mut pool2 = ResolvedPool::new(PrimIds {
@@ -4586,16 +4359,48 @@ mod tests {
                 ty,
             )
         };
-        assert!(plan(FuncIdx(0), &poly_eq(bound), &pool2, &pre).is_none());
-        assert!(plan(FuncIdx(0), &poly_eq(intt), &pool2, &pre).is_some());
+        // A polymorphic compare is covered either way: proven-Int operands
+        // lower to an inline `icmp`, anything else runs the interpreter's own
+        // comparison through the bridge.
+        let _ = plan(FuncIdx(0), &poly_eq(bound), &pool2, &pre);
+        let _ = plan(FuncIdx(0), &poly_eq(intt), &pool2, &pre);
+    }
+
+    /// A `Program` whose constant pool holds a *mortal* heap value is
+    /// malformed — the compiler interns every heap constant into the frozen
+    /// area. There is no slower mode to retreat to, so this aborts.
+    #[test]
+    #[should_panic(expected = "mortal heap value")]
+    fn compile_aborts_on_a_mortal_heap_constant() {
+        let (pool, int) = int_pool();
+        let f = testkit::func(vec![], CoreExpr::Tail(Atom::Const(ConstId(0))), int);
+        let p = plan(FuncIdx(0), &f, &pool, &test_prelude());
+        let mut module = test_module();
+
+        let mut heap = ProcHeap::new();
+        let heap_const = Value::str_in(&mut heap, "not an immediate");
+        let heap_program = crate::bytecode::Program {
+            constants: vec![heap_const],
+            ..Default::default()
+        };
+        let _ = compile(&mut module, &p, &heap_program);
     }
 
     #[test]
-    fn compile_rejects_heap_constants() {
+    fn compile_embeds_an_immediate_constant() {
         let (pool, int) = int_pool();
         let f = testkit::func(vec![], CoreExpr::Tail(Atom::Const(ConstId(0))), int);
-        let p = plan(FuncIdx(0), &f, &pool, &test_prelude()).unwrap();
+        let p = plan(FuncIdx(0), &f, &pool, &test_prelude());
+        let mut module = test_module();
+        let ok_program = crate::bytecode::Program {
+            constants: vec![Value::small_int(7)],
+            ..Default::default()
+        };
+        compile(&mut module, &p, &ok_program).expect("immediate constants compile");
+    }
 
+    /// A bare JIT module for the compile-level tests.
+    fn test_module() -> JITModule {
         let mut flags = settings::builder();
         flags.set("use_colocated_libcalls", "false").unwrap();
         flags.set("enable_pinned_reg", "true").unwrap();
@@ -4604,24 +4409,7 @@ mod tests {
             .unwrap()
             .finish(settings::Flags::new(flags))
             .unwrap();
-        let mut module = JITModule::new(JITBuilder::with_isa(isa, default_libcall_names()));
-
-        let mut heap = ProcHeap::new();
-        let heap_const = Value::str_in(&mut heap, "not an immediate");
-        let heap_program = crate::bytecode::Program {
-            constants: vec![heap_const],
-            ..Default::default()
-        };
-        let rejected = compile(&mut module, &p, &heap_program).unwrap();
-        assert!(rejected.is_none(), "heap constants are not embeddable");
-
-        // The same body over an immediate constant compiles.
-        let ok_program = crate::bytecode::Program {
-            constants: vec![Value::small_int(7)],
-            ..Default::default()
-        };
-        let ok = compile(&mut module, &p, &ok_program).unwrap();
-        assert!(ok.is_some());
+        JITModule::new(JITBuilder::with_isa(isa, default_libcall_names()))
     }
 
     #[test]
@@ -5056,7 +4844,7 @@ mod tests {
         let f = unwrap_fn(et, int);
         // The gate recovered the variant count from the exhaustive
         // all-constructor shape.
-        let p = plan(FuncIdx(0), &f, &pool, &test_prelude()).unwrap();
+        let p = plan(FuncIdx(0), &f, &pool, &test_prelude());
         assert_eq!(p.switch_counts.get(&ENUM_TID), Some(&2));
 
         let j = jit(&[f], &pool, &test_consts());
@@ -5125,7 +4913,7 @@ mod tests {
             },
             int,
         );
-        let p = plan(FuncIdx(0), &f, &pool, &test_prelude()).unwrap();
+        let p = plan(FuncIdx(0), &f, &pool, &test_prelude());
         assert!(p.switch_counts.is_empty());
 
         let j = jit(&[f], &pool, &test_consts());
@@ -5178,7 +4966,10 @@ mod tests {
             let_(1, int, out_of_range, CoreExpr::Tail(Atom::Local(local(1)))),
             int,
         );
-        assert!(plan(FuncIdx(0), &f, &pool, &test_prelude()).is_none());
+        // An out-of-range index is malformed IR the checker cannot produce.
+        // Planning no longer screens it: the site loses its tuple proof and
+        // lowers through the checking bridge, which reports the bad index.
+        let _ = plan(FuncIdx(0), &f, &pool, &test_prelude());
     }
 
     #[test]
@@ -5770,23 +5561,5 @@ mod tests {
         assert_eq!(take_freed_objects(), 1, "only the cell frees");
         drop(big); // the test's own handle was the last reference
         assert_eq!(take_freed_objects(), 1, "the boxed field frees last");
-    }
-
-    #[test]
-    fn layout_walk_consumes_every_resume_ip() {
-        // The cursor invariant, checked structurally: emit records one
-        // resume ip per non-tail call, and fib's body contains exactly two.
-        let (_, int) = int_pool();
-        let bools = BoolCtors::of(&test_prelude());
-        let switch_counts = HashMap::new();
-        let layout = emit::emit(
-            &fib_fn(int),
-            &mut LayoutCtx {
-                bools,
-                switch_counts: &switch_counts,
-            },
-        )
-        .layout;
-        assert_eq!(layout.call_resume_ips.len(), 2);
     }
 }

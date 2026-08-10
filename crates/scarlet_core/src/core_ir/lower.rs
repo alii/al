@@ -86,7 +86,7 @@ fn binding_bug(b: BindingId, why: &str) -> ! {
 /// [`CoreBind::global`], recoverable via [`CoreExpr::toplevel_globals`]. The
 /// pairing comes from the `TypedBind`, so it cannot drift from the
 /// `PushGlobal slot` already-emitted fn bodies use.
-pub fn lower(p: &TypedProgram) -> CoreProgram {
+pub(crate) fn lower(p: &TypedProgram) -> CoreProgram {
     let mut fns = Vec::with_capacity(p.fns.len());
     for f in &p.fns {
         let f = lower_fn(p.temps, f);

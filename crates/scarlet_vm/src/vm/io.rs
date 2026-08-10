@@ -397,7 +397,7 @@ impl VM {
     /// outcome: accept's `Ok(None)` for a retired listener, the stale-socket
     /// `NetError` for a connection. Without this a sibling parked on the id
     /// hangs forever. Returns whether anything was woken.
-    pub(super) fn fail_io_waiters(&mut self, id: i32) -> bool {
+    fn fail_io_waiters(&mut self, id: i32) -> bool {
         let Some(waiters) = self.io_waiters.remove(&id) else {
             return false;
         };

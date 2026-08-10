@@ -41,7 +41,7 @@ use super::{PatRest, TypedArm, TypedBinPatSeg, TypedBind, TypedExpr, TypedPat, e
 /// scrutinee's type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CtorPat {
-    pub variant: VariantRef,
+    pub(crate) variant: VariantRef,
     /// Declared field labels, in declared order. Private, and the same length
     /// as `field_tys` — see [`CtorPat::new`].
     labels: Vec<StrId>,
@@ -58,7 +58,7 @@ impl CtorPat {
     /// `Nil` is a prim `Con`, `is_heap` answers false for it, and Perceus then
     /// emits neither `Dup` nor `Drop` for what may be a heap field.
     /// [`Self::from_parts`] checks the widths the independent sources report.
-    pub fn new(variant: VariantRef, fields: Vec<(StrId, RTy)>) -> CtorPat {
+    fn new(variant: VariantRef, fields: Vec<(StrId, RTy)>) -> CtorPat {
         let (labels, field_tys) = fields.into_iter().unzip();
         CtorPat {
             variant,
@@ -70,7 +70,7 @@ impl CtorPat {
     /// [`Self::new`] from three widths the walk derived independently. A
     /// disagreement is a compiler bug and aborts — never a wildcard, which
     /// would silently match everything.
-    pub fn from_parts(
+    pub(crate) fn from_parts(
         variant: VariantRef,
         declared_arity: Arity,
         labels: Vec<StrId>,
@@ -84,24 +84,25 @@ impl CtorPat {
         CtorPat::new(variant, labels.into_iter().zip(field_tys).collect())
     }
 
-    pub fn arity(&self) -> usize {
+    pub(crate) fn arity(&self) -> usize {
         self.field_tys.len()
     }
 
     /// Declared field labels, for hover and diagnostics.
-    pub fn labels(&self) -> &[StrId] {
+    #[cfg(test)]
+    fn labels(&self) -> &[StrId] {
         &self.labels
     }
 
     /// The declared-fields description [`slot_labeled`] consumes: one labeled
     /// entry per field.
-    pub fn slot_fields(&self) -> SmallVec<[Option<StrId>; 4]> {
+    pub(crate) fn slot_fields(&self) -> SmallVec<[Option<StrId>; 4]> {
         self.labels.iter().map(|&l| Some(l)).collect()
     }
 
     /// Field types in declared order. Exactly [`Self::arity`] long, so it zips
     /// against `slot_labeled`'s slots.
-    pub fn field_tys(&self) -> &[RTy] {
+    pub(crate) fn field_tys(&self) -> &[RTy] {
         &self.field_tys
     }
 }
@@ -180,7 +181,7 @@ pub fn elaborate_pattern<C: PatCtx>(cx: &mut C, p: &ast::Pattern, scrut: RTy) ->
 /// error, so an error here means the two walks disagree. It aborts: dropping
 /// the mis-slotted sub-pattern would leave its binds unminted and the arm
 /// matching too much.
-pub fn slot_pattern_args<'p, C: PatCtx>(
+pub(crate) fn slot_pattern_args<'p, C: PatCtx>(
     cx: &mut C,
     fields: &[Option<StrId>],
     args: &'p [ast::PatternArg],
@@ -199,7 +200,7 @@ pub fn slot_pattern_args<'p, C: PatCtx>(
 
 /// Every [`TypedBind`] `p` introduces, in left-to-right order, each listed
 /// once however many or-alternatives mention it.
-pub fn pat_binds(p: &TypedPat) -> Vec<TypedBind> {
+pub(crate) fn pat_binds(p: &TypedPat) -> Vec<TypedBind> {
     let mut out = Vec::new();
     collect_binds(p, &mut out);
     out
@@ -514,7 +515,7 @@ pub enum SpecWidth {
 /// by construction (the width expression is checked `Int`, the scale is a
 /// synthesised `Int` constant), so the typed op applies even though the
 /// checker never saw the node.
-pub fn seg_bits<C: PatCtx>(cx: &mut C, spec: &ast::BinSpec) -> SpecWidth {
+pub(crate) fn seg_bits<C: PatCtx>(cx: &mut C, spec: &ast::BinSpec) -> SpecWidth {
     match spec {
         ast::BinSpec::Int { bits: Some(e) } => SpecWidth::Int(cx.expr(e)),
         ast::BinSpec::Int { bits: None } => {

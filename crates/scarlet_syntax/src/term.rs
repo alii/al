@@ -19,9 +19,9 @@ pub struct Palette {
     pub reset: &'static str,
     pub bold: &'static str,
     pub dim: &'static str,
-    pub red: &'static str,
-    pub cyan: &'static str,
-    pub blue: &'static str,
+    pub(crate) red: &'static str,
+    pub(crate) cyan: &'static str,
+    pub(crate) blue: &'static str,
     pub error: &'static str,
     /// Brand mark color (Scarlet, #AA091B) — the logo only. Never body text.
     pub scarlet: &'static str,
@@ -62,7 +62,7 @@ const OSC8_OPEN: &str = "\x1b]8;;";
 const OSC8_CLOSE: &str = "\x07";
 
 impl Palette {
-    pub fn for_stream(s: &impl IsTerminal) -> Self {
+    fn for_stream(s: &impl IsTerminal) -> Self {
         if color_enabled(s) { ON } else { OFF }
     }
 
@@ -74,7 +74,7 @@ impl Palette {
         Self::for_stream(&std::io::stderr())
     }
 
-    pub fn enabled(&self) -> bool {
+    pub(crate) fn enabled(&self) -> bool {
         self.enabled
     }
 

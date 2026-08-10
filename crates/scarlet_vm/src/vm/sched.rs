@@ -26,7 +26,7 @@ use super::migrate::{DetachedFds, Migrant};
 
 /// How many seeds a scheduler takes from the injector per visit. One at a time
 /// maximizes spread: k seeds across k idle schedulers is one each.
-pub(super) const SEED_BATCH: usize = 1;
+const SEED_BATCH: usize = 1;
 
 /// A spawned-but-not-yet-started process, the unit of cross-scheduler work
 /// distribution. `heap` is owned memory and `root` points only into it or the
@@ -151,7 +151,7 @@ pub(super) struct SchedSlot {
     /// raced through a shared queue. The handoff is a preference, not
     /// ownership: an idle peer with nothing to run may steal from here
     /// ([`Runtime::steal_inbound`]) and the woken owner just re-parks.
-    pub(super) inbox: Mutex<VecDeque<Inbound>>,
+    inbox: Mutex<VecDeque<Inbound>>,
     /// Listener ids retired by `net.close` on some scheduler, drained by this
     /// slot's owner. See [`Runtime::retire_listener`].
     pub(super) retired_listeners: Mutex<Vec<i32>>,
@@ -161,7 +161,7 @@ pub(super) struct SchedSlot {
     /// Seeds that run on exactly this scheduler and are never stolen. Used by
     /// the accept fan-out to spread acceptors one per core. A listener is one
     /// shared kernel socket, so this is locality, not correctness.
-    pub(super) pinned: Mutex<VecDeque<Seed>>,
+    pinned: Mutex<VecDeque<Seed>>,
     /// Poller waker, registered under [`super::poll::WAKER_TOKEN`]. Filled only
     /// once a thread exists, so an empty slot means a worker that never
     /// spawned. That doubles as the liveness check for donation targeting,
@@ -185,7 +185,7 @@ pub(super) struct SchedSlot {
     ///   from other placements, and must end in a notify (see [`Claim`]).
     /// - A worker whose thread failed to spawn keeps its flag down forever, so
     ///   no flag-gated path targets it; its work drains elsewhere.
-    pub(super) parked: AtomicBool,
+    parked: AtomicBool,
     /// Published load: runnable processes last reported, plus one per directed
     /// inbound still in flight. Donation reads these to level queue lengths
     /// while every scheduler is busy.

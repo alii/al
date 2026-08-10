@@ -2,7 +2,7 @@ use include_dir::{Dir, include_dir};
 
 static STD: Dir = include_dir!("$CARGO_MANIFEST_DIR/src/std");
 
-pub fn lookup(path: &str) -> Option<&'static str> {
+pub(crate) fn lookup(path: &str) -> Option<&'static str> {
     STD.get_file(format!("{path}.scrl"))
         .and_then(|f| f.contents_utf8())
 }
@@ -10,7 +10,7 @@ pub fn lookup(path: &str) -> Option<&'static str> {
 /// Every stdlib module path except the prelude, sorted so precompilation order
 /// is deterministic.
 #[allow(clippy::expect_used)] // a bad glob literal is a build-time bug, not a runtime condition
-pub fn all_modules() -> Vec<crate::module::ModulePath> {
+pub(crate) fn all_modules() -> Vec<crate::module::ModulePath> {
     let mut out: Vec<_> = STD
         .find("scarlet/**/*.scrl")
         .expect("stdlib glob literal is valid")

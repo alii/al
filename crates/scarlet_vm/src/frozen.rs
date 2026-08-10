@@ -48,7 +48,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use indexmap::{Equivalent, IndexMap};
 
-use crate::bytecode::{Value, enum_hash_with_payload, enum_name_prefix_hash};
+use crate::bytecode::Value;
 
 /// Initial segment capacity in words (32 KiB). Capacities double from here so
 /// the segment list stays short and `contains` range checks stay cheap.
@@ -110,13 +110,13 @@ impl FrozenArea {
             strs: HashMap::new(),
             ints: HashMap::new(),
             str_arrays: IndexMap::new(),
-            label_tuples: IndexMap::new(),
         }
     }
 
-    /// Whether `ptr` points into allocated frozen storage. For debug
-    /// assertions and tests only; refcounting skips immortals via a header bit.
-    pub fn contains(&self, ptr: *const u64) -> bool {
+    /// Whether `ptr` points into allocated frozen storage. For tests only;
+    /// refcounting skips immortals via a header bit.
+    #[cfg(test)]
+    pub(crate) fn contains(&self, ptr: *const u64) -> bool {
         let addr = ptr as usize;
         let segments = lock(&self.segments);
         segments.iter().any(|seg| {
@@ -125,17 +125,18 @@ impl FrozenArea {
         })
     }
 
-    pub fn segment_count(&self) -> usize {
+    fn segment_count(&self) -> usize {
         lock(&self.segments).len()
     }
 
     /// Total allocated words across all segments (for stats/tests).
-    pub fn words_used(&self) -> usize {
+    pub(crate) fn words_used(&self) -> usize {
         lock(&self.segments).iter().map(|s| s.used).sum()
     }
 
     /// Total reserved words across all segments (for stats/tests).
-    pub fn words_capacity(&self) -> usize {
+    #[cfg(test)]
+    fn words_capacity(&self) -> usize {
         lock(&self.segments).iter().map(|s| s.words.len()).sum()
     }
 
@@ -198,7 +199,8 @@ pub struct FrozenConst(Value);
 
 impl FrozenConst {
     /// Borrow the underlying value.
-    pub fn value(&self) -> &Value {
+    #[cfg(test)]
+    fn value(&self) -> &Value {
         &self.0
     }
 
@@ -272,8 +274,6 @@ pub struct FrozenBuilder {
     ints: HashMap<i64, Value>,
     /// Canonical frozen all-string array constant per distinct contents.
     str_arrays: StrAggregateMap,
-    /// Canonical frozen `Tuple`-of-`Str` label list per distinct contents.
-    label_tuples: StrAggregateMap,
 }
 
 impl FrozenBuilder {
@@ -281,13 +281,14 @@ impl FrozenBuilder {
     /// first, 8-byte aligned and stable for the program lifetime. The caller
     /// must fully initialize the words before letting the pointer escape this
     /// thread (module docs, "Publication protocol").
-    pub fn alloc(&mut self, words: usize) -> NonNull<u64> {
+    pub(crate) fn alloc(&mut self, words: usize) -> NonNull<u64> {
         self.area.alloc(words)
     }
 
     /// Allocate and copy a fully formed object image (header + payload
     /// words) into the area.
-    pub fn alloc_from(&mut self, image: &[u64]) -> NonNull<u64> {
+    #[cfg(test)]
+    fn alloc_from(&mut self, image: &[u64]) -> NonNull<u64> {
         let dst = self.area.alloc(image.len());
         // SAFETY: `dst` is a fresh, disjoint allocation of exactly
         // `image.len()` words.
@@ -295,7 +296,8 @@ impl FrozenBuilder {
         dst
     }
 
-    pub fn area(&self) -> &FrozenArea {
+    #[cfg(test)]
+    pub(crate) fn area(&self) -> &FrozenArea {
         &self.area
     }
 }
@@ -356,40 +358,6 @@ impl FrozenBuilder {
     /// A frozen binary constant of `bit_len` bits.
     pub fn binary_bits(&mut self, bytes: Vec<u8>, bit_len: u64) -> FrozenConst {
         FrozenConst(Value::binary_bits_in(self, bytes, bit_len))
-    }
-
-    /// A frozen enum constant. The hash must be computed exactly the way the
-    /// VM computes it at construction, or equality breaks.
-    pub fn enum_(
-        &mut self,
-        type_id: crate::TypeId,
-        variant_idx: u16,
-        enum_name: &str,
-        variant_name: &str,
-        field_labels: &[&str],
-        payload: Vec<FrozenConst>,
-    ) -> FrozenConst {
-        let payload = frozen_values(&payload);
-        let hash = enum_hash_with_payload(enum_name_prefix_hash(enum_name, variant_name), payload);
-        let en = self.str(enum_name).into_value();
-        let vn = self.str(variant_name).into_value();
-        let labels_tuple = self.label_tuple(field_labels);
-        FrozenConst(Value::enum_in(
-            self,
-            type_id,
-            variant_idx,
-            hash,
-            en,
-            vn,
-            labels_tuple,
-            payload,
-        ))
-    }
-
-    /// The canonical frozen labels reference for enum objects: a `Tuple` of
-    /// `Str`, the shape [`Value::enum_in`] requires for its `labels` argument.
-    fn label_tuple(&mut self, labels: &[&str]) -> Value {
-        self.intern_str_aggregate(labels, |b| &mut b.label_tuples, Value::tuple_in)
     }
 
     /// Shared interning loop for the string-aggregate constants. `map` selects
@@ -644,47 +612,5 @@ mod tests {
         let elem = l1.value().as_array().unwrap().get(0).unwrap();
         assert_eq!(elem.as_str(), Some("host"));
         assert_eq!(addr(&elem), addr(b.str("host").value()));
-    }
-
-    /// Enum constants carry interned names/labels: two constants of the same
-    /// variant share the canonical string and label-tuple allocations.
-    #[test]
-    fn enum_names_and_labels_point_into_the_frozen_area() {
-        let area = Arc::new(FrozenArea::new());
-        let mut b = area.builder();
-        let v1 = b.enum_(
-            crate::TypeId(7),
-            0,
-            "Credentials",
-            "Basic",
-            &["user", "pass"],
-            vec![],
-        );
-        let v2 = b.enum_(
-            crate::TypeId(7),
-            0,
-            "Credentials",
-            "Basic",
-            &["user", "pass"],
-            vec![],
-        );
-        assert_ne!(addr(v1.value()), addr(v2.value()), "distinct enum objects");
-        assert!(area.contains(addr(v1.value()) as *const u64));
-        let (e1, e2) = (v1.value().as_enum().unwrap(), v2.value().as_enum().unwrap());
-        assert_eq!(e1.enum_name(), "Credentials");
-        assert_eq!(e1.variant_name(), "Basic");
-        assert_eq!(e1.field_labels()[1].as_str(), Some("pass"));
-        assert_eq!(e1.hash(), e2.hash());
-        assert_eq!(addr(&e1.enum_name_value()), addr(&e2.enum_name_value()));
-        assert_eq!(
-            addr(&e1.variant_name_value()),
-            addr(&e2.variant_name_value())
-        );
-        assert_eq!(addr(&e1.labels_value()), addr(&e2.labels_value()));
-        assert_eq!(
-            addr(&e1.enum_name_value()),
-            addr(b.str("Credentials").value())
-        );
-        assert!(area.contains(addr(&e1.labels_value()) as *const u64));
     }
 }

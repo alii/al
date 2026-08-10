@@ -11,7 +11,7 @@ mod prelude;
 pub mod prelude_bindings;
 mod session;
 
-pub use binop::{BinopKind, ShortCircuitOp, ValueBinop, specialize_binop};
+pub(crate) use binop::{BinopKind, ShortCircuitOp, ValueBinop, specialize_binop};
 pub use compiler::*;
 pub use prelude_bindings::{CtorRef, PreludeBindings, TypeRef};
 pub use scarlet_vm::bytecode::*;
@@ -20,7 +20,7 @@ pub use session::{HoverFact, IncrementalSession, Watermark};
 /// Resolve an `@vm(name)` intrinsic key to its VM opcode. The only
 /// string→Op mapping; analysis calls it while registering the stdlib so an
 /// unknown key errors at the annotation, not during codegen.
-pub fn builtin_op(name: &str) -> Option<Op> {
+fn builtin_op(name: &str) -> Option<Op> {
     Some(match name {
         "println" => Op::Print,
         "string__inspect" => Op::ToString,

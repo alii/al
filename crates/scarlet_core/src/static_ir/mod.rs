@@ -65,7 +65,7 @@ impl<T> Slice<T> {
     }
 
     #[inline]
-    pub fn range(self) -> std::ops::Range<usize> {
+    fn range(self) -> std::ops::Range<usize> {
         self.start as usize..self.start as usize + self.len as usize
     }
 }
@@ -204,7 +204,7 @@ impl StaticStdlib {
         iface
     }
 
-    pub fn lookup_module(&self, key: &str) -> Option<ModuleInterface> {
+    pub(crate) fn lookup_module(&self, key: &str) -> Option<ModuleInterface> {
         self.modules
             .binary_search_by_key(&key, |(k, _)| k)
             .ok()
@@ -214,7 +214,7 @@ impl StaticStdlib {
     /// Hydrate the precompiled stdlib's code/functions/constants into live
     /// form. Constants go through `frozen` so strings and label lists intern
     /// to the same allocations as the rest of the program.
-    pub fn hydrate_program(
+    pub(crate) fn hydrate_program(
         &self,
         frozen: &mut FrozenBuilder,
     ) -> (Vec<Instruction>, Vec<Function>, Vec<Value>) {

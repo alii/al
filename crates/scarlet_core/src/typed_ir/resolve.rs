@@ -81,22 +81,22 @@ pub enum CallForm {
 
 impl Denotation {
     /// A raw frame slot the module walk assigned — see [`ValueRef::Slot`].
-    pub fn slot(slot: FrameSlot) -> Self {
+    pub(crate) fn slot(slot: FrameSlot) -> Self {
         Denotation(Den::Value(ValueRef::Slot(slot)))
     }
 
     /// A module-scope value that is not a statically-known function.
-    pub fn global(slot: GlobalSlot) -> Self {
+    pub(crate) fn global(slot: GlobalSlot) -> Self {
         Denotation(Den::Value(ValueRef::Global(slot)))
     }
 
-    pub fn capture(idx: CaptureIdx) -> Self {
+    pub(crate) fn capture(idx: CaptureIdx) -> Self {
         Denotation(Den::Value(ValueRef::Capture(idx)))
     }
 
     /// A top-level `fn` other than the one being elaborated. Called by index,
     /// loaded from its entry-frame slot.
-    pub fn known_fn(slot: GlobalSlot, func_idx: FuncIdx) -> Self {
+    pub(crate) fn known_fn(slot: GlobalSlot, func_idx: FuncIdx) -> Self {
         Denotation(Den::Fn {
             place: ValueRef::Global(slot),
             target: FnTarget::Known(func_idx),
@@ -106,7 +106,7 @@ impl Denotation {
     /// The top-level `fn` currently being elaborated. `CallSelf` when called,
     /// `PushGlobal slot` when loaded — never `PushSelf`, because a `CallKnown`
     /// frame's `captures` is a sentinel.
-    pub fn self_toplevel_fn(slot: GlobalSlot) -> Self {
+    pub(crate) fn self_toplevel_fn(slot: GlobalSlot) -> Self {
         Denotation(Den::Fn {
             place: ValueRef::Global(slot),
             target: FnTarget::SelfRec,
@@ -115,18 +115,18 @@ impl Denotation {
 
     /// A nested lambda referring to itself. Its frame is a real closure frame,
     /// so `PushSelf` is the right value load.
-    pub fn self_closure() -> Self {
+    pub(crate) fn self_closure() -> Self {
         Denotation(Den::Fn {
             place: ValueRef::SelfClosure,
             target: FnTarget::SelfRec,
         })
     }
 
-    pub fn ctor(variant: VariantRef, arity: Arity) -> Self {
+    fn ctor(variant: VariantRef, arity: Arity) -> Self {
         Denotation(Den::Ctor { variant, arity })
     }
 
-    pub fn builtin(op: Op) -> Self {
+    fn builtin(op: Op) -> Self {
         Denotation(Den::Builtin { op })
     }
 
@@ -136,7 +136,7 @@ impl Denotation {
     /// `None` for [`ValueKind::Local`] / [`ValueKind::ModuleFn`], which denote
     /// a *place* only the binding frame knows. Taking no place parameter is
     /// what stops a constructor's frame resolution leaking into a [`ValueRef`].
-    pub fn from_kind(kind: ValueKind, name: StrId) -> Option<Self> {
+    pub(crate) fn from_kind(kind: ValueKind, name: StrId) -> Option<Self> {
         match kind {
             ValueKind::Constructor {
                 type_id,
@@ -159,7 +159,7 @@ impl Denotation {
     }
 
     /// The name in value position.
-    pub fn as_value(&self) -> ValueForm {
+    pub(crate) fn as_value(&self) -> ValueForm {
         match self.0 {
             Den::Value(place) | Den::Fn { place, .. } => ValueForm::Ref(place),
             Den::Ctor {
@@ -173,7 +173,7 @@ impl Denotation {
 
     /// The name in callee position. `fn_ty` types the `TypedExpr::Var` a
     /// dynamic call evaluates, and is unused otherwise.
-    pub fn as_callee(&self, fn_ty: RTy) -> CallForm {
+    pub(crate) fn as_callee(&self, fn_ty: RTy) -> CallForm {
         match self.0 {
             Den::Fn {
                 target: FnTarget::Known(fi),
@@ -193,7 +193,7 @@ impl Denotation {
     }
 
     /// The variant and declared [`Arity`] this name constructs.
-    pub fn as_ctor(&self) -> Option<(VariantRef, Arity)> {
+    pub(crate) fn as_ctor(&self) -> Option<(VariantRef, Arity)> {
         match self.0 {
             Den::Ctor { variant, arity } => Some((variant, arity)),
             _ => None,

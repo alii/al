@@ -26,7 +26,9 @@ use crate::bytecode::value::{
     NATIVE_HOLLOW_FOR_REUSE_SYMBOL, NATIVE_RELEASE_AT_ZERO_SYMBOL, native_hollow_for_reuse,
     native_release_at_zero,
 };
-use cranelift_codegen::ir::{AbiParam, Signature, Type, types};
+#[cfg(test)]
+use cranelift_codegen::ir::Type;
+use cranelift_codegen::ir::{AbiParam, Signature, types};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -78,7 +80,7 @@ impl From<ModuleError> for JitError {
 /// `(canonical name, shim address)` pairs. [`RuntimeFns::declare`]'s imports
 /// resolve against these names. An unused entry is harmless; a declared name
 /// missing here panics inside `finalize_definitions`.
-pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
+fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
     let mut syms = vec![
         (
             NATIVE_RELEASE_AT_ZERO_SYMBOL,
@@ -140,7 +142,7 @@ pub fn jit_module() -> Result<JITModule, JitError> {
 /// The [`NativeEntry`] signature in CLIF terms: one pointer parameter, one
 /// `i64` status return. Written once so body declarations and
 /// [`finalize_into`]'s check cannot drift apart.
-pub fn native_entry_signature(module: &JITModule) -> Signature {
+fn native_entry_signature(module: &JITModule) -> Signature {
     let mut sig = module.make_signature();
     // The tail calling convention is what admits `return_call`: an Scarlet-level
     // transfer between compiled bodies stays in machine code instead of
@@ -196,59 +198,58 @@ pub fn entry_trampoline(module: &mut JITModule) -> Result<FuncId, JitError> {
 /// The declared runtime imports, one `FuncId` per shim, ready for
 /// `declare_func_in_func` at CLIF-emission sites. Cranelift dedupes repeat
 /// declarations, so [`RuntimeFns::declare`] is idempotent per module.
-pub struct RuntimeFns {
+#[cfg(test)]
+struct RuntimeFns {
     /// `al_native_release_at_zero(obj)` — the cold free-at-zero call the
     /// inline drop gate branches to
     /// ([`native_rc::emit_dynamic_drop`](crate::native_rc)).
-    pub release_at_zero: FuncId,
+    release_at_zero: FuncId,
     /// `al_shim_int_box(vmx, i) -> bits` — box a full-range `i64`, spilling
     /// past the 47-bit immediate range.
-    pub int_box: FuncId,
+    int_box: FuncId,
     /// `al_shim_int_unbox(bits) -> i` — decode an Int value that may be a
     /// `BigInt` box.
-    pub int_unbox: FuncId,
+    int_unbox: FuncId,
     /// `al_shim_add_int_val(vmx, a, b) -> bits` — whole-op fallback add.
-    pub add_int_val: FuncId,
+    add_int_val: FuncId,
     /// `al_shim_sub_int_val(vmx, a, b) -> bits`.
-    pub sub_int_val: FuncId,
+    sub_int_val: FuncId,
     /// `al_shim_mul_int_val(vmx, a, b) -> bits`.
-    pub mul_int_val: FuncId,
+    mul_int_val: FuncId,
     /// `al_shim_div_int_val(vmx, a, b) -> bits`.
-    pub div_int_val: FuncId,
+    div_int_val: FuncId,
     /// `al_shim_mod_int_val(vmx, a, b) -> bits`.
-    pub mod_int_val: FuncId,
+    mod_int_val: FuncId,
     /// `al_shim_neg_int_val(vmx, a) -> bits`.
-    pub neg_int_val: FuncId,
+    neg_int_val: FuncId,
     /// `al_shim_div_int(a, b) -> q` — unboxed division with interpreter
     /// totality.
-    pub div_int: FuncId,
+    div_int: FuncId,
     /// `al_shim_mod_int(a, b) -> r` — unboxed remainder with interpreter
     /// totality.
-    pub mod_int: FuncId,
-    /// `al_shim_op(vmx, op_code, operand, buf, argc) -> bits` — the generic
-    /// bridge for the pure single-result ops (`is_native_bridge_op`).
-    pub shim_op: FuncId,
+    mod_int: FuncId,
     /// `al_rt_prepare_call(vmx, target, resume, args, argc) -> (entry, aux)`
     /// — non-tail call as a transfer decision.
-    pub prepare_call: FuncId,
+    prepare_call: FuncId,
     /// `al_rt_prepare_tail(vmx, target, args, argc) -> (entry, aux)`.
-    pub prepare_tail: FuncId,
+    prepare_tail: FuncId,
     /// `al_rt_ret_transfer(vmx, result) -> (entry, aux)` — the compiled
     /// epilogue as a transfer decision.
-    pub ret_transfer: FuncId,
+    ret_transfer: FuncId,
     /// `al_rt_pop(vmx) -> bits` — the callee result at a continuation.
-    pub rt_pop: FuncId,
+    rt_pop: FuncId,
     /// `al_rt_checkpoint(vmx) -> status` — the reds checkpoint at a
     /// self-tail-call back-edge (`Done` = keep looping, `Yield` = unwind
     /// with the frame resumable at ip 0).
-    pub rt_checkpoint: FuncId,
+    rt_checkpoint: FuncId,
     /// `al_rt_frame_base(vmx) -> ptr` — address of the top frame's slot 0;
     /// re-fetched after any stack-growing seam.
-    pub rt_frame_base: FuncId,
+    rt_frame_base: FuncId,
 }
 
+#[cfg(test)]
 impl RuntimeFns {
-    pub fn declare(module: &mut JITModule) -> Result<RuntimeFns, JitError> {
+    fn declare(module: &mut JITModule) -> Result<RuntimeFns, JitError> {
         let ptr = module.target_config().pointer_type();
         let i64t = types::I64;
         // A name declared here but missing from `runtime_symbols` would only
@@ -281,7 +282,6 @@ impl RuntimeFns {
             neg_int_val: import_rets("al_shim_neg_int_val", &[ptr, i64t], &[i64t])?,
             div_int: import_rets("al_shim_div_int", &[i64t, i64t], &[i64t])?,
             mod_int: import_rets("al_shim_mod_int", &[i64t, i64t], &[i64t])?,
-            shim_op: import_rets("al_shim_op", &[ptr, i64t, i64t, ptr, i64t], &[i64t])?,
             prepare_call: import_rets(
                 "al_rt_prepare_call",
                 &[ptr, i64t, i64t, ptr, i64t],

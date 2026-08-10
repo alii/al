@@ -53,7 +53,7 @@ enum DocInner {
 }
 
 impl Doc {
-    pub fn is_nil(&self) -> bool {
+    pub(crate) fn is_nil(&self) -> bool {
         matches!(self.0, DocInner::Nil)
     }
 }
@@ -86,11 +86,11 @@ enum Mode {
     Broken,
 }
 
-pub fn nil() -> Doc {
+pub(crate) fn nil() -> Doc {
     Doc(DocInner::Nil)
 }
 
-pub fn text(s: impl Into<Cow<'static, str>>) -> Doc {
+pub(crate) fn text(s: impl Into<Cow<'static, str>>) -> Doc {
     let s = s.into();
     if s.is_empty() {
         return nil();
@@ -133,7 +133,7 @@ fn single_line_text(s: Cow<'static, str>) -> Doc {
 }
 
 /// Soft break: " " when flat, newline when broken.
-pub fn line() -> Doc {
+pub(crate) fn line() -> Doc {
     break_("", " ")
 }
 
@@ -152,11 +152,11 @@ fn break_(broken: &'static str, unbroken: &'static str) -> Doc {
     })
 }
 
-pub fn hardline() -> Doc {
+pub(crate) fn hardline() -> Doc {
     Doc(DocInner::HardLine(1))
 }
 
-pub fn hardlines(n: usize) -> Doc {
+pub(crate) fn hardlines(n: usize) -> Doc {
     if n == 0 {
         nil()
     } else {
@@ -164,7 +164,7 @@ pub fn hardlines(n: usize) -> Doc {
     }
 }
 
-pub fn nest(tabs: isize, d: Doc) -> Doc {
+pub(crate) fn nest(tabs: isize, d: Doc) -> Doc {
     if tabs == 0 {
         return d;
     }
@@ -184,7 +184,7 @@ fn hug(d: Doc) -> Doc {
     Doc(DocInner::Hug(Box::new(d)))
 }
 
-pub fn group(d: Doc) -> Doc {
+pub(crate) fn group(d: Doc) -> Doc {
     // Idempotent: an already-grouped doc keeps its own Breaks.
     if matches!(d.0, DocInner::Group { .. }) {
         return d;
@@ -194,7 +194,7 @@ pub fn group(d: Doc) -> Doc {
 
 /// Group that breaks willingly: block-shaped (`{ … }`), a natural end for the
 /// line. See `Breaks::Willingly`.
-pub fn group_willing(d: Doc) -> Doc {
+pub(crate) fn group_willing(d: Doc) -> Doc {
     group_as(Breaks::Willingly, d)
 }
 
@@ -225,7 +225,7 @@ fn group_as(breaks: Breaks, d: Doc) -> Doc {
 
 /// Whether the doc, as the trailing element of a line, provides the line's
 /// natural end. Content before such a doc never breaks on its behalf.
-pub fn ends_line(d: &Doc) -> bool {
+pub(crate) fn ends_line(d: &Doc) -> bool {
     matches!(
         d.0,
         DocInner::Group {
@@ -250,7 +250,7 @@ fn contains_hardline(d: &Doc) -> bool {
     }
 }
 
-pub fn concat(ds: Vec<Doc>) -> Doc {
+pub(crate) fn concat(ds: Vec<Doc>) -> Doc {
     let mut out: Vec<Doc> = Vec::with_capacity(ds.len());
     for d in ds {
         match d.0 {
@@ -274,7 +274,7 @@ macro_rules! d {
     };
 }
 
-pub fn join(items: Vec<Doc>, sep: Doc) -> Doc {
+pub(crate) fn join(items: Vec<Doc>, sep: Doc) -> Doc {
     if items.is_empty() {
         return nil();
     }
@@ -319,7 +319,7 @@ fn delimited_with(
 
 /// `open i0, i1, ... close` on one line, or one item per line indented one tab
 /// with a trailing comma.
-pub fn delimited(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
+pub(crate) fn delimited(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
     delimited_with(open, items, close, d![text(","), line()], break_(",", ""))
 }
 
@@ -336,7 +336,7 @@ pub fn delimited(open: &'static str, items: Vec<Doc>, close: &'static str) -> Do
 /// line; otherwise this falls back to `delimited`. It is also exactly
 /// `delimited` when the final item renders flat, or when an earlier item
 /// hard-breaks and leaves nothing to hug onto.
-pub fn delimited_hug(open: &'static str, mut items: Vec<Doc>, close: &'static str) -> Doc {
+pub(crate) fn delimited_hug(open: &'static str, mut items: Vec<Doc>, close: &'static str) -> Doc {
     let Some(last) = items.pop() else {
         return text(format!("{open}{close}"));
     };
@@ -360,12 +360,16 @@ pub fn delimited_hug(open: &'static str, mut items: Vec<Doc>, close: &'static st
 /// Like `delimited`, but emits no trailing comma when broken across lines. For
 /// groups whose final element is a `..` rest marker: the parser rejects a comma
 /// after `..`, so a wrapped pattern must end `..\n<close>`.
-pub fn delimited_no_trailing(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
+pub(crate) fn delimited_no_trailing(
+    open: &'static str,
+    items: Vec<Doc>,
+    close: &'static str,
+) -> Doc {
     delimited_with(open, items, close, d![text(","), line()], line0())
 }
 
 /// `{ body }` on one line, or broken across lines with the body indented.
-pub fn block(body: Doc) -> Doc {
+pub(crate) fn block(body: Doc) -> Doc {
     if body.is_nil() {
         return text("{}");
     }
@@ -377,7 +381,7 @@ pub fn block(body: Doc) -> Doc {
 
 /// Always broken one-per-line, with **no** separators — the newline is the
 /// separator. Used for a constructor field list that is too long to read flat.
-pub fn hard_list_bare(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
+pub(crate) fn hard_list_bare(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
     if items.is_empty() {
         return d![text(open), text(close)];
     }
@@ -398,7 +402,11 @@ pub fn hard_list_bare(open: &'static str, items: Vec<Doc>, close: &'static str) 
 
 /// Comma-separated when the list fits on one line; one per line with **no**
 /// commas when it breaks. The parser accepts either.
-pub fn delimited_commas_when_flat(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
+pub(crate) fn delimited_commas_when_flat(
+    open: &'static str,
+    items: Vec<Doc>,
+    close: &'static str,
+) -> Doc {
     delimited_with(open, items, close, break_("", ", "), line0())
 }
 
@@ -413,7 +421,7 @@ pub fn delimited_commas_when_flat(open: &'static str, items: Vec<Doc>, close: &'
 ///
 /// Used when the author already broke the list — width is not the only reason
 /// to keep it broken.
-pub fn hard_list(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
+pub(crate) fn hard_list(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
     if items.is_empty() {
         return d![text(open), text(close)];
     }
@@ -434,7 +442,7 @@ pub fn hard_list(open: &'static str, items: Vec<Doc>, close: &'static str) -> Do
 }
 
 /// `{ body }` always broken across lines with the body indented.
-pub fn hard_braces(body: Doc) -> Doc {
+pub(crate) fn hard_braces(body: Doc) -> Doc {
     d![
         text("{"),
         nest(1, d![hardline(), body]),
@@ -443,7 +451,7 @@ pub fn hard_braces(body: Doc) -> Doc {
     ]
 }
 
-pub fn layout(doc: &Doc, max_width: isize) -> String {
+pub(crate) fn layout(doc: &Doc, max_width: isize) -> String {
     let mut out = String::new();
     let mut col: isize = 0;
     let mut work: VecDeque<(isize, Mode, &Doc)> = VecDeque::new();

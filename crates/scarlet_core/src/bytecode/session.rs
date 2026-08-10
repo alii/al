@@ -38,11 +38,11 @@ pub(super) struct RawRef {
 /// so `IncrementalSession::hover` joins the inferred type from here.
 #[derive(Debug, Clone)]
 pub struct HoverFact {
-    pub module: ModuleId,
-    pub span: Span,
-    pub name: String,
-    pub ty: Type,
-    pub doc: Option<String>,
+    module: ModuleId,
+    span: Span,
+    name: String,
+    ty: Type,
+    doc: Option<String>,
 }
 
 /// Snapshot of every append-only compiler structure, captured at module
@@ -54,12 +54,12 @@ pub struct HoverFact {
 /// [`Compiler::reset_to`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Watermark {
-    pub engine: EnginePoolWatermark,
-    pub env: EnvWatermark,
-    pub code: usize,
-    pub functions: usize,
-    pub constants: usize,
-    pub local_count: i32,
+    engine: EnginePoolWatermark,
+    env: EnvWatermark,
+    code: usize,
+    functions: usize,
+    constants: usize,
+    local_count: i32,
 }
 
 impl Watermark {
@@ -86,7 +86,7 @@ impl Watermark {
     /// not `Ord::min`: on an `ord_key` tie `min` picks by argument order and
     /// silently discards one env payload, which can under-truncate the env and
     /// leave stale entries. This keeps the field-wise deeper rollback instead.
-    pub fn earlier(self, other: Self) -> Self {
+    pub(crate) fn earlier(self, other: Self) -> Self {
         match self.ord_key().cmp(&other.ord_key()) {
             std::cmp::Ordering::Less => self,
             std::cmp::Ordering::Greater => other,
@@ -100,7 +100,7 @@ impl Watermark {
     /// `earlier`'s mirror, keeping the field-wise shallower env on a tie. Used
     /// to clamp a rewind to the seed floor: truncating the env past the seed's
     /// payload would dangle stdlib bindings whose pools survived.
-    pub fn later(self, other: Self) -> Self {
+    fn later(self, other: Self) -> Self {
         match self.ord_key().cmp(&other.ord_key()) {
             std::cmp::Ordering::Less => other,
             std::cmp::Ordering::Greater => self,
@@ -169,7 +169,7 @@ struct SynthDef {
 }
 
 impl Compiler {
-    pub fn watermark(&self) -> Watermark {
+    pub(crate) fn watermark(&self) -> Watermark {
         Watermark {
             engine: self.engine.pool_watermark(),
             env: self.env.watermark(),
@@ -193,7 +193,7 @@ impl Compiler {
     /// that prefix is memcpy'd out of the stdlib blob and every `Ty`/`StrId`/
     /// `ArenaSlice` frozen into `.rodata` indexes into it.
     /// `IncrementalSession::rewind_to` is the clamp.
-    pub fn reset_to(&mut self, w: &Watermark) {
+    fn reset_to(&mut self, w: &Watermark) {
         let Watermark {
             engine,
             env,

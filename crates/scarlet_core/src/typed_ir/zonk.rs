@@ -47,7 +47,7 @@ pub struct Zonker<'e> {
 }
 
 impl<'e> Zonker<'e> {
-    pub fn new(eng: &'e InferEngine) -> Self {
+    pub(crate) fn new(eng: &'e InferEngine) -> Self {
         Zonker {
             eng,
             memo: HashMap::new(),
@@ -73,7 +73,7 @@ impl<'e> Zonker<'e> {
     /// The `bool` is true when an opaque `Bound` was invented anywhere in the
     /// spine. A caller caching across zonkers must not keep such a node: the
     /// variable may be solved by a later body.
-    pub fn zonk_or_opaque(&mut self, pool: &mut ResolvedPool, t: Ty) -> (RTy, bool) {
+    pub(crate) fn zonk_or_opaque(&mut self, pool: &mut ResolvedPool, t: Ty) -> (RTy, bool) {
         self.resolve(pool, t)
     }
 

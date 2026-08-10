@@ -63,7 +63,7 @@ pub fn new_parser(s: &mut Scanner) -> Parser {
     new_parser_from_tokens(tokens, diags)
 }
 
-pub fn new_parser_from_tokens(
+pub(crate) fn new_parser_from_tokens(
     mut tokens: Vec<Token>,
     scanner_diagnostics: Vec<Diagnostic>,
 ) -> Parser {

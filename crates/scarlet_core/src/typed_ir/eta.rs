@@ -40,7 +40,7 @@ pub struct FnRTy {
 
 impl FnRTy {
     /// `None` when `ty` is not a function type.
-    pub fn of(pool: &ResolvedPool, ty: RTy) -> Option<FnRTy> {
+    pub(crate) fn of(pool: &ResolvedPool, ty: RTy) -> Option<FnRTy> {
         match pool.node(ty) {
             ResolvedNode::Fun { params, ret } => Some(FnRTy {
                 ty,
@@ -52,19 +52,19 @@ impl FnRTy {
     }
 
     /// The function type itself.
-    pub fn ty(&self) -> RTy {
+    fn ty(&self) -> RTy {
         self.ty
     }
 
-    pub fn params(&self) -> &[RTy] {
+    fn params(&self) -> &[RTy] {
         &self.params
     }
 
-    pub fn ret(&self) -> RTy {
+    fn ret(&self) -> RTy {
         self.ret
     }
 
-    pub fn arity(&self) -> Arity {
+    fn arity(&self) -> Arity {
         Arity::of(&self.params)
     }
 }

@@ -188,7 +188,7 @@ pub struct CompileResult {
     /// find-refs / rename / symbols / dead-code). An owned `Rc` handle so the
     /// owning `IncrementalSession` can keep answering queries against the same
     /// graph after the result is handed back.
-    pub references: Rc<ReferenceGraph>,
+    pub(crate) references: Rc<ReferenceGraph>,
 }
 
 impl CompileResult {
@@ -226,7 +226,7 @@ pub(super) struct LocalSlot {
     /// `PushGlobal <slot>` instead of capturing it. Decided once at bind time
     /// by [`Compiler::binds_a_global`]; `resolve_variable` must read this
     /// rather than re-derive it from `depth`.
-    pub(super) is_global: bool,
+    is_global: bool,
 }
 
 /// One top-level `fn`/`const` declaration of the module currently being
@@ -463,7 +463,7 @@ pub struct Compiler {
     /// canonical module key -> the import path as the user wrote it. Identity
     /// is the resolved file; diagnostics must still say `./lib`, not
     /// `/private/var/.../lib`.
-    pub(super) module_display: HashMap<ModuleKey, String>,
+    module_display: HashMap<ModuleKey, String>,
     pub(super) base_dir: Option<PathBuf>,
     /// When set, `scarlet/...` imports resolve to `.scrl` files under this directory
     /// (the in-repo `src/std`) instead of the embedded snapshot, so a session
@@ -1442,7 +1442,7 @@ impl Compiler {
         self.add_constant(v)
     }
 
-    pub(super) fn get_or_create_local(&mut self, name: &str) -> i32 {
+    fn get_or_create_local(&mut self, name: &str) -> i32 {
         let id = self.engine.intern(name);
         if let Some(entry) = self.locals.get(&id).copied() {
             // Reuse only if this slot was bound in the *current* block scope.
@@ -1555,7 +1555,7 @@ impl Compiler {
     /// Per-fn body elaboration also walks an outermost block; a `let x` there
     /// must not take a module-scope slot. Only a module toplevel runs with no
     /// enclosing frame.
-    pub(super) fn take_global_slot(&mut self) -> Option<GlobalSlot> {
+    fn take_global_slot(&mut self) -> Option<GlobalSlot> {
         if !self.outer_scopes.is_empty() {
             return None;
         }
@@ -1563,7 +1563,7 @@ impl Compiler {
     }
 
     #[inline]
-    pub(super) fn alloc_temp(&mut self) -> i32 {
+    fn alloc_temp(&mut self) -> i32 {
         let idx = self.local_count;
         self.local_count += 1;
         idx
@@ -1613,7 +1613,7 @@ impl Compiler {
     /// starting with `_` are exempt. If the same name was already tracked in
     /// this scope and never used, that earlier binding is reported now (it's
     /// been shadowed and can no longer be referenced).
-    pub(super) fn track_binding(&mut self, name: &str, sp: Span) {
+    fn track_binding(&mut self, name: &str, sp: Span) {
         if name.starts_with('_') {
             return;
         }
@@ -2531,7 +2531,7 @@ impl Compiler {
     /// How to name a module in a diagnostic: the path the importer wrote
     /// (`./lib`), falling back to the module's own last segment. Never the
     /// canonical key — that is an identity, not a name.
-    pub(super) fn module_name(&self, key: &ModuleKey) -> String {
+    fn module_name(&self, key: &ModuleKey) -> String {
         self.module_display.get(key).cloned().unwrap_or_else(|| {
             let k = key.as_str();
             k.rsplit('/').next().unwrap_or(k).to_string()
@@ -5076,7 +5076,7 @@ fn pattern_is_refutable(p: &ast::Pattern) -> bool {
 /// for a block, the last node (recursively); otherwise the expression's own
 /// span. This focuses a return-type or branch-type mismatch on the actual
 /// value-producing sub-expression rather than the whole `{ ... }`.
-pub fn type_defining_span(expr: &ast::Expression) -> Span {
+fn type_defining_span(expr: &ast::Expression) -> Span {
     match expr {
         ast::Expression::BlockExpression(b) => match b.body.last() {
             Some(ast::Node::Expression(e)) => type_defining_span(e),
