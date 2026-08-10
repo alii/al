@@ -22,10 +22,20 @@ pub fn then(r Result(a, e), f fn(a) Result(b, e)) Result(b, e) {
 // Unwrap a result that has a Nil error type. The error is not generic
 // intentionally, as it is usually a mistake to be ignoring
 // error values. Most of the time you would want to consume them.
-pub fn unwrap(r Result(a, Nil), default e) Result(a, e) {
+pub fn unwrap(r Result(a, Nil), default a) a {
 	match r {
-		Ok(a) -> Ok(a)
-		Err(Nil) -> Err(default)
+		Ok(a) -> a
+		Err(Nil) -> default
+	}
+}
+
+// Lazily unwrap a result that has a Nil error type. The error is not generic
+// intentionally, as it is usually a mistake to be ignoring
+// error values. Most of the time you would want to consume them.
+pub fn unwrap_lazy(r Result(a, Nil), default fn() a) a {
+	match r {
+		Ok(a) -> a
+		Err(Nil) -> default()
 	}
 }
 
