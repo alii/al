@@ -52,7 +52,11 @@ impl VM {
         loop {
             let f = self.frame();
             let fi = FuncIdx::from_usize(f.func_idx as usize);
-            if let Some(entry) = self.program.native.get(fi) {
+            // Dispatch on how the frame was *entered*, not on whether the body
+            // has an entry now: `f.ip` is only a resume ordinal for a frame
+            // that started native.
+            let entry = f.native.then(|| self.program.native.get(fi)).flatten();
+            if let Some(entry) = entry {
                 let resume = i64::from(f.ip);
                 let status = self.call_native(entry, resume);
                 match self.outcome_from_status(status)? {
@@ -169,6 +173,11 @@ impl VM {
                         func_idx: target_idx,
                         code_start: func_code_start,
                         ip: 0,
+                        native: self
+                            .program
+                            .native
+                            .get(FuncIdx::from_usize(target_idx as usize))
+                            .is_some(),
                         base_slot: args_start,
                         captures: $captures,
                     });
@@ -206,12 +215,10 @@ impl VM {
         // bytecode position the trampoline later misreads as a resume ordinal.
         macro_rules! native_entry_check {
             ($target:expr) => {{
-                if self
-                    .program
-                    .native
-                    .get(FuncIdx::from_usize($target as usize))
-                    .is_some()
-                {
+                // The frame the caller just pushed recorded this same answer;
+                // both must agree, so read it from the frame.
+                if self.frame().native {
+                    let _ = $target;
                     // Hand the pushed frame to the trampoline; it re-enters
                     // the interpreter for the caller when the callee's return
                     // transfer lands back on it.
@@ -296,6 +303,11 @@ impl VM {
                         func_idx,
                         code_start,
                         ip: 0,
+                        native: self
+                            .program
+                            .native
+                            .get(FuncIdx::from_usize(func_idx as usize))
+                            .is_some(),
                         base_slot: args_start,
                         captures,
                     });

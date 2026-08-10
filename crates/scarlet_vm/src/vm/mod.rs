@@ -177,7 +177,17 @@ pub type VmResult<T> = Result<T, VmError>;
 struct CallFrame {
     func_idx: i32,
     code_start: i32,
+    /// A bytecode offset when [`CallFrame::native`] is false, and a resume
+    /// ordinal when it is true. The two coordinate spaces are not
+    /// interchangeable, which is what `native` records.
     ip: i32,
+    /// Whether this frame was entered as compiled code.
+    ///
+    /// Fixed when the frame is pushed, not read from the entry table on each
+    /// dispatch: a body can gain an entry *while* one of its frames is live
+    /// (see `NativeMode::Lazy`), and resuming such a frame as native would
+    /// feed a bytecode offset in as a resume ordinal.
+    native: bool,
     base_slot: usize,
     // The whole closure, not a separate captures slice, so the frame stays
     // plain data with exactly one root: everything it captures is reachable
@@ -519,6 +529,13 @@ impl VM {
             func_idx: entry,
             code_start,
             ip: 0,
+            native: self
+                .program
+                .native
+                .get(<crate::FuncIdx as crate::tivec::Idx>::from_usize(
+                    entry as usize,
+                ))
+                .is_some(),
             base_slot: 0,
             captures: entry_closure,
         });
@@ -1041,6 +1058,13 @@ impl VM {
             func_idx,
             code_start,
             ip: 0,
+            native: self
+                .program
+                .native
+                .get(<crate::FuncIdx as crate::tivec::Idx>::from_usize(
+                    func_idx as usize,
+                ))
+                .is_some(),
             base_slot: 0,
             captures: f,
         }];

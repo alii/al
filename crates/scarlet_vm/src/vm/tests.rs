@@ -680,6 +680,7 @@ fn donation_fd_guard_blocks_entangled_connections() {
             func_idx: 0,
             code_start: 0,
             ip: 0,
+            native: false,
             base_slot: 0,
             captures: closure,
         }],

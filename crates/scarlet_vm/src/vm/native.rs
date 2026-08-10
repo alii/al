@@ -203,6 +203,11 @@ impl VM {
             func_idx: target,
             code_start,
             ip: 0,
+            native: self
+                .program
+                .native
+                .get(FuncIdx::from_usize(target as usize))
+                .is_some(),
             base_slot: args_start,
             captures: Value::small_int(0),
         });
@@ -265,6 +270,11 @@ impl VM {
             func_idx: target,
             code_start,
             ip: 0,
+            native: self
+                .program
+                .native
+                .get(FuncIdx::from_usize(target as usize))
+                .is_some(),
             base_slot: args_start,
             captures: callee,
         });
@@ -738,6 +748,7 @@ mod tests {
             func_idx: 0,
             code_start: 0,
             ip: 1,
+            native: false,
             base_slot: 0,
             captures: Value::small_int(0),
         });
@@ -806,6 +817,7 @@ mod tests {
             func_idx: 1,
             code_start: 2,
             ip: 0,
+            native: false,
             base_slot: 0,
             captures: Value::small_int(0),
         });
@@ -827,6 +839,7 @@ mod tests {
             func_idx: 1,
             code_start: 2,
             ip: 0,
+            native: false,
             base_slot: 0,
             captures: Value::small_int(0),
         });
