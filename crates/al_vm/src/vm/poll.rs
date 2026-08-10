@@ -507,7 +507,10 @@ impl VM {
             Ok(None) => {
                 let stream: TcpStream = socket.into();
                 match stream.peer_addr() {
-                    Ok(peer) => self.adopt_connection(stream, peer),
+                    Ok(peer) => match self.adopt_connection(stream, peer)? {
+                        Ok(sock) => self.make_ok(sock),
+                        Err(err) => self.make_err(err),
+                    },
                     Err(e) => {
                         let err = self.net_error_value(&e)?;
                         self.make_err(err)

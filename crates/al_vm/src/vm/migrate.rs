@@ -24,7 +24,7 @@ use super::{Process, VM};
 /// Connection fds re-homed out of a scheduler's tables, ready to travel with a
 /// [`Migrant`] or `Seed`. Listeners are excluded: the listener socket is
 /// program-wide (`Runtime.shared_listeners`) and every scheduler registers the
-/// same fd on demand (`VM::ensure_listener`).
+/// same fd on demand (`VM::listener_for_accept`).
 pub(super) type DetachedFds = Vec<(i32, TcpStream, u64)>;
 
 /// A process in flight between schedulers.

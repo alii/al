@@ -91,7 +91,9 @@ use crate::bytecode::value::{
     NATIVE_HOLLOW_FOR_REUSE_SYMBOL, NATIVE_MORTAL_HEAP_BITS, NATIVE_PTR_MASK,
     NATIVE_RC_BYTE_OFFSET, NATIVE_RELEASE_AT_ZERO_SYMBOL,
 };
-use crate::bytecode::{CtorRef, NativeCtx, NativeStatus, Op, PreludeBindings, TypeRef, Value};
+use crate::bytecode::{
+    CtorRef, NativeCtx, NativeStatus, Op, PreludeBindings, TypeRef, Value, is_native_bridge_op,
+};
 use crate::tivec::{Idx, TiVec};
 use crate::type_def::TypeId;
 use crate::typed_ir::{RTy, ResolvedNode, ResolvedPool};
@@ -108,6 +110,7 @@ const SYM_RT_FRAME_BASE: &str = "al_rt_frame_base";
 const SYM_RT_MAKE_CLOSURE: &str = "al_rt_make_closure";
 const SYM_DIV_INT: &str = "al_shim_div_int";
 const SYM_MOD_INT: &str = "al_shim_mod_int";
+const SYM_SHIM_OP: &str = "al_shim_op";
 const SYM_ENUM_ALLOC: &str = "al_shim_enum_alloc";
 const SYM_MAKE_ARRAY: &str = "al_shim_make_array";
 const SYM_MAKE_TUPLE: &str = "al_shim_make_tuple";
@@ -528,6 +531,12 @@ impl Gate<'_> {
                 [recv] => self.is_binary(*recv).then_some(()),
                 _ => None,
             },
+            // The pure single-result ops go through the generic bridge, which
+            // runs the interpreter's own op method: it re-checks operand types
+            // and elides nothing, so no type proof is needed here. Their only
+            // interpreter errors are the type mismatches a well-typed program
+            // never produces.
+            Atom::PrimOp { op, .. } if is_native_bridge_op(*op) => Some(()),
             Atom::PrimOp { op, args, imm } => {
                 if *imm != Imm::None {
                     return None;
@@ -741,6 +750,7 @@ pub(crate) mod gate_diag {
                 [recv] if g.is_binary(*recv) => None,
                 _ => Some("bin-byte-size-unproven".into()),
             },
+            Atom::PrimOp { op, .. } if is_native_bridge_op(*op) => None,
             Atom::PrimOp { op, args, imm } => {
                 if *imm != Imm::None {
                     return Some(format!("op:{op:?}"));
@@ -1187,6 +1197,12 @@ impl Uses {
                 // `PushGlobal` reads the entry frame, not a local; the Bool
                 // heads are nullary constants. Neither has an operand.
                 Op::PushGlobal | Op::PushTrue | Op::PushFalse => {}
+                // The bridge hands every operand to the shim as an owned word.
+                _ if is_native_bridge_op(*op) => {
+                    for &x in args {
+                        self.need_word(x);
+                    }
+                }
                 _ => match nop_of(*op) {
                     Some((NOp::Not, _)) => {
                         for &x in args {
@@ -1319,6 +1335,7 @@ struct RtRefs {
     int_box: ir::FuncRef,
     div_int: ir::FuncRef,
     mod_int: ir::FuncRef,
+    shim_op: ir::FuncRef,
     prepare_call: ir::FuncRef,
     prepare_call_value: ir::FuncRef,
     prepare_tail: ir::FuncRef,
@@ -1374,6 +1391,7 @@ fn declare_imports<M: Module>(
     let int_box = import(module, NATIVE_INT_BOX_SYMBOL, &[ptr, i64t], Some(i64t))?;
     let div_int = import(module, SYM_DIV_INT, &[i64t, i64t], Some(i64t))?;
     let mod_int = import(module, SYM_MOD_INT, &[i64t, i64t], Some(i64t))?;
+    let shim_op = import(module, SYM_SHIM_OP, &[ptr, i64t, i64t, ptr, i64t], Some(i64t))?;
     // The transfer helpers return a `PreparedCall`: two registers.
     let import2 =
         |module: &mut M, name: &str, params: &[ir::Type]| -> Result<FuncId, Box<ModuleError>> {
@@ -1420,6 +1438,7 @@ fn declare_imports<M: Module>(
         int_box: module.declare_func_in_func(int_box, func),
         div_int: module.declare_func_in_func(div_int, func),
         mod_int: module.declare_func_in_func(mod_int, func),
+        shim_op: module.declare_func_in_func(shim_op, func),
         prepare_call: module.declare_func_in_func(prepare_call, func),
         prepare_call_value: module.declare_func_in_func(prepare_call_value, func),
         prepare_tail: module.declare_func_in_func(prepare_tail, func),
@@ -2184,6 +2203,22 @@ impl<'a> BodyGen<'a> {
                 self.b.switch_to_block(merge);
                 let f = self.b.block_params(merge)[0];
                 self.field_result(f, want_word, want_int)
+            }
+            // The pure single-result ops: spill the owned operands, call the
+            // generic bridge (which runs the interpreter's op method over the
+            // value stack), take the owned result. `operand` is the flattened
+            // immediate the method reads; ops without one pass 0. An Int result
+            // (StrLen, BinBitSize, MapSize, BinByteAt) is a boxed word
+            // `opaque_result` unboxes on demand.
+            Atom::PrimOp { op, args, imm } if is_native_bridge_op(*op) => {
+                let operand = super::emit::imm_operand(*op, *imm);
+                let buf = self.arg_buffer(args);
+                let opc = self.b.ins().iconst(types::I64, i64::from(*op as u8));
+                let opv = self.b.ins().iconst(types::I64, i64::from(operand));
+                let n = self.b.ins().iconst(types::I64, args.len() as i64);
+                let vmx = self.vmx();
+                let call = self.b.ins().call(self.fns.shim_op, &[vmx, opc, opv, buf, n]);
+                self.opaque_result(call, want_int)
             }
             Atom::PrimOp { op, args, .. } => {
                 let Some((nop, _)) = nop_of(*op) else {

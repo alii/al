@@ -225,6 +225,9 @@ pub struct RuntimeFns {
     /// `al_shim_mod_int(a, b) -> r` — unboxed remainder with interpreter
     /// totality.
     pub mod_int: FuncId,
+    /// `al_shim_op(vmx, op_code, operand, buf, argc) -> bits` — the generic
+    /// bridge for the pure single-result ops (`is_native_bridge_op`).
+    pub shim_op: FuncId,
     /// `al_rt_prepare_call(vmx, target, resume, args, argc) -> (entry, aux)`
     /// — non-tail call as a transfer decision.
     pub prepare_call: FuncId,
@@ -278,6 +281,7 @@ impl RuntimeFns {
             neg_int_val: import_rets("al_shim_neg_int_val", &[ptr, i64t], &[i64t])?,
             div_int: import_rets("al_shim_div_int", &[i64t, i64t], &[i64t])?,
             mod_int: import_rets("al_shim_mod_int", &[i64t, i64t], &[i64t])?,
+            shim_op: import_rets("al_shim_op", &[ptr, i64t, i64t, ptr, i64t], &[i64t])?,
             prepare_call: import_rets(
                 "al_rt_prepare_call",
                 &[ptr, i64t, i64t, ptr, i64t],

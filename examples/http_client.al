@@ -271,11 +271,11 @@ fn serve_raw(sock Socket) Nil {
 
 fn accept_loop(server Server) Nil {
 	match net.accept(server) {
-		Ok(sock) -> {
+		Ok(Some(sock)) -> {
 			scheduler.spawn(fn() serve_raw(sock))
 			accept_loop(server)
 		}
-		// net.close delivers this to the parked accept: the shutdown signal.
+		Ok(None) -> Nil
 		Err(_) -> Nil
 	}
 }
@@ -323,7 +323,7 @@ match net.listen('127.0.0.1', 0) {
 			show('GET /stream', request(port, 'GET', '/stream', ''))
 			show('GET /nope', request(port, 'GET', '/nope', ''))
 
-			// Wakes every acceptor with NotConnected, their clean-shutdown
+			// Wakes every acceptor with Ok(None), their end-of-stream
 			// signal, so the accept loops return and the program ends.
 			net.close(server) or Nil
 		}

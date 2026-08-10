@@ -5,13 +5,13 @@
 // reads it back — the program never fights another process for a fixed port.
 // The accept loop runs in its own process and the main process drives it as a
 // client. Closing the listener at the end wakes the parked acceptor with
-// Err(NotConnected), its clean-shutdown signal, and that is what lets this
+// Ok(None), its end-of-stream signal, and that is what lets this
 // program exit.
 
 import al/binary.{Dec}
 import al/net.{Server}
 import al/net/address.{IpAddress, SocketAddress}
-import al/net/error.{InvalidPort, NetError, NotConnected, TimedOut, UnexpectedEof}
+import al/net/error.{InvalidPort, NetError, TimedOut, UnexpectedEof}
 import al/net/socket.{Closed, Data, Socket}
 import al/scheduler
 import al/string
@@ -28,7 +28,7 @@ const HEADER_BYTES = 4
 
 fn accept_loop(server Server) Nil {
 	match net.accept(server) {
-		Ok(sock) -> {
+		Ok(Some(sock)) -> {
 			// One process per connection: a process is a few hundred bytes and
 			// about a microsecond to start, so this is the cheap option, not
 			// the extravagant one. Accepting parks this process until a client
@@ -37,7 +37,7 @@ fn accept_loop(server Server) Nil {
 			accept_loop(server)
 		}
 		// Not a failure: this is what net.close delivers to a parked accept.
-		Err(NotConnected) -> println('server: listener closed')
+		Ok(None) -> println('server: listener closed')
 		Err(e) -> println('server: accept failed: ${string.inspect(e)}')
 	}
 }

@@ -25,6 +25,8 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use crate::FuncIdx;
 use crate::tivec::Idx;
 
+use super::Op;
+
 /// One-word status a native entry returns to its caller. Anything other than
 /// [`NativeStatus::Done`] unwinds every native frame by plain returns, and the
 /// trampoline then does what the interpreter's dispatch loop would. The status
@@ -53,6 +55,59 @@ pub enum NativeStatus {
     /// reaches the interpreter boundary: every entry invocation runs under a
     /// trampoline that consumes it.
     TailCall = 4,
+}
+
+/// The pure, single-result opcodes JIT-compiled code lowers to one `al_shim_op`
+/// call instead of a dedicated shim or an inline sequence. Each runs the
+/// interpreter's own op method over the value stack, so native and interpreted
+/// execution share one implementation and cannot diverge. Parking ops are
+/// excluded — a suspension cannot cross a native frame — as are ops already
+/// lowered inline (`nop_of`) or through a bespoke shim, and the binary-pattern
+/// segment ops, some of which push two results.
+///
+/// The gate, the use scan, the emitter (all in `al_core::core_ir::clif`) and
+/// `VM::run_bridge_op` must agree on this set; this predicate is the single
+/// authority they share.
+pub fn is_native_bridge_op(op: Op) -> bool {
+    matches!(
+        op,
+        Op::Index
+            | Op::IndexOr
+            | Op::ElemAt
+            | Op::SeqDrop
+            | Op::ArrayConcat
+            | Op::MakeRange
+            | Op::MapGet
+            | Op::MapHas
+            | Op::MapKeys
+            | Op::MapValues
+            | Op::MapSize
+            | Op::MapNew
+            | Op::MapSet
+            | Op::MapDelete
+            | Op::MapToList
+            | Op::EnvMap
+            | Op::StrSplit
+            | Op::StrLen
+            | Op::StrContains
+            | Op::StrTrim
+            | Op::IntToString
+            | Op::ToString
+            | Op::StrConcatN
+            | Op::BinFromString
+            | Op::BinToString
+            | Op::BinBitSize
+            | Op::BinSlice
+            | Op::BinAppend
+            | Op::BinConcatN
+            | Op::BinMatchPrefix
+            | Op::BinIndexOf
+            | Op::BinByteAt
+            | Op::BinParseInt
+            | Op::BinEqIgnoreAsciiCase
+            | Op::BinToAsciiLower
+            | Op::BinFromIntAscii
+    )
 }
 
 /// What the pinned register (x86_64 r15, aarch64 x21) points at while a

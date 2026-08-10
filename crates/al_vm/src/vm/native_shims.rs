@@ -21,10 +21,10 @@
 #![allow(unsafe_code)]
 
 use crate::TypeId;
-use crate::bytecode::value::{ReuseAddr, range_len};
-use crate::bytecode::{Value, ValueView, seq};
+use crate::bytecode::value::{ReuseAddr, proof_violation, range_len};
+use crate::bytecode::{Op, Value, ValueView, seq};
 
-use super::VM;
+use super::{VM, VmResult};
 
 /// Escape raw bits from an owned value without running its destructor. The
 /// reference it carries transfers to the returned bits.
@@ -509,9 +509,97 @@ pub unsafe extern "C" fn al_shim_push_global(vmx: *mut VM, slot: i64) -> u64 {
     vm.globals[slot as usize].to_bits()
 }
 
+/// The generic bridge for [`is_native_bridge_op`](crate::bytecode::is_native_bridge_op)
+/// opcodes. `buf` holds `argc` owned operand words in interpreter push order
+/// (`buf[0]` deepest, `buf[argc-1]` on top); each reference is transferred to
+/// this call. The shim pushes them onto the value stack, runs the interpreter's
+/// own op method (which pops them and pushes one result), and returns the owned
+/// result bits.
+///
+/// The op methods' only `Err` arms are typed-pop mismatches the type checker
+/// already excludes for well-typed bytecode, so a failure here is a proof
+/// violation, not a recoverable error — no status word is needed.
+///
+/// # Safety
+/// `vmx` must point at the running scheduler's live `VM`; `buf` must point at
+/// `argc` initialized value words whose references the caller owns and
+/// transfers; `op_code` must be `op as u8` for an op
+/// [`is_native_bridge_op`](crate::bytecode::is_native_bridge_op) admits.
+pub unsafe extern "C" fn al_shim_op(
+    vmx: *mut VM,
+    op_code: i64,
+    operand: i64,
+    buf: *const u64,
+    argc: i64,
+) -> u64 {
+    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
+    let vm = unsafe { &mut *vmx };
+    for i in 0..argc as usize {
+        // SAFETY: `buf` holds `argc` initialized owned words; each transfers
+        // its reference onto the value stack here, balanced by the op's pops.
+        vm.stack.push(unsafe { Value::from_bits(buf.add(i).read()) });
+    }
+    match vm.run_bridge_op(op_code as u8, operand as i32) {
+        Ok(()) => match vm.stack.pop() {
+            Some(v) => into_bits(v),
+            None => proof_violation("bridge op produced no result"),
+        },
+        // The type checker excludes every reachable error arm of these ops.
+        Err(_) => proof_violation("bridge op hit a type-proof-excluded error"),
+    }
+}
+
+impl VM {
+    /// Dispatch an [`is_native_bridge_op`](crate::bytecode::is_native_bridge_op)
+    /// opcode to its interpreter method. `operand` is the op's flattened
+    /// immediate (unused by ops without one). Mirrors the interpreter's
+    /// `run_slice` arms exactly; the two share the method bodies.
+    pub(super) fn run_bridge_op(&mut self, op_code: u8, operand: i32) -> VmResult<()> {
+        match op_code {
+            c if c == Op::Index as u8 => self.seq_index(),
+            c if c == Op::IndexOr as u8 => self.seq_index_or(operand),
+            c if c == Op::ElemAt as u8 => self.elem_at(operand),
+            c if c == Op::SeqDrop as u8 => self.seq_drop(),
+            c if c == Op::ArrayConcat as u8 => self.seq_concat(),
+            c if c == Op::MakeRange as u8 => self.make_range(),
+            c if c == Op::MapGet as u8 => self.map_get(),
+            c if c == Op::MapHas as u8 => self.map_has(),
+            c if c == Op::MapKeys as u8 => self.map_keys(),
+            c if c == Op::MapValues as u8 => self.map_values(),
+            c if c == Op::MapSize as u8 => self.map_size(),
+            c if c == Op::MapNew as u8 => self.map_new(),
+            c if c == Op::MapSet as u8 => self.map_set(),
+            c if c == Op::MapDelete as u8 => self.map_delete(),
+            c if c == Op::MapToList as u8 => self.map_to_list(),
+            c if c == Op::EnvMap as u8 => self.env_map(),
+            c if c == Op::StrSplit as u8 => self.str_split(),
+            c if c == Op::StrLen as u8 => self.str_len(),
+            c if c == Op::StrContains as u8 => self.str_contains(),
+            c if c == Op::StrTrim as u8 => self.str_trim(),
+            c if c == Op::IntToString as u8 => self.int_to_string(),
+            c if c == Op::ToString as u8 => self.to_string_op(),
+            c if c == Op::StrConcatN as u8 => self.str_concat_n(operand as usize),
+            c if c == Op::BinFromString as u8 => self.bin_from_string(),
+            c if c == Op::BinToString as u8 => self.bin_to_string(),
+            c if c == Op::BinBitSize as u8 => self.bin_bit_size(),
+            c if c == Op::BinSlice as u8 => self.bin_slice(),
+            c if c == Op::BinAppend as u8 => self.bin_append(),
+            c if c == Op::BinConcatN as u8 => self.bin_concat_n(operand as usize),
+            c if c == Op::BinMatchPrefix as u8 => self.bin_match_prefix(),
+            c if c == Op::BinIndexOf as u8 => self.bin_index_of(),
+            c if c == Op::BinByteAt as u8 => self.bin_byte_at(),
+            c if c == Op::BinParseInt as u8 => self.bin_parse_int(),
+            c if c == Op::BinEqIgnoreAsciiCase as u8 => self.bin_eq_ignore_ascii_case(),
+            c if c == Op::BinToAsciiLower as u8 => self.bin_to_ascii_lower(),
+            c if c == Op::BinFromIntAscii as u8 => self.bin_from_int_ascii(),
+            _ => proof_violation("run_bridge_op on an op is_native_bridge_op excludes"),
+        }
+    }
+}
+
 /// Every shim as `(symbol name, address)` for `JITBuilder::symbol`. These
 /// names are what the CLIF emitter's declared externals resolve against.
-pub fn shim_symbols() -> [(&'static str, *const u8); 23] {
+pub fn shim_symbols() -> [(&'static str, *const u8); 24] {
     [
         ("al_shim_push_global", al_shim_push_global as *const u8),
         ("al_shim_int_box", al_shim_int_box as *const u8),
@@ -548,6 +636,7 @@ pub fn shim_symbols() -> [(&'static str, *const u8); 23] {
         ("al_shim_neg_int_val", al_shim_neg_int_val as *const u8),
         ("al_shim_div_int", al_shim_div_int as *const u8),
         ("al_shim_mod_int", al_shim_mod_int as *const u8),
+        ("al_shim_op", al_shim_op as *const u8),
     ]
 }
 

@@ -241,7 +241,7 @@ pub(super) struct Runtime {
     /// Every live listener, keyed by socket id.
     ///
     /// One kernel socket per `Server`, program-wide. Storing an address here
-    /// instead would make `ensure_listener` bind a second `SO_REUSEPORT`
+    /// instead would make `listener_for_accept` bind a second `SO_REUSEPORT`
     /// socket on whichever scheduler accepted, and a connection routed to a
     /// socket nobody accepts on sits in its backlog forever. On macOS
     /// `SO_REUSEPORT` does not balance at all: the last binder takes

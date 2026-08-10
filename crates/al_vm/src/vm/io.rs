@@ -112,10 +112,27 @@ impl VM {
     pub(super) fn tcp_accept(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
         *reds -= IO_REDUCTION_COST;
         let sv = self.pop_listener("net.accept")?;
-        let accept_res = self.listener(sv.id).and_then(TcpListener::accept);
+        let accept_res = match self.listener_for_accept(sv.id) {
+            Ok(Some(listener)) => listener.accept(),
+            // The Server was closed: the stream of connections ended, which
+            // is `Ok(None)` — accept's clean-shutdown signal, not an error.
+            Ok(None) => {
+                let none = self.make_none()?;
+                let v = self.make_ok(none)?;
+                self.stack.push(v);
+                return Ok(None);
+            }
+            Err(e) => Err(e),
+        };
         match accept_res {
             Ok((conn, peer)) => {
-                let v = self.adopt_connection(conn, peer)?;
+                let v = match self.adopt_connection(conn, peer)? {
+                    Ok(sock) => {
+                        let some = self.make_some(sock)?;
+                        self.make_ok(some)?
+                    }
+                    Err(err) => self.make_err(err)?,
+                };
                 self.stack.push(v);
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
@@ -142,7 +159,10 @@ impl VM {
         match start_connect(&addr) {
             // Local connects can complete immediately.
             Ok(ConnectStart::Connected(stream)) => {
-                let v = self.adopt_connection(stream, addr)?;
+                let v = match self.adopt_connection(stream, addr)? {
+                    Ok(sock) => self.make_ok(sock)?,
+                    Err(err) => self.make_err(err)?,
+                };
                 self.stack.push(v);
             }
             Ok(ConnectStart::Pending(socket)) => {
@@ -342,8 +362,9 @@ impl VM {
 
     /// Drain this scheduler's retired-listener queue: deregister each fd, drop
     /// this scheduler's `Arc` clone, and wake every accept parked on the id. A
-    /// woken accept re-runs, misses the shared map and surfaces `NetError`, so
-    /// `accept_loop` exits instead of hanging.
+    /// woken accept re-runs, misses the shared map and surfaces `Ok(None)` —
+    /// the end of the stream of connections — so `accept_loop` exits instead
+    /// of hanging.
     ///
     /// Returns whether anything was woken. A caller must not enter a blocking
     /// poll wait over a process this just made runnable.
@@ -380,9 +401,10 @@ impl VM {
     }
 
     /// Fail every park waiting on socket `id`. The socket is gone, so each
-    /// waiter is made runnable and its re-run resolves to the stale-socket
-    /// `NetError`. Without this a sibling parked on the id hangs forever.
-    /// Returns whether anything was woken.
+    /// waiter is made runnable and its re-run resolves to the gone-socket
+    /// outcome: accept's `Ok(None)` for a retired listener, the stale-socket
+    /// `NetError` for a connection. Without this a sibling parked on the id
+    /// hangs forever. Returns whether anything was woken.
     pub(super) fn fail_io_waiters(&mut self, id: i32) -> bool {
         let Some(waiters) = self.io_waiters.remove(&id) else {
             return false;
@@ -498,18 +520,6 @@ impl VM {
     /// the underlying `SocketValue` is the first payload field.
     fn pop_connection(&mut self, op: &'static str) -> VmResult<SocketValue> {
         connection_socket(&self.pop()?, op)
-    }
-
-    /// Resolve `id` to a listener in this scheduler's table, hydrating from
-    /// the runtime's shared listeners on a miss. A stale id is a user-visible
-    /// `NetError`, never a VM halt.
-    #[inline]
-    fn listener(&mut self, id: i32) -> std::io::Result<&TcpListener> {
-        self.ensure_listener(id)?;
-        self.tcp_listeners
-            .get(&id)
-            .map(|l| l.as_ref())
-            .ok_or_else(stale_socket)
     }
 
     /// Build the `NetError` for a socket/connect `std::io::Error`. Errnos
@@ -644,36 +654,39 @@ impl VM {
     /// Make listener `id` accept-able from this scheduler: clone the shared
     /// socket and register the SAME fd with this scheduler's poller. It must
     /// never bind a socket of its own — a connection routed to an unaccepted
-    /// twin deadlocks the program. A miss means the listener was closed and
-    /// surfaces as a `NetError`.
+    /// twin deadlocks the program. `Ok(None)` means the listener is gone from
+    /// the shared map — `net.close` retired it — which accept reports as its
+    /// own `Ok(None)`, not a failure. `Err` is a poller-registration failure
+    /// on this scheduler.
     ///
     /// The registration is load-bearing: the socket is global but each
     /// `mio::Poll` is thread-confined, so an accept parked here is only woken
     /// by THIS poller seeing the fd. Each poller gets its own readiness edge
     /// for a shared fd, on both epoll and kqueue.
-    fn ensure_listener(&mut self, id: i32) -> std::io::Result<()> {
-        if self.tcp_listeners.contains_key(&id) {
-            return Ok(());
+    fn listener_for_accept(&mut self, id: i32) -> std::io::Result<Option<&TcpListener>> {
+        if !self.tcp_listeners.contains_key(&id) {
+            let Some(l) = lock(&self.runtime.shared_listeners).get(&id).cloned() else {
+                return Ok(None);
+            };
+            self.track_listener(id, l)?;
         }
-        let Some(l) = lock(&self.runtime.shared_listeners).get(&id).cloned() else {
-            return Err(stale_socket());
-        };
-        self.track_listener(id, l)
+        Ok(self.tcp_listeners.get(&id).map(|l| l.as_ref()))
     }
 
-    /// Take ownership of a connected stream and build the AL `Ok(Socket)`, or
-    /// `Err(NetError)` when the poller refuses the fd — a connection that
-    /// cannot wake its parks must not be adopted.
+    /// Take ownership of a connected stream and build the AL `Socket` record,
+    /// or the `NetError` value when the poller refuses the fd — a connection
+    /// that cannot wake its parks must not be adopted. Both come back bare:
+    /// the caller wraps them for its op (`Ok(sock)` for connect,
+    /// `Ok(Some(sock))` for accept).
     pub(super) fn adopt_connection(
         &mut self,
         stream: TcpStream,
         peer: std::net::SocketAddr,
-    ) -> VmResult<Value> {
+    ) -> VmResult<Result<Value, Value>> {
         // A blocking socket in a nonblocking event loop stalls the whole
         // scheduler on its first read or write.
         if let Err(e) = stream.set_nonblocking(true) {
-            let err = self.net_error_value(&e)?;
-            return self.make_err(err);
+            return Ok(Err(self.net_error_value(&e)?));
         }
         // Small request/response exchanges should not sit in Nagle's buffer
         // waiting for an ACK.
@@ -683,15 +696,17 @@ impl VM {
         // connection closes. Ownership never moves implicitly.
         let owner = self.current_pid;
         if let Err(e) = self.track_connection(id, stream, owner) {
-            let err = self.net_error_value(&e)?;
-            return self.make_err(err);
+            return Ok(Err(self.net_error_value(&e)?));
         }
         let handle = Value::socket(SocketValue {
             id,
             is_listener: false,
         });
-        let v = self.templates.make_socket(&mut self.heap, handle, peer)?;
-        self.make_ok(v)
+        Ok(Ok(self.templates.make_socket(
+            &mut self.heap,
+            handle,
+            peer,
+        )?))
     }
 }
 
@@ -913,7 +928,7 @@ mod tests {
         }
     }
 
-    /// `ensure_listener` on a scheduler that did not listen registers the
+    /// `listener_for_accept` on a scheduler that did not listen registers the
     /// SAME kernel socket, never a second one. Binding a fresh
     /// `SO_REUSEPORT` socket here deadlocks on the unaccepted twin.
     #[test]
@@ -935,7 +950,9 @@ mod tests {
             .expect("track");
         super::super::lock(&rt.shared_listeners).insert(id, listener);
 
-        vm1.ensure_listener(id).expect("foreign registration");
+        vm1.listener_for_accept(id)
+            .expect("foreign registration")
+            .expect("listener must be present");
         assert_eq!(
             vm0.tcp_listeners[&id].as_raw_fd(),
             vm1.tcp_listeners[&id].as_raw_fd(),
@@ -944,7 +961,7 @@ mod tests {
     }
 
     /// Retiring a listener empties every scheduler's table and makes a later
-    /// `ensure_listener` a stale-socket error — it can never re-create the
+    /// `listener_for_accept` resolve to closed — it can never re-create the
     /// socket, because it cannot bind.
     #[test]
     fn retiring_a_listener_reaches_every_scheduler_and_cannot_revive() {
@@ -969,7 +986,9 @@ mod tests {
         vm0.track_listener(id, Arc::clone(&listener))
             .expect("track");
         super::super::lock(&rt.shared_listeners).insert(id, listener);
-        vm1.ensure_listener(id).expect("foreign registration");
+        vm1.listener_for_accept(id)
+            .expect("foreign registration")
+            .expect("listener must be present");
 
         rt.retire_listener(usize::MAX, id);
         vm0.process_retired_listeners();
@@ -978,8 +997,10 @@ mod tests {
         assert!(!vm0.tcp_listeners.contains_key(&id));
         assert!(!vm1.tcp_listeners.contains_key(&id));
         assert!(
-            vm1.ensure_listener(id).is_err(),
-            "a retired id must resolve to stale-socket, never to a new bind"
+            vm1.listener_for_accept(id)
+                .expect("lookup must not fail")
+                .is_none(),
+            "a retired id must resolve to closed, never to a new bind"
         );
     }
 

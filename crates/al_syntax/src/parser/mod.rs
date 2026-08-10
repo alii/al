@@ -1278,6 +1278,12 @@ impl Parser {
 
     fn parse_pattern(&mut self) -> PResult<ast::Pattern> {
         let start = self.current_span();
+        // Optional leading separator, TypeScript-union style: `| A | B` ≡
+        // `A | B`. The formatter never emits it; accepting it lets every
+        // alternative of a hand-wrapped or-pattern start its line with a pipe.
+        if self.kind() == Kind::BitwiseOr {
+            self.eat(Kind::BitwiseOr)?;
+        }
         let first = self.parse_pattern_range()?;
 
         if self.kind() == Kind::BitwiseOr {

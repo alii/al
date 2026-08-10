@@ -182,7 +182,7 @@ suite! {
         wire_format,
         // Effects. Both bind a loopback listener on port 0, serve it
         // in-process, then close it, which wakes the parked acceptors with
-        // NotConnected so the program exits. Both print facts *about* the
+        // Ok(None) so the program exits. Both print facts *about* the
         // kernel-assigned port, never the port itself. A sandbox that denies
         // bind(2) fails these, as it already fails
         // `vm_io::tcp_connect_and_vectored_echo`.

@@ -1022,11 +1022,14 @@ impl Formatter {
                 d![text(head), delimited("(", items, ")")]
             }
             P::Or { first, rest, .. } => {
-                let ps: Vec<Doc> = std::iter::once(&**first)
-                    .chain(rest.iter())
-                    .map(|p| self.pattern(p))
-                    .collect();
-                join(ps, text(" | "))
+                // Flat while it fits: `A | B | C`. Too wide: one alternative
+                // per line, each continuation led by its pipe at the arm's
+                // indent — never a break inside an alternative's own parens.
+                let mut parts = vec![self.pattern(first)];
+                for p in rest {
+                    parts.push(d![line(), text("| "), self.pattern(p)]);
+                }
+                group(doc::concat(parts))
             }
             P::Range { start, end, .. } => {
                 d![
@@ -1283,6 +1286,15 @@ mod tests {
             ("comment_only_body_has_no_leading_blank",
              "fn test() {    \n\t//\n}\n",
              "fn test() {\n\t//\n}\n"),
+            ("short_or_pattern_stays_flat",
+             "fn f(x Int) Int {\n\tmatch x {\n\t\t1 | 2 | 3 -> 10\n\t\t_ -> 0\n\t}\n}\n",
+             "fn f(x Int) Int {\n\tmatch x {\n\t\t1 | 2 | 3 -> 10\n\t\telse -> 0\n\t}\n}\n"),
+            ("leading_pipe_is_normalized",
+             "fn f(x Int) Int {\n\tmatch x {\n\t\t| 1\n\t\t| 2 -> 10\n\t\t_ -> 0\n\t}\n}\n",
+             "fn f(x Int) Int {\n\tmatch x {\n\t\t1 | 2 -> 10\n\t\telse -> 0\n\t}\n}\n"),
+            ("wide_or_pattern_breaks_at_pipes",
+             "fn f(e NetError) Nil {\n\tmatch e {\n\t\tErr(NotConnected) | Err(TimedOut) | Err(ConnectionRefused) | Err(BrokenPipe) | Err(AddrInUse) | Err(AddrNotAvailable) -> Nil\n\t\t_ -> Nil\n\t}\n}\n",
+             "fn f(e NetError) Nil {\n\tmatch e {\n\t\tErr(NotConnected)\n\t\t| Err(TimedOut)\n\t\t| Err(ConnectionRefused)\n\t\t| Err(BrokenPipe)\n\t\t| Err(AddrInUse)\n\t\t| Err(AddrNotAvailable) -> Nil\n\t\telse -> Nil\n\t}\n}\n"),
             ("comment_preserved_above_fn",
              "// hello\nfn a() Int { 1 }\n",
              "// hello\nfn a() Int {\n\t1\n}\n"),

@@ -9,11 +9,12 @@ import al/net/error.{
 	InvalidPort,
 	NetworkDown,
 	NetworkUnreachable,
-	NotConnected,
 }
 import al/scheduler
 import al/string
 
+// A TCP server. The value is only ever constructed by the VM, and has no values.
+// It's an opaque pointer to the internal value in the VM. See [`al_vm::vm::io::VM::tcp_listen`]
 pub type Server
 
 // Bind a listener to an already-resolved address. The port is validated to be
@@ -36,11 +37,14 @@ pub fn listen(host String, port Int) Result(Server, NetError) {
 }
 
 // Take the next incoming connection off the listener's queue, parking the
-// calling process until one arrives. After the `Server` is closed, this — and
-// every later accept on it — returns `Err(NotConnected)`; a hand-rolled accept
-// loop should treat that variant as clean shutdown, not an error.
+// calling process until one arrives. Accept yields the stream of a listener's
+// connections, so its three outcomes are an iterator's: `Ok(Some(sock))` is
+// the next connection, `Ok(None)` is the end of the stream — the `Server` was
+// closed with `close`, which this and every later accept report — and
+// `Err(e)` is a kernel accept failure. Shutdown is not an error: an accept
+// loop exits on `Ok(None)`.
 @vm(net__accept)
-pub fn accept(s Server) Result(Socket, NetError)
+pub fn accept(s Server) Result(Option(Socket), NetError)
 
 // Listen on host:port and serve connections across every CPU core in parallel.
 //
@@ -80,7 +84,7 @@ pub fn serve_on(server Server, handler fn(Socket) Nil) Nil {
 // runs on every core, all draining the listener's single shared accept queue —
 // spreading the accepts is a locality preference, not a correctness need.
 //
-// A per-connection accept error (ECONNABORTED, ECONNRESET, an unmapped errno
+// A per-connection accept failure (ECONNABORTED, ECONNRESET, an unmapped errno
 // such as EMFILE/EPROTO) means one incoming connection was lost, not that the
 // listening socket is dead — the loop retries. ENETDOWN/ENETUNREACH/
 // EHOSTUNREACH are per-connection too: accept(2) documents them as
@@ -89,13 +93,12 @@ pub fn serve_on(server Server, handler fn(Socket) Nil) Nil {
 // descriptor exhaustion (EMFILE/ENFILE), where accept fails without dequeuing
 // anything, so that retry backs off for 100ms first — retrying immediately
 // would spin this core at full speed against the same full descriptor table.
-// NotConnected is the shutdown signal a `net.close` delivers to parked
-// acceptors, so the loop exits quietly; any other variant means the listener
-// itself died unexpectedly, which is reported before this core stops
-// accepting.
+// `Ok(None)` is the shutdown a `net.close` delivers to parked acceptors, so
+// the loop exits quietly. Any other failure is one this loop has no answer
+// to; it is reported before this core stops accepting.
 fn accept_loop(server Server, handler fn(Socket) Nil) Nil {
 	match accept(server) {
-		Ok(sock) -> {
+		Ok(Some(sock)) -> {
 			// Close after the handler returns, explicitly: the connection
 			// belongs to this acceptor process (its creator), which loops
 			// forever — a handler that forgot to close would otherwise leak
@@ -107,15 +110,16 @@ fn accept_loop(server Server, handler fn(Socket) Nil) Nil {
 			})
 			accept_loop(server, handler)
 		}
-		Err(ConnectionAborted) -> accept_loop(server, handler)
-		Err(ConnectionReset) -> accept_loop(server, handler)
-		Err(NetworkDown) | Err(NetworkUnreachable) | Err(HostUnreachable) ->
-			accept_loop(server, handler)
+		Ok(None) -> Nil
+		Err(ConnectionAborted)
+		| Err(ConnectionReset)
+		| Err(NetworkDown)
+		| Err(NetworkUnreachable)
+		| Err(HostUnreachable) -> accept_loop(server, handler)
 		Err(Errno(_)) -> {
 			scheduler.sleep(100)
 			accept_loop(server, handler)
 		}
-		Err(NotConnected) -> Nil
 		Err(e) -> println('accept failed: ${string.inspect(e)}')
 	}
 }
@@ -153,7 +157,7 @@ pub fn local_addr(s Server) Result(SocketAddress, NetError)
 
 // Shut the listener down. Closing a `Server` wakes every process parked in
 // `accept` and makes that call — and every later `accept` — return
-// `Err(NotConnected)`, which is the clean-shutdown signal the `serve`
-// acceptors (and any hand-rolled accept loop) exit on.
+// `Ok(None)`, the end-of-stream signal the `serve` acceptors (and any
+// hand-rolled accept loop) exit on.
 @vm(net__close)
 pub fn close(s Server) Result(Nil, NetError)

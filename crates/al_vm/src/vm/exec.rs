@@ -790,35 +790,8 @@ impl VM {
                     // `code_start` added back.
                     ip = self.program.code[(code_start + instr.operand + idx) as usize].operand;
                 }
-                Op::ToString => {
-                    let val = self.pop()?;
-                    // An already-Str operand is its own string image.
-                    if val.as_str().is_some() {
-                        self.stack.push(val);
-                    } else {
-                        let s = inspect(&val, &self.program);
-                        let v = Value::str_in(&mut self.heap, &s);
-                        self.stack.push(v);
-                    }
-                }
-                Op::StrConcatN => {
-                    let n = instr.operand as usize;
-                    let base = self.operand_base(n)?;
-                    let v = {
-                        let mut parts: SmallVec<[&str; 8]> = SmallVec::with_capacity(n);
-                        for v in &self.stack[base..] {
-                            match v.as_str() {
-                                Some(s) => parts.push(s),
-                                None => {
-                                    return Err(VmError::internal("str_concat requires strings"));
-                                }
-                            }
-                        }
-                        Value::str_from_parts_in(&mut self.heap, &parts)
-                    };
-                    self.stack.truncate(base);
-                    self.stack.push(v);
-                }
+                Op::ToString => self.to_string_op()?,
+                Op::StrConcatN => self.str_concat_n(instr.operand as usize)?,
                 Op::Halt => {
                     break;
                 }
@@ -1266,7 +1239,38 @@ impl VM {
 
     /// Concatenate the two strings on top of the stack.
     #[inline]
-    fn str_concat2(&mut self) -> VmResult<()> {
+    /// `Op::ToString`: the operand's string image (a Str is its own image).
+    pub(super) fn to_string_op(&mut self) -> VmResult<()> {
+        let val = self.pop()?;
+        if val.as_str().is_some() {
+            self.stack.push(val);
+        } else {
+            let s = inspect(&val, &self.program);
+            let v = Value::str_in(&mut self.heap, &s);
+            self.stack.push(v);
+        }
+        Ok(())
+    }
+
+    /// `Op::StrConcatN`: concatenate `n` Str operands on the stack.
+    pub(super) fn str_concat_n(&mut self, n: usize) -> VmResult<()> {
+        let base = self.operand_base(n)?;
+        let v = {
+            let mut parts: SmallVec<[&str; 8]> = SmallVec::with_capacity(n);
+            for v in &self.stack[base..] {
+                match v.as_str() {
+                    Some(s) => parts.push(s),
+                    None => return Err(VmError::internal("str_concat requires strings")),
+                }
+            }
+            Value::str_from_parts_in(&mut self.heap, &parts)
+        };
+        self.stack.truncate(base);
+        self.stack.push(v);
+        Ok(())
+    }
+
+    pub(super) fn str_concat2(&mut self) -> VmResult<()> {
         let b = self.pop()?;
         let a = self.pop()?;
         match (a.as_str(), b.as_str()) {

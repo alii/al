@@ -75,7 +75,7 @@ fn tcp_echo_server_roundtrip() {
     let src = listening_src(
         "import al/net/socket.{Data, Closed}\nimport al/binary",
         r#"match net.accept(server) {
-	Ok(sock) -> {
+	Ok(Some(sock)) -> {
 		println('peer ${address.to_string(sock.peer)}')
 		match socket.read(sock, 4096) {
 			Ok(Data(data)) -> match socket.write(sock, data) {
@@ -92,6 +92,7 @@ fn tcp_echo_server_roundtrip() {
 			Err(e) -> println('read-failed: ${e}')
 		}
 	}
+	Ok(None) -> println('accept-closed')
 	Err(e) -> println('accept-failed: ${e}')
 }"#,
     );
@@ -137,7 +138,7 @@ match net.listen('127.0.0.1', 0) {
 		Ok(addr) -> {
 			scheduler.spawn(fn() {
 				match net.accept(server) {
-					Ok(sock) -> match socket.read_exact(sock, 5) {
+					Ok(Some(sock)) -> match socket.read_exact(sock, 5) {
 						Ok(first) -> match socket.read_exact(sock, 6) {
 							Ok(second) -> {
 								socket.write_parts(sock, [first, second]) or Nil
@@ -147,6 +148,7 @@ match net.listen('127.0.0.1', 0) {
 						}
 						Err(e) -> println('server read1 failed: ${e}')
 					}
+					Ok(None) -> println('server accept closed')
 					Err(e) -> println('server accept failed: ${e}')
 				}
 			})
@@ -194,10 +196,11 @@ fn tcp_read_within_times_out() {
     let src = listening_src(
         "import al/net/socket",
         r#"match net.accept(server) {
-	Ok(sock) -> match socket.read_within(sock, 4096, 150) {
+	Ok(Some(sock)) -> match socket.read_within(sock, 4096, 150) {
 		Ok(_) -> println('unexpected-data')
 		Err(e) -> println('timed-out: ${e}')
 	}
+	Ok(None) -> println('accept-closed')
 	Err(e) -> println('accept-failed: ${e}')
 }"#,
     );
@@ -225,7 +228,7 @@ fn tcp_read_within_returns_data() {
     let src = listening_src(
         "import al/net/socket.{Data, Closed}\nimport al/binary",
         r#"match net.accept(server) {
-	Ok(sock) -> match socket.read_within(sock, 4096, 5000) {
+	Ok(Some(sock)) -> match socket.read_within(sock, 4096, 5000) {
 		Ok(Data(data)) -> match binary.to_string(data) {
 			Ok(text) -> println('got: ${text}')
 			Err(_) -> println('not-utf8')
@@ -233,6 +236,7 @@ fn tcp_read_within_returns_data() {
 		Ok(Closed) -> println('peer-closed')
 		Err(e) -> println('read-failed: ${e}')
 	}
+	Ok(None) -> println('accept-closed')
 	Err(e) -> println('accept-failed: ${e}')
 }"#,
     );
@@ -673,7 +677,8 @@ match net.listen('127.0.0.1', 0) {
 			Err(_) -> println('connect failed')
 			Ok(_client) -> match net.accept(server) {
 				Err(_) -> println('accept failed')
-				Ok(conn) -> {
+				Ok(None) -> println('accept closed')
+				Ok(Some(conn)) -> {
 					deadline = time.add_ms(time.monotonic(), 250)
 					zero = outcome(body.collect(body.content_length(conn, 0, deadline), 16))
 					neg = outcome(body.collect(body.content_length(conn, 0 - 1, deadline), 16))
@@ -822,10 +827,11 @@ match net.listen('127.0.0.1', 0) {
 		Ok(addr) -> {
 			scheduler.spawn(fn() {
 				match net.accept(server) {
-					Ok(c) -> {
+					Ok(Some(c)) -> {
 						socket.write(c, binary.from_string('pong')) or Nil
 						socket.close(c) or Nil
 					}
+					Ok(None) -> println('accept closed')
 					Err(e) -> println('accept failed: ${e}')
 				}
 			})
@@ -856,8 +862,8 @@ match net.listen('127.0.0.1', 0) {
     }
 }
 
-/// `net.close` on a listener must fail accepts parked on other schedulers,
-/// not leave them parked forever.
+/// `net.close` on a listener must end accepts parked on other schedulers
+/// with `Ok(None)`, not leave them parked forever.
 #[test]
 fn closing_a_listener_wakes_a_foreign_parked_acceptor() {
     let src = r#"import al/scheduler
@@ -876,8 +882,9 @@ match net.listen('127.0.0.1', 0) {
 	Ok(server) -> {
 		scheduler.spawn(fn() {
 			match net.accept(server) {
-				Ok(_) -> println('unexpected accept')
-				Err(_) -> println('accept ended')
+				Ok(Some(_)) -> println('unexpected accept')
+				Ok(None) -> println('accept ended')
+				Err(e) -> println('accept failed: ${e}')
 			}
 		})
 		println('warm ${burn(25)}')
@@ -918,10 +925,11 @@ match net.listen('127.0.0.1', 0) {
 				}
 			})
 			match net.accept(server) {
-				Ok(peer) -> match socket.read_exact(peer, 1) {
+				Ok(Some(peer)) -> match socket.read_exact(peer, 1) {
 					Ok(_) -> println('unexpected data')
 					Err(_) -> println('peer closed')
 				}
+				Ok(None) -> println('accept closed')
 				Err(e) -> println('accept failed: ${e}')
 			}
 		}
@@ -1003,10 +1011,11 @@ match net.listen('127.0.0.1', 0) {
 		Ok(addr) -> {
 			scheduler.spawn_local(fn() {
 				match net.accept(server) {
-					Ok(peer) -> {
+					Ok(Some(peer)) -> {
 						scheduler.sleep(150)
 						socket.write(peer, binary.from_string('x')) or Nil
 					}
+					Ok(None) -> Nil
 					Err(_) -> Nil
 				}
 			})

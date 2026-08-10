@@ -234,7 +234,7 @@ fn redeclared_join(id: JoinId) -> ! {
 /// pushed"); any other pairing aborts rather than emit an operand the VM would
 /// misread.
 #[allow(clippy::panic)]
-fn imm_operand(op: Op, imm: Imm) -> i32 {
+pub(super) fn imm_operand(op: Op, imm: Imm) -> i32 {
     match (op, imm) {
         (Op::IndexOr, Imm::Const(c)) => c.0 as i32,
         (Op::IndexOr, Imm::PushedDefault) => -1,
