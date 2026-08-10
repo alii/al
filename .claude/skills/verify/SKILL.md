@@ -1,11 +1,11 @@
 ---
 name: verify
-description: Verify a change to the AL compiler/VM by driving the real `al` binary end-to-end. Use before committing anything that touches crates/al_core (parser, types, core_ir, bytecode) or crates/al (vm, cli, lsp, repl).
+description: Verify a change to the Scarlet compiler/VM by driving the real `scarlet` binary end-to-end. Use before committing anything that touches crates/al_core (parser, types, core_ir, bytecode) or crates/al (vm, cli, lsp, repl).
 ---
 
 # Verifying an AL change
 
-The surface is the `al` **CLI**. Everything a user reaches — type errors,
+The surface is the `scarlet` **CLI**. Everything a user reaches — type errors,
 codegen, the VM, the REPL — comes out of `al check`, `al run`, or `al repl`.
 Compile once, then drive those. Do not run `cargo test` here; CI does that.
 
@@ -16,7 +16,7 @@ cargo build --release          # ~15s warm; ./target/release/al
 ```
 
 Never build under `/tmp` or `$TMPDIR` — Santa blocks binaries executed from
-there. Never set `CARGO_TARGET_DIR`. AL *source* files under `$TMPDIR` are
+there. Never set `CARGO_TARGET_DIR`. AL _source_ files under `$TMPDIR` are
 fine; only the binary must live under `~/code`.
 
 ## Drive it
@@ -62,14 +62,14 @@ diff <(norm a.txt) <(norm b.txt)
   compiles; stale indices survive nowhere else.
 - **A second module.** `Span` carries no file id, so any span-keyed compiler
   map (`closure_info`, `expr_tys`) can collide across files. Make two files
-  whose bodies sit at the *same* line/column with *different* types and check
+  whose bodies sit at the _same_ line/column with _different_ types and check
   both still work.
 - **Ordinary diagnostics still ordinary.** A plain type error and a plain
   parse error must not turn into an internal-compiler-error.
 - **Constructor as a first-class value** (`array.map(xs, W)`) — this makes
   `lower` synthesise an eta-wrapper into `program.code` mid-lowering, which
   has broken jump targets and `Function.code_start` before. Always pair it
-  with a branch: `if cond { a } else { b }`, and exercise *both* arms — the
+  with a branch: `if cond { a } else { b }`, and exercise _both_ arms — the
   fall-through arm hides the bug.
 
 ## Benchmarking
@@ -85,10 +85,10 @@ Two traps:
 
 1. **Layout noise is ±1%.** Two builds of semantically identical source place
    the VM's interpreter loop differently. Before believing a small delta,
-   build a *placebo* — the baseline plus a dead function — and measure it too.
+   build a _placebo_ — the baseline plus a dead function — and measure it too.
    If the placebo moves as much as the change did, you measured nothing.
 2. **Build path matters.** A binary built in a `git worktree` has a different
-   `OUT_DIR` and different layout. Build baseline *and* candidate at the same
+   `OUT_DIR` and different layout. Build baseline _and_ candidate at the same
    path (apply/revert the diff in one throwaway worktree under `~/code`, never
    `/tmp`) and `git worktree remove` it when done.
 

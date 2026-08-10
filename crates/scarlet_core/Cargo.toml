@@ -1,0 +1,24 @@
+[package]
+name = "scarlet_core"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# Forwarded to `scarlet_vm` — see its manifest. Kept here so a dependant can turn
+# the counter on through either crate.
+alloc-counter = ["scarlet_vm/alloc-counter"]
+
+[dependencies]
+scarlet_syntax = { path = "../scarlet_syntax" }
+scarlet_types = { path = "../scarlet_types" }
+scarlet_vm = { path = "../scarlet_vm" }
+indexmap = { workspace = true }
+cranelift-codegen = { workspace = true }
+cranelift-frontend = { workspace = true }
+cranelift-module = { workspace = true }
+cranelift-jit = { workspace = true }
+cranelift-native = { workspace = true }
+smallvec = "1.15"
+petgraph = "0.8"
+include_dir = { version = "0.7", features = ["glob"] }
+percent-encoding = "2"

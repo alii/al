@@ -1,0 +1,163 @@
+import scarlet/net/address.{SocketAddress, IpAddress}
+import scarlet/net/socket.{Socket}
+import scarlet/net/error.{
+	NetError,
+	ConnectionAborted,
+	ConnectionReset,
+	Errno,
+	HostUnreachable,
+	InvalidPort,
+	NetworkDown,
+	NetworkUnreachable,
+}
+import scarlet/scheduler
+import scarlet/string
+
+// A TCP server. The value is only ever constructed by the VM, and has no values.
+// It's an opaque pointer to the internal value in the VM. See [`al_vm::vm::io::VM::tcp_listen`]
+pub type Server
+
+// Bind a listener to an already-resolved address. The port is validated to be
+// in 0..=65535 and the bind never blocks the scheduler (the address is already
+// an IP literal — no name resolution happens here).
+@vm(net__listen)
+pub fn listen_addr(addr SocketAddress) Result(Server, NetError)
+
+// Bind a listener to `host:port`. Hostnames are resolved off-scheduler via
+// `resolve` before binding, so a name that requires DNS never stalls the
+// scheduler thread. IP literals resolve synchronously.
+pub fn listen(host String, port Int) Result(Server, NetError) {
+	match resolve(host) {
+		Ok(ip) -> match address.socket_address(ip, port) {
+			Ok(addr) -> listen_addr(addr)
+			Err(Nil) -> Err(InvalidPort)
+		}
+		Err(e) -> Err(e)
+	}
+}
+
+// Take the next incoming connection off the listener's queue, parking the
+// calling process until one arrives. Accept yields the stream of a listener's
+// connections, so its three outcomes are an iterator's: `Ok(Some(sock))` is
+// the next connection, `Ok(None)` is the end of the stream — the `Server` was
+// closed with `close`, which this and every later accept report — and
+// `Err(e)` is a kernel accept failure. Shutdown is not an error: an accept
+// loop exits on `Ok(None)`.
+@vm(net__accept)
+pub fn accept(s Server) Result(Option(Socket), NetError)
+
+// Listen on host:port and serve connections across every CPU core in parallel.
+//
+// One listening socket, one accept queue, an acceptor process on every core:
+// the kernel hands each connection to exactly one accepter, so no core can be
+// starved and no connection can be routed where nobody accepts. Every accepted
+// connection is handled on the core that accepted it (the connection's socket
+// never moves between cores), and `handler` runs once per connection in its
+// own lightweight process.
+//
+// Returns the bound `Server` once the listeners are bound and the acceptors
+// are running; the acceptors keep the program alive. The handle is what lets
+// the caller shut the listener down later with `close`, or read a kernel-
+// assigned port back with `local_addr` after binding port 0. A bind failure
+// is reported as `Err`.
+pub fn serve(host String, port Int, handler fn(Socket) Nil) Result(Server, NetError) {
+	match listen(host, port) {
+		Ok(server) -> {
+			serve_on(server, handler)
+			Ok(server)
+		}
+		Err(e) -> Err(e)
+	}
+}
+
+// Serve connections from a listener already bound with `listen`, fanning the
+// accept loop out across every core exactly as `serve` does. Useful to bind on
+// port 0, read the kernel-assigned port back with `local_addr`, then serve.
+// Returns `Nil`: once the listener is bound the acceptors cannot fail here —
+// the only fallible step is the bind, which the caller has already done.
+pub fn serve_on(server Server, handler fn(Socket) Nil) Nil {
+	scheduler.spawn_per_core(fn() accept_loop(server, handler))
+}
+
+// The per-core accept loop: accept a connection, hand it to its own process on
+// this same core (so the connection's socket stays local), then loop. One copy
+// runs on every core, all draining the listener's single shared accept queue —
+// spreading the accepts is a locality preference, not a correctness need.
+//
+// A per-connection accept failure (ECONNABORTED, ECONNRESET, an unmapped errno
+// such as EMFILE/EPROTO) means one incoming connection was lost, not that the
+// listening socket is dead — the loop retries. ENETDOWN/ENETUNREACH/
+// EHOSTUNREACH are per-connection too: accept(2) documents them as
+// already-pending errors of the ACCEPTED connection — one that died in the
+// queue — not as listener death, so they retry as well. An unmapped errno is usually
+// descriptor exhaustion (EMFILE/ENFILE), where accept fails without dequeuing
+// anything, so that retry backs off for 100ms first — retrying immediately
+// would spin this core at full speed against the same full descriptor table.
+// `Ok(None)` is the shutdown a `net.close` delivers to parked acceptors, so
+// the loop exits quietly. Any other failure is one this loop has no answer
+// to; it is reported before this core stops accepting.
+fn accept_loop(server Server, handler fn(Socket) Nil) Nil {
+	match accept(server) {
+		Ok(Some(sock)) -> {
+			// Close after the handler returns, explicitly: the connection
+			// belongs to this acceptor process (its creator), which loops
+			// forever — a handler that forgot to close would otherwise leak
+			// the socket for the server's whole life. Double-closing a
+			// handler that did close is a harmless Err, swallowed here.
+			scheduler.spawn_local(fn() {
+				handler(sock)
+				socket.close(sock) or Nil
+			})
+			accept_loop(server, handler)
+		}
+		Ok(None) -> Nil
+		Err(ConnectionAborted)
+		| Err(ConnectionReset)
+		| Err(NetworkDown)
+		| Err(NetworkUnreachable)
+		| Err(HostUnreachable) -> accept_loop(server, handler)
+		Err(Errno(_)) -> {
+			scheduler.sleep(100)
+			accept_loop(server, handler)
+		}
+		Err(e) -> println('accept failed: ${string.inspect(e)}')
+	}
+}
+
+// Resolve `host` to an `IpAddress`. IP literals pass through unchanged; hostname
+// resolution (getaddrinfo) runs on the blocking thread pool so it never stalls
+// the scheduler.
+@vm(net__resolve)
+pub fn resolve(host String) Result(IpAddress, NetError)
+
+// Open a connection to a remote host. `host` may be an IP address or a
+// hostname; the hostname is resolved off-scheduler via `resolve`, then the
+// connection is established with the calling process parked — neither step
+// blocks the scheduler.
+pub fn connect(host String, port Int) Result(Socket, NetError) {
+	match resolve(host) {
+		Ok(ip) -> match address.socket_address(ip, port) {
+			Ok(addr) -> connect_addr(addr)
+			Err(Nil) -> Err(InvalidPort)
+		}
+		Err(e) -> Err(e)
+	}
+}
+
+// Connect to an already-resolved address. Useful to resolve once and connect
+// many times, or to connect to an `IpAddress` obtained elsewhere. The port is
+// validated to be in 0..=65535.
+@vm(net__connect)
+pub fn connect_addr(addr SocketAddress) Result(Socket, NetError)
+
+// The address the listener is actually bound to. This is how the kernel-
+// assigned port is read back after binding port 0.
+@vm(net__local_addr)
+pub fn local_addr(s Server) Result(SocketAddress, NetError)
+
+// Shut the listener down. Closing a `Server` wakes every process parked in
+// `accept` and makes that call — and every later `accept` — return
+// `Ok(None)`, the end-of-stream signal the `serve` acceptors (and any
+// hand-rolled accept loop) exit on.
+@vm(net__close)
+pub fn close(s Server) Result(Nil, NetError)

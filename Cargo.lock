@@ -9,80 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "al"
-version = "0.1.0"
-dependencies = [
- "al_core",
- "al_vm",
- "clap",
- "clap_mangen",
- "cranelift-codegen",
- "cranelift-frontend",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native",
- "percent-encoding",
- "rustyline",
- "serde_json",
- "ureq",
-]
-
-[[package]]
-name = "al_core"
-version = "0.1.0"
-dependencies = [
- "al_syntax",
- "al_types",
- "al_vm",
- "cranelift-codegen",
- "cranelift-frontend",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native",
- "include_dir",
- "indexmap",
- "percent-encoding",
- "petgraph",
- "smallvec",
-]
-
-[[package]]
-name = "al_syntax"
-version = "0.1.0"
-dependencies = [
- "percent-encoding",
- "unicode-width",
-]
-
-[[package]]
-name = "al_types"
-version = "0.1.0"
-dependencies = [
- "al_syntax",
- "al_vm",
- "indexmap",
- "smallvec",
-]
-
-[[package]]
-name = "al_vm"
-version = "0.1.0"
-dependencies = [
- "cranelift-codegen",
- "cranelift-frontend",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native",
- "indexmap",
- "libc",
- "libmimalloc-sys",
- "memchr",
- "mio",
- "smallvec",
- "socket2",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1047,6 +973,80 @@ dependencies = [
  "unicode-width",
  "utf8parse",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "scarlet"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "clap_mangen",
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native",
+ "percent-encoding",
+ "rustyline",
+ "scarlet_core",
+ "scarlet_vm",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "scarlet_core"
+version = "0.1.0"
+dependencies = [
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native",
+ "include_dir",
+ "indexmap",
+ "percent-encoding",
+ "petgraph",
+ "scarlet_syntax",
+ "scarlet_types",
+ "scarlet_vm",
+ "smallvec",
+]
+
+[[package]]
+name = "scarlet_syntax"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
+ "unicode-width",
+]
+
+[[package]]
+name = "scarlet_types"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "scarlet_syntax",
+ "scarlet_vm",
+ "smallvec",
+]
+
+[[package]]
+name = "scarlet_vm"
+version = "0.1.0"
+dependencies = [
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native",
+ "indexmap",
+ "libc",
+ "libmimalloc-sys",
+ "memchr",
+ "mio",
+ "smallvec",
+ "socket2",
 ]
 
 [[package]]

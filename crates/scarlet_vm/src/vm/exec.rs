@@ -1,0 +1,1447 @@
+//! The bytecode interpreter: one process's execution slice.
+//!
+//! [`VM::execute_slice`] is the hot loop. It hoists the active frame's scalar
+//! state (`ip`, `code_start`, `base_slot`, `func_idx`) into locals and syncs
+//! back only on call and return, which is what makes preemption at a call a
+//! plain `return`.
+//!
+//! Fat opcode bodies live out of line: [`super::collections`],
+//! [`super::text`], [`super::io`] (the parking ops).
+//!
+//! Dispatch is replicated, not shared: selected arms end in their own copy of
+//! fetch-and-switch (`dispatch!`) so the predictor gets a branch-target entry
+//! per site. Only arms with a near-deterministic successor carry a copy —
+//! replicating the four most-executed arms instead measured slower. The copy
+//! decodes only small register-shaped opcodes; anything else leaves `ip` on
+//! its instruction and falls out to the shared loop head to be re-fetched.
+
+use crate::FuncIdx;
+use crate::abi::AbiSlot;
+use crate::bytecode::value::ReuseAddr;
+use crate::bytecode::{
+    Op, Value, ValueView, freed_objects_pending, take_freed_objects, values_equal,
+};
+use crate::heap::ProcHeap;
+use crate::tivec::Idx;
+use smallvec::SmallVec;
+
+use super::poll::monotonic_now_ms;
+use super::{
+    CallFrame, IO_REDUCTION_COST, REDUCTION_BUDGET, Step, VM, VmError, VmResult, f64_str, freeze,
+    inspect, value_type_name,
+};
+
+/// Objects freed per reduction charged by [`VM::charge_reclamation`]. Tuned so
+/// only big cascading drops (thousands of objects) cost the process budget.
+const FREES_PER_REDUCTION: u64 = 256;
+
+impl VM {
+    /// One scheduling slice of the current process, dispatched on the top
+    /// frame's resume point. `ip == 0` is the only resume point at which a
+    /// compiled body may be entered; every other resume point runs the
+    /// interpreter, so bytecode is kept for every function as its fallback.
+    /// One scheduling slice: the per-frame trampoline. Dispatch the top
+    /// frame to whichever engine owns it — a native-table function enters
+    /// compiled code at its stored resume ordinal, everything else
+    /// interprets — until the slice ends (`Done` with no frames, `Yield`,
+    /// `Parked`, `Error`). One reduction budget spans the whole slice no
+    /// matter which engine spends it.
+    pub(super) fn run_slice(&mut self) -> VmResult<Step> {
+        take_freed_objects();
+        self.native_reds = REDUCTION_BUDGET;
+        loop {
+            let f = self.frame();
+            let fi = FuncIdx::from_usize(f.func_idx as usize);
+            if let Some(entry) = self.program.native.get(fi) {
+                let resume = i64::from(f.ip);
+                let status = self.call_native(entry, resume);
+                match self.outcome_from_status(status)? {
+                    Step::Done if self.frames.is_empty() => return Ok(Step::Done),
+                    // A transfer to an interpreted frame (call or return):
+                    // dispatch the new top.
+                    Step::Done => continue,
+                    step => return Ok(step),
+                }
+            } else {
+                match self.execute_slice_budgeted(self.native_reds)? {
+                    Step::Dispatch => continue,
+                    step => return Ok(step),
+                }
+            }
+        }
+    }
+
+    /// As [`VM::execute_slice`], but resuming from `budget` remaining
+    /// reductions. One budget governs a whole scheduling slice no matter which
+    /// backend spends it: a native re-entry resumes the same count, and on a
+    /// `Done` exit the remainder goes back to `native_reds`.
+    pub(super) fn execute_slice_budgeted(&mut self, budget: i32) -> VmResult<Step> {
+        #[cfg(feature = "op-histogram")]
+        super::op_histogram::maybe_dump(&self.program);
+
+        // Hoisted so the per-instruction path avoids two Vec indexes. Synced
+        // back to self.frames on Call/TailCall/Ret.
+        let (mut ip, mut code_start, mut base_slot, mut func_idx) = {
+            let f = self.frame();
+            (f.ip, f.code_start, f.base_slot, f.func_idx)
+        };
+        // No freed-object discard here: a mid-slice continuation must keep the
+        // native portion's accrued reclamation debt, charged at the next call
+        // checkpoint.
+        let mut reds = budget;
+
+        // These macros are defined before the loop so their free
+        // `self`/`ip`/`base_slot`/`code_start`/`func_idx`/`reds` resolve to
+        // these locals by macro_rules definition-site hygiene. The fetched
+        // instruction is threaded in as `$instr` because every dispatch site
+        // fetches its own.
+        macro_rules! bin {
+            ($acc:ident, $ctor:ident, |$a:ident, $b:ident| $body:expr) => {{
+                let $b = self.pop()?.$acc();
+                let $a = self.pop()?.$acc();
+                self.stack.push(Value::$ctor($body));
+            }};
+        }
+        macro_rules! un {
+            ($acc:ident, $ctor:ident, |$a:ident| $body:expr) => {{
+                let $a = self.pop()?.$acc();
+                self.stack.push(Value::$ctor($body));
+            }};
+        }
+        // `push_int` boxes the rare out-of-range spill.
+        macro_rules! bin_int {
+            ($acc:ident, |$a:ident, $b:ident| $body:expr) => {{
+                let $b = self.pop()?.$acc();
+                let $a = self.pop()?.$acc();
+                self.push_int($body);
+            }};
+        }
+        macro_rules! un_int {
+            ($acc:ident, |$a:ident| $body:expr) => {{
+                let $a = self.pop()?.$acc();
+                self.push_int($body);
+            }};
+        }
+        macro_rules! lc_arith {
+            ($instr:ident, |$a:ident, $b:ident| $body:expr) => {{
+                let $a = self.stack[base_slot + $instr.a as usize].as_int_typed();
+                let $b = self.program.constants[$instr.b as usize].as_int_typed();
+                self.push_int($body);
+            }};
+        }
+        macro_rules! lc_jump {
+            ($instr:ident, |$a:ident, $b:ident| $cond:expr) => {{
+                let $a = self.stack[base_slot + $instr.a as usize].as_int_typed();
+                let $b = self.program.constants[$instr.b as usize].as_int_typed();
+                if $cond {
+                    ip = $instr.operand;
+                }
+            }};
+        }
+        // `Some(step)` means the process parked and the slice is over.
+        macro_rules! park {
+            ($call:expr) => {{
+                if let Some(step) = $call? {
+                    return Ok(step);
+                }
+            }};
+        }
+        // `$captures` is expanded into exactly one of the two branches, so a
+        // moved value is moved once.
+        macro_rules! enter_frame {
+            ($target_idx:expr, $arity:expr, $func_locals:expr, $func_code_start:expr, $captures:expr, $tail:expr) => {{
+                let target_idx = $target_idx;
+                let arity = $arity;
+                let func_locals = $func_locals;
+                let func_code_start = $func_code_start;
+                let args_start = self.stack.len() - arity as usize;
+
+                if $tail {
+                    self.collapse_tail_frame(base_slot, args_start);
+                    let f = self.frame_mut();
+                    f.func_idx = target_idx;
+                    f.code_start = func_code_start;
+                    f.ip = 0;
+                    f.captures = $captures;
+                } else {
+                    self.frame_mut().ip = ip;
+                    self.frames.push(CallFrame {
+                        func_idx: target_idx,
+                        code_start: func_code_start,
+                        ip: 0,
+                        base_slot: args_start,
+                        captures: $captures,
+                    });
+                    base_slot = args_start;
+                }
+
+                for _ in arity..func_locals {
+                    self.stack.push(Value::small_int(0));
+                }
+
+                ip = 0;
+                code_start = func_code_start;
+                func_idx = target_idx;
+            }};
+        }
+        // Preemption checkpoint at a function application: one reduction plus
+        // any reclamation debt accrued since the last one. The debt is paid
+        // behind a test because draining unconditionally measured ~1.5x on a
+        // tail-recursive loop. `reds` is at least 1 here (a non-positive value
+        // yielded at the last checkpoint), so the decrement cannot wrap.
+        macro_rules! checkpoint {
+            () => {{
+                reds -= 1;
+                self.charge_reclamation(&mut reds);
+                if reds <= 0 {
+                    return Ok(Step::Yield);
+                }
+            }};
+        }
+        // The interp→native seam. After `enter_frame!` (push or tail
+        // collapse) the callee frame sits at `ip == 0`, exactly what a native
+        // entry expects, so a table hit hands it to the trampoline. Firing on
+        // tail calls too is required, not optional: a native-table function
+        // must never be interpreted, or its `frame.ip` would advance to a
+        // bytecode position the trampoline later misreads as a resume ordinal.
+        macro_rules! native_entry_check {
+            ($target:expr) => {{
+                if self
+                    .program
+                    .native
+                    .get(FuncIdx::from_usize($target as usize))
+                    .is_some()
+                {
+                    // Hand the pushed frame to the trampoline; it re-enters
+                    // the interpreter for the caller when the callee's return
+                    // transfer lands back on it.
+                    self.native_reds = reds;
+                    return Ok(Step::Dispatch);
+                }
+            }};
+        }
+
+        // Hot-opcode bodies, written once and expanded at both dispatch
+        // levels. Cold opcodes are written inline in the full match below.
+        macro_rules! push_const {
+            ($instr:ident) => {{
+                self.stack
+                    .push(self.program.constants[$instr.operand as usize].clone());
+            }};
+        }
+        macro_rules! push_local {
+            ($instr:ident) => {{
+                let slot = base_slot + $instr.operand as usize;
+                self.stack.push(self.stack[slot].clone());
+            }};
+        }
+        // The entry frame's slots ARE the program's globals, so a store there
+        // freezes and publishes. The frame is identified by function identity
+        // (`func_idx == entry`), never by guessing from `base_slot == 0` —
+        // a zero-argument call could sit at slot 0 too.
+        macro_rules! store_local {
+            ($instr:ident) => {{
+                let slot = base_slot + $instr.operand as usize;
+                let v = self.pop()?;
+                self.stack[slot] = v;
+                if func_idx == self.program.entry && self.current_is_main {
+                    self.publish_toplevel(slot);
+                }
+            }};
+        }
+        // Jump operands are frame-relative, which is exactly what `ip` is, so
+        // a branch is an assignment and never touches `code_start`.
+        macro_rules! jump {
+            ($instr:ident) => {{
+                ip = $instr.operand;
+            }};
+        }
+        macro_rules! jump_if_false {
+            ($instr:ident) => {{
+                let cond = self.pop()?;
+                if !is_truthy(&cond)? {
+                    ip = $instr.operand;
+                }
+            }};
+        }
+        // Self-recursion fast path: the callee is the live frame's function, so
+        // the closure pop, tag match and arity check are all skipped (the arity
+        // is statically guaranteed by `compile_call`).
+        macro_rules! call_self {
+            ($instr:ident) => {{
+                let arity = $instr.operand;
+                let func = &self.program.functions[func_idx as usize];
+                let func_locals = func.locals;
+                let args_start = self.stack.len() - arity as usize;
+
+                if $instr.op == Op::TailCallSelf {
+                    // Non-argument locals are preserved across the collapse so
+                    // a Perceus `Drop` at end-of-body can hand its hollowed
+                    // cell to a `Reuse` at start-of-body next iteration; the
+                    // zero-fill below is skipped for that reason.
+                    self.collapse_tail_frame_self(
+                        base_slot,
+                        args_start,
+                        arity as usize,
+                        func_locals as usize,
+                    );
+                    let f = self.frame_mut();
+                    f.ip = 0;
+                } else {
+                    // A self-call from inside a capture-carrying closure must
+                    // see the same captures.
+                    let captures = self.frame().captures.clone();
+                    self.frame_mut().ip = ip;
+                    self.frames.push(CallFrame {
+                        func_idx,
+                        code_start,
+                        ip: 0,
+                        base_slot: args_start,
+                        captures,
+                    });
+                    base_slot = args_start;
+                    for _ in arity..func_locals {
+                        self.stack.push(Value::small_int(0));
+                    }
+                }
+                ip = 0;
+
+                // The checkpoint runs AFTER the frame work, so a yield at a
+                // self-tail back-edge suspends with `frame.ip == 0` and the
+                // next iteration's arguments already in the locals. Any other
+                // execution backend must reproduce this frame-at-yield shape;
+                // pinned by `tests/vm_fairness.rs`.
+                checkpoint!();
+                // Fire for tail calls too: the collapsed frame sits at ip 0,
+                // exactly a fresh entry, and a native-table function must
+                // never be interpreted — the trampoline enters it at resume 0.
+                native_entry_check!(func_idx);
+            }};
+        }
+        // Known top-level target: the callee is provably capture-free and is
+        // not on the stack, so the pop, tag check and arity check `Op::Call`
+        // pays are all skipped. The frame's `captures` is a sentinel immediate;
+        // the callee body never emits `PushCapture`/`PushSelf` because a
+        // top-level fn loads itself as a value via `PushGlobal`.
+        macro_rules! call_known {
+            ($instr:ident) => {{
+                let target_idx = $instr.operand;
+                let arity = i32::from($instr.b);
+                let func = &self.program.functions[target_idx as usize];
+                let (func_locals, func_code_start) = (func.locals, func.code_start);
+                debug_assert_eq!(func.capture_count, 0);
+                debug_assert_eq!(func.arity, arity);
+
+                enter_frame!(
+                    target_idx,
+                    arity,
+                    func_locals,
+                    func_code_start,
+                    Value::small_int(0),
+                    $instr.op == Op::TailCallKnown
+                );
+                checkpoint!();
+                native_entry_check!(target_idx);
+            }};
+        }
+        macro_rules! ret {
+            () => {{
+                let ret_val = self.pop()?;
+                let Some(old_frame) = self.frames.pop() else {
+                    return Err(VmError::internal("return with no active call frame"));
+                };
+
+                self.stack.truncate(old_frame.base_slot);
+
+                self.stack.push(ret_val);
+
+                match self.frames.last() {
+                    None => break,
+                    Some(f)
+                        if self
+                            .program
+                            .native
+                            .get(FuncIdx::from_usize(f.func_idx as usize))
+                            .is_some() =>
+                    {
+                        // Returning into a compiled caller: its `ip` is a
+                        // resume ordinal only the trampoline may dispatch.
+                        self.native_reds = reds;
+                        return Ok(Step::Dispatch);
+                    }
+                    Some(f) => {
+                        ip = f.ip;
+                        code_start = f.code_start;
+                        base_slot = f.base_slot;
+                        func_idx = f.func_idx;
+                    }
+                }
+            }};
+        }
+
+        // One copy of fetch-and-switch, expanded at the tail of the arms with
+        // a predictable successor; see the module docs. Instrumented builds
+        // collapse it to nothing so the shared loop head is the only counting
+        // site — semantics are unchanged, since that is already the path for
+        // every opcode the copy does not decode.
+        #[cfg(feature = "op-histogram")]
+        macro_rules! dispatch {
+            () => {{}};
+        }
+        #[cfg(not(feature = "op-histogram"))]
+        macro_rules! dispatch {
+            () => {{
+                let addr = code_start + ip;
+                let Some(instr) = crate::bytecode::fetch(&self.program.code, addr as usize) else {
+                    break;
+                };
+                match instr.op {
+                    Op::PushLocal => {
+                        ip += 1;
+                        push_local!(instr);
+                        continue;
+                    }
+                    Op::AddInt => {
+                        ip += 1;
+                        bin_int!(as_int_typed, |a, b| a.wrapping_add(b));
+                        continue;
+                    }
+                    Op::SubInt => {
+                        ip += 1;
+                        bin_int!(as_int_typed, |a, b| a.wrapping_sub(b));
+                        continue;
+                    }
+                    Op::AddIntLC => {
+                        ip += 1;
+                        lc_arith!(instr, |a, b| a.wrapping_add(b));
+                        continue;
+                    }
+                    Op::SubIntLC => {
+                        ip += 1;
+                        lc_arith!(instr, |a, b| a.wrapping_sub(b));
+                        continue;
+                    }
+                    Op::JumpGeIntLC => {
+                        ip += 1;
+                        lc_jump!(instr, |a, b| a >= b);
+                        continue;
+                    }
+                    Op::JumpNeIntLC => {
+                        ip += 1;
+                        lc_jump!(instr, |a, b| a != b);
+                        continue;
+                    }
+                    Op::Jump => {
+                        jump!(instr);
+                        continue;
+                    }
+                    Op::StoreLocal => {
+                        ip += 1;
+                        store_local!(instr);
+                        continue;
+                    }
+                    Op::Ret => {
+                        ret!();
+                        continue;
+                    }
+                    Op::PushConst => {
+                        ip += 1;
+                        push_const!(instr);
+                        continue;
+                    }
+                    Op::LtInt => {
+                        ip += 1;
+                        bin!(as_int_typed, bool, |a, b| a < b);
+                        continue;
+                    }
+                    Op::EqInt => {
+                        ip += 1;
+                        bin!(as_int_typed, bool, |a, b| a == b);
+                        continue;
+                    }
+                    Op::JumpIfFalse => {
+                        ip += 1;
+                        jump_if_false!(instr);
+                        continue;
+                    }
+                    // Perceus `Drop` sits between the loads and the call in
+                    // every reuse-shaped body, so it earns a copy here.
+                    Op::Drop => {
+                        ip += 1;
+                        let slot = base_slot + instr.operand as usize;
+                        let v = &mut self.stack[slot];
+                        if v.is_unique() {
+                            v.hollow_for_reuse();
+                        } else {
+                            *v = Value::small_int(0);
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }};
+        }
+
+        loop {
+            let addr = code_start + ip;
+            let Some(instr) = crate::bytecode::fetch(&self.program.code, addr as usize) else {
+                break;
+            };
+            ip += 1;
+
+            #[cfg(feature = "op-histogram")]
+            super::op_histogram::record(instr.op, func_idx);
+
+            match instr.op {
+                Op::PushConst => push_const!(instr),
+                Op::PushLocal => push_local!(instr),
+                Op::PushGlobal => {
+                    // The global area is shared by every process on this
+                    // scheduler.
+                    let slot = instr.operand as usize;
+                    self.stack.push(self.globals[slot].clone());
+                }
+                Op::StoreLocal => store_local!(instr),
+                Op::PushNil => {
+                    let nil = self.make_nil()?;
+                    self.stack.push(nil);
+                }
+                Op::PushTrue => {
+                    self.stack.push(Value::bool(true));
+                }
+                Op::PushFalse => {
+                    self.stack.push(Value::bool(false));
+                }
+                Op::Pop => {
+                    self.pop()?;
+                }
+                Op::Dup => {
+                    let v = self.peek()?.clone();
+                    self.stack.push(v);
+                }
+                // Untyped fallbacks; the specialized arms below handle
+                // operands the checker proved concrete.
+                Op::Add => self.add()?,
+                Op::Sub => self.sub()?,
+                Op::Mul => self.mul()?,
+                Op::Div => self.div()?,
+                Op::Mod => self.rem()?,
+                Op::Neg => {
+                    let a = self.pop()?;
+                    if let Some(i) = a.as_int() {
+                        self.push_int(i.wrapping_neg());
+                    } else if let Some(f) = a.as_float() {
+                        self.stack.push(Value::float(-f));
+                    } else {
+                        return Err(VmError::type_mismatch("negate", "Int or Float", &a));
+                    }
+                }
+
+                // Emitted only when unification proved both operands concrete,
+                // so the tag is a debug-only invariant (`as_*_typed`). Totality
+                // matches the untyped forms: wrap on overflow, x/0=0, x%0=x,
+                // non-finite float → 0.0.
+                Op::AddInt => bin_int!(as_int_typed, |a, b| a.wrapping_add(b)),
+                Op::SubInt => bin_int!(as_int_typed, |a, b| a.wrapping_sub(b)),
+                Op::MulInt => bin_int!(as_int_typed, |a, b| a.wrapping_mul(b)),
+                Op::DivInt => {
+                    bin_int!(as_int_typed, |a, b| if b == 0 {
+                        0
+                    } else {
+                        a.wrapping_div(b)
+                    })
+                }
+                Op::ModInt => {
+                    bin_int!(as_int_typed, |a, b| if b == 0 {
+                        a
+                    } else {
+                        a.wrapping_rem(b)
+                    })
+                }
+                Op::NegInt => un_int!(as_int_typed, |a| a.wrapping_neg()),
+                Op::AddFloat => bin!(as_float_typed, float, |a, b| a + b),
+                Op::SubFloat => bin!(as_float_typed, float, |a, b| a - b),
+                Op::MulFloat => bin!(as_float_typed, float, |a, b| a * b),
+                Op::DivFloat => {
+                    bin!(as_float_typed, float, |a, b| if b == 0.0 {
+                        0.0
+                    } else {
+                        a / b
+                    })
+                }
+                Op::NegFloat => un!(as_float_typed, float, |a| -a),
+                Op::AddStr => self.str_concat2()?,
+
+                Op::Eq => {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+                    self.stack.push(Value::bool(values_equal(&a, &b)));
+                }
+                Op::Neq => {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+                    self.stack.push(Value::bool(!values_equal(&a, &b)));
+                }
+                Op::Lt => self.compare_push(|o| o.is_lt())?,
+                Op::Gt => self.compare_push(|o| o.is_gt())?,
+                Op::Lte => self.compare_push(|o| o.is_le())?,
+                Op::Gte => self.compare_push(|o| o.is_ge())?,
+
+                Op::LtInt => bin!(as_int_typed, bool, |a, b| a < b),
+                Op::GtInt => bin!(as_int_typed, bool, |a, b| a > b),
+                Op::LteInt => bin!(as_int_typed, bool, |a, b| a <= b),
+                Op::GteInt => bin!(as_int_typed, bool, |a, b| a >= b),
+                Op::EqInt => bin!(as_int_typed, bool, |a, b| a == b),
+                Op::NeqInt => bin!(as_int_typed, bool, |a, b| a != b),
+                Op::LtFloat => bin!(as_float_typed, bool, |a, b| a < b),
+                Op::GtFloat => bin!(as_float_typed, bool, |a, b| a > b),
+                Op::LteFloat => bin!(as_float_typed, bool, |a, b| a <= b),
+                Op::GteFloat => bin!(as_float_typed, bool, |a, b| a >= b),
+
+                Op::Not => {
+                    let a = self.pop()?;
+                    self.stack.push(Value::bool(!is_truthy(&a)?));
+                }
+                Op::Jump => jump!(instr),
+                Op::JumpIfFalse => jump_if_false!(instr),
+                // Peephole-fused (PushLocal a; PushConst b; <op>) sequences,
+                // operands packed into Instruction.{a,b}.
+                Op::AddIntLC => {
+                    lc_arith!(instr, |a, b| a.wrapping_add(b));
+                    dispatch!()
+                }
+                Op::SubIntLC => {
+                    lc_arith!(instr, |a, b| a.wrapping_sub(b));
+                    dispatch!()
+                }
+                Op::JumpGeIntLC => {
+                    lc_jump!(instr, |a, b| a >= b);
+                    dispatch!()
+                }
+                Op::JumpNeIntLC => {
+                    lc_jump!(instr, |a, b| a != b);
+                    dispatch!()
+                }
+                Op::Nop => {}
+
+                Op::Call | Op::TailCall => {
+                    let arity = instr.operand;
+                    let callee = self.pop()?;
+
+                    let Some(cl) = callee.as_closure() else {
+                        return Err(VmError::internal("call target is not a function"));
+                    };
+                    let cl_func_idx = cl.func_idx();
+                    let func = &self.program.functions[cl_func_idx as usize];
+                    let (func_arity, func_locals, func_code_start) =
+                        (func.arity, func.locals, func.code_start);
+
+                    if arity != func_arity {
+                        return Err(VmError::internal(format!(
+                            "call arity mismatch: expected {func_arity}, got {arity}"
+                        )));
+                    }
+
+                    // The callee value itself becomes the frame's `captures`
+                    // handle: one word copied, no captures clone.
+                    enter_frame!(
+                        cl_func_idx,
+                        arity,
+                        func_locals,
+                        func_code_start,
+                        callee,
+                        instr.op == Op::TailCall
+                    );
+                    checkpoint!();
+                    native_entry_check!(cl_func_idx);
+                }
+                Op::CallSelf | Op::TailCallSelf => {
+                    call_self!(instr);
+                    dispatch!()
+                }
+                Op::CallKnown | Op::TailCallKnown => {
+                    call_known!(instr);
+                    dispatch!()
+                }
+                Op::Ret => {
+                    ret!();
+                    dispatch!()
+                }
+                Op::MakeArray => self.make_array(instr.operand)?,
+                Op::MakeTuple => self.make_tuple(instr.operand)?,
+                Op::TupleIndex => self.tuple_index(instr.operand)?,
+                Op::MakeRange => self.make_range()?,
+                Op::Index => self.seq_index()?,
+                Op::IndexOr => self.seq_index_or(instr.operand)?,
+                Op::ElemAt => self.elem_at(instr.operand)?,
+                Op::ArrayLen => self.seq_len()?,
+                Op::ArraySlice => self.seq_slice()?,
+                Op::ArrayConcat => self.seq_concat()?,
+                Op::Prepend => self.seq_prepend(instr.operand)?,
+                Op::SeqDrop => self.seq_drop()?,
+                Op::Append => self.seq_append(instr.operand)?,
+                Op::GetField => self.get_field(instr.operand)?,
+                Op::GetFieldUnchecked => {
+                    let val = self.pop()?;
+                    self.stack
+                        .push(val.enum_field_typed(instr.operand as usize));
+                }
+                Op::MakeClosure => self.make_closure(instr.operand)?,
+                Op::PushCapture => {
+                    let capture_idx = instr.operand as usize;
+                    let v = match self
+                        .frame()
+                        .captures
+                        .as_closure()
+                        .and_then(|cl| cl.captures().get(capture_idx).cloned())
+                    {
+                        Some(v) => v,
+                        None => {
+                            return Err(VmError::internal(format!(
+                                "capture index {capture_idx} out of bounds"
+                            )));
+                        }
+                    };
+                    self.stack.push(v);
+                }
+                Op::PushSelf => {
+                    // The frame's `captures` handle IS the closure being run.
+                    let val = self.frame().captures.clone();
+                    self.stack.push(val);
+                }
+                Op::Print => {
+                    let val = self.pop()?;
+                    println!("{}", inspect(&val, &self.program));
+                    // A write syscall, blocking on a full pipe: charge it like
+                    // other I/O.
+                    reds -= IO_REDUCTION_COST;
+                }
+                Op::StackDepth => {
+                    self.stack.push(Value::small_int(self.frames.len() as i64));
+                }
+                Op::Monotonic => {
+                    self.stack.push(Value::small_int(monotonic_now_ms()));
+                }
+                Op::Argv => self.argv()?,
+                Op::EnvMap => self.env_map()?,
+                Op::MapGet => self.map_get()?,
+                Op::MapHas => self.map_has()?,
+                Op::MapKeys => self.map_keys()?,
+                Op::MapValues => self.map_values()?,
+                Op::MapSize => self.map_size()?,
+                Op::MapNew => self.map_new()?,
+                Op::MapSet => self.map_set()?,
+                Op::MapDelete => self.map_delete()?,
+                Op::MapToList => self.map_to_list()?,
+                Op::MakeEnumPayload => {
+                    self.make_enum_payload(instr.operand, instr.b as usize, instr.a != 0)?
+                }
+                Op::MatchEnum => {
+                    let variant_name = self.pop()?;
+                    let type_id_val = self.pop()?;
+                    let val = self.pop()?;
+
+                    let Some(variant_str) = variant_name.as_str() else {
+                        return Err(VmError::internal("enum/variant names must be strings"));
+                    };
+                    let Some(type_id) = type_id_val.as_int() else {
+                        return Err(VmError::internal("enum type id must be int"));
+                    };
+                    let type_id = crate::TypeId(type_id as i32);
+
+                    if let Some(ev) = val.as_enum() {
+                        // For enums built by `MakeEnumPayload` the stored
+                        // variant-name word IS the constant the match header
+                        // pushed, so a bits compare decides the arm. The
+                        // content compare is the fallback for enums built by
+                        // prelude templates, where the same name interns to a
+                        // different address.
+                        self.stack.push(Value::bool(
+                            ev.type_id() == type_id
+                                && (ev.variant_name_value().to_bits() == variant_name.to_bits()
+                                    || ev.variant_name() == variant_str),
+                        ));
+                    } else {
+                        self.stack.push(Value::bool(false));
+                    }
+                }
+                Op::UnwrapEnum => {
+                    let enum_val = self.pop()?;
+                    if let Some(ev) = enum_val.as_enum() {
+                        for p in ev.payload() {
+                            self.stack.push(p.clone());
+                        }
+                    } else {
+                        return Err(VmError::internal("unwrap on non-enum value"));
+                    }
+                }
+                Op::SwitchTag => {
+                    // Computed jump by variant index. Emitted only for a
+                    // resolved enum matched exhaustively, so `idx < a` holds by
+                    // construction of the table.
+                    let scrutinee = self.pop()?;
+                    let Some(ev) = scrutinee.as_enum() else {
+                        return Err(VmError::internal("SwitchTag on non-enum value"));
+                    };
+                    let idx = ev.variant_idx() as i32;
+                    debug_assert!((idx as u32) < instr.a as u32);
+                    // `operand` is the table base, frame-relative like every
+                    // other target, so indexing `program.code` needs
+                    // `code_start` added back.
+                    ip = self.program.code[(code_start + instr.operand + idx) as usize].operand;
+                }
+                Op::ToString => self.op_to_string()?,
+                Op::StrConcatN => self.str_concat_n(instr.operand as usize)?,
+                Op::Halt => {
+                    break;
+                }
+                // I/O, timer and process opcodes: anything that can park the
+                // process or offload to the blocking pool (see `vm::io`).
+                Op::FileRead => park!(self.file_read(ip, &mut reds)),
+                Op::FileWrite => park!(self.file_write(ip, &mut reds)),
+                Op::TcpListen => self.tcp_listen()?,
+                Op::TcpAccept => park!(self.tcp_accept(ip, &mut reds)),
+                Op::TcpConnect => park!(self.tcp_connect(ip, &mut reds)),
+                Op::TcpRead => park!(self.tcp_read(ip, &mut reds)),
+                Op::TcpReadUntil => park!(self.tcp_read_until(ip, &mut reds)),
+                Op::TcpWrite => park!(self.tcp_write(ip, &mut reds)),
+                Op::TcpWriteParts => park!(self.tcp_write_parts(ip, &mut reds)),
+                Op::TcpClose => self.tcp_close(&mut reds)?,
+                Op::TcpCloseServer => self.tcp_close_server()?,
+                Op::TcpLocalAddr => self.tcp_local_addr()?,
+                Op::DnsResolve => park!(self.dns_resolve(ip, &mut reds)),
+                Op::IpParse => self.ip_parse()?,
+                Op::ProcessSpawn => self.process_spawn(&mut reds)?,
+                Op::SpawnLocal => self.process_spawn_local(&mut reds)?,
+                Op::SpawnOnEach => self.process_spawn_on_each(&mut reds)?,
+                Op::Sleep => park!(self.sleep(ip)),
+                // String and binary builtins (see `vm::text`).
+                Op::StrSplit => self.str_split()?,
+                Op::StrLen => self.str_len()?,
+                Op::StrContains => self.str_contains()?,
+                Op::StrTrim => self.str_trim()?,
+                Op::IntToString => self.int_to_string()?,
+                Op::BinFromString => self.bin_from_string()?,
+                Op::BinToString => self.bin_to_string()?,
+                Op::BinBitSize => self.bin_bit_size()?,
+                Op::BinByteSize => self.bin_byte_size()?,
+                Op::BinSlice => self.bin_slice()?,
+                Op::BinAppend => self.bin_append()?,
+                Op::BinConcatN => self.bin_concat_n(instr.operand as usize)?,
+                Op::BinFromInt => self.bin_from_int()?,
+                Op::BinReadInt => self.bin_read_int()?,
+                Op::BinTake => self.bin_take()?,
+                Op::BinReadUtf8 => self.bin_read_utf8()?,
+                Op::BinMatchPrefix => self.bin_match_prefix()?,
+                Op::BinView => self.bin_view()?,
+                // ASCII builtins: never-inline methods so their bodies stay out
+                // of the dispatch loop and leave the hot integer arms' codegen
+                // undisturbed.
+                Op::BinIndexOf => self.bin_index_of()?,
+                Op::BinByteAt => self.bin_byte_at()?,
+                Op::BinParseInt => self.bin_parse_int()?,
+                Op::BinEqIgnoreAsciiCase => self.bin_eq_ignore_ascii_case()?,
+                Op::BinToAsciiLower => self.bin_to_ascii_lower()?,
+                Op::BinFromIntAscii => self.bin_from_int_ascii()?,
+                // HTTP/1.1 protocol ops, cold for the same reason.
+                Op::HttpParseHead => self.http_parse_head()?,
+                Op::HttpFraming => self.http_framing()?,
+                Op::HttpChunkDecode => self.http_chunk_decode()?,
+                Op::HttpHeaderGet => self.http_header_get()?,
+                Op::HttpHeaderHas => self.http_header_has()?,
+                Op::HttpHeadersValid => self.http_headers_valid()?,
+                Op::HttpSerializeHead => self.http_serialize_head()?,
+                // Float→Int casts use saturating `as i64`; Value floats are
+                // canonicalized finite (no NaN/Inf), so these stay total.
+                Op::FloatFloor => {
+                    let f = self.pop_float("float.floor")?;
+                    self.push_int(f.floor() as i64);
+                }
+                Op::FloatCeil => {
+                    let f = self.pop_float("float.ceil")?;
+                    self.push_int(f.ceil() as i64);
+                }
+                Op::FloatRound => {
+                    let f = self.pop_float("float.round")?;
+                    self.push_int(f.round() as i64);
+                }
+                Op::FloatTruncate => {
+                    let f = self.pop_float("float.truncate")?;
+                    self.push_int(f.trunc() as i64);
+                }
+                Op::FloatFromInt => {
+                    let n = self.pop_int("float.from_int")?;
+                    self.stack.push(Value::float(n as f64));
+                }
+                Op::FloatToString => {
+                    let f = self.pop_float("float.to_string")?;
+                    let s = f64_str(f);
+                    let v = Value::str_in(&mut self.heap, &s);
+                    self.stack.push(v);
+                }
+                // Perceus drop-guided reuse (frame-limited, ICFP'22).
+                Op::Drop => {
+                    // Last use of this local. If the frame holds the only
+                    // reference, keep the allocation in the slot for a
+                    // following `Reuse` but release its children NOW: reuse
+                    // only propagates down a recursive chain when the parent
+                    // cons stops holding the tail before the recursive call
+                    // sees it. The slot IS the per-frame reuse table.
+                    let slot = base_slot + instr.operand as usize;
+                    let v = &mut self.stack[slot];
+                    if v.is_unique() {
+                        v.hollow_for_reuse();
+                    } else {
+                        *v = Value::small_int(0);
+                    }
+                }
+                Op::Reuse => {
+                    // Take the candidate cell the preceding `Drop` left in the
+                    // slot and push it as the address the following
+                    // constructor overwrites in place. Ownership transfers via
+                    // the stack so rc stays 1. A nil push means no candidate
+                    // and the constructor allocates fresh.
+                    let slot = base_slot + instr.operand as usize;
+                    let cell = std::mem::replace(&mut self.stack[slot], Value::small_int(0));
+                    if cell.is_unique() {
+                        self.stack.push(cell);
+                    } else {
+                        self.stack.push(Value::nil());
+                    }
+                }
+            }
+        }
+
+        // Publish the remaining budget for a native caller sitting under the
+        // floor; for a finished process the next slice re-seeds it anyway.
+        self.native_reds = reds;
+        Ok(Step::Done)
+    }
+
+    /// Collapse the active frame for a tail call: discard the slots in
+    /// `[base, args_start)` and slide the freshly-pushed argument words at
+    /// `[args_start, len)` down to `base`.
+    #[inline]
+    pub(super) fn collapse_tail_frame(&mut self, base: usize, args_start: usize) {
+        debug_assert!(base <= args_start && args_start <= self.stack.len());
+        self.stack.drain(base..args_start);
+    }
+
+    /// Collapse the active frame for a *self*-tail-call: swap the `arity` new
+    /// argument words at `[args_start, len)` down into the parameter slots,
+    /// then truncate to `[base, base+locals)`.
+    ///
+    /// The non-argument locals are left in place on purpose: they are the
+    /// per-frame reuse table, and `Op::Reuse` at start-of-body consumes the
+    /// hollowed cells `Op::Drop` parked there last iteration. The caller skips
+    /// the zero-fill for that reason.
+    #[inline]
+    fn collapse_tail_frame_self(
+        &mut self,
+        base: usize,
+        args_start: usize,
+        arity: usize,
+        locals: usize,
+    ) {
+        debug_assert!(arity <= locals);
+        debug_assert!(base + locals <= args_start);
+        debug_assert_eq!(args_start + arity, self.stack.len());
+        for i in 0..arity {
+            self.stack.swap(base + i, args_start + i);
+        }
+        self.stack.truncate(base + locals);
+    }
+
+    /// `Op::StoreLocal` into the main process's entry frame: freeze the
+    /// binding's graph into the program-wide frozen area and mirror the frozen
+    /// root into the global area. The global table holds only frozen words, so
+    /// it is not a GC root and `PushGlobal` is a word push on every scheduler.
+    ///
+    /// The caller's `base_slot == 0 && current_is_main` guard singles out the
+    /// entry frame. No callee in main can land at base_slot 0 only because
+    /// `__main__` opens with the stdlib's binding stores; remove that floor and
+    /// a zero-arity module-scope call would publish its own locals as globals.
+    ///
+    /// The publish is unconditional, so a slot stored twice is published twice.
+    /// The contract is publish-before-read, not publish-once.
+    #[cold]
+    #[inline(never)]
+    fn publish_toplevel(&mut self, slot: usize) {
+        if slot >= self.globals.len() {
+            self.globals.resize(slot + 1, Value::nil());
+        }
+        // Re-storing exactly the published value (an immediate, or a frozen
+        // constant read back and stored again) must not copy the graph into
+        // the never-reclaimed frozen area a second time. Distinct heap values
+        // still freeze per store: or-pattern and cursor rebinds at top level
+        // pay one frozen copy per distinct value until publication moves to
+        // spawn boundaries.
+        if self.globals_published.get(slot).copied().unwrap_or(false)
+            && self.globals[slot].to_bits() == self.stack[slot].to_bits()
+        {
+            return;
+        }
+        let frozen = freeze::freeze_global(&mut self.frozen, &self.stack[slot]);
+        self.globals[slot] = frozen.value();
+        if slot >= self.globals_published.len() {
+            self.globals_published.resize(slot + 1, false);
+        }
+        self.globals_published[slot] = true;
+        self.runtime.publish_global(slot, frozen);
+    }
+
+    /// `Op::MakeClosure`: build a closure over `func_idx` from `capture_count`
+    /// capture words on top of the stack. When `with_reuse`, an `Op::Reuse`
+    /// token sits on top of the captures: pop it first and — if it names a
+    /// live cell — overwrite that allocation in place.
+    fn make_closure(&mut self, func_idx: i32) -> VmResult<()> {
+        let cc = self.program.functions[func_idx as usize].capture_count as usize;
+        let base = self.operand_base(cc)?;
+        let v = Value::closure_in(&mut self.heap, func_idx, &self.stack[base..]);
+        self.stack.truncate(base);
+        self.stack.push(v);
+        Ok(())
+    }
+
+    /// `Op::MakeEnumPayload`: build a tagged enum value from the four header
+    /// words (`type_id`, enum name, variant name, field-label array) plus
+    /// `payload_count` payload words on top of the stack. When `with_reuse`, an
+    /// `Op::Reuse` token sits above the payload and names a cell to overwrite
+    /// in place.
+    fn make_enum_payload(
+        &mut self,
+        _prehash_idx: i32,
+        payload_count: usize,
+        with_reuse: bool,
+    ) -> VmResult<()> {
+        let reuse = if with_reuse {
+            self.take_reuse_addr()?
+        } else {
+            ReuseAddr::none()
+        };
+        // Names and labels are constant-pool references; only the enum cell and
+        // its payload slots are fresh.
+        let base = self.operand_base(payload_count + 4)?;
+        let payload_base = base + 4;
+
+        let type_id_val = &self.stack[base];
+        let enum_name_val = self.stack[base + 1].clone();
+        let variant_name_val = self.stack[base + 2].clone();
+        let labels_val = &self.stack[base + 3];
+
+        let Some(packed) = type_id_val.as_int() else {
+            return Err(VmError::internal("enum type id must be int"));
+        };
+        let type_id = crate::TypeId(packed as i32);
+        let variant_idx = (packed >> 32) as u16;
+
+        if enum_name_val.as_str().is_none() {
+            return Err(VmError::internal("enum name must be string"));
+        }
+
+        // The field-label array is a per-ctor-site pooled constant, and
+        // `PushConst` copies the constant word, so its address is stable for
+        // the program's lifetime and is a sound memo key.
+        let labels_key = match (labels_val.as_array(), labels_val.object_addr()) {
+            (Some(_), Some(addr)) => addr,
+            _ => return Err(VmError::internal("field labels must be an array")),
+        };
+        let field_labels = match self.label_cache.get(&labels_key) {
+            Some(cached) => cached.clone(),
+            None => {
+                // `publish_frozen` is the only door from a runtime `Value` to
+                // a `FrozenConst` child, and is a passthrough for these
+                // already-frozen label strings.
+                let labels = expect_string_array(labels_val)?
+                    .iter()
+                    .map(|l| ProcHeap::publish_frozen(&mut self.frozen, l))
+                    .collect();
+                let tuple = self.frozen.tuple(labels).into_value();
+                self.label_cache.insert(labels_key, tuple.clone());
+                tuple
+            }
+        };
+
+        if variant_name_val.as_str().is_none() {
+            return Err(VmError::internal("variant name must be string"));
+        }
+
+        // `0` marks the cell "not yet hashed"; `EnumRef::hash` computes and
+        // caches on first use. Constructing is far more common than hashing,
+        // and hashing here measured ~5% of a keep-alive HTTP request.
+        let hash = 0u64;
+        let v = Value::enum_reuse_in(
+            &mut self.heap,
+            reuse,
+            type_id,
+            variant_idx,
+            hash,
+            enum_name_val,
+            variant_name_val,
+            field_labels,
+            &self.stack[payload_base..],
+        );
+        self.stack.truncate(base);
+        self.stack.push(v);
+        Ok(())
+    }
+
+    pub(super) fn pop(&mut self) -> VmResult<Value> {
+        self.stack
+            .pop()
+            .ok_or_else(|| VmError::internal("stack underflow"))
+    }
+
+    /// Pop and decode the Perceus reuse token an `Op::Reuse` pushed above a
+    /// constructor's operands. A live address means ownership transfers to the
+    /// constructor, which overwrites the cell in place.
+    #[inline]
+    pub(super) fn take_reuse_addr(&mut self) -> VmResult<ReuseAddr> {
+        Ok(self.pop()?.into_reuse_addr())
+    }
+
+    /// Index of the first of the top `n` operand slots, left in place. The
+    /// caller reads them via `&self.stack[base..]` and truncates to `base`
+    /// afterwards, so no temporary buffer is needed.
+    pub(super) fn operand_base(&self, n: usize) -> VmResult<usize> {
+        let len = self.stack.len();
+        if n > len {
+            return Err(VmError::internal("stack underflow"));
+        }
+        Ok(len - n)
+    }
+
+    fn peek(&self) -> VmResult<&Value> {
+        self.stack
+            .last()
+            .ok_or_else(|| VmError::internal("stack underflow"))
+    }
+
+    /// The operand `d` slots below the top of the stack (0 = top), or `None`
+    /// if the stack is shallower than that. Reads without popping.
+    pub(super) fn peek_at(&self, d: usize) -> Option<&Value> {
+        self.stack.len().checked_sub(1 + d).map(|i| &self.stack[i])
+    }
+
+    /// [`peek_at`](Self::peek_at) that reports underflow as a compiler bug.
+    pub(super) fn peek_at_or(&self, d: usize) -> VmResult<&Value> {
+        self.peek_at(d)
+            .ok_or_else(|| VmError::internal("stack underflow"))
+    }
+
+    /// Bill `reds` for reference-counting reclamation done since the last call
+    /// checkpoint, one reduction per [`FREES_PER_REDUCTION`], so a giant
+    /// cascading free preempts at the next call instead of stalling the
+    /// scheduler.
+    #[inline]
+    pub(super) fn charge_reclamation(&self, reds: &mut i32) {
+        if freed_objects_pending() >= FREES_PER_REDUCTION {
+            let freed = take_freed_objects();
+            *reds = reds.saturating_sub((freed / FREES_PER_REDUCTION) as i32);
+        }
+    }
+
+    // Typed pop helpers for the stdlib and I/O ops. The popped `Value` is
+    // returned whole so callers can borrow the arena contents through it; that
+    // borrow survives a following `*_in` constructor because allocation never
+    // moves existing objects.
+
+    #[inline]
+    pub(super) fn pop_str(&mut self, op: &'static str) -> VmResult<Value> {
+        let v = self.pop()?;
+        if v.as_str().is_some() {
+            Ok(v)
+        } else {
+            Err(VmError::type_mismatch(op, "String", &v))
+        }
+    }
+
+    #[inline]
+    pub(super) fn pop_int(&mut self, op: &'static str) -> VmResult<i64> {
+        let v = self.pop()?;
+        match v.as_int() {
+            Some(n) => Ok(n),
+            None => Err(VmError::type_mismatch(op, "Int", &v)),
+        }
+    }
+
+    /// Pop a numeric value as `f64`. Coerces Int, like `Op::Neg` and friends.
+    #[inline]
+    fn pop_float(&mut self, op: &'static str) -> VmResult<f64> {
+        let v = self.pop()?;
+        if let Some(f) = v.as_float() {
+            Ok(f)
+        } else if let Some(n) = v.as_int() {
+            Ok(n as f64)
+        } else {
+            Err(VmError::type_mismatch(op, "Float", &v))
+        }
+    }
+
+    #[inline]
+    pub(super) fn pop_binary(&mut self, op: &'static str) -> VmResult<Value> {
+        let v = self.pop()?;
+        if v.as_binary().is_some() {
+            Ok(v)
+        } else {
+            Err(VmError::type_mismatch(op, "Binary", &v))
+        }
+    }
+
+    // `make_nil`/`make_none` copy prebuilt frozen-area values and allocate
+    // nothing. The payload-carrying constructors build one fresh wrapper enum.
+    // All are fallible: the slot may be unbound (front-end bug, `Internal`).
+
+    #[inline]
+    pub(super) fn make_nil(&self) -> VmResult<Value> {
+        self.templates.nullary(AbiSlot::Unit)
+    }
+
+    #[inline]
+    pub(super) fn make_none(&self) -> VmResult<Value> {
+        self.templates.nullary(AbiSlot::OptionNone)
+    }
+
+    #[inline]
+    pub(super) fn make_some(&mut self, v: Value) -> VmResult<Value> {
+        self.abi_make(AbiSlot::OptionSome, &[v])
+    }
+
+    #[inline]
+    pub(super) fn make_ok(&mut self, v: Value) -> VmResult<Value> {
+        self.abi_make(AbiSlot::ResultOk, &[v])
+    }
+
+    #[inline]
+    pub(super) fn make_err(&mut self, v: Value) -> VmResult<Value> {
+        self.abi_make(AbiSlot::ResultErr, &[v])
+    }
+
+    #[inline]
+    pub(super) fn make_err_nil(&mut self) -> VmResult<Value> {
+        let nil = self.make_nil()?;
+        self.make_err(nil)
+    }
+
+    /// Instantiate the constructor bound to `slot` around `payload`. The
+    /// template clone is a few words, as the old per-field clone was.
+    #[inline]
+    pub(super) fn abi_make(&mut self, slot: AbiSlot, payload: &[Value]) -> VmResult<Value> {
+        let t = self.templates.get(slot)?.clone();
+        Ok(t.instantiate(&mut self.heap, payload))
+    }
+
+    /// The pre-built value of a nullary slot.
+    #[inline]
+    pub(super) fn abi_nullary(&self, slot: AbiSlot) -> VmResult<Value> {
+        self.templates.nullary(slot)
+    }
+
+    /// Concatenate the two strings on top of the stack.
+    #[inline]
+    /// `Op::ToString`: the operand's string image (a Str is its own image).
+    pub(super) fn op_to_string(&mut self) -> VmResult<()> {
+        let val = self.pop()?;
+        if val.as_str().is_some() {
+            self.stack.push(val);
+        } else {
+            let s = inspect(&val, &self.program);
+            let v = Value::str_in(&mut self.heap, &s);
+            self.stack.push(v);
+        }
+        Ok(())
+    }
+
+    /// `Op::StrConcatN`: concatenate `n` Str operands on the stack.
+    pub(super) fn str_concat_n(&mut self, n: usize) -> VmResult<()> {
+        let base = self.operand_base(n)?;
+        let v = {
+            let mut parts: SmallVec<[&str; 8]> = SmallVec::with_capacity(n);
+            for v in &self.stack[base..] {
+                match v.as_str() {
+                    Some(s) => parts.push(s),
+                    None => return Err(VmError::internal("str_concat requires strings")),
+                }
+            }
+            Value::str_from_parts_in(&mut self.heap, &parts)
+        };
+        self.stack.truncate(base);
+        self.stack.push(v);
+        Ok(())
+    }
+
+    pub(super) fn str_concat2(&mut self) -> VmResult<()> {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        match (a.as_str(), b.as_str()) {
+            (Some(sa), Some(sb)) => {
+                let v = Value::str_from_parts_in(&mut self.heap, &[sa, sb]);
+                self.stack.push(v);
+                Ok(())
+            }
+            _ => Err(VmError::internal("string concat on non-Str operands")),
+        }
+    }
+
+    /// `+` — the one arithmetic op with a non-numeric case, Str + Str.
+    pub(super) fn add(&mut self) -> VmResult<()> {
+        let both_str = self.peek_at(1).is_some_and(|v| v.as_str().is_some())
+            && self.peek_at(0).is_some_and(|v| v.as_str().is_some());
+        if both_str {
+            return self.str_concat2();
+        }
+        let b = self.pop()?;
+        let a = self.pop()?;
+        self.arith(a, b, |x, y| x.wrapping_add(y), |x, y| x + y)
+    }
+
+    pub(super) fn sub(&mut self) -> VmResult<()> {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        self.arith(a, b, |x, y| x.wrapping_sub(y), |x, y| x - y)
+    }
+
+    pub(super) fn mul(&mut self) -> VmResult<()> {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        self.arith(a, b, |x, y| x.wrapping_mul(y), |x, y| x * y)
+    }
+
+    /// `/` is TOTAL: `x / 0 = 0`, `x / 0.0 = 0.0`. The zero guard is
+    /// load-bearing — `wrapping_div` still panics on a zero divisor.
+    pub(super) fn div(&mut self) -> VmResult<()> {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        self.arith(
+            a,
+            b,
+            |x, y| if y == 0 { 0 } else { x.wrapping_div(y) },
+            |x, y| if y == 0.0 { 0.0 } else { x / y },
+        )
+    }
+
+    /// `%` is TOTAL: `x % 0 = x`, preserving `a = (a/b)*b + a%b`.
+    pub(super) fn rem(&mut self) -> VmResult<()> {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        self.arith(
+            a,
+            b,
+            |x, y| if y == 0 { x } else { x.wrapping_rem(y) },
+            |x, y| if y == 0.0 { x } else { x % y },
+        )
+    }
+
+    /// Numeric core for the untyped `+ - * / %` fallbacks. A mixed pair is a
+    /// compiler bug: HM unifies both operands to one numeric type. Arithmetic
+    /// is TOTAL — int overflow wraps, and `Value::float` collapses any
+    /// non-finite result to `0.0`.
+    fn arith(
+        &mut self,
+        a: Value,
+        b: Value,
+        int_f: fn(i64, i64) -> i64,
+        float_f: fn(f64, f64) -> f64,
+    ) -> VmResult<()> {
+        let v = match (a.kind(), b.kind()) {
+            (ValueView::Int(ai), ValueView::Int(bi)) => self.boxed_int(int_f(ai, bi)),
+            (ValueView::Float(af), ValueView::Float(bf)) => Value::float(float_f(af, bf)),
+            _ => {
+                return Err(VmError::internal(format!(
+                    "arithmetic on '{}' and '{}'",
+                    value_type_name(&a),
+                    value_type_name(&b)
+                )));
+            }
+        };
+        self.stack.push(v);
+        Ok(())
+    }
+
+    /// Pop two operands and push whether their ordering satisfies `keep`.
+    pub(super) fn compare_push(&mut self, keep: fn(std::cmp::Ordering) -> bool) -> VmResult<()> {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        let ord = compare_values(a, b)?;
+        self.stack.push(Value::bool(keep(ord)));
+        Ok(())
+    }
+
+    /// Box an i64 into a `Value`.
+    #[inline]
+    pub(super) fn boxed_int(&mut self, i: i64) -> Value {
+        if Value::fits_small_int(i) {
+            Value::small_int(i)
+        } else {
+            self.spill_int(i)
+        }
+    }
+
+    /// The out-of-range half of [`boxed_int`](Self::boxed_int). Kept out of
+    /// line so the allocation never inlines into the integer arithmetic arms,
+    /// where it would cost registers and i-cache on every op.
+    #[cold]
+    #[inline(never)]
+    fn spill_int(&mut self, i: i64) -> Value {
+        Value::int_in(&mut self.heap, i)
+    }
+
+    /// Push the program's command-line arguments as an `Array(String)`.
+    #[inline(never)]
+    pub(super) fn argv(&mut self) -> VmResult<()> {
+        let runtime = self.runtime.clone();
+        let args = &runtime.argv;
+        let mut items: Vec<Value> = Vec::with_capacity(args.len());
+        for arg in args {
+            items.push(Value::str_in(&mut self.heap, arg));
+        }
+        let v = Value::array_in(&mut self.heap, &items);
+        self.stack.push(v);
+        Ok(())
+    }
+
+    /// Push an integer result (see `boxed_int`).
+    #[inline]
+    pub(super) fn push_int(&mut self, i: i64) {
+        let v = self.boxed_int(i);
+        self.stack.push(v);
+    }
+}
+
+fn expect_string_array(v: &Value) -> VmResult<Vec<Value>> {
+    match v.as_array() {
+        Some(items) => {
+            let mut out: Vec<Value> = Vec::with_capacity(items.len());
+            for it in items.iter() {
+                if it.as_str().is_none() {
+                    return Err(VmError::internal("field label must be string"));
+                }
+                out.push(it);
+            }
+            Ok(out)
+        }
+        None => Err(VmError::internal("field labels must be an array")),
+    }
+}
+
+/// Total ordering of two same-typed numeric operands. Scarlet floats are canonical
+/// finite, so `partial_cmp` always succeeds; the `Equal` fallback avoids an
+/// `unwrap`.
+fn compare_values(a: Value, b: Value) -> VmResult<std::cmp::Ordering> {
+    match (a.kind(), b.kind()) {
+        (ValueView::Int(ai), ValueView::Int(bi)) => Ok(ai.cmp(&bi)),
+        (ValueView::Float(af), ValueView::Float(bf)) => {
+            Ok(af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal))
+        }
+        _ => Err(VmError::internal(format!(
+            "compare '{}' with '{}'",
+            value_type_name(&a),
+            value_type_name(&b)
+        ))),
+    }
+}
+
+fn is_truthy(v: &Value) -> VmResult<bool> {
+    v.as_bool()
+        .ok_or_else(|| VmError::type_mismatch("condition", "Bool", v))
+}

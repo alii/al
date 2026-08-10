@@ -9,8 +9,8 @@ import {
 let client: LanguageClient | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
-  const config = vscode.workspace.getConfiguration("al");
-  const binaryPath = config.get("binaryPath", "al");
+  const config = vscode.workspace.getConfiguration("scarlet");
+  const binaryPath = config.get("binaryPath", "scarlet");
 
    const serverOptions: ServerOptions = {
     command: binaryPath,
@@ -18,7 +18,7 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: "file", language: "al" }],
+    documentSelector: [{ scheme: "file", language: "scarlet" }],
   };
 
   client = new LanguageClient(
@@ -31,7 +31,7 @@ export function activate(context: vscode.ExtensionContext) {
   client.start();
 
    const formatter = vscode.languages.registerDocumentFormattingEditProvider(
-    "al",
+    "scarlet",
     {
       async provideDocumentFormattingEdits(
         document: vscode.TextDocument

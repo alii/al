@@ -1,0 +1,60 @@
+// Backpassing: `x <- f(args)` hands the rest of the enclosing block to `f`
+// as a trailing callback argument. Pins the desugaring end to end: binding,
+// multiple binders, `_`, nesting order, block-value propagation, and that
+// code after the callback in the callee still runs.
+
+fn require_positive(n Int, k fn(Int) String) String {
+	if n > 0 {
+		k(n)
+	} else {
+		'no'
+	}
+}
+
+fn describe(n Int) String {
+	x <- require_positive(n)
+	'got ${x}'
+}
+
+fn feed(n Int, k fn(Int) Int) Int {
+	k(n * 2)
+}
+
+fn nested() Int {
+	a <- feed(1)
+	b <- feed(a + 1)
+	a + b
+}
+
+fn split(n Int, k fn(Int, Int) Int) Int {
+	k(n / 10, n % 10)
+}
+
+fn digits() Int {
+	tens, ones <- split(42)
+	tens * 100 + ones
+}
+
+fn discard_example() Int {
+	_ <- feed(10)
+	5
+}
+
+fn with_resource(name String, k fn(String) Nil) Nil {
+	println('acquire ${name}')
+	k(name)
+	println('release ${name}')
+}
+
+fn use_resource() Nil {
+	r <- with_resource('db')
+	println('use ${r}')
+}
+
+println(describe(5))
+println(describe(-3))
+println(nested())
+println(digits())
+println(discard_example())
+use_resource()
+println('done')

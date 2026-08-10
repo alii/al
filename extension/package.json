@@ -1,7 +1,7 @@
 {
-  "name": "al-lang",
-  "displayName": "AL Language Support",
-  "description": "Syntax highlighting and formatting for AL language files",
+  "name": "scarlet-lang",
+  "displayName": "Scarlet Language Support",
+  "description": "Scarlet programming language support for Visual Studio Code",
   "version": "0.0.1",
   "publisher": "alistaiir",
   "engines": {
@@ -15,31 +15,31 @@
   "contributes": {
     "languages": [
       {
-        "id": "al",
+        "id": "scarlet",
         "aliases": [
-          "AL",
-          "al"
+          "Scarlet",
+          "scrl"
         ],
         "extensions": [
-          ".al"
+          ".scrl"
         ],
         "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
       {
-        "language": "al",
-        "scopeName": "source.al",
-        "path": "./syntaxes/al.tmLanguage.json"
+        "language": "scarlet",
+        "scopeName": "source.scrl",
+        "path": "./syntaxes/scarlet.tmLanguage.json"
       }
     ],
     "configuration": {
-      "title": "AL",
+      "title": "Scarlet",
       "properties": {
-        "al.binaryPath": {
+        "scarlet.binaryPath": {
           "type": "string",
-          "default": "al",
-          "description": "Path to the AL binary"
+          "default": "scarlet",
+          "description": "Path to the Scarlet binary"
         }
       }
     }

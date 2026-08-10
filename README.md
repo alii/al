@@ -1,26 +1,20 @@
-# AL
+<img width="128" src="https://github.com/scarletindustries.png" />
 
-A small, statically-typed, expression-oriented programming language.
+### Scarlet
 
-## Install
+The Scarlet programming language is a statically-typed and expression-oriented programming language, for developer productivity.
 
-```bash
-curl -fsSL al.alistair.sh/install.sh | bash
+[Documentation](https://scarlet.industries)
+
+---
+
+```scarlet
+println("Hello from Scarlet.")
 ```
 
-## Usage
-
 ```
-al run <file.al>      Run a program
-al repl               Start interactive REPL
-al check <file.al>    Type-check without running
-al fmt [path]         Format source files
+scarlet run <file.scrl>      Run a program
+scarlet repl               Start interactive REPL
+scarlet check <file.scrl>    Type-check without running
+scarlet fmt [glob path]         Format source files
 ```
-
-## Documentation
-
-Full documentation and language reference available at **[al.alistair.sh](https://al.alistair.sh)**
-
-## License
-
-MIT

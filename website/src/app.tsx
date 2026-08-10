@@ -76,7 +76,7 @@ match http.serve('0.0.0.0', 8080, fn(_req) http.text('Hello from al/http!')) {
         plain: true,
         code: `curl -fsSL al.alistair.sh/install.sh | bash`,
       },
-      "This puts the `al` binary in `~/.al/bin` and adds that to your PATH. Run `al upgrade` later to get a newer build. There is nothing else to install: the standard library lives inside the binary.",
+      "This puts the `scarlet` binary in `~/.al/bin` and adds that to your PATH. Run `al upgrade` later to get a newer build. There is nothing else to install: the standard library lives inside the binary.",
       "AL is early software. The version number starts with 0.0 and means it. Things will change.",
     ],
   },
@@ -1194,7 +1194,6 @@ import al/net/socket.{Socket, Data, Closed}
 import al/string
 import al/binary
 import al/array
-import al.{Ok}
 
 const body = 'Hello from AL!'
 const content_length = string.length(body)
@@ -1253,7 +1252,7 @@ match net.serve('0.0.0.0', 8080, respond) {
     id: "tooling",
     title: "Tooling",
     body: [
-      "Everything lives in the one `al` binary:",
+      "Everything lives in the one `scarlet` binary:",
       {
         id: "tooling-commands",
         plain: true,
