@@ -59,7 +59,7 @@ pub struct OrShape {
 pub(crate) fn elaborator_bug(why: &'static str, span: Span) -> ! {
     panic!(
         "internal compiler error: {why} at {span:?} is well-typed but was not elaborated. \
-         Please report this as a compiler bug."
+         Report this as a compiler bug."
     )
 }
 

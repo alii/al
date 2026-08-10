@@ -175,7 +175,7 @@ impl Compiler {
         // `CleanModule`, and abort the elaborator on a program `al check` took.
         let Some(key) = self.imported_qualifiers.get(qual).cloned() else {
             self.error(
-                format!("Unknown module qualifier '{qual}' — did you `import` it?"),
+                format!("Unknown module qualifier '{qual}'. Import the module before use."),
                 span,
             );
             return None;

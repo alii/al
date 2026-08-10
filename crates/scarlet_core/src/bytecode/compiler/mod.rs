@@ -694,7 +694,7 @@ fn walk_region_is_filled(region: &[WalkStep]) -> bool {
 fn walk_region_underflow() -> ! {
     panic!(
         "internal compiler error: close_walk_region without matching open_walk_region. \
-         Please report this as a compiler bug."
+         Report this as a compiler bug."
     )
 }
 
@@ -708,7 +708,7 @@ fn walk_region_underflow() -> ! {
 fn unclaimed_toplevel_slots(n: usize) -> ! {
     panic!(
         "internal compiler error: toplevel elaboration left {n} module-scope slot(s) unclaimed. \
-         Please report this as a compiler bug."
+         Report this as a compiler bug."
     )
 }
 
@@ -722,7 +722,7 @@ fn unclaimed_toplevel_slots(n: usize) -> ! {
 fn function_reserved_during_elaboration() -> ! {
     panic!(
         "internal compiler error: a `Function` was reserved while the elaborator walked. \
-         Please report this as a compiler bug."
+         Report this as a compiler bug."
     )
 }
 
@@ -3295,7 +3295,7 @@ impl Compiler {
             if let Some(suggestion) = self.env.suggest_name(name) {
                 self.error(
                     format!(
-                        "Unknown identifier '{}'. Did you mean '{}'?",
+                        "Unknown identifier '{}'. Closest match: '{}'.",
                         name, suggestion
                     ),
                     expr.span,
@@ -3959,9 +3959,9 @@ impl Compiler {
                     let module = self.module_name(&self.imported_qualifiers[&name]);
                     if let Some(d) = self.engine.diagnostics.last_mut() {
                         d.message.push_str(&format!(
-                            "; note: '{name}' here is a local binding that shadows \
-                             the imported module '{module}' — rename one of them \
-                             (e.g. 'import {module} as ...') to reach the module"
+                            "; '{name}' here is a local binding that shadows \
+                             the imported module '{module}'. Rename one of them \
+                             (e.g. 'import {module} as ...') to reach the module."
                         ));
                     }
                 }

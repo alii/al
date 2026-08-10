@@ -218,7 +218,7 @@ reject_case! {
     /// The did-you-mean path in `compile_identifier`. The no-suggestion path is
     /// `unknown_identifier_is_error` above.
     unknown_identifier_suggests_close_name:
-        ("println = 1\nfoo = prntln\n", "Did you mean 'println'?"),
+        ("println = 1\nfoo = prntln\n", "Closest match: 'println'."),
 
     /// The tuple path. The constructor path emits a different message.
     refutable_tuple_destructuring_binding_is_error: (
@@ -336,7 +336,7 @@ fn ctor_spread_solves_type_params_before_lambda_args_are_hinted() {
 reject_case! {
     shadowing_fn_failed_field_access_names_the_shadowed_module: (
         "import scarlet/http\n\npub fn http() {\n    http.Unsized\n}\n",
-        "note: 'http' here is a local binding that shadows the imported module 'scarlet/http'",
+        "'http' here is a local binding that shadows the imported module 'scarlet/http'",
     ),
     fn_shadowing_import_qualifier_gets_decl_site_hint: (
         "import scarlet/http\n\npub fn http() {\n    http.Unsized\n}\n",
@@ -374,7 +374,7 @@ ok_case! {
 reject_case! {
     unknown_qualified_type_names_module_and_member: (
         "import scarlet/http\n\ntype C = http.Nope\n",
-        "Unknown type 'http.Nope' — check that 'http' is imported and exports a type 'Nope'",
+        "Unknown type 'http.Nope'. Import 'http' and verify it exports a type 'Nope'.",
     ),
     qualified_type_arity_error_uses_qualified_name: (
         "import scarlet/http\n\ntype C = http.Method(Int)\n",

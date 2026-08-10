@@ -60,7 +60,7 @@ impl crate::core_ir::emit::EmitCtx for Compiler {
 fn labels_of_variantless_type(tid: TypeId) -> ! {
     unreachable!(
         "internal compiler error: emit asked for labels of a type with no variants: {tid:?}. \
-         Please report this as a compiler bug."
+         Report this as a compiler bug."
     )
 }
 

@@ -63,7 +63,7 @@ fn idx16<T: TryInto<u16> + Copy + std::fmt::Debug>(i: T) -> u16 {
         Ok(v) => v,
         Err(_) => panic!(
             "internal compiler error: index immediate {i:?} exceeds u16. \
-             Please report this as a compiler bug."
+             Report this as a compiler bug."
         ),
     }
 }
@@ -76,7 +76,7 @@ fn idx16<T: TryInto<u16> + Copy + std::fmt::Debug>(i: T) -> u16 {
 #[cold]
 #[inline(never)]
 fn binding_bug(b: BindingId, why: &str) -> ! {
-    panic!("internal compiler error: {b} {why}. Please report this as a compiler bug.")
+    panic!("internal compiler error: {b} {why}. Report this as a compiler bug.")
 }
 
 /// Lower a whole typechecked module.
@@ -1098,7 +1098,7 @@ impl Lower {
             ArmFall::Join(j) => self.goto_join(j),
             ArmFall::Unreachable => panic!(
                 "internal compiler error: failure edge lowered for a match arm classified \
-                 infallible. Please report this as a compiler bug."
+                 infallible. Report this as a compiler bug."
             ),
         }
     }

@@ -955,7 +955,7 @@ impl Uses {
 fn unsupported_node(what: &str) -> ! {
     panic!(
         "internal compiler error: native backend reached unsupported {what}. \
-         Please report this as a compiler bug."
+         Report this as a compiler bug."
     )
 }
 
@@ -3256,7 +3256,7 @@ impl<'a> BodyGen<'a> {
 fn resume_walk_mismatch() -> ! {
     panic!(
         "internal compiler error: native backend call-site walk diverged from emit's \
-         recorded resume ips. Please report this as a compiler bug."
+         recorded resume ips. Report this as a compiler bug."
     )
 }
 
@@ -3267,7 +3267,7 @@ fn resume_walk_mismatch() -> ! {
 fn ctor_walk_mismatch() -> ! {
     panic!(
         "internal compiler error: native backend constructor-site walk diverged from \
-         the emitted construct headers. Please report this as a compiler bug."
+         the emitted construct headers. Report this as a compiler bug."
     )
 }
 

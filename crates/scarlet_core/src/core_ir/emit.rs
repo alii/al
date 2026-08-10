@@ -218,7 +218,7 @@ struct Emitter<'a, C: EmitCtx> {
 fn unbound_local(id: LocalId) -> ! {
     panic!(
         "internal compiler error: emit reached unbound local {id}. \
-         Please report this as a compiler bug."
+         Report this as a compiler bug."
     )
 }
 
@@ -231,7 +231,7 @@ fn unbound_local(id: LocalId) -> ! {
 fn unbound_join(id: JoinId) -> ! {
     panic!(
         "internal compiler error: emit reached goto to undeclared join {id}. \
-         Please report this as a compiler bug."
+         Report this as a compiler bug."
     )
 }
 
@@ -243,7 +243,7 @@ fn unbound_join(id: JoinId) -> ! {
 fn redeclared_join(id: JoinId) -> ! {
     panic!(
         "internal compiler error: emit declared join {id} twice on one path. \
-         Please report this as a compiler bug."
+         Report this as a compiler bug."
     )
 }
 
@@ -259,7 +259,7 @@ pub(super) fn imm_operand(op: Op, imm: Imm) -> i32 {
         (Op::IndexOr, Imm::None | Imm::Index(_) | Imm::Argc(_))
         | (_, Imm::Const(_) | Imm::PushedDefault) => panic!(
             "internal compiler error: {op:?} cannot carry immediate {imm:?}. \
-             Please report this as a compiler bug."
+             Report this as a compiler bug."
         ),
         (_, Imm::None) => 0,
         (_, Imm::Index(i)) => i32::from(i),

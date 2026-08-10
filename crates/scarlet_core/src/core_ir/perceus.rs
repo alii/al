@@ -646,7 +646,7 @@ fn set_diff(a: &Live, b: &Live) -> Vec<LocalId> {
 fn unscoped_goto(id: JoinId) -> ! {
     panic!(
         "internal compiler error: perceus reached goto to join {id} with no \
-         enclosing LetCont. Please report this as a compiler bug."
+         enclosing LetCont. Report this as a compiler bug."
     )
 }
 

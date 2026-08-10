@@ -715,7 +715,7 @@ fn cmd_upgrade(version: Option<String>) -> Result<(), String> {
             let v = v.trim().strip_prefix("al ").unwrap_or(v.trim());
             println!("Upgraded to {v}");
         }
-        _ => println!("Upgraded successfully!"),
+        _ => println!("Upgrade complete"),
     }
     Ok(())
 }

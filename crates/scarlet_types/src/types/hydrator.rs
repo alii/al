@@ -261,7 +261,7 @@ impl Hydrator {
                 name_span,
                 match &nt.qualifier {
                     Some(q) => format!(
-                        "Unknown type '{display}' — check that '{}' is imported and exports a type '{}'",
+                        "Unknown type '{display}'. Import '{}' and verify it exports a type '{}'.",
                         q.name, name
                     ),
                     None => format!("Unknown type '{}'", name),

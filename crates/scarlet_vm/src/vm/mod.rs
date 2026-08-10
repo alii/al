@@ -164,7 +164,7 @@ impl fmt::Display for VmError {
                 write!(f, "{what} index {idx} out of bounds (length {len})")
             }
             Self::Internal(s) => {
-                write!(f, "internal VM error (likely a compiler bug): {s}")
+                write!(f, "internal VM error (compiler bug): {s}")
             }
             Self::Io(e) => write!(f, "scheduler I/O failed: {e}"),
         }
