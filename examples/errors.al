@@ -76,7 +76,7 @@ bad = parse_score('abc')
 println('is_ok     ${result.is_ok(good)} ${result.is_ok(bad)}')
 println('is_err    ${result.is_err(good)} ${result.is_err(bad)}')
 println('map       ${show(result.map(good, fn(n) n * 2))}')
-println('unwrap    ${result.unwrap(good, 0)} ${result.unwrap(bad, 0)}')
+println('or        ${good or 0} ${bad or 0}')
 
 // then chains the *next* fallible step, short-circuiting on the first Err —
 // validate only ever sees a number that parsed.

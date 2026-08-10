@@ -12,7 +12,7 @@ parse     Err(NotANumber(abc))
 is_ok     True False
 is_err    False True
 map       Ok(84)
-unwrap    42 0
+or        42 0
 then      Ok(42)
 then      Err(NotANumber(900 out of range))
 then      Err(NotANumber(abc))

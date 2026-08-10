@@ -40,7 +40,7 @@ fn show(u Usd) String {
 // `parse` is the honest way to write a literal amount: it is exact, and it
 // fails on garbage instead of guessing.
 fn d(s String) Decimal {
-	result.unwrap(decimal.parse(s), decimal.from_int(0))
+	decimal.parse(s) or decimal.from_int(0)
 }
 
 // Multiply exactly — the scale grows to hold every digit — then round back to
@@ -55,10 +55,7 @@ fn tax(u Usd, rate Decimal) Usd {
 // first shares. Dividing and multiplying back would either lose or invent
 // money; this remainder-preserving allocation is the standard fix.
 fn split(total Usd, n Int) Array(Usd) {
-	base = result.unwrap(
-		decimal.div_with(amount(total), decimal.from_int(n), 2, Down),
-		decimal.from_int(0),
-	)
+	base = decimal.div_with(amount(total), decimal.from_int(n), 2, Down) or decimal.from_int(0)
 	leftover = decimal.units(decimal.sub(amount(total), decimal.mul(base, decimal.from_int(n))))
 	shares(base, leftover, n)
 }
@@ -151,7 +148,7 @@ println('')
 // Floats are the lossy boundary, and crossing it is explicit in both
 // directions. from_float can fail — the type is telling you this is an
 // approximation you have to accept.
-approx = result.unwrap(decimal.from_float(0.1 + 0.2, 2), zero)
+approx = decimal.from_float(0.1 + 0.2, 2) or zero
 println('to_float         ${decimal.to_float(d('19.99'))}')
 println('from_float       ${str(approx)}')
 println('from_float 20dp  ${result.is_err(decimal.from_float(1.5, 20))}')
@@ -159,7 +156,7 @@ println('')
 
 // div needs a target scale, because an exact quotient need not exist at any.
 // Both ways it can fail live in the error type instead of in a crash.
-third = result.unwrap(decimal.div(d('10'), d('3'), 4), zero)
+third = decimal.div(d('10'), d('3'), 4) or zero
 println('10 / 3 @ 4       ${str(third)}')
 
 match decimal.div(d('10'), zero, 2) {
