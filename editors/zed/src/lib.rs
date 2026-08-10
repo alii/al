@@ -21,8 +21,8 @@ impl zed::Extension for ScarletExtension {
             .and_then(|binary| binary.path.clone())
             .or_else(|| worktree.which("scarlet"))
             .ok_or_else(|| {
-                "scarlet binary not found on PATH; install it or set its location \
-                 via the `lsp.scarlet.binary.path` setting"
+                "The `scarlet` binary is not on PATH. Add it to PATH or set \
+                 `lsp.scarlet.binary.path` in Zed settings."
                     .to_string()
             })?;
 

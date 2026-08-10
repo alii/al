@@ -1,6 +1,6 @@
 id = "scarlet"
 name = "Scarlet"
-description = "Scarlet programming language support for Zed: diagnostics, completions, and formatting via the Scarlet language server"
+description = "Scarlet language support for Zed. Diagnostics, completions, and formatting from the Scarlet language server."
 version = "0.0.1"
 schema_version = 1
 authors = ["Alistair Smith <hi@alistair.sh>"]

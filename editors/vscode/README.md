@@ -2,17 +2,15 @@
 
 # Scarlet for Visual Studio Code
 
-Editor support for the [Scarlet programming language](https://scarlet.industries).
+[Scarlet](https://scarlet.industries) language support for Visual Studio Code.
 
-## Features
-
-- Syntax highlighting for `.scrl` files
-- Diagnostics, completions, and other language features via the Scarlet language server (`scarlet lsp`)
-- Document formatting via `scarlet fmt --stdin`
+- Syntax highlighting for `.scrl` files.
+- Diagnostics and completions from the Scarlet language server (`scarlet lsp`).
+- Document formatting through `scarlet fmt --stdin`.
 
 ## Requirements
 
-The `scarlet` binary must be installed and on your `PATH`. If it lives elsewhere, point the extension at it with the `scarlet.binaryPath` setting:
+The extension runs the `scarlet` binary from `PATH`. Set `scarlet.binaryPath` when the binary is elsewhere:
 
 ```json
 {
@@ -22,7 +20,7 @@ The `scarlet` binary must be installed and on your `PATH`. If it lives elsewhere
 
 ## Development
 
-Use [Bun](https://bun.sh) for package management and scripts:
+Bun manages packages and scripts.
 
 ```sh
 bun install

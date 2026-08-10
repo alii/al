@@ -1,7 +1,7 @@
 {
   "name": "scarlet-lang",
-  "displayName": "Scarlet Language Support",
-  "description": "Scarlet programming language support for Visual Studio Code: syntax highlighting, diagnostics, completions, and formatting via the Scarlet language server",
+  "displayName": "Scarlet",
+  "description": "Scarlet language support for Visual Studio Code. Syntax highlighting, diagnostics, completions, and formatting.",
   "version": "0.0.1",
   "publisher": "alistaiir",
   "author": {
