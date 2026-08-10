@@ -669,7 +669,7 @@ fn double(x Int) Int { x * 2 }\n";
 /// program's `NativeTable`.
 ///
 /// `must_native` names the functions the caller's parity claim rides on. Its
-/// table slot must be filled whenever `SCARLET_NATIVE` selected it; otherwise a
+/// table slot must be filled for every planned body; otherwise a
 /// coverage-gate rejection silently interprets the "native" run and the parity
 /// assertion compares the interpreter to itself.
 fn compile_native(src: &str, must_native: &[&str]) -> bytecode::Program {
@@ -720,7 +720,6 @@ fn compile_native(src: &str, must_native: &[&str]) -> bytecode::Program {
         // published entries outlive this scope (see vm::jit).
     }
 
-    let cfg = bytecode::native::config();
     for name in must_native {
         let pos = program
             .functions
@@ -728,16 +727,14 @@ fn compile_native(src: &str, must_native: &[&str]) -> bytecode::Program {
             .position(|f| &*f.name == *name)
             .unwrap_or_else(|| panic!("fn {name} in program"));
         let idx = scarlet::core_ir::FuncIdx::from_usize(pos);
-        if cfg.includes(idx) {
-            assert!(
-                program.native.get(idx).is_some(),
-                "SCARLET_NATIVE mode {:?} selected `{name}` but no native body was \
-                 published (coverage gate rejected it?); the native half of this \
-                 alloc-count parity test would silently interpret",
-                cfg.mode
-            );
-        }
+        assert!(
+            program.native.get(idx).is_some(),
+            "no native body was published for `{name}` (coverage gate rejected \
+             it?); the native half of this alloc-count parity test would \
+             silently interpret"
+        );
     }
+
     program
 }
 

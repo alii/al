@@ -217,6 +217,13 @@ impl VM {
             ($target:expr) => {{
                 // The frame the caller just pushed recorded this same answer;
                 // both must agree, so read it from the frame.
+                if !self.frame().native {
+                    // Interpreting it: count the call, so a body that turns
+                    // out to be hot gets compiled.
+                    self.program
+                        .native
+                        .note_interpreted_call(FuncIdx::from_usize($target as usize));
+                }
                 if self.frame().native {
                     let _ = $target;
                     // Hand the pushed frame to the trampoline; it re-enters

@@ -25,18 +25,6 @@ use scarlet::heap::ProcHeap;
 use scarlet::tivec::Idx as _;
 use scarlet::{bytecode, vm};
 
-/// Pin `SCARLET_NATIVE=native` before the process-wide config is first read, so
-/// these tests exercise the native backend whatever mode `cargo test`
-/// inherited. Every `#[test]` here calls this before compiling anything.
-fn pin_native_mode() {
-    static PIN: std::sync::Once = std::sync::Once::new();
-    PIN.call_once(|| {
-        // SAFETY: called before any env read of SCARLET_NATIVE in this process;
-        // all tests in this binary funnel through this `Once` first.
-        unsafe { std::env::set_var("SCARLET_NATIVE", "native") };
-    });
-}
-
 /// Serializes the balance tests so each alloc/free ledger is attributable to
 /// exactly one program. The counters are thread-local, so this is for
 /// diagnosability, not correctness.
@@ -46,7 +34,6 @@ static BALANCE_LOCK: Mutex<()> = Mutex::new(());
 /// entry: the in-process equivalent of `main.rs::publish_native`. Returns the
 /// program plus the names of the natively published functions.
 fn compile_with_backend(src: &str) -> (bytecode::Program, Vec<String>) {
-    pin_native_mode();
     let ast = common::parse(src);
     let plans: Rc<RefCell<Vec<clif::NativePlan>>> = Rc::default();
     let sink = Rc::clone(&plans);

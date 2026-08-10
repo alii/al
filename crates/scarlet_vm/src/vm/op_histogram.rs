@@ -14,13 +14,12 @@
 //! the dispatch loop head. Measure with
 //!
 //! ```text
-//! SCARLET_NATIVE=off ./target/release/al run …
+//! ./target/release/al run …
 //! ```
 //!
 //! Otherwise a JIT'd function reads 0.00% and every interpreted function's
 //! share is inflated by the missing denominator.
 
-use crate::bytecode::native::{self, NativeMode};
 use crate::bytecode::{Op, Program};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -81,26 +80,19 @@ fn threshold() -> u64 {
     }
 }
 
-/// Write both histograms to stderr, biggest share first. The header names the
-/// native mode because the sample's scope depends on it: under anything but
-/// `SCARLET_NATIVE=off` the missing bodies are exactly the hot ones.
+/// Write both histograms to stderr, biggest share first.
 fn dump_op_counts(program: &Program) {
     let total = TOTAL_OPS.load(Ordering::Relaxed).max(1);
-    let mode = native::config().mode;
     let mut out = String::new();
     out.push_str(&format!(
-        "\n=== op histogram ({} ops sampled, SCARLET_NATIVE={}) ===\n",
+        "\n=== op histogram ({} ops sampled) ===\n",
         TOTAL_OPS.load(Ordering::Relaxed),
-        mode_name(mode)
     ));
-    if mode != NativeMode::Off {
-        out.push_str(
-            "!!! INCOMPLETE SAMPLE: natively-compiled bodies bypass the dispatch\n\
-             !!! loop and are NOT counted — every share below is a share of\n\
-             !!! *interpreted* ops, not of Scarlet ops. Re-run with SCARLET_NATIVE=off\n\
-             !!! before comparing these numbers to an interpreter baseline.\n",
-        );
-    }
+    out.push_str(
+        "!!! INCOMPLETE SAMPLE: bodies that warmed to native bypass the\n\
+         !!! dispatch loop and are NOT counted — every share below is a share\n\
+         !!! of *interpreted* ops, not of Scarlet ops.\n",
+    );
 
     out.push_str("--- by function ---\n");
     let mut fns: Vec<(usize, u64)> = FN_COUNTS
@@ -151,16 +143,6 @@ fn dump_op_counts(program: &Program) {
     let mut err = std::io::stderr().lock();
     let _ = err.write_all(out.as_bytes());
     let _ = err.flush();
-}
-
-/// `SCARLET_NATIVE`'s spelling of the live mode, so the header quotes back a value
-/// an operator would set.
-fn mode_name(mode: NativeMode) -> &'static str {
-    match mode {
-        NativeMode::Off => "off",
-        NativeMode::Native => "native",
-        NativeMode::Mix => "mix",
-    }
 }
 
 /// Discriminant → mnemonic, recovered from the program's own code: every

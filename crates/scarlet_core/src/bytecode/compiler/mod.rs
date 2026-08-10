@@ -449,7 +449,7 @@ pub struct Compiler {
     pub(super) module_refs: ModuleReferences,
     check_only: bool,
     /// Whole-unit accounting for the native compile-at-load pass: how many
-    /// bodies the `SCARLET_NATIVE` mode selected and how long the native hook
+    /// bodies the native hook saw and how long it
     /// spent on them. Summarised against the 100ms unit budget (under
     /// `SCARLET_NATIVE_DEBUG`) when the compile hands back its `Emitted`.
     native_stats: super::native::UnitStats,
@@ -648,7 +648,7 @@ struct LoweredBody {
 /// Fires for declared function bodies and for the eta wrappers elaboration
 /// mints; never for module toplevels or `__main__` (always-interpreted glue,
 /// no `FuncIdx` of their own), and never under `check_only`. Every fire is
-/// additionally gated on the process-wide `SCARLET_NATIVE` mode
+/// fired for every lowered body
 /// ([`native::config`](super::native::config)): `off` suppresses the hook
 /// entirely, `native` (the default) fires for every body, and `mix` fires for
 /// a seeded per-function subset — so a backend never sees a body the mode
@@ -1082,13 +1082,6 @@ fn compile_impl(
 
     let mut c = new_compiler(base_dir, check_only);
     c.native_hook = native_hook;
-    // The SCARLET_NATIVE env contract is applied at program construction whether
-    // or not a backend hook was installed: `config()` reads the env exactly
-    // once process-wide (echoing the mix seed when `SCARLET_NATIVE_SEED` was set),
-    // and `off` drops the hook outright so no body can fire it.
-    if super::native::config().mode == super::native::NativeMode::Off {
-        c.native_hook = None;
-    }
     if let Some(m) = as_module.clone() {
         // `as_module` is always a stdlib path (see `check_as_module`), whose
         // written form is its canonical identity.
@@ -4435,11 +4428,10 @@ impl Compiler {
             // is the `FuncIdx` their reservation in `Self::elaborate` fixed.
             // Guarded on `check_only` here (unlike `elaborate_body`, which
             // returned before its hook) because a check still materializes
-            // wrappers. Gated on the `SCARLET_NATIVE` mode like every hook fire.
+            // wrappers.
             let wrapper_idx = crate::core_ir::FuncIdx::from_usize(base + i);
             if !self.check_only
                 && let Some(hook) = self.native_hook.as_mut()
-                && super::native::config().includes(wrapper_idx)
             {
                 let native_t0 = std::time::Instant::now();
                 hook(wrapper_idx, &w, pool);
@@ -4503,11 +4495,9 @@ impl Compiler {
         // The native-backend seam: this body's `RTy`s index `pool`, which dies
         // with this call — see [`NativeHook`]. Post-perceus, so the hook sees
         // the same Core IR (Drops, reuse tokens and all) that `emit` consumes.
-        // Gated on the `SCARLET_NATIVE` mode (off/native/mix); the hook time feeds
+        // The hook time feeds
         // the whole-unit budget summary.
-        if let Some(hook) = self.native_hook.as_mut()
-            && super::native::config().includes(func_idx)
-        {
+        if let Some(hook) = self.native_hook.as_mut() {
             let native_t0 = std::time::Instant::now();
             hook(func_idx, &core, &pool);
             self.native_stats.record(native_t0.elapsed());

@@ -379,7 +379,11 @@ fn cmd_run(args: RunArgs) {
     let Some(emitted) = result.emitted else {
         die("nothing to run: the compile produced no program");
     };
-    publish_native(plans.take(), &emitted.program, &emitted.frame_layouts);
+    publish_native(
+        plans.take(),
+        &emitted.program,
+        emitted.frame_layouts.clone(),
+    );
 
     let mut argv = Vec::with_capacity(args.args.len() + 1);
     argv.push(args.entrypoint.clone());
@@ -393,79 +397,117 @@ fn cmd_run(args: RunArgs) {
     }
 }
 
-/// JIT every hook-captured plan into one immortal module and publish the
-/// entries into the program's [`NativeTable`](bytecode::NativeTable). Any
-/// failure leaves slots empty and falls back to the bytecode, printing only
-/// under `SCARLET_NATIVE_DEBUG` so a default run's stderr stays empty.
+/// Park the hook-captured plans behind the program's
+/// [`NativeTable`](bytecode::NativeTable), so a body is compiled the first time
+/// it has been interpreted `WARM_CALLS` times.
+///
+/// Nothing is compiled here. Compiling every body costs ~0.7ms each, which a
+/// short-lived program should not pay for code it never runs; a hot body
+/// crosses the threshold within its first few calls.
 fn publish_native(
     plans: Vec<clif::NativePlan>,
     program: &bytecode::Program,
-    layouts: &std::collections::HashMap<scarlet_vm::FuncIdx, scarlet::core_ir::emit::FrameLayout>,
+    layouts: std::collections::HashMap<scarlet_vm::FuncIdx, scarlet::core_ir::emit::FrameLayout>,
 ) {
-    use scarlet::tivec::Idx as _;
     if plans.is_empty() {
         return;
     }
-    let t0 = std::time::Instant::now();
-    // No degraded mode: every body compiles, so a failure here is a compiler
-    // bug. Reporting it beats shipping a build that silently interprets.
-    let mut module = match vm::jit::jit_module() {
+    let module = match vm::jit::jit_module() {
         Ok(m) => m,
         Err(e) => die(format!("native backend unavailable: {e}")),
     };
-    let mut defs = Vec::with_capacity(plans.len());
-    for plan in &plans {
-        let Some(layout) = layouts.get(&plan.func_idx) else {
-            die(format!(
-                "no frame layout recorded for fn#{}",
-                plan.func_idx.index()
-            ));
-        };
-        let body = match clif::compile(&mut module, plan, program, layout) {
-            Ok(body) => body,
-            Err(e) => die(format!("native compile failed: {e}")),
-        };
-        let name = program
-            .functions
-            .get(body.func_idx.index())
-            .map(|f| f.name.to_string())
-            .unwrap_or_default();
-        defs.push(vm::jit::JitDef {
-            fn_idx: body.func_idx,
-            func_id: body.func_id,
-            name,
-            code_size: body.code_size,
-        });
+    install_lazy_compiler(module, plans, program, layouts);
+}
+
+/// Park the plans and hand the table a compiler, so a body is compiled the
+/// first time it proves hot.
+///
+/// The state is behind a `Mutex` because schedulers run on their own threads
+/// and any of them can be the one to warm a body. Contention is not a concern:
+/// a body is compiled at most once, and the lock is held only for that.
+fn install_lazy_compiler(
+    module: vm::jit::JitModule,
+    plans: Vec<clif::NativePlan>,
+    program: &bytecode::Program,
+    layouts: std::collections::HashMap<scarlet_vm::FuncIdx, scarlet::core_ir::emit::FrameLayout>,
+) {
+    use scarlet::tivec::Idx as _;
+    use std::sync::{Arc, Mutex};
+
+    struct Pending {
+        module: vm::jit::JitModule,
+        plans: std::collections::HashMap<scarlet_vm::FuncIdx, clif::NativePlan>,
+        layouts:
+            std::collections::HashMap<scarlet_vm::FuncIdx, scarlet::core_ir::emit::FrameLayout>,
     }
-    if let Err(e) = vm::jit::finalize_into(&mut module, &defs, &program.native) {
-        die(format!("native finalize failed: {e}"));
-    }
-    // Everything the mode selected must now have an entry. A gap would mean a
-    // body quietly ran interpreted, which is exactly the degraded mode this
-    // path no longer has.
-    for plan in &plans {
-        if program.native.get(plan.func_idx).is_none() {
-            let name = program
-                .functions
-                .get(plan.func_idx.index())
-                .map(|f| f.name.to_string())
-                .unwrap_or_default();
-            die(format!(
-                "native entry missing for fn#{} {name}",
-                plan.func_idx.index()
-            ));
+
+    let by_idx = plans.into_iter().map(|p| (p.func_idx, p)).collect();
+    let pending = Arc::new(Mutex::new(Pending {
+        module,
+        plans: by_idx,
+        layouts,
+    }));
+    // The program the compiled code is compiled against. Its `native` table is
+    // shared with every scheduler's clone, so publishing here is visible to
+    // all of them.
+    let prog = program.clone();
+    let table = program.native.clone();
+    let compile = move |idx: scarlet_vm::FuncIdx| {
+        let Ok(mut st) = pending.lock() else {
+            return;
+        };
+        // Another scheduler may have won the race and already published it.
+        let Some(plan) = st.plans.remove(&idx) else {
+            return;
+        };
+        let t0 = std::time::Instant::now();
+        let st = &mut *st;
+        let def = compile_one(&mut st.module, &plan, &prog, &st.layouts);
+        if let Err(e) = vm::jit::finalize_into(&mut st.module, &[def], &table) {
+            die(format!("native finalize failed: {e}"));
         }
+        if bytecode::native::debug() {
+            eprintln!(
+                "al-native: warmed fn#{} in {:.2}ms",
+                idx.index(),
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    };
+    // SAFETY-adjacent: the table is shared by `Arc`, so the compiler must be
+    // installed before any process runs.
+    program.native.set_compiler(Arc::new(compile));
+}
+
+/// Compile one planned body into `module`, or stop the run.
+fn compile_one(
+    module: &mut vm::jit::JitModule,
+    plan: &clif::NativePlan,
+    program: &bytecode::Program,
+    layouts: &std::collections::HashMap<scarlet_vm::FuncIdx, scarlet::core_ir::emit::FrameLayout>,
+) -> vm::jit::JitDef {
+    use scarlet::tivec::Idx as _;
+    let Some(layout) = layouts.get(&plan.func_idx) else {
+        die(format!(
+            "no frame layout recorded for fn#{}",
+            plan.func_idx.index()
+        ));
+    };
+    let body = match clif::compile(module, plan, program, layout) {
+        Ok(body) => body,
+        Err(e) => die(format!("native compile failed: {e}")),
+    };
+    let name = program
+        .functions
+        .get(body.func_idx.index())
+        .map(|f| f.name.to_string())
+        .unwrap_or_default();
+    vm::jit::JitDef {
+        fn_idx: body.func_idx,
+        func_id: body.func_id,
+        name,
+        code_size: body.code_size,
     }
-    if bytecode::native::debug() {
-        let ms = t0.elapsed().as_secs_f64() * 1000.0;
-        eprintln!(
-            "al-native: jit {} of {} planned bodies in {ms:.2}ms",
-            defs.len(),
-            plans.len(),
-        );
-    }
-    // Dropping the module keeps the executable mapping alive (see vm::jit), so
-    // the published entries stay valid forever.
 }
 
 fn cmd_fmt(args: FmtArgs) {

@@ -1,8 +1,15 @@
-//! The native (Cranelift) backend's contract, pinned against the interpreter
-//! as a differential oracle: every test runs one program under
-//! `SCARLET_NATIVE=off` and `SCARLET_NATIVE=native` and demands identical output. The
-//! env vars are set per child, so the mode `cargo test` inherited is
-//! irrelevant.
+//! The native (Cranelift) backend's contract, pinned against the language's
+//! intended semantics rather than against a second engine: every test runs a
+//! program once — under the one production configuration, lazy warmup and all —
+//! and asserts the exact bytes it must print. The fuzz test's expected output
+//! is computed in Rust by the generator itself (wrapping i64, `x/0 = 0`,
+//! `x%0 = x`), so a miscompile fails against ground truth even if it is
+//! consistent.
+//!
+//! Warmup is part of the contract: a body compiles after
+//! `NativeTable::WARM_CALLS` interpreted calls, so each scenario is built to
+//! cross that threshold mid-run — the interp→native boundary (and the return
+//! path back across it) is exercised by construction, not by a mode switch.
 
 mod common;
 
@@ -35,69 +42,47 @@ fn run_al_env(args: &[&str], envs: &[(&str, &str)]) -> AlOutput {
     }
 }
 
-/// Run `src` under one SCARLET_NATIVE mode. `schedulers` pins SCARLET_SCHEDULERS when
-/// the test's scheduling shape matters.
-fn run_mode(
-    proj: &Project,
-    name: &str,
-    src: &str,
-    mode: &str,
-    schedulers: Option<u32>,
-) -> AlOutput {
+/// Run `src` once. `schedulers` pins SCARLET_SCHEDULERS when the test's
+/// scheduling shape matters.
+fn run(proj: &Project, name: &str, src: &str, schedulers: Option<u32>) -> AlOutput {
     let path = proj.dir.join(name);
     std::fs::write(&path, src).unwrap();
     let path = path.to_string_lossy().into_owned();
     let scheds = schedulers.map(|n| n.to_string());
-    let mut envs: Vec<(&str, &str)> = vec![("SCARLET_NATIVE", mode)];
+    let mut envs: Vec<(&str, &str)> = Vec::new();
     if let Some(s) = scheds.as_deref() {
         envs.push(("SCARLET_SCHEDULERS", s));
     }
     run_al_env(&["run", &path], &envs)
 }
 
-/// The oracle: same stdout, same exit code, empty stderr in both modes.
-/// Returns the shared stdout for follow-up assertions.
-fn assert_parity(tag: &str, src: &str, schedulers: Option<u32>) -> String {
+/// One run must succeed, keep stderr empty, and print exactly `expected`.
+fn assert_prints(tag: &str, src: &str, schedulers: Option<u32>, expected: &str) {
     let proj = Project::new(tag);
-    let off = run_mode(&proj, "prog.scrl", src, "off", schedulers);
-    let native = run_mode(&proj, "prog.scrl", src, "native", schedulers);
-    let dump = |m: &str, o: &AlOutput| {
-        format!(
-            "--- {m}: exit {:?} ---\n--- stdout ---\n{}--- stderr ---\n{}",
-            o.code, o.stdout, o.stderr
-        )
-    };
+    let out = run(&proj, "prog.scrl", src, schedulers);
     assert!(
-        off.success,
-        "[{tag}] interpreter run failed:\n{src}\n{}",
-        dump("off", &off)
+        out.success,
+        "[{tag}] run failed (exit {:?}) for:\n{src}\n--- stdout ---\n{}--- stderr ---\n{}",
+        out.code, out.stdout, out.stderr
     );
     assert!(
-        native.success,
-        "[{tag}] native run failed:\n{src}\n{}",
-        dump("native", &native)
-    );
-    assert!(
-        off.stderr.is_empty() && native.stderr.is_empty(),
-        "[{tag}] stderr must stay empty by default:\n{}\n{}",
-        dump("off", &off),
-        dump("native", &native)
+        out.stderr.is_empty(),
+        "[{tag}] stderr must stay empty by default:\n{}",
+        out.stderr
     );
     assert_eq!(
-        off.stdout,
-        native.stdout,
-        "[{tag}] native output diverged from the interpreter for:\n{src}\n{}\n{}",
-        dump("off", &off),
-        dump("native", &native)
+        out.stdout, expected,
+        "[{tag}] wrong output for:\n{src}\n--- stdout ---\n{}",
+        out.stdout
     );
-    off.stdout
 }
 
-/// (a) interp -> native -> interp -> native sandwich. `outer`/`leaf` are
-/// Int-only so they compile; `middle` builds an array so it must interpret.
-/// The chain crosses the boundary in both directions twice.
+/// (a) interp -> native -> interp sandwich. `leaf`'s recursion crosses the
+/// warmth threshold mid-run (leaf(8) alone is 8 calls), so later `leaf`
+/// frames run native while `middle`/`outer` stay interpreted: the boundary is
+/// crossed in both directions inside one program.
 #[test]
-fn sandwich_interp_native_interp_returns_correct_results() {
+fn sandwich_crosses_the_warmup_boundary_mid_run() {
     let src = "import scarlet/array
 
 fn leaf(n Int) Int {
@@ -116,39 +101,45 @@ fn outer(n Int) Int {
 println(outer(6))
 ";
     // leaf(8) + leaf(6) + leaf(9) = 40320 + 720 + 362880
-    let out = assert_parity("sandwich", src, None);
-    assert_eq!(out, "403920\n");
+    assert_prints("sandwich", src, None, "403920\n");
 }
 
-/// (b) a native caller whose interpreted callee parks. The suspension must
-/// unwind through `caller`'s native frame, and the resume must find `x` —
-/// bound before the parking call, used after it — intact in its frame slot.
+/// (b) a native caller whose interpreted callee parks. `caller` warms over
+/// the first 16 iterations; `pause` is reached only on the last 4, so by then
+/// a *native* `caller` frame sits under an interpreted callee that parks on a
+/// timer. The suspension must unwind through the native frame and the resume
+/// must find `x` — bound before the parking call, used after it — intact.
 #[test]
 fn native_caller_parks_and_resumes_through_interpreted_callee() {
     let src = "import scarlet/scheduler
 
 fn pause(n Int) Int {
-\tscheduler.sleep(30)
+\tscheduler.sleep(1)
 \tn + 1
 }
 
-fn caller(a Int, b Int) Int {
-\tx = a * 1000 + b
-\ty = pause(x)
-\tx + y + a
+fn caller(i Int) Int {
+\tx = i * 1000 + 7
+\ty = if i <= 4 { pause(x) } else { x + 1 }
+\tx + y + i
 }
 
-println(caller(4, 321))
+fn drive(i Int, acc Int) Int {
+\tif i == 0 { acc } else { drive(i - 1, acc + caller(i)) }
+}
+
+println(drive(24, 0))
 ";
-    // x = 4321, y = 4322, + 4
-    let out = assert_parity("native_park", src, Some(1));
-    assert_eq!(out, "8647\n");
+    // caller(i) = 2*(1000i + 7) + 1 + i = 2001i + 15;
+    // sum over i = 1..=24: 2001*300 + 15*24 = 600660.
+    assert_prints("native_park", src, Some(1), "600660\n");
 }
 
 /// (c) scheduling fairness. One scheduler; a self-tail spinner and a printer.
-/// The compiled loop back-edge must checkpoint reductions like the
-/// interpreter's TailCallSelf, or the spinner starves the sibling and the
-/// output order inverts.
+/// `kick` warms `spin` past the threshold with plain calls, so the 20M-step
+/// loop runs native — and its compiled back-edge must checkpoint reductions
+/// like the interpreter's TailCallSelf, or the spinner starves the sibling
+/// and the output order inverts.
 #[test]
 fn fairness_native_self_tail_loop_yields_to_sibling() {
     let src = "import scarlet/scheduler
@@ -157,25 +148,30 @@ fn spin(n Int, acc Int) Int {
 \tif n == 0 { acc } else { spin(n - 1, acc + 1) }
 }
 
+fn kick(n Int) Int {
+\tif n == 0 { 0 } else { spin(1, 0) + kick(n - 1) }
+}
+
 scheduler.spawn_local(fn() {
-\tprintln(spin(20000000, 0))
+\tprintln(kick(10) + spin(20000000, 0))
 })
 scheduler.spawn_local(fn() {
 \tprintln('sibling progressed')
 })
 ";
-    let out = assert_parity("native_fairness", src, Some(1));
-    assert_eq!(
-        out, "sibling progressed\n20000000\n",
-        "the spinner must yield at reduction checkpoints, letting the sibling run first"
+    assert_prints(
+        "native_fairness",
+        src,
+        Some(1),
+        "sibling progressed\n20000010\n",
     );
 }
 
-/// (d) Int overflow spill parity past ±2^47, where Ints leave the NaN-box
-/// payload, and at the i64 wrap. The expected strings are pinned literally so
-/// both modes are held to the semantics, not just to each other.
+/// (d) Int overflow spill past ±2^47, where Ints leave the NaN-box payload,
+/// and at the i64 wrap. The recursion warms both functions mid-run, so the
+/// pinned literals hold across the interp→native switch.
 #[test]
-fn int_overflow_spill_is_identical_native_vs_off() {
+fn int_overflow_spill_prints_pinned_values() {
     let src = "fn fact(n Int, acc Int) Int {
 \tif n < 2 { acc } else { fact(n - 1, acc * n) }
 }
@@ -192,16 +188,17 @@ println(140737488355327 + 1)
 println({0 - 140737488355328} - 1)
 println(12345678901 * 987654321)
 ";
-    let out = assert_parity("native_spill", src, None);
-    assert_eq!(
-        out,
+    assert_prints(
+        "native_spill",
+        src,
+        None,
         "2432902008176640000\n\
          -8764578968847253504\n\
          2880067194370816120\n\
          3736710778780434371\n\
          140737488355328\n\
          -140737488355329\n\
-         -6253480961458370395\n"
+         -6253480961458370395\n",
     );
 }
 
@@ -238,6 +235,25 @@ const BOUNDARY: [i64; 8] = [
     999999937,
 ];
 
+// The intended Int semantics, in Rust: two's-complement wrap, total div/mod.
+// These are the ground truth the generated programs are checked against.
+
+fn wadd(a: i64, b: i64) -> i64 {
+    a.wrapping_add(b)
+}
+fn wsub(a: i64, b: i64) -> i64 {
+    a.wrapping_sub(b)
+}
+fn wmul(a: i64, b: i64) -> i64 {
+    a.wrapping_mul(b)
+}
+fn sdiv(a: i64, b: i64) -> i64 {
+    if b == 0 { 0 } else { a.wrapping_div(b) }
+}
+fn smod(a: i64, b: i64) -> i64 {
+    if b == 0 { a } else { a.wrapping_rem(b) }
+}
+
 /// Render an Int literal as an operand. Negatives become `{0 - n}` so they
 /// slot into any position regardless of unary-minus precedence.
 fn lit(v: i64) -> String {
@@ -248,15 +264,258 @@ fn lit(v: i64) -> String {
     }
 }
 
-/// A random operand: a live temp, a parameter, or a constant.
-fn operand(r: &mut Rng, temps: usize) -> String {
-    match r.below(4) {
-        0 if temps > 0 => format!("t{}", r.below(temps as u64)),
-        1 => lit(BOUNDARY[r.below(BOUNDARY.len() as u64) as usize]),
-        2 => "a".to_string(),
-        3 => "b".to_string(),
-        _ => lit(r.below(199) as i64 - 99),
+/// One generated expression: enough of the language to exercise arithmetic
+/// at the boundary constants, control flow, enum construction/dispatch,
+/// closures, reuse loops and cross-function calls — with an [`Expr::eval`]
+/// giving its intended value.
+enum Expr {
+    Lit(i64),
+    Temp(usize),
+    A,
+    B,
+    /// `{ l } op { r }` over `+ - * / %`.
+    Bin(usize, Box<Expr>, Box<Expr>),
+    /// `if l cmp r { t } else { e }` over `< <= > >= == !=`.
+    IfCmp(usize, Box<Expr>, Box<Expr>, Box<Expr>, Box<Expr>),
+    /// `match s % 3 { 0 -> a0  1 -> a1  _ -> aw }`.
+    Mod3(Box<Expr>, Box<Expr>, Box<Expr>, Box<Expr>),
+    /// `match mk_pick(k, x, y) { One(x) -> x + p  Two(x, y) -> x * y - q  Zero -> z }`.
+    PickMatch {
+        k: Box<Expr>,
+        x: Box<Expr>,
+        y: Box<Expr>,
+        p: Box<Expr>,
+        q: Box<Expr>,
+        z: Box<Expr>,
+    },
+    /// `g = fn(x Int) x * { m } + c` called at `a1` and `a2`, summed.
+    Closure {
+        m: Box<Expr>,
+        c: i64,
+        a1: Box<Expr>,
+        a2: Box<Expr>,
+    },
+    /// `spin_reuse(n, acc, s)` — see the preamble.
+    SpinReuse {
+        n: u64,
+        acc: Box<Expr>,
+        s: Box<Expr>,
+    },
+    /// `chain_sum(chain_map(chain_build(n, x), fn(x Int) x * m + { c }))`.
+    ChainPipe {
+        n: u64,
+        x: Box<Expr>,
+        m: u64,
+        c: Box<Expr>,
+    },
+    /// `pick_val(mk_pick(k, x, y), d)` — see the preamble.
+    PickVal {
+        k: Box<Expr>,
+        x: Box<Expr>,
+        y: Box<Expr>,
+        d: Box<Expr>,
+    },
+    /// `spin_step(mk_pick(k, x, y), n, acc)` — see the preamble.
+    SpinStep {
+        k: Box<Expr>,
+        x: Box<Expr>,
+        y: Box<Expr>,
+        n: u64,
+        acc: Box<Expr>,
+    },
+    /// `f{idx}(a, b)` — a call to an earlier generated function.
+    Call(usize, Box<Expr>, Box<Expr>),
+}
+
+const BIN_OPS: [&str; 5] = ["+", "-", "*", "/", "%"];
+const CMP_OPS: [&str; 6] = ["<", "<=", ">", ">=", "==", "!="];
+
+impl Expr {
+    fn render(&self) -> String {
+        match self {
+            Expr::Lit(v) => lit(*v),
+            Expr::Temp(t) => format!("t{t}"),
+            Expr::A => "a".into(),
+            Expr::B => "b".into(),
+            Expr::Bin(op, l, r) => {
+                format!("{{ {} }} {} {{ {} }}", l.render(), BIN_OPS[*op], r.render())
+            }
+            Expr::IfCmp(c, l, r, t, e) => format!(
+                "if {} {} {} {{ {} }} else {{ {} }}",
+                l.render(),
+                CMP_OPS[*c],
+                r.render(),
+                t.render(),
+                e.render()
+            ),
+            Expr::Mod3(s, a0, a1, aw) => format!(
+                "match {} % 3 {{\n\t\t0 -> {}\n\t\t1 -> {}\n\t\t_ -> {}\n\t}}",
+                s.render(),
+                a0.render(),
+                a1.render(),
+                aw.render()
+            ),
+            Expr::PickMatch { k, x, y, p, q, z } => format!(
+                "match mk_pick({}, {}, {}) {{\n\
+                 \t\tOne(x) -> x + {}\n\
+                 \t\tTwo(x, y) -> x * y - {}\n\
+                 \t\tZero -> {}\n\
+                 \t}}",
+                k.render(),
+                x.render(),
+                y.render(),
+                p.render(),
+                q.render(),
+                z.render()
+            ),
+            Expr::Closure { m, c, a1, a2 } => format!(
+                "{{\n\t\tg = fn(x Int) x * {{ {} }} + {}\n\t\tg({}) + g({})\n\t}}",
+                m.render(),
+                lit(*c),
+                a1.render(),
+                a2.render()
+            ),
+            Expr::SpinReuse { n, acc, s } => {
+                format!("spin_reuse({n}, {}, {})", acc.render(), s.render())
+            }
+            Expr::ChainPipe { n, x, m, c } => format!(
+                "chain_sum(chain_map(chain_build({n}, {}), fn(x Int) x * {m} + {{ {} }}))",
+                x.render(),
+                c.render()
+            ),
+            Expr::PickVal { k, x, y, d } => format!(
+                "pick_val(mk_pick({}, {}, {}), {})",
+                k.render(),
+                x.render(),
+                y.render(),
+                d.render()
+            ),
+            Expr::SpinStep { k, x, y, n, acc } => format!(
+                "spin_step(mk_pick({}, {}, {}), {n}, {})",
+                k.render(),
+                x.render(),
+                y.render(),
+                acc.render()
+            ),
+            Expr::Call(f, a, b) => format!("f{f}({}, {})", a.render(), b.render()),
+        }
     }
+
+    /// The intended value, mirroring the preamble functions exactly.
+    fn eval(&self, a: i64, b: i64, temps: &[i64], fns: &[Vec<Expr>]) -> i64 {
+        let ev = |e: &Expr| e.eval(a, b, temps, fns);
+        match self {
+            Expr::Lit(v) => *v,
+            Expr::Temp(t) => temps[*t],
+            Expr::A => a,
+            Expr::B => b,
+            Expr::Bin(op, l, r) => {
+                let (l, r) = (ev(l), ev(r));
+                match op {
+                    0 => wadd(l, r),
+                    1 => wsub(l, r),
+                    2 => wmul(l, r),
+                    3 => sdiv(l, r),
+                    _ => smod(l, r),
+                }
+            }
+            Expr::IfCmp(c, l, r, t, e) => {
+                let (l, r) = (ev(l), ev(r));
+                let cond = match c {
+                    0 => l < r,
+                    1 => l <= r,
+                    2 => l > r,
+                    3 => l >= r,
+                    4 => l == r,
+                    _ => l != r,
+                };
+                if cond { ev(t) } else { ev(e) }
+            }
+            Expr::Mod3(s, a0, a1, aw) => match smod(ev(s), 3) {
+                0 => ev(a0),
+                1 => ev(a1),
+                _ => ev(aw),
+            },
+            Expr::PickMatch { k, x, y, p, q, z } => match smod(ev(k), 3) {
+                0 => wadd(ev(x), ev(p)),
+                1 => wsub(wmul(ev(x), ev(y)), ev(q)),
+                _ => ev(z),
+            },
+            Expr::Closure { m, c, a1, a2 } => {
+                let m = ev(m);
+                let g = |x: i64| wadd(wmul(x, m), *c);
+                wadd(g(ev(a1)), g(ev(a2)))
+            }
+            Expr::SpinReuse { n, acc, s } => {
+                let s = ev(s);
+                let mut acc = ev(acc);
+                let mut i = *n as i64;
+                while i > 0 {
+                    // p = Two(i + s, i * 3); pick_val(p, s) = (i + s) * 2 + i * 3
+                    acc = wadd(acc, wadd(wmul(wadd(i, s), 2), wmul(i, 3)));
+                    i -= 1;
+                }
+                acc
+            }
+            Expr::ChainPipe { n, x, m, c } => {
+                let (x, c) = (ev(x), ev(c));
+                let mut sum = 0i64;
+                for i in 1..=*n as i64 {
+                    // chain_build's element x + i, mapped through x*m + c.
+                    sum = wadd(sum, wadd(wmul(wadd(x, i), *m as i64), c));
+                }
+                sum
+            }
+            Expr::PickVal { k, x, y, d } => match smod(ev(k), 3) {
+                0 => wadd(ev(x), 1),
+                1 => wadd(wmul(ev(x), 2), ev(y)),
+                _ => ev(d),
+            },
+            Expr::SpinStep { k, x, y, n, acc } => {
+                let mut n = *n as i64;
+                let mut acc = ev(acc);
+                match smod(ev(k), 3) {
+                    0 => {
+                        // One(x): acc += x, x += 1 per step; ends acc + x.
+                        let mut x = ev(x);
+                        while n > 0 {
+                            acc = wadd(acc, x);
+                            x = wadd(x, 1);
+                            n -= 1;
+                        }
+                        wadd(acc, x)
+                    }
+                    1 => {
+                        // Two(x, y): acc += y, (x, y) = (y, x + 1); ends
+                        // acc + x + y.
+                        let (mut x, mut y) = (ev(x), ev(y));
+                        while n > 0 {
+                            acc = wadd(acc, y);
+                            let nx = y;
+                            y = wadd(x, 1);
+                            x = nx;
+                            n -= 1;
+                        }
+                        wadd(wadd(acc, x), y)
+                    }
+                    _ => acc,
+                }
+            }
+            Expr::Call(f, ca, cb) => eval_fn(fns, *f, ev(ca), ev(cb)),
+        }
+    }
+}
+
+/// Evaluate generated `f{idx}(a, b)`: each statement binds the next temp, and
+/// the body returns every temp plus both params, summed left to right.
+fn eval_fn(fns: &[Vec<Expr>], idx: usize, a: i64, b: i64) -> i64 {
+    let mut temps: Vec<i64> = Vec::with_capacity(fns[idx].len());
+    for e in &fns[idx] {
+        let v = e.eval(a, b, &temps, fns);
+        temps.push(v);
+    }
+    let sum = temps.iter().fold(0i64, |s, v| wadd(s, *v));
+    wadd(wadd(sum, a), b)
 }
 
 /// Shared preamble for every fuzz program: helpers covering the heap shapes
@@ -333,168 +592,175 @@ fn small_count(r: &mut Rng) -> u64 {
     1 + r.below(24)
 }
 
+fn small_lit(r: &mut Rng) -> i64 {
+    r.below(199) as i64 - 99
+}
+
+/// A random operand: a live temp, a parameter, or a constant.
+fn operand(r: &mut Rng, temps: usize) -> Expr {
+    match r.below(4) {
+        0 if temps > 0 => Expr::Temp(r.below(temps as u64) as usize),
+        1 => Expr::Lit(BOUNDARY[r.below(BOUNDARY.len() as u64) as usize]),
+        2 => Expr::A,
+        3 => Expr::B,
+        _ => Expr::Lit(small_lit(r)),
+    }
+}
+
 /// One generated function: a chain of let-bound statements over Int
 /// operands. Division and modulo need no guard — they are total in Scarlet
 /// (x/0=0, x%0=x). Every temp and both params fold into the returned sum,
-/// since Scarlet errors on unused bindings, and each function past the first opens
-/// with a call to its predecessor.
-fn gen_fn(r: &mut Rng, idx: usize) -> String {
-    let mut body = String::new();
+/// since Scarlet errors on unused bindings, and each function past the first
+/// opens with a call to its predecessor.
+fn gen_fn(r: &mut Rng, idx: usize) -> Vec<Expr> {
     let stmts = 4 + r.below(7) as usize;
+    let mut body = Vec::with_capacity(stmts);
     for t in 0..stmts {
-        let rhs = match r.below(12) {
-            _ if t == 0 && idx > 0 => format!("f{}(a, b)", idx - 1),
-            0..=3 => {
-                let op = ["+", "-", "*", "/", "%"][r.below(5) as usize];
-                format!("{{ {} }} {op} {{ {} }}", operand(r, t), operand(r, t))
-            }
-            4 => {
-                let cmp = ["<", "<=", ">", ">=", "==", "!="][r.below(6) as usize];
-                format!(
-                    "if {} {cmp} {} {{ {} }} else {{ {} }}",
-                    operand(r, t),
-                    operand(r, t),
-                    operand(r, t),
-                    operand(r, t)
-                )
-            }
-            5 => format!(
-                "match {} % 3 {{\n\t\t0 -> {}\n\t\t1 -> {}\n\t\t_ -> {}\n\t}}",
-                operand(r, t),
-                operand(r, t),
-                operand(r, t),
-                operand(r, t)
-            ),
+        let o = |r: &mut Rng| Box::new(operand(r, t));
+        let e = match r.below(12) {
+            _ if t == 0 && idx > 0 => Expr::Call(idx - 1, Box::new(Expr::A), Box::new(Expr::B)),
+            0..=3 => Expr::Bin(r.below(5) as usize, o(r), o(r)),
+            4 => Expr::IfCmp(r.below(6) as usize, o(r), o(r), o(r), o(r)),
+            5 => Expr::Mod3(o(r), o(r), o(r), o(r)),
             // Enum ctor at a runtime-selected variant, consumed by an
             // exhaustive match with payload binds.
-            6 => format!(
-                "match mk_pick({}, {}, {}) {{\n\
-                 \t\tOne(x) -> x + {}\n\
-                 \t\tTwo(x, y) -> x * y - {}\n\
-                 \t\tZero -> {}\n\
-                 \t}}",
-                operand(r, t),
-                operand(r, t),
-                operand(r, t),
-                operand(r, t),
-                operand(r, t),
-                operand(r, t)
-            ),
+            6 => Expr::PickMatch {
+                k: o(r),
+                x: o(r),
+                y: o(r),
+                p: o(r),
+                q: o(r),
+                z: o(r),
+            },
             // A closure over surrounding locals, called twice dynamically.
-            7 => format!(
-                "{{\n\t\tg = fn(x Int) x * {{ {} }} + {}\n\t\tg({}) + g({})\n\t}}",
-                operand(r, t),
-                lit(r.below(199) as i64 - 99),
-                operand(r, t),
-                operand(r, t)
-            ),
+            7 => Expr::Closure {
+                m: o(r),
+                c: small_lit(r),
+                a1: o(r),
+                a2: o(r),
+            },
             // Loop-carried reuse across spin_reuse's self-tail back-edge.
-            8 => format!(
-                "spin_reuse({}, {}, {})",
-                small_count(r),
-                operand(r, t),
-                operand(r, t)
-            ),
+            8 => Expr::SpinReuse {
+                n: small_count(r),
+                acc: o(r),
+                s: o(r),
+            },
             // Cons-for-Cons reuse in chain_map, folded back to an Int.
-            9 => format!(
-                "chain_sum(chain_map(chain_build({}, {}), fn(x Int) x * {} + {{ {} }}))",
-                small_count(r),
-                operand(r, t),
-                1 + r.below(9),
-                operand(r, t)
-            ),
+            9 => Expr::ChainPipe {
+                n: small_count(r),
+                x: o(r),
+                m: 1 + r.below(9),
+                c: o(r),
+            },
             // Match-reconstruct reuse: Reuse right before TailCallSelf.
-            10 => format!(
-                "spin_step(mk_pick({}, {}, {}), {}, {})",
-                operand(r, t),
-                operand(r, t),
-                operand(r, t),
-                small_count(r),
-                operand(r, t)
-            ),
-            _ if idx > 0 => {
-                let callee = r.below(idx as u64);
-                format!("f{callee}({}, {})", operand(r, t), operand(r, t))
-            }
-            _ => format!("{{ {} }} + {{ {} }}", operand(r, t), operand(r, t)),
+            10 => Expr::SpinStep {
+                k: o(r),
+                x: o(r),
+                y: o(r),
+                n: small_count(r),
+                acc: o(r),
+            },
+            _ if idx > 0 => Expr::Call(r.below(idx as u64) as usize, o(r), o(r)),
+            _ => Expr::Bin(0, o(r), o(r)),
         };
-        body.push_str(&format!("\tt{t} = {rhs}\n"));
+        body.push(e);
     }
-    let sum = (0..stmts)
+    body
+}
+
+fn render_fn(idx: usize, body: &[Expr]) -> String {
+    let mut src = String::new();
+    for (t, e) in body.iter().enumerate() {
+        src.push_str(&format!("\tt{t} = {}\n", e.render()));
+    }
+    let sum = (0..body.len())
         .map(|t| format!("t{t}"))
         .chain(["a".to_string(), "b".to_string()])
         .collect::<Vec<_>>()
         .join(" + ");
-    body.push_str(&format!("\t{sum}\n"));
-    format!("fn f{idx}(a Int, b Int) Int {{\n{body}}}\n")
+    src.push_str(&format!("\t{sum}\n"));
+    format!("fn f{idx}(a Int, b Int) Int {{\n{src}}}\n")
 }
 
-/// One whole program: the preamble, 2-3 chained functions, prints of the last
-/// at random arguments, and one print composing every preamble shape so no
-/// program skips that coverage when the per-statement dice miss it.
-fn gen_program(r: &mut Rng) -> String {
+/// One whole program plus its expected stdout: the preamble, 2-3 chained
+/// functions, prints of the last at random arguments, and one print composing
+/// every preamble shape so no program skips that coverage when the
+/// per-statement dice miss it.
+fn gen_program(r: &mut Rng) -> (String, String) {
     let nfns = 2 + r.below(2) as usize;
+    let mut fns = Vec::with_capacity(nfns);
+    for i in 0..nfns {
+        fns.push(gen_fn(r, i));
+    }
+
+    let mut prints: Vec<Expr> = Vec::new();
+    for _ in 0..3 {
+        prints.push(Expr::Call(
+            nfns - 1,
+            Box::new(Expr::Lit(small_lit(r))),
+            Box::new(Expr::Lit(BOUNDARY[r.below(BOUNDARY.len() as u64) as usize])),
+        ));
+    }
+    prints.push(Expr::SpinStep {
+        k: Box::new(Expr::Lit(small_lit(r))),
+        x: Box::new(Expr::Lit(small_lit(r))),
+        y: Box::new(Expr::Lit(small_lit(r))),
+        n: small_count(r),
+        acc: Box::new(Expr::SpinReuse {
+            n: small_count(r),
+            acc: Box::new(Expr::ChainPipe {
+                n: small_count(r),
+                x: Box::new(Expr::Lit(BOUNDARY[r.below(BOUNDARY.len() as u64) as usize])),
+                m: 1,
+                c: Box::new(Expr::Lit(small_lit(r))),
+            }),
+            s: Box::new(Expr::PickVal {
+                k: Box::new(Expr::Lit(small_lit(r))),
+                x: Box::new(Expr::Lit(small_lit(r))),
+                y: Box::new(Expr::Lit(small_lit(r))),
+                d: Box::new(Expr::Lit(small_lit(r))),
+            }),
+        }),
+    });
+
     let mut src = String::from(PREAMBLE);
     src.push('\n');
-    for i in 0..nfns {
-        src.push_str(&gen_fn(r, i));
+    for (i, f) in fns.iter().enumerate() {
+        src.push_str(&render_fn(i, f));
         src.push('\n');
     }
-    for _ in 0..3 {
-        let a = lit(r.below(199) as i64 - 99);
-        let b = lit(BOUNDARY[r.below(BOUNDARY.len() as u64) as usize]);
-        src.push_str(&format!("println(f{}({a}, {b}))\n", nfns - 1));
+    let mut expected = String::new();
+    for p in &prints {
+        src.push_str(&format!("println({})\n", p.render()));
+        expected.push_str(&format!("{}\n", p.eval(0, 0, &[], &fns)));
     }
-    src.push_str(&format!(
-        "println(spin_step(mk_pick({}, {}, {}), {}, spin_reuse({}, chain_sum(chain_map(chain_build({}, {}), fn(x Int) x + {})), pick_val(mk_pick({}, {}, {}), {}))))\n",
-        lit(r.below(199) as i64 - 99),
-        lit(r.below(199) as i64 - 99),
-        lit(r.below(199) as i64 - 99),
-        small_count(r),
-        small_count(r),
-        small_count(r),
-        lit(BOUNDARY[r.below(BOUNDARY.len() as u64) as usize]),
-        lit(r.below(199) as i64 - 99),
-        lit(r.below(199) as i64 - 99),
-        lit(r.below(199) as i64 - 99),
-        lit(r.below(199) as i64 - 99),
-        lit(r.below(199) as i64 - 99),
-    ));
-    src
+    (src, expected)
 }
 
-/// (e) ~200 seeded random programs; native output must equal the
-/// interpreter's. The seed is fixed, and a divergence panics with the program
-/// index and full source.
+/// (e) ~200 seeded random programs; each must print exactly the output the
+/// generator computed from the intended semantics. The seed is fixed, and a
+/// divergence panics with the program index and full source.
 #[test]
-fn differential_fuzz_native_matches_interpreter() {
+fn fuzz_generated_programs_print_their_computed_values() {
     const SEED: u64 = 0x5eed_a10c_0de5_eed1;
     const PROGRAMS: usize = 200;
     let mut r = Rng::new(SEED);
     let proj = Project::new("native_fuzz");
     for i in 0..PROGRAMS {
-        let src = gen_program(&mut r);
-        let off = run_mode(&proj, "fuzz.scrl", &src, "off", None);
+        let (src, expected) = gen_program(&mut r);
+        let out = run(&proj, "fuzz.scrl", &src, None);
         assert!(
-            off.success && off.stderr.is_empty(),
-            "fuzz #{i} (seed {SEED:#x}): interpreter rejected a generated program:\n{src}\n\
+            out.success && out.stderr.is_empty(),
+            "fuzz #{i} (seed {SEED:#x}): run failed:\n{src}\n\
              --- stdout ---\n{}--- stderr ---\n{}",
-            off.stdout,
-            off.stderr
-        );
-        let native = run_mode(&proj, "fuzz.scrl", &src, "native", None);
-        assert!(
-            native.success && native.stderr.is_empty(),
-            "fuzz #{i} (seed {SEED:#x}): native run failed:\n{src}\n\
-             --- stdout ---\n{}--- stderr ---\n{}",
-            native.stdout,
-            native.stderr
+            out.stdout,
+            out.stderr
         );
         assert_eq!(
-            off.stdout, native.stdout,
-            "fuzz #{i} (seed {SEED:#x}): native diverged from the interpreter for:\n{src}\n\
-             --- off ---\n{}--- native ---\n{}",
-            off.stdout, native.stdout
+            out.stdout, expected,
+            "fuzz #{i} (seed {SEED:#x}): output diverged from the intended \
+             semantics for:\n{src}\n--- got ---\n{}--- want ---\n{expected}",
+            out.stdout
         );
     }
 }
@@ -511,10 +777,7 @@ fn dis_native_prints_clif_for_fib() {
     )
     .unwrap();
     let path = path.to_string_lossy().into_owned();
-    let out = run_al_env(
-        &["dis", &path, "--native", "fib"],
-        &[("SCARLET_NATIVE", "native")],
-    );
+    let out = run_al_env(&["dis", &path, "--native", "fib"], &[]);
     assert!(
         out.success,
         "`al dis --native fib` failed:\n--- stdout ---\n{}--- stderr ---\n{}",

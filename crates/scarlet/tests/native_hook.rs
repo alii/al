@@ -24,20 +24,7 @@ struct Seen {
     ret_prim: Option<Prim>,
 }
 
-/// Pin `SCARLET_NATIVE=native` before the process-wide config is first read.
-/// Inheriting `off` or `mix` from the outer environment would stop the hook
-/// firing. Every `#[test]` here must call this as its first line.
-fn pin_native_mode() {
-    static PIN: std::sync::Once = std::sync::Once::new();
-    PIN.call_once(|| {
-        // SAFETY: called before any env read of SCARLET_NATIVE in this process;
-        // all tests in this binary funnel through this `Once` first.
-        unsafe { std::env::set_var("SCARLET_NATIVE", "native") };
-    });
-}
-
 fn compile_recording(source: &str) -> (scarlet::bytecode::Program, Vec<Seen>) {
-    pin_native_mode();
     let ast = parse(source);
     let seen = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&seen);
@@ -75,7 +62,6 @@ twice(4)
 
 #[test]
 fn hook_fires_per_body_keyed_by_program_func_idx() {
-    pin_native_mode();
     let (program, seen) = compile_recording(SOURCE);
 
     let mut idxs: Vec<usize> = seen.iter().map(|s| s.idx).collect();
@@ -117,7 +103,6 @@ fn hook_fires_per_body_keyed_by_program_func_idx() {
 
 #[test]
 fn installing_the_hook_does_not_perturb_fn_numbering() {
-    pin_native_mode();
     let (hooked, _) = compile_recording(SOURCE);
 
     let ast = parse(SOURCE);
@@ -136,7 +121,6 @@ fn installing_the_hook_does_not_perturb_fn_numbering() {
 
 #[test]
 fn toplevel_glue_is_never_hooked() {
-    pin_native_mode();
     let (program, seen) = compile_recording(SOURCE);
     let entry = program.entry as usize;
     assert_eq!(&*program.functions[entry].name, "__main__");
@@ -152,7 +136,6 @@ fn toplevel_glue_is_never_hooked() {
 /// program than `off` does.
 #[test]
 fn relowered_stdlib_reproduces_the_seeded_program() {
-    pin_native_mode();
     // Real imports, so the comparison covers module init glue too.
     let src = r#"
 import scarlet/array

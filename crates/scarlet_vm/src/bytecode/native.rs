@@ -19,8 +19,8 @@
 //!
 //! [`Program`]: super::Program
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use crate::FuncIdx;
 use crate::tivec::Idx;
@@ -318,9 +318,24 @@ pub type NativeEntry = *const u8;
 
 /// The per-program entry table. `Clone` is shallow on purpose: per-scheduler
 /// `Program` clones must observe one table.
+/// Compiles one body and publishes its entry. The driver installs one; this
+/// crate must not name the compiler.
+pub type Compiler = Arc<dyn Fn(FuncIdx) + Send + Sync>;
+
 #[derive(Clone, Default)]
 pub struct NativeTable {
     entries: Arc<[AtomicPtr<()>]>,
+    /// Calls seen for a body that has no entry yet. Once one crosses
+    /// [`WARM_CALLS`], [`NativeTable::note_interpreted_call`] asks `compile`
+    /// for that body, so a short-lived program never pays to compile the
+    /// hundreds of stdlib bodies it does not run.
+    warmth: Arc<[AtomicU32]>,
+    /// Compiles one body and publishes its entry. Installed by the driver:
+    /// this crate must not name the compiler.
+    ///
+    /// Behind the same `Arc` as the entries, because every scheduler holds a
+    /// `Program` clone of this table and all of them must see it.
+    compile: Arc<OnceLock<Compiler>>,
     /// The module's SystemV->tail bridge (`al_entry_trampoline`), published by
     /// `finalize_into` before any entry. Null iff no entry is published.
     trampoline: Arc<AtomicPtr<()>>,
@@ -330,11 +345,41 @@ impl NativeTable {
     /// A table with `fn_count` empty slots. Size it from the FINAL
     /// `Program::functions` length; [`FuncIdx`] is minted against that
     /// numbering.
+    /// Calls a body is interpreted for before it is worth compiling. Low
+    /// enough that a hot loop is compiled almost at once, high enough that a
+    /// body run a handful of times never is.
+    pub const WARM_CALLS: u32 = 8;
+
+    /// Count one call of `fn_idx` made while it had no entry, and ask the
+    /// installed compiler for it on the call that crosses [`Self::WARM_CALLS`].
+    ///
+    /// Exactly one call crosses the threshold, so the compile is requested
+    /// once however many schedulers race here.
+    pub fn note_interpreted_call(&self, fn_idx: FuncIdx) {
+        let Some(compile) = self.compile.get() else {
+            return;
+        };
+        let Some(slot) = self.warmth.get(fn_idx.index()) else {
+            return;
+        };
+        if slot.fetch_add(1, Ordering::Relaxed) + 1 == Self::WARM_CALLS {
+            compile(fn_idx);
+        }
+    }
+
+    /// Install the compiler this table asks for warm bodies. Called once, by
+    /// the driver, before any process runs.
+    pub fn set_compiler(&self, compile: Compiler) {
+        let _ = self.compile.set(compile);
+    }
+
     pub fn new(fn_count: usize) -> NativeTable {
         NativeTable {
             entries: (0..fn_count)
                 .map(|_| AtomicPtr::new(std::ptr::null_mut()))
                 .collect(),
+            warmth: (0..fn_count).map(|_| AtomicU32::new(0)).collect(),
+            compile: Arc::new(OnceLock::new()),
             trampoline: Arc::new(AtomicPtr::new(std::ptr::null_mut())),
         }
     }
@@ -408,149 +453,13 @@ impl std::fmt::Debug for NativeTable {
     }
 }
 
-/// What `SCARLET_NATIVE` asked for. Read exactly once per process. See [`config`]
-/// for the seed and stderr rules.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum NativeMode {
-    /// Interpret everything; no function is handed to the native backend.
-    ///
-    /// A testing mode, not a supported way to run a program. It is the
-    /// reference the differential tests check compiled output against — the
-    /// only independent check that the native backend is right — which is the
-    /// reason the bytecode interpreter still exists.
-    Off,
-    /// Compile every function. The default, and the only production mode: a
-    /// body that fails to compile aborts the run rather than falling back.
-    #[default]
-    Native,
-    /// Compile a seeded random subset, so interpreted and compiled frames
-    /// interleave. A testing mode, for native/interpreter boundary bugs.
-    Mix,
-}
-
-impl NativeMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            NativeMode::Off => "off",
-            NativeMode::Native => "native",
-            NativeMode::Mix => "mix",
-        }
-    }
-}
-
-/// The process-wide native-backend configuration.
-#[derive(Debug, Clone, Copy)]
-pub struct NativeConfig {
-    pub mode: NativeMode,
-    /// Subset seed. Meaningful only under [`NativeMode::Mix`]; zero otherwise.
-    seed: u64,
-}
-
-/// The outcome of parsing the two env values, side-effect free so tests can
-/// drive it without touching the process environment. `seed: None` under `Mix`
-/// means "draw from entropy".
-struct Parsed {
-    mode: NativeMode,
-    seed: Option<u64>,
-    warnings: Vec<String>,
-}
-
-fn parse(mode: Option<&str>, seed: Option<&str>) -> Parsed {
-    let mut warnings = Vec::new();
-    let mode = match mode {
-        None => NativeMode::Native,
-        Some("off") => NativeMode::Off,
-        Some("native") => NativeMode::Native,
-        Some("mix") => NativeMode::Mix,
-        Some(other) => {
-            warnings.push(format!(
-                "al: unknown SCARLET_NATIVE value {other:?} (expected off|native|mix); using native"
-            ));
-            NativeMode::Native
-        }
-    };
-    let seed = match (mode, seed) {
-        (NativeMode::Mix, Some(s)) => match s.parse::<u64>() {
-            Ok(n) => Some(n),
-            Err(_) => {
-                warnings.push(format!(
-                    "al: SCARLET_NATIVE_SEED {s:?} is not a u64; drawing a random seed"
-                ));
-                None
-            }
-        },
-        _ => None,
-    };
-    Parsed {
-        mode,
-        seed,
-        warnings,
-    }
-}
-
-/// The process-wide config, reading `SCARLET_NATIVE` / `SCARLET_NATIVE_SEED` on first
-/// use and never again. The seed is echoed to stderr only when `SCARLET_NATIVE_SEED`
-/// was explicitly set: golden tests assert an empty stderr, and the whole suite
-/// must run under `SCARLET_NATIVE=mix` unchanged.
-pub fn config() -> &'static NativeConfig {
-    static CONFIG: std::sync::OnceLock<NativeConfig> = std::sync::OnceLock::new();
-    CONFIG.get_or_init(|| {
-        let mode_var = std::env::var("SCARLET_NATIVE").ok();
-        let seed_var = std::env::var("SCARLET_NATIVE_SEED").ok();
-        let parsed = parse(mode_var.as_deref(), seed_var.as_deref());
-        for w in &parsed.warnings {
-            eprintln!("{w}");
-        }
-        let seed = match (parsed.mode, parsed.seed) {
-            (NativeMode::Mix, Some(seed)) => {
-                eprintln!("al: native mix seed = {seed}");
-                seed
-            }
-            (NativeMode::Mix, None) => entropy_seed(),
-            _ => 0,
-        };
-        NativeConfig {
-            mode: parsed.mode,
-            seed,
-        }
-    })
-}
-
-/// A seed nobody chose: hashed process entropy, no extra dependency.
-fn entropy_seed() -> u64 {
-    use std::hash::{BuildHasher, Hasher};
-    std::collections::hash_map::RandomState::new()
-        .build_hasher()
-        .finish()
-}
-
-impl NativeConfig {
-    /// Whether the mode selects `idx` for native compilation. Deterministic in
-    /// `(seed, idx)`, so a `mix` run reproduces from its printed seed.
-    pub fn includes(&self, idx: FuncIdx) -> bool {
-        match self.mode {
-            NativeMode::Off => false,
-            NativeMode::Native => true,
-            NativeMode::Mix => splitmix64(self.seed ^ idx.index() as u64) & 1 == 0,
-        }
-    }
-}
-
-/// SplitMix64 finaliser: one well-mixed word per `(seed, idx)` pair.
-fn splitmix64(mut z: u64) -> u64 {
-    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
-
 /// Whether `SCARLET_NATIVE_DEBUG` asked for native-backend diagnostics. Read once.
 pub fn debug() -> bool {
     static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *DEBUG.get_or_init(|| std::env::var_os("SCARLET_NATIVE_DEBUG").is_some())
 }
 
-/// One debug line per selected function, so a `mix` subset is observable.
+/// One debug line per planned function.
 pub fn log_selected(idx: FuncIdx, name: &str) {
     if debug() {
         eprintln!("al-native: selected {idx} {name}");
@@ -583,12 +492,77 @@ impl UnitStats {
             ""
         };
         eprintln!(
-            "al-native: mode={} selected {} fns; in-compile hook {ms:.2}ms \
+            "al-native: planned {} fns; in-compile hook {ms:.2}ms \
              over {instrs} instrs (unit budget 100ms){over}",
-            config().mode.as_str(),
             self.selected,
         );
     }
+}
+
+/// Call a JIT entry through the module's SystemV trampoline, preserving the
+/// pinned register the JIT clobbers.
+///
+/// `enable_pinned_reg` gives generated code the pinned register (r15 on
+/// x86_64, x21 on aarch64) by dropping it from Cranelift's callee-save list,
+/// so a compiled entry's prologue writes it and no epilogue puts it back —
+/// while every Rust caller on the path is entitled by the platform ABI to
+/// assume it survives. This bracket restores that assumption. The trampoline
+/// (SystemV, Cranelift-compiled) handles every OTHER callee-saved register
+/// the tail-cc entry clobbers.
+///
+/// # Safety
+/// `tramp` must be the module's finalized `al_entry_trampoline`, `entry` a
+/// finalized tail-cc JIT entry from the same module, and `ctx` a live context
+/// of the shape the entry was compiled against.
+#[allow(unsafe_code)] // the pinned-register bracket the JIT ABI requires; contract above
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+pub unsafe extern "C" fn call_entry_preserving_pinned(
+    ctx: *mut core::ffi::c_void,
+    tramp: *const u8,
+    entry: NativeEntry,
+    resume: i64,
+) -> NativeStatus {
+    // rdi = ctx, rsi = tramp, rdx = entry, rcx = resume. The trampoline takes
+    // (ctx, entry, resume), so entry and resume shift down one register.
+    // Entry rsp is 8 (mod 16); one push makes it 0, which is what the
+    // callee's `call` requires.
+    core::arch::naked_asm!(
+        "push r15",
+        "mov rax, rsi",
+        "mov rsi, rdx",
+        "mov rdx, rcx",
+        "call rax",
+        "pop r15",
+        "ret",
+    )
+}
+
+/// See the x86_64 sibling. AAPCS64 makes x19-x28 callee-saved; the pinned
+/// register is x21.
+///
+/// # Safety
+/// As the x86_64 sibling.
+#[allow(unsafe_code)] // the pinned-register bracket the JIT ABI requires; contract above
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+pub unsafe extern "C" fn call_entry_preserving_pinned(
+    ctx: *mut core::ffi::c_void,
+    tramp: *const u8,
+    entry: NativeEntry,
+    resume: i64,
+) -> NativeStatus {
+    // x0 = ctx, x1 = tramp, x2 = entry, x3 = resume; the trampoline takes
+    // (ctx, entry, resume).
+    core::arch::naked_asm!(
+        "stp x21, x30, [sp, #-16]!",
+        "mov x9, x1",
+        "mov x1, x2",
+        "mov x2, x3",
+        "blr x9",
+        "ldp x21, x30, [sp], #16",
+        "ret",
+    )
 }
 
 #[cfg(test)]
@@ -662,160 +636,4 @@ mod tests {
         assert_eq!(NativeStatus::TailCall as u64, 4);
         assert_eq!(std::mem::size_of::<NativeStatus>(), 8);
     }
-}
-
-#[cfg(test)]
-mod mode_tests {
-    use super::*;
-
-    #[test]
-    fn unset_defaults_to_native() {
-        let p = parse(None, None);
-        assert_eq!(p.mode, NativeMode::Native);
-        assert!(p.seed.is_none());
-        assert!(p.warnings.is_empty());
-    }
-
-    #[test]
-    fn parses_all_three_modes() {
-        assert_eq!(parse(Some("off"), None).mode, NativeMode::Off);
-        assert_eq!(parse(Some("native"), None).mode, NativeMode::Native);
-        assert_eq!(parse(Some("mix"), None).mode, NativeMode::Mix);
-    }
-
-    #[test]
-    fn unknown_mode_warns_and_defaults_to_native() {
-        let p = parse(Some("on"), None);
-        assert_eq!(p.mode, NativeMode::Native);
-        assert_eq!(p.warnings.len(), 1);
-    }
-
-    #[test]
-    fn seed_is_a_mix_only_knob() {
-        assert_eq!(parse(Some("mix"), Some("42")).seed, Some(42));
-        assert_eq!(parse(Some("native"), Some("42")).seed, None);
-        assert_eq!(parse(Some("off"), Some("42")).seed, None);
-    }
-
-    #[test]
-    fn bad_seed_warns_and_falls_back_to_entropy() {
-        let p = parse(Some("mix"), Some("banana"));
-        assert_eq!(p.mode, NativeMode::Mix);
-        assert!(p.seed.is_none());
-        assert_eq!(p.warnings.len(), 1);
-    }
-
-    #[test]
-    fn off_selects_nothing_native_selects_everything() {
-        let off = NativeConfig {
-            mode: NativeMode::Off,
-            seed: 0,
-        };
-        let native = NativeConfig {
-            mode: NativeMode::Native,
-            seed: 0,
-        };
-        for i in 0..64 {
-            assert!(!off.includes(FuncIdx(i)));
-            assert!(native.includes(FuncIdx(i)));
-        }
-    }
-
-    #[test]
-    fn mix_is_deterministic_in_seed_and_a_proper_subset() {
-        let a = NativeConfig {
-            mode: NativeMode::Mix,
-            seed: 42,
-        };
-        let b = NativeConfig {
-            mode: NativeMode::Mix,
-            seed: 42,
-        };
-        let picks: Vec<bool> = (0..256).map(|i| a.includes(FuncIdx(i))).collect();
-        let again: Vec<bool> = (0..256).map(|i| b.includes(FuncIdx(i))).collect();
-        assert_eq!(picks, again);
-        // Neither empty nor everything.
-        assert!(picks.iter().any(|&p| p));
-        assert!(picks.iter().any(|&p| !p));
-    }
-
-    #[test]
-    fn mix_subsets_differ_across_seeds() {
-        let a = NativeConfig {
-            mode: NativeMode::Mix,
-            seed: 1,
-        };
-        let b = NativeConfig {
-            mode: NativeMode::Mix,
-            seed: 2,
-        };
-        let differs = (0..256).any(|i| a.includes(FuncIdx(i)) != b.includes(FuncIdx(i)));
-        assert!(differs);
-    }
-}
-
-/// Call a JIT entry through the module's SystemV trampoline, preserving the
-/// pinned register the JIT clobbers.
-///
-/// `enable_pinned_reg` gives generated code the pinned register (r15 on
-/// x86_64, x21 on aarch64) by dropping it from Cranelift's callee-save list,
-/// so a compiled entry's prologue writes it and no epilogue puts it back —
-/// while every Rust caller on the path is entitled by the platform ABI to
-/// assume it survives. This bracket restores that assumption. The trampoline
-/// (SystemV, Cranelift-compiled) handles every OTHER callee-saved register
-/// the tail-cc entry clobbers.
-///
-/// # Safety
-/// `tramp` must be the module's finalized `al_entry_trampoline`, `entry` a
-/// finalized tail-cc JIT entry from the same module, and `ctx` a live context
-/// of the shape the entry was compiled against.
-#[allow(unsafe_code)] // the pinned-register bracket the JIT ABI requires; contract above
-#[cfg(target_arch = "x86_64")]
-#[unsafe(naked)]
-pub unsafe extern "C" fn call_entry_preserving_pinned(
-    ctx: *mut core::ffi::c_void,
-    tramp: *const u8,
-    entry: NativeEntry,
-    resume: i64,
-) -> NativeStatus {
-    // rdi = ctx, rsi = tramp, rdx = entry, rcx = resume. The trampoline takes
-    // (ctx, entry, resume), so entry and resume shift down one register.
-    // Entry rsp is 8 (mod 16); one push makes it 0, which is what the
-    // callee's `call` requires.
-    core::arch::naked_asm!(
-        "push r15",
-        "mov rax, rsi",
-        "mov rsi, rdx",
-        "mov rdx, rcx",
-        "call rax",
-        "pop r15",
-        "ret",
-    )
-}
-
-/// See the x86_64 sibling. AAPCS64 makes x19-x28 callee-saved; the pinned
-/// register is x21.
-///
-/// # Safety
-/// As the x86_64 sibling.
-#[allow(unsafe_code)] // the pinned-register bracket the JIT ABI requires; contract above
-#[cfg(target_arch = "aarch64")]
-#[unsafe(naked)]
-pub unsafe extern "C" fn call_entry_preserving_pinned(
-    ctx: *mut core::ffi::c_void,
-    tramp: *const u8,
-    entry: NativeEntry,
-    resume: i64,
-) -> NativeStatus {
-    // x0 = ctx, x1 = tramp, x2 = entry, x3 = resume; the trampoline takes
-    // (ctx, entry, resume).
-    core::arch::naked_asm!(
-        "stp x21, x30, [sp, #-16]!",
-        "mov x9, x1",
-        "mov x1, x2",
-        "mov x2, x3",
-        "blr x9",
-        "ldp x21, x30, [sp], #16",
-        "ret",
-    )
 }

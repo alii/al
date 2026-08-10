@@ -185,7 +185,7 @@ struct CallFrame {
     ///
     /// Fixed when the frame is pushed, not read from the entry table on each
     /// dispatch: a body can gain an entry *while* one of its frames is live
-    /// (see `NativeMode::Lazy`), and resuming such a frame as native would
+    /// (bodies warm to native mid-run), and resuming such a frame as native would
     /// feed a bytecode offset in as a resume ordinal.
     native: bool,
     base_slot: usize,

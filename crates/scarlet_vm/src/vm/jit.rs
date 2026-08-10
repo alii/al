@@ -101,7 +101,11 @@ fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
 ///
 /// Errors only when the host has no Cranelift backend; the caller's fallback
 /// is to interpret everything.
-pub fn jit_module() -> Result<JITModule, JitError> {
+/// The JIT module the driver holds open. Aliased so callers need not depend on
+/// `cranelift_jit` directly.
+pub type JitModule = JITModule;
+
+pub fn jit_module() -> Result<JitModule, JitError> {
     let mut flags = settings::builder();
     // JIT'd code and the shims sit at arbitrary addresses in one process, so
     // calls need absolute addresses rather than colocated PLT-style stubs.
@@ -336,9 +340,16 @@ pub fn finalize_into(
             });
         }
     }
-    let tramp = entry_trampoline(module)?;
-    module.finalize_definitions()?;
-    table.set_trampoline(module.get_finalized_function(tramp));
+    // The trampoline is one per module, defined on the first publish. Later
+    // publishes — a lazily compiled body joining a module that is already
+    // running — must not redefine it.
+    if table.trampoline().is_null() {
+        let tramp = entry_trampoline(module)?;
+        module.finalize_definitions()?;
+        table.set_trampoline(module.get_finalized_function(tramp));
+    } else {
+        module.finalize_definitions()?;
+    }
     for def in defs {
         let code = module.get_finalized_function(def.func_id);
         table.set(def.fn_idx, code);

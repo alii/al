@@ -428,11 +428,18 @@ pub(crate) unsafe extern "C" fn al_rt_ret_transfer(vmx: *mut VM, result: u64) ->
     let Some(parent) = vm.frames.last() else {
         return PreparedCall::status(NativeStatus::Done);
     };
-    let r = match vm
-        .program
+    // Resume the parent the way it was *entered*: `parent.ip` is a resume
+    // ordinal only for a frame that started native. A body can gain an entry
+    // while one of its frames is live, so the table is the wrong thing to ask.
+    let parent_entry = parent
         .native
-        .get(FuncIdx::from_usize(parent.func_idx as usize))
-    {
+        .then(|| {
+            vm.program
+                .native
+                .get(FuncIdx::from_usize(parent.func_idx as usize))
+        })
+        .flatten();
+    let r = match parent_entry {
         Some(entry) => PreparedCall::enter(entry, i64::from(parent.ip)),
         None => PreparedCall::status(NativeStatus::Done),
     };
@@ -835,6 +842,9 @@ mod tests {
             .native
             .set(crate::FuncIdx::from_usize(0), yield_entry as *const u8);
         vm.frames[0].ip = 5;
+        // The parent must have been *entered* native for its `ip` to be a
+        // resume ordinal; publishing an entry after the fact is not enough.
+        vm.frames[0].native = true;
         vm.frames.push(CallFrame {
             func_idx: 1,
             code_start: 2,
