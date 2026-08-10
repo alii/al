@@ -24,10 +24,10 @@ in `editors/zed/languages/scarlet/`.
 ```sh
 bun install
 bun run generate      # after editing grammar.js
-./check-corpus.sh     # parses every .scrl in the repo; must stay clean
+bun run corpus        # parses every .scrl in the repo; must stay clean
 ```
 
-`check-corpus.sh` is the sync check against the reference parser: anything the
-compiler's corpus accepts must parse here without a single error node. Run it
-before committing grammar changes, and re-run `cargo xtask gen-editor-syntax`
-after any token-table change in `scarlet_syntax`.
+`bun run corpus` is the sync check against the reference parser: anything the
+compiler's corpus accepts must parse here without a single error node. CI runs
+both steps, and `cargo test -p xtask` fails when `lexical.js` or the
+tmLanguage is stale relative to the compiler's token tables.

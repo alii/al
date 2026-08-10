@@ -36,3 +36,28 @@ jobs:
       # corrupting memory intermittently.
       - name: Test (GC stress)
         run: SCARLET_GC_STRESS=1 cargo test --workspace
+
+  grammar:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/tree-sitter-scarlet
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install
+        run: bun install
+
+      # src/ is committed because grammar consumers build from it; editing
+      # grammar.js without regenerating must fail here.
+      - name: Generated parser is current
+        run: bun run generate && git diff --exit-code src grammar.js
+
+      # The grammar-vs-parser sync check: every .scrl the compiler's own
+      # corpus accepts must parse without an error node.
+      - name: Corpus
+        run: bun run corpus

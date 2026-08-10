@@ -1,18 +1,10 @@
-// Tree-sitter grammar for Scarlet. The structural rules transcribe the
-// hand-written recursive-descent parser in crates/scarlet_syntax/src/parser;
-// the lexical layer (keywords, escapes, identifier/number shapes) is
-// generated from the compiler's token tables into lexical.js.
-//
-// Fidelity notes, mirroring the reference parser:
-// - The reference parser is newline-sensitive in a few spots (a call `(` or
-//   index `[` on a fresh line does not chain; see parser "P7"). Tree-sitter
-//   extras are whitespace-blind, so those delimiters use token.immediate:
-//   stricter than the parser (no space before `(` either), but the formatter
-//   never emits that space, and the corpus check keeps us honest.
-// - identifier and type_identifier are disjoint tokens (lowercase vs
-//   uppercase first char), modelling token::is_type_name, which is the
-//   language's only case rule and drives ctor-vs-var decisions everywhere.
-// - `(x)` grouping and 1-tuples do not exist; blocks `{ x }` group.
+/// <reference types="tree-sitter-cli/dsl" />
+// @ts-check
+
+// Structural rules transcribed from crates/scarlet_syntax/src/parser; the
+// lexical layer (keywords, escapes, literal shapes) is generated into
+// lexical.js by `cargo xtask gen-editor-syntax`. `bun run corpus` checks the
+// grammar against every .scrl file in the repo.
 
 'use strict';
 
@@ -20,8 +12,8 @@ const lex = require('./lexical');
 
 const KEYWORDS = new Set(lex.keywords);
 
-// Every keyword the structural rules use must exist in the generated table,
-// so a renamed keyword breaks `tree-sitter generate` instead of drifting.
+// A keyword renamed in the compiler breaks generation here instead of
+// silently drifting.
 function kw(text) {
   if (!KEYWORDS.has(text)) throw new Error(`not a Scarlet keyword: ${text}`);
   return text;
@@ -31,14 +23,14 @@ function commaSep1(rule) {
   return seq(rule, repeat(seq(',', rule)), optional(','));
 }
 
-// parse_field_list: items on one line need commas, a newline is also a
-// separator. Whitespace-blind, that means the comma is simply optional.
-function fieldSep1(rule) {
-  return seq(rule, repeat(seq(optional(','), rule)), optional(','));
-}
-
 function commaSep(rule) {
   return optional(commaSep1(rule));
+}
+
+// parse_field_list separates fields with commas or newlines; whitespace-blind,
+// the comma is simply optional.
+function fieldSep1(rule) {
+  return seq(rule, repeat(seq(optional(','), rule)), optional(','));
 }
 
 module.exports = grammar({
@@ -51,14 +43,14 @@ module.exports = grammar({
   externals: ($) => [$._minus_line_start],
 
   conflicts: ($) => [
-    // `x Foo = e` (typed binding) vs `x` then `Foo = e` (typed discard):
-    // only the reference parser's same-line rule separates them.
+    // Statement forms that only the reference parser's same-line rules
+    // separate from expressions: `x Foo = e` vs `x` then `Foo = e`, and
+    // `Foo(x) = e` vs the call `Foo(x)`.
     [$.binding, $._primary_expression],
-    // `Foo(x) = e` (ctor destructuring) vs `Foo(x)` (ctor call).
     [$.ctor_binding, $._primary_expression],
-    // Pattern/expression twins: a GLR fork inside `(...)` or `[...]` stays
-    // alive until the `=` (or its absence) after the closing delimiter
-    // decides destructuring vs literal.
+    // Pattern/expression twins: a GLR fork inside `(...)`, `[...]`, or
+    // `<<...>>` stays alive until the `=` (or its absence) after the closing
+    // delimiter decides destructuring vs literal.
     [$._pattern_atom, $._primary_expression],
     [$._primary_expression, $.ctor_pattern],
     [$._primary_expression, $._number_pattern],
@@ -86,9 +78,7 @@ module.exports = grammar({
         $._expression,
       ),
 
-    // -----------------------------------------------------------------------
-    // Declarations
-    // -----------------------------------------------------------------------
+    // Declarations -----------------------------------------------------------
 
     attribute: ($) =>
       seq(
@@ -125,7 +115,7 @@ module.exports = grammar({
         field('name', $.identifier),
         field('parameters', $.parameters),
         optional(field('return_type', $._type)),
-        // Absent on `@vm(...)` declarations, which have no body at all.
+        // Absent on `@vm(...)` declarations.
         optional(field('body', $.block)),
       )),
 
@@ -157,8 +147,8 @@ module.exports = grammar({
       seq(
         '{',
         choice(
-          // `type Point { x Int  y Int }` desugars to one ctor named like
-          // the type; a lowercase first token selects this shorthand.
+          // `type Point { x Int  y Int }`: single-constructor shorthand,
+          // selected by a lowercase first token.
           fieldSep1($.constructor_field),
           repeat1($.constructor),
         ),
@@ -184,9 +174,7 @@ module.exports = grammar({
         field('value', $._expression),
       ),
 
-    // -----------------------------------------------------------------------
-    // Types
-    // -----------------------------------------------------------------------
+    // Types ------------------------------------------------------------------
 
     _type: ($) => choice($.function_type, $.tuple_type, $.named_type, $.type_variable),
 
@@ -204,13 +192,10 @@ module.exports = grammar({
         optional(seq(token.immediate('('), commaSep1($._type), ')')),
       ),
 
-    // A lowercase name in type position is a free type variable
-    // (`fn twice(f fn(a) a, x a) a`).
+    // A lowercase name in type position is a free type variable.
     type_variable: ($) => $.identifier,
 
-    // -----------------------------------------------------------------------
-    // Statements
-    // -----------------------------------------------------------------------
+    // Statements -------------------------------------------------------------
 
     binding: ($) =>
       seq(
@@ -221,19 +206,13 @@ module.exports = grammar({
       ),
 
     tuple_binding: ($) =>
-      seq(
-        '(',
-        commaSep1($._pattern),
-        ')',
-        '=',
-        field('value', $._expression),
-      ),
+      seq('(', commaSep1($._pattern), ')', '=', field('value', $._expression)),
 
     // `Nil = println('x')`: assert-and-discard of a zero-arg type.
     typed_discard: ($) =>
       seq(field('type', $.type_identifier), '=', field('value', $._expression)),
 
-    // `Stat(files, dirs, ..) = walk(root)`: single-arm match sugar.
+    // `Stat(files, ..) = walk(root)`: single-arm match sugar.
     ctor_binding: ($) =>
       seq(
         field('constructor', $.type_identifier),
@@ -244,7 +223,7 @@ module.exports = grammar({
         field('value', $._expression),
       ),
 
-    // `a, b <- call(args)`: rewritten to `call(args, fn(a, b) { rest })`.
+    // `a, b <- call(args)` desugars to `call(args, fn(a, b) { rest })`.
     backpass: ($) =>
       seq(
         field('binder', $.identifier),
@@ -253,11 +232,9 @@ module.exports = grammar({
         field('call', $.call_expression),
       ),
 
-    // -----------------------------------------------------------------------
-    // Expressions (precedence ladder from parser PRECEDENCE table, loosest
-    // first: or < || < && < == != < comparisons < .. < + - < * / % < unary
-    // < postfix)
-    // -----------------------------------------------------------------------
+    // Expressions ------------------------------------------------------------
+    // Precedence ladder from the parser's PRECEDENCE table, loosest first:
+    // or < || < && < == != < comparisons < .. < + - < * / % < unary < postfix.
 
     _expression: ($) =>
       choice(
@@ -302,18 +279,16 @@ module.exports = grammar({
       );
     },
 
-    // Endpoints are additive-precedence: `-5..5` is `(-5)..(5)`, and a range
-    // is a single operand of any comparison around it. No chaining.
+    // Endpoints are additive-precedence (`-5..5` is `(-5)..(5)`); no chaining.
     range_expression: ($) =>
       prec.left(
         6,
         seq(field('start', $._expression), '..', field('end', $._expression)),
       ),
 
-    // `_minus_line_start` is the parser's "P4" rule: a fresh-line `-` starts
-    // a new statement or arm rather than continuing an additive chain, so
-    // unary and negative-literal rules accept it but binary subtraction
-    // does not.
+    // `_minus_line_start` is the parser's fresh-line-minus rule: it starts a
+    // new statement or arm, so unary and negative-literal rules accept it but
+    // binary subtraction does not.
     unary_expression: ($) =>
       prec(
         9,
@@ -331,8 +306,8 @@ module.exports = grammar({
         $._primary_expression,
       ),
 
-    // token.immediate: a `(` on a fresh line starts a new expression instead
-    // of chaining as a call (parser "P7").
+    // token.immediate: a `(` or `[` on a fresh line starts a new expression
+    // instead of chaining (parser "P7").
     call_expression: ($) =>
       prec(
         10,
@@ -351,10 +326,7 @@ module.exports = grammar({
     spread_argument: ($) => seq('..', $._expression),
 
     labeled_argument: ($) =>
-      prec(
-        1,
-        seq(field('label', $.identifier), ':', field('value', $._expression)),
-      ),
+      prec(1, seq(field('label', $.identifier), ':', field('value', $._expression))),
 
     index_expression: ($) =>
       prec(
@@ -373,8 +345,8 @@ module.exports = grammar({
         seq(
           field('value', $._postfix_expression),
           '.',
-          // A number field is a tuple index; `x.0.1` reaches here as the
-          // single number token `0.1`, exactly as the scanner fuses it.
+          // A number field is a tuple index; `x.0.1` arrives as the single
+          // number token `0.1`, exactly as the scanner fuses it.
           field('field', choice($.identifier, $.type_identifier, $.number)),
         ),
       ),
@@ -394,7 +366,7 @@ module.exports = grammar({
         $.function_expression,
       ),
 
-    // 2+ elements: `(x)` grouping does not exist (blocks group instead).
+    // 2+ elements; `(x)` grouping does not exist (blocks group instead).
     tuple_expression: ($) =>
       seq('(', $._expression, ',', commaSep1($._expression), ')'),
 
@@ -403,8 +375,7 @@ module.exports = grammar({
     array_expression: ($) =>
       seq('[', commaSep(choice($.spread_argument, $._expression)), ']'),
 
-    binary_literal: ($) =>
-      seq('<<', commaSep($.binary_segment), '>>'),
+    binary_literal: ($) => seq('<<', commaSep($.binary_segment), '>>'),
 
     binary_segment: ($) =>
       seq(
@@ -452,14 +423,11 @@ module.exports = grammar({
         seq(kw('fn'), field('parameters', $.parameters), field('body', $._expression)),
       ),
 
-    // -----------------------------------------------------------------------
-    // Patterns
-    // -----------------------------------------------------------------------
+    // Patterns ---------------------------------------------------------------
 
     _pattern: ($) => choice($.or_pattern, $.range_pattern, $._pattern_atom),
 
-    or_pattern: ($) =>
-      prec.left(seq($._pattern, '|', $._pattern)),
+    or_pattern: ($) => prec.left(seq($._pattern, '|', $._pattern)),
 
     // Both bounds must be number literals; end-exclusive like ranges.
     range_pattern: ($) => seq($._number_pattern, '..', $._number_pattern),
@@ -490,14 +458,10 @@ module.exports = grammar({
 
     pattern_arguments: ($) => commaSep1($._pattern_argument),
 
-    _pattern_argument: ($) =>
-      choice($.labeled_pattern, $._pattern, $.rest_pattern),
+    _pattern_argument: ($) => choice($.labeled_pattern, $._pattern, $.rest_pattern),
 
     labeled_pattern: ($) =>
-      prec(
-        1,
-        seq(field('label', $.identifier), ':', field('pattern', $._pattern)),
-      ),
+      prec(1, seq(field('label', $.identifier), ':', field('pattern', $._pattern))),
 
     // `..` / `..rest`: remaining fields, elements, or bytes.
     rest_pattern: ($) => prec.right(seq('..', optional(field('binder', $.identifier)))),
@@ -515,9 +479,8 @@ module.exports = grammar({
         optional(seq(':', field('spec', $.binary_spec))),
       ),
 
-    // -----------------------------------------------------------------------
-    // Strings (single-line; both quotes; `${expr}` and `$name` interpolation)
-    // -----------------------------------------------------------------------
+    // Strings ----------------------------------------------------------------
+    // Single-line; both quotes; `${expr}` and `$name` interpolation.
 
     string: ($) =>
       choice(
@@ -551,22 +514,17 @@ module.exports = grammar({
 
     escape_sequence: () => token.immediate(lex.escape),
 
-    interpolation: ($) =>
-      seq(token.immediate('${'), $._expression, '}'),
+    interpolation: ($) => seq(token.immediate('${'), $._expression, '}'),
 
-    short_interpolation: ($) =>
-      token.immediate(seq('$', lex.identifier)),
+    short_interpolation: ($) => token.immediate(seq('$', lex.identifier)),
 
-    // -----------------------------------------------------------------------
-    // Terminals
-    // -----------------------------------------------------------------------
+    // Terminals --------------------------------------------------------------
+    // identifier and type_identifier are disjoint by first-letter case,
+    // modelling token::is_type_name — the language's only case rule.
 
-    identifier: () =>
-      token(new RegExp(`[a-z_][A-Za-z0-9_]*`)),
+    identifier: () => /[a-z_][A-Za-z0-9_]*/,
 
-    // token::is_type_name: a leading uppercase letter marks a type or
-    // constructor name; the language's only case rule.
-    type_identifier: () => token(new RegExp(`[A-Z][A-Za-z0-9_]*`)),
+    type_identifier: () => /[A-Z][A-Za-z0-9_]*/,
 
     number: () => token(lex.number),
 

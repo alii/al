@@ -3324,18 +3324,12 @@
       }
     },
     "identifier": {
-      "type": "TOKEN",
-      "content": {
-        "type": "PATTERN",
-        "value": "[a-z_][A-Za-z0-9_]*"
-      }
+      "type": "PATTERN",
+      "value": "[a-z_][A-Za-z0-9_]*"
     },
     "type_identifier": {
-      "type": "TOKEN",
-      "content": {
-        "type": "PATTERN",
-        "value": "[A-Z][A-Za-z0-9_]*"
-      }
+      "type": "PATTERN",
+      "value": "[A-Z][A-Za-z0-9_]*"
     },
     "number": {
       "type": "TOKEN",
