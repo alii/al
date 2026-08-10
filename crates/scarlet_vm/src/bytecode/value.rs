@@ -1065,7 +1065,7 @@ impl Value {
         (self.0 & HDR_MASK) == HDR_SOCKET
     }
     #[inline(always)]
-    pub fn is_subject(&self) -> bool {
+    fn is_subject(&self) -> bool {
         (self.0 & HDR_MASK) == HDR_SUBJECT
     }
     #[inline(always)]
@@ -1120,7 +1120,7 @@ impl Value {
     /// A mailbox handle by its registry id. Ids are minted by a monotonic
     /// counter, so the 48-bit payload cannot be exhausted in practice.
     #[inline]
-    pub fn subject(id: u64) -> Value {
+    pub(crate) fn subject(id: u64) -> Value {
         debug_assert!(id <= PAYLOAD, "subject id exceeds the 48-bit payload");
         Value(HDR_SUBJECT | (id & PAYLOAD))
     }
@@ -1523,7 +1523,7 @@ impl Value {
         }
     }
     #[inline]
-    pub fn as_subject(&self) -> Option<u64> {
+    pub(crate) fn as_subject(&self) -> Option<u64> {
         if self.is_subject() {
             Some(self.0 & PAYLOAD)
         } else {

@@ -1220,7 +1220,7 @@ impl InferEngine {
     /// Flip every Unbound var at level > current to Generic and quantify over
     /// them. Display names are assigned here so they stay stable across every
     /// later printing of the scheme.
-    pub fn generalize(&mut self, ty: Ty) -> Scheme {
+    fn generalize(&mut self, ty: Ty) -> Scheme {
         self.generalize_impl(ty, false, ValueKind::Local, None)
     }
 

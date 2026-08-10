@@ -469,7 +469,7 @@ pub struct Compiler {
     /// whose parameters must not generalize at a value binding. Stdlib type
     /// ids are stable across `reset_to` (the watermark sits past the static
     /// stdlib), so the memo survives a session's rewinds.
-    pub(super) restricted_gen_cons: Option<HashSet<TypeId>>,
+    restricted_gen_cons: Option<HashSet<TypeId>>,
     // --- Module state ---
     pub(super) module_table: ModuleTable,
     /// Append-only `ModulePath` ↔ `ModuleId` interner backing every `DefId`.

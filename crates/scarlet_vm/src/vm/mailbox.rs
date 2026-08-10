@@ -71,7 +71,7 @@ struct Mailbox {
 }
 
 /// The outcome of a receive probe.
-pub(super) enum TryReceive {
+enum TryReceive {
     Msg(Value),
     Empty,
     /// The calling process does not own the subject (or it is dead, which
@@ -81,7 +81,7 @@ pub(super) enum TryReceive {
 
 impl Runtime {
     /// Mint a mailbox owned by `owner` and return its subject id.
-    pub(super) fn subject_create(&self, owner: u64) -> u64 {
+    fn subject_create(&self, owner: u64) -> u64 {
         let mut reg = lock(&self.mailboxes);
         let id = reg.next_id;
         reg.next_id += 1;
@@ -100,7 +100,7 @@ impl Runtime {
 
     /// Queue `msg` (an exclusively owned graph) on subject `id` and wake a
     /// parked receiver. A dead subject drops the message.
-    pub(super) fn subject_send(&self, id: u64, msg: Value) {
+    fn subject_send(&self, id: u64, msg: Value) {
         let waiter = {
             let mut reg = lock(&self.mailboxes);
             let Some(mb) = reg.by_id.get_mut(&id) else {
@@ -120,7 +120,7 @@ impl Runtime {
     /// Pop the oldest message for the owner's receive, clearing any stale
     /// waiter registration first — this call IS the owner receiving, so no
     /// send may target the old wait id.
-    pub(super) fn subject_try_receive(&self, id: u64, pid: u64) -> TryReceive {
+    fn subject_try_receive(&self, id: u64, pid: u64) -> TryReceive {
         let mut reg = lock(&self.mailboxes);
         let Some(mb) = reg.by_id.get_mut(&id) else {
             return TryReceive::NotOwner;
@@ -176,7 +176,7 @@ impl Runtime {
 
     /// Queue a wait id on scheduler `sched`'s wake list and interrupt its
     /// poller. The cross-thread half of waking a parked receiver.
-    pub(super) fn deliver_wake(&self, sched: usize, wait_id: u64) {
+    fn deliver_wake(&self, sched: usize, wait_id: u64) {
         lock(&self.slots[sched].wakes).push(wait_id);
         self.notify(sched);
     }

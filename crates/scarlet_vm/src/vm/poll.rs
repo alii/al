@@ -445,7 +445,7 @@ impl VM {
 
     /// Wake the processes whose wait ids a `scheduler.send` queued on this
     /// slot. A stale id — the wait already ended on its deadline — is skipped.
-    pub(super) fn drain_wakes(&mut self) -> bool {
+    fn drain_wakes(&mut self) -> bool {
         let drained: Vec<u64> = {
             let mut q = lock(&self.runtime.slots[self.scheduler_index].wakes);
             if q.is_empty() {
