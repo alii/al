@@ -54,6 +54,54 @@ pub enum Kind {
     PuncMod,
 }
 
+impl Kind {
+    /// Every `Kind` whose `Display` output is its fixed source spelling. The
+    /// exhaustive match below forces a new variant to be classified here.
+    /// The editor grammars are generated from this list (`cargo xtask
+    /// gen-editor-syntax`).
+    pub fn fixed_spelling_kinds() -> Vec<Kind> {
+        let mut kinds = vec![
+            Kind::LogicalAnd,
+            Kind::LogicalOr,
+            Kind::BitwiseOr,
+            Kind::PuncArrow,
+            Kind::PuncBackArrow,
+            Kind::PuncComma,
+            Kind::PuncColon,
+            Kind::PuncSemicolon,
+            Kind::PuncDot,
+            Kind::PuncDotdot,
+            Kind::PuncOpenParen,
+            Kind::PuncCloseParen,
+            Kind::PuncOpenBrace,
+            Kind::PuncCloseBrace,
+            Kind::PuncOpenBracket,
+            Kind::PuncCloseBracket,
+            Kind::BinOpen,
+            Kind::BinClose,
+            Kind::PuncQuestionMark,
+            Kind::PuncExclamationMark,
+            Kind::PuncAt,
+            Kind::PuncEquals,
+            Kind::PuncEqualsComparator,
+            Kind::PuncNotEqual,
+            Kind::PuncGt,
+            Kind::PuncLt,
+            Kind::PuncGte,
+            Kind::PuncLte,
+            Kind::PuncPlus,
+            Kind::PuncPlusplus,
+            Kind::PuncMinus,
+            Kind::PuncMinusminus,
+            Kind::PuncMul,
+            Kind::PuncDiv,
+            Kind::PuncMod,
+        ];
+        kinds.extend(Keyword::ALL.into_iter().map(Kind::Keyword));
+        kinds
+    }
+}
+
 /// For diagnostics, not source reconstruction. Unquoted; error sites that
 /// want quotes add their own.
 impl fmt::Display for Kind {
@@ -112,49 +160,15 @@ impl fmt::Display for Kind {
 mod tests {
     use super::Kind;
 
-    /// Every `Kind` whose `Display` output is its fixed source spelling. The
-    /// exhaustive match below forces a new variant to be classified here.
     fn fixed_spelling_kinds() -> Vec<Kind> {
-        let mut kinds = vec![
-            Kind::LogicalAnd,
-            Kind::LogicalOr,
-            Kind::BitwiseOr,
-            Kind::PuncArrow,
-            Kind::PuncBackArrow,
-            Kind::PuncComma,
-            Kind::PuncColon,
-            Kind::PuncSemicolon,
-            Kind::PuncDot,
-            Kind::PuncDotdot,
-            Kind::PuncOpenParen,
-            Kind::PuncCloseParen,
-            Kind::PuncOpenBrace,
-            Kind::PuncCloseBrace,
-            Kind::PuncOpenBracket,
-            Kind::PuncCloseBracket,
-            Kind::BinOpen,
-            Kind::BinClose,
-            Kind::PuncQuestionMark,
-            Kind::PuncExclamationMark,
-            Kind::PuncAt,
-            Kind::PuncEquals,
-            Kind::PuncEqualsComparator,
-            Kind::PuncNotEqual,
-            Kind::PuncGt,
-            Kind::PuncLt,
-            Kind::PuncGte,
-            Kind::PuncLte,
-            Kind::PuncPlus,
-            Kind::PuncPlusplus,
-            Kind::PuncMinus,
-            Kind::PuncMinusminus,
-            Kind::PuncMul,
-            Kind::PuncDiv,
-            Kind::PuncMod,
-        ];
-        kinds.extend(super::Keyword::ALL.into_iter().map(Kind::Keyword));
+        Kind::fixed_spelling_kinds()
+    }
 
-        for kind in &kinds {
+    /// The exhaustive match forces a new `Kind` variant to be classified as
+    /// fixed-spelling or not before this compiles again.
+    #[test]
+    fn fixed_spelling_list_is_classified() {
+        for kind in fixed_spelling_kinds() {
             match kind {
                 // No fixed source spelling: payload-bearing or positional.
                 Kind::Eof
@@ -167,7 +181,7 @@ mod tests {
                 | Kind::InterpStringEnd => {
                     unreachable!("{kind:?} must not be in the fixed-spelling list")
                 }
-                // Fixed spelling: must appear in the list above.
+                // Fixed spelling: must appear in `fixed_spelling_kinds`.
                 Kind::LogicalAnd
                 | Kind::LogicalOr
                 | Kind::BitwiseOr
@@ -206,7 +220,6 @@ mod tests {
                 | Kind::PuncMod => {}
             }
         }
-        kinds
     }
 
     /// `Display`'s spellings are maintained separately from the scanner's

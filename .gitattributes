@@ -6,3 +6,12 @@
 crates/al/tests/golden/** -text
 
 *.scrl linguist-language=Rust
+
+# Generated artifacts: collapsed in GitHub diffs, excluded from language
+# stats. tree-sitter output is rebuilt by `bun run generate`; lexical.js and
+# the tmLanguage by `cargo xtask gen-editor-syntax`.
+editors/tree-sitter-scarlet/src/** linguist-generated=true
+# ...except the hand-written external scanner.
+editors/tree-sitter-scarlet/src/scanner.c -linguist-generated
+editors/tree-sitter-scarlet/lexical.js linguist-generated=true
+scarlet.tmLanguage.json linguist-generated=true

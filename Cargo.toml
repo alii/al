@@ -1,5 +1,12 @@
 [workspace]
-members = ["crates/scarlet_vm", "crates/scarlet_syntax", "crates/scarlet_types", "crates/scarlet_core", "crates/scarlet"]
+members = [
+    "crates/scarlet_vm",
+    "crates/scarlet_syntax",
+    "crates/scarlet_types",
+    "crates/scarlet_core",
+    "crates/scarlet",
+    "crates/xtask",
+]
 resolver = "2"
 
 [workspace.dependencies]

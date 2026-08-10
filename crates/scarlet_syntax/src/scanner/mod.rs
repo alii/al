@@ -2,6 +2,20 @@ use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::span::Span;
 use crate::token::{self, Kind, Token, Trivia};
 
+/// Every escape the language accepts, as (source char after `\`, denoted
+/// byte). The editor grammars are generated from this table (`cargo xtask
+/// gen-editor-syntax`), so adding an escape here updates them too.
+pub const ESCAPES: &[(u8, u8)] = &[
+    (b'n', b'\n'),
+    (b't', b'\t'),
+    (b'r', b'\r'),
+    (b'0', b'\0'),
+    (b'"', b'"'),
+    (b'\'', b'\''),
+    (b'\\', b'\\'),
+    (b'$', b'$'),
+];
+
 /// One level of string-interpolation nesting. `brace_depth == 0` means the
 /// scanner is in the string body; `> 0` means it is inside `${ ... }` and
 /// counts unmatched `{` so a nested brace does not close the interpolation.
@@ -482,16 +496,9 @@ impl Scanner {
         }
         self.incr_pos();
 
-        Some(match peeked {
-            b'n' => b'\n',
-            b't' => b'\t',
-            b'r' => b'\r',
-            b'0' => b'\0',
-            b'"' => b'"',
-            b'\'' => b'\'',
-            b'\\' => b'\\',
-            b'$' => b'$',
-            _ => {
+        Some(match ESCAPES.iter().find(|(source, _)| *source == peeked) {
+            Some(&(_, denoted)) => denoted,
+            None => {
                 self.add_error(format!("Unknown escape sequence '\\{}'", peeked as char));
                 peeked
             }

@@ -1,10 +1,15 @@
 id = "scarlet"
 name = "Scarlet"
-description = "Scarlet language support for Zed. Diagnostics, completions, and formatting from the Scarlet language server."
+description = "Scarlet language support for Zed. Syntax highlighting from the tree-sitter grammar. Diagnostics, completions, and formatting from the Scarlet language server."
 version = "0.0.1"
 schema_version = 1
 authors = ["Alistair Smith <hi@alistair.sh>"]
 repository = "https://github.com/scarletindustries/language"
+
+[grammars.scarlet]
+repository = "https://github.com/scarletindustries/language"
+rev = "cc9080c474d5b5932de2a7c2778299eca7028414"
+path = "editors/tree-sitter-scarlet"
 
 [language_servers.scarlet]
 name = "Scarlet Language Server"

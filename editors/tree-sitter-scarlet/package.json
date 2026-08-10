@@ -1,0 +1,15 @@
+{
+  "name": "tree-sitter-scarlet",
+  "version": "0.1.0",
+  "description": "Scarlet grammar for tree-sitter",
+  "repository": "https://github.com/scarletindustries/language",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "corpus": "find ../.. -name '*.scrl' -not -path '*/target/*' -not -path '*/node_modules/*' -not -path '*/.git/*' | xargs tree-sitter parse -q"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.25.8"
+  }
+}
