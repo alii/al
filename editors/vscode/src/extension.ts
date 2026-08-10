@@ -51,7 +51,7 @@ export function activate(context: vscode.ExtensionContext) {
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
-          vscode.window.showErrorMessage(`AL format failed: ${message}`);
+          vscode.window.showErrorMessage(`Scarlet format failed: ${message}`);
           return [];
         }
       },

@@ -1,0 +1,14 @@
+name = "Scarlet"
+path_suffixes = ["scrl"]
+line_comments = ["// "]
+block_comment = ["/* ", " */"]
+autoclose_before = ";:.,=}])>"
+hard_tabs = true
+tab_size = 4
+brackets = [
+    { start = "{", end = "}", close = true, newline = true },
+    { start = "[", end = "]", close = true, newline = true },
+    { start = "(", end = ")", close = true, newline = false },
+    { start = "'", end = "'", close = true, newline = false, not_in = ["string", "comment"] },
+    { start = "\"", end = "\"", close = true, newline = false, not_in = ["string"] },
+]

@@ -1,0 +1,16 @@
+[package]
+name = "zed_scarlet"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"
+
+# Standalone crate: Zed builds it for wasm32-wasip2, so it must not join the
+# workspace, which the parent Cargo.toml would otherwise pull it into.
+[workspace]

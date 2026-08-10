@@ -1,15 +1,43 @@
 {
   "name": "scarlet-lang",
   "displayName": "Scarlet Language Support",
-  "description": "Scarlet programming language support for Visual Studio Code",
+  "description": "Scarlet programming language support for Visual Studio Code: syntax highlighting, diagnostics, completions, and formatting via the Scarlet language server",
   "version": "0.0.1",
   "publisher": "alistaiir",
+  "author": {
+    "name": "Alistair Smith",
+    "email": "hi@alistair.sh"
+  },
+  "icon": "images/icon.png",
+  "galleryBanner": {
+    "color": "#030203",
+    "theme": "dark"
+  },
+  "homepage": "https://scarlet.industries",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/scarletindustries/language",
+    "directory": "editors/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/scarletindustries/language/issues"
+  },
+  "keywords": [
+    "scarlet",
+    "scrl",
+    "language-server",
+    "lsp",
+    "formatter"
+  ],
   "engines": {
     "vscode": "^1.107.0"
   },
   "categories": [
     "Programming Languages",
     "Formatters"
+  ],
+  "activationEvents": [
+    "onLanguage:scarlet"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -23,6 +51,10 @@
         "extensions": [
           ".scrl"
         ],
+        "icon": {
+          "light": "./images/icon.png",
+          "dark": "./images/icon.png"
+        },
         "configuration": "./language-configuration.json"
       }
     ],

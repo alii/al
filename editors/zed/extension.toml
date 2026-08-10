@@ -1,0 +1,11 @@
+id = "scarlet"
+name = "Scarlet"
+description = "Scarlet programming language support for Zed: diagnostics, completions, and formatting via the Scarlet language server"
+version = "0.0.1"
+schema_version = 1
+authors = ["Alistair Smith <hi@alistair.sh>"]
+repository = "https://github.com/scarletindustries/language"
+
+[language_servers.scarlet]
+name = "Scarlet Language Server"
+languages = ["Scarlet"]
