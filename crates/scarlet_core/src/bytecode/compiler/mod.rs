@@ -292,6 +292,10 @@ struct ModuleFrame {
     imported_qualifiers: HashMap<String, ModuleKey>,
     base_dir: Option<PathBuf>,
     module_refs: ModuleReferences,
+    /// Whether this frame scoped the module's namespace (env module frame +
+    /// `locals_frame_marks`). Recorded at enter so a `retain_namespaces`
+    /// toggle can never unbalance the pop.
+    scoped: bool,
 }
 
 /// Compiler frame state parked by `enter_elab_frame` while a [`DeferredBody`]'s
@@ -338,6 +342,20 @@ pub struct Compiler {
     /// `undo_log` length captured at each `push_local_scope`; `pop_local_scope`
     /// unwinds the log down to the popped mark.
     pub(super) scope_marks: Vec<usize>,
+    /// Depth-0 `locals` binds made while a module frame is open — a module's
+    /// import items bind below its local scope, so `undo_log` never sees them.
+    /// `leave_module_frame` replays this so an import's binding is scoped to
+    /// the module that wrote it instead of leaking into every later module.
+    locals_frame_undo: Vec<(StrId, Option<LocalSlot>)>,
+    /// `(locals_frame_undo.len(), undo_log.len())` captured by each *scoped*
+    /// `enter_module_frame` (see [`ModuleFrame::scoped`]).
+    locals_frame_marks: Vec<(usize, usize)>,
+    /// Stdlib bootstrap (prelude registration, `precompile_stdlib`, the
+    /// native-hook relower) compiles at root on purpose: the flat by-name
+    /// residue it leaves *is* the ambient stdlib namespace the blob snapshots
+    /// and `seed_static` reinjects. While set, `enter_module_frame` skips
+    /// namespace scoping. User modules always compile with it unset.
+    retain_namespaces: bool,
     /// Per-scope unused-binding tracking. Each frame maps a let/param/match
     /// name (that doesn't start with `_`) to its definition span; `mark_used`
     /// removes the entry on first reference. Anything left when the frame is
@@ -958,6 +976,9 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         locals: HashMap::new(),
         undo_log: vec![],
         scope_marks: vec![],
+        locals_frame_undo: vec![],
+        locals_frame_marks: vec![],
+        retain_namespaces: false,
         unused: vec![],
         nil_discards: vec![],
         outer_scopes: vec![],
@@ -1101,12 +1122,17 @@ fn compile_impl(
             Some(_) => {
                 c.register_prelude();
                 let at = Span::DUMMY;
-                for path in module::stdlib::all_modules() {
-                    if has_errors(&c.engine.diagnostics) {
-                        break;
+                // Retained for the same reason `precompile_stdlib` retains:
+                // this relower must reproduce the seeded state, ambient
+                // by-name stdlib namespace included.
+                c.with_retained_namespaces(|c| {
+                    for path in module::stdlib::all_modules() {
+                        if has_errors(&c.engine.diagnostics) {
+                            break;
+                        }
+                        c.load_module(&ast::ImportPath::canonical(path), at);
                     }
-                    c.load_module(&ast::ImportPath::canonical(path), at);
-                }
+                });
                 // Reset the memos that would otherwise leak across the
                 // stdlib/user boundary: a seeded compile starts with both
                 // empty, so leaving them populated would let user code dedup
@@ -1502,6 +1528,8 @@ impl Compiler {
         let prev = self.locals.insert(name, entry);
         if !self.scope_marks.is_empty() {
             self.undo_log.push((name, prev));
+        } else if !self.locals_frame_marks.is_empty() {
+            self.locals_frame_undo.push((name, prev));
         }
     }
 
@@ -2670,6 +2698,17 @@ impl Compiler {
         Some((canon, key))
     }
 
+    /// Run `f` with [`Self::retain_namespaces`] set: module compiles inside it
+    /// leave their by-name residue at root instead of scoping it to their
+    /// frame. Stdlib bootstrap only — see the field's doc.
+    pub(crate) fn with_retained_namespaces<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let prev = self.retain_namespaces;
+        self.retain_namespaces = true;
+        let out = f(self);
+        self.retain_namespaces = prev;
+        out
+    }
+
     /// Snapshot the enclosing module's per-module state into a `ModuleFrame`
     /// and swap in fresh state for compiling `path`'s body. A fresh
     /// `ModuleReferences` collector is installed (the typecheck pass populates
@@ -2683,6 +2722,16 @@ impl Compiler {
         base_dir: Option<PathBuf>,
     ) -> ModuleFrame {
         let mid = self.ref_interner.intern(&path);
+        let scoped = !self.retain_namespaces;
+        if scoped {
+            // No compiler scope may span a module frame: imports (the only
+            // depth-0 binds inside a frame) are processed before the module's
+            // own local scope opens.
+            debug_assert!(self.scope_marks.is_empty());
+            self.env.push_module_frame();
+            self.locals_frame_marks
+                .push((self.locals_frame_undo.len(), self.undo_log.len()));
+        }
         ModuleFrame {
             module: std::mem::replace(&mut self.current_module, path),
             module_key: std::mem::replace(&mut self.current_module_key, key),
@@ -2690,6 +2739,7 @@ impl Compiler {
             imported_qualifiers: std::mem::take(&mut self.imported_qualifiers),
             base_dir: std::mem::replace(&mut self.base_dir, base_dir),
             module_refs: std::mem::replace(&mut self.module_refs, ModuleReferences::new(mid)),
+            scoped,
         }
     }
 
@@ -2704,7 +2754,37 @@ impl Compiler {
             imported_qualifiers,
             base_dir,
             module_refs,
+            scoped,
         } = old;
+        if scoped {
+            // Unwind the module's namespace: its env by-name entries and its
+            // depth-0 `locals` binds (import items). Entries above the
+            // `undo_log` mark were attributed to a scope already open at
+            // frame entry, so they unwind here too.
+            if let Some((fmark, umark)) = self.locals_frame_marks.pop() {
+                for (name, prev) in self.undo_log.drain(umark..).rev() {
+                    match prev {
+                        Some(p) => {
+                            self.locals.insert(name, p);
+                        }
+                        None => {
+                            self.locals.remove(&name);
+                        }
+                    }
+                }
+                for (name, prev) in self.locals_frame_undo.drain(fmark..).rev() {
+                    match prev {
+                        Some(p) => {
+                            self.locals.insert(name, p);
+                        }
+                        None => {
+                            self.locals.remove(&name);
+                        }
+                    }
+                }
+            }
+            self.env.pop_module_frame();
+        }
         self.current_module = module;
         self.current_module_key = module_key;
         self.module_path_slice = module_path_slice;

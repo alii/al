@@ -20,7 +20,11 @@ impl Compiler {
         // Type heads need no such rescue: they land in the flat env.type_info.
         let at = Span::DUMMY;
         let path = crate::ast::ImportPath::canonical(module::scarlet_prelude());
-        let Some((_, key)) = self.load_module(&path, at) else {
+        // The prelude's residue IS the ambient namespace ("Type heads need no
+        // rescue" above depends on it), so its compile must not be
+        // frame-scoped like an ordinary module's.
+        let loaded = self.with_retained_namespaces(|c| c.load_module(&path, at));
+        let Some((_, key)) = loaded else {
             return;
         };
         #[allow(clippy::expect_used)]

@@ -366,7 +366,7 @@ fn a_qualified_constructor_pattern_matches() {
     proj.write("color.scrl", COLOR_SRC);
     proj.write(
         "main.scrl",
-        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t\tcolor.Green(s) -> s\n\t}\n}\nprintln(v(color.Green(3)))\nprintln(v(color.Red))\n",
+        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t\tcolor.Green(s) -> s\n\t}\n}\nprintln(v(color.Green(3)))\nprintln(v(color.Red))\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "3\n0\n");
 }
@@ -379,7 +379,7 @@ fn qualified_and_imported_constructors_are_the_same_constructor() {
     proj.write("color.scrl", COLOR_SRC);
     proj.write(
         "main.scrl",
-        "import ./color.{Red}\nimport ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tRed -> 0\n\t\tcolor.Green(s) -> s\n\t}\n}\nprintln(v(color.Green(9)))\n",
+        "import ./color.{Red}\nimport ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tRed -> 0\n\t\tcolor.Green(s) -> s\n\t}\n}\nprintln(v(color.Green(9)))\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "9\n");
 }
@@ -392,7 +392,7 @@ fn a_qualified_pattern_is_seen_by_exhaustiveness() {
     proj.write("color.scrl", COLOR_SRC);
     proj.write(
         "main.scrl",
-        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t}\n}\nprintln(v(color.Red))\n",
+        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t}\n}\nprintln(v(color.Red))\n",
     );
     project_rejects(&proj, "check", "main.scrl", &["not exhaustive", "Green"]);
 }
@@ -404,12 +404,12 @@ fn a_qualified_pattern_takes_labels_and_rest() {
     proj.write("color.scrl", COLOR_SRC);
     proj.write(
         "lab.scrl",
-        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t\tcolor.Green(shade: s) -> s\n\t}\n}\nprintln(v(color.Green(5)))\n",
+        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t\tcolor.Green(shade: s) -> s\n\t}\n}\nprintln(v(color.Green(5)))\n",
     );
     run_project_outputs(&proj, "run", "lab.scrl", "5\n");
     proj.write(
         "rest.scrl",
-        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t\tcolor.Green(..) -> 1\n\t}\n}\nprintln(v(color.Green(5)))\n",
+        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t\tcolor.Green(..) -> 1\n\t}\n}\nprintln(v(color.Green(5)))\n",
     );
     run_project_outputs(&proj, "run", "rest.scrl", "1\n");
 }
@@ -439,7 +439,7 @@ fn a_bad_qualified_pattern_is_a_diagnostic_not_a_crash() {
     proj.write("color.scrl", COLOR_SRC);
     proj.write(
         "unknown_qual.scrl",
-        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tnope.Red -> 0\n\t\t_ -> 1\n\t}\n}\nprintln(v(color.Red))\n",
+        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tnope.Red -> 0\n\t\t_ -> 1\n\t}\n}\nprintln(v(color.Red))\n",
     );
     project_rejects(
         &proj,
@@ -450,7 +450,7 @@ fn a_bad_qualified_pattern_is_a_diagnostic_not_a_crash() {
 
     proj.write(
         "unknown_member.scrl",
-        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tcolor.Purple -> 0\n\t\t_ -> 1\n\t}\n}\nprintln(v(color.Red))\n",
+        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tcolor.Purple -> 0\n\t\t_ -> 1\n\t}\n}\nprintln(v(color.Red))\n",
     );
     project_rejects(
         &proj,

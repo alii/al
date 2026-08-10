@@ -64,8 +64,13 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), String> {
     bail_on_errors(&c, "prelude")?;
 
     let at = Span::DUMMY;
+    // Retained namespaces: the whole point of this pass is to snapshot the
+    // flat by-name residue (`take_type_info` below) into the blob, so stdlib
+    // modules must compile without frame scoping.
     for path in stdlib::all_modules() {
-        c.load_module(&crate::ast::ImportPath::canonical(path.clone()), at);
+        c.with_retained_namespaces(|c| {
+            c.load_module(&crate::ast::ImportPath::canonical(path.clone()), at)
+        });
         bail_on_errors(&c, ModuleKey::for_stdlib(&path).as_str())?;
     }
 
