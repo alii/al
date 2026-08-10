@@ -83,7 +83,7 @@ impl FnRTy {
 ///
 /// If the constructor's declared field count disagrees with the instantiated
 /// function type's arity.
-pub fn eta_wrapper(
+pub(crate) fn eta_wrapper(
     fns: &mut FnTable,
     name: StrId,
     param_name: StrId,

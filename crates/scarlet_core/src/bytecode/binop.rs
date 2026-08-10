@@ -69,7 +69,7 @@ impl BinopKind {
 /// the VM's tag-dispatching path. Total: every `(ValueBinop, Option<Prim>)`
 /// names an opcode. `typed_ir::elaborate` is the only caller, so a new
 /// specialization belongs here.
-pub fn specialize_binop(op: ValueBinop, prim: Option<Prim>) -> Op {
+pub(crate) fn specialize_binop(op: ValueBinop, prim: Option<Prim>) -> Op {
     use ValueBinop as V;
     match (op, prim) {
         (V::Add, Some(Prim::Int)) => Op::AddInt,

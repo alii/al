@@ -79,7 +79,7 @@ use cranelift_codegen::isa::CallConv;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module, ModuleError};
 
-use super::emit::{self, EmitCtx, FrameLayout};
+use super::emit::FrameLayout;
 use super::native_frame::{
     self, FrameSlots, NATIVE_INT_BOX_SYMBOL, ValueBits, box_bool, box_int, unbox_int, value_bits,
 };
@@ -98,7 +98,7 @@ use crate::bytecode::{
 use crate::tivec::{Idx, TiVec};
 use crate::type_def::TypeId;
 use crate::typed_ir::{RTy, ResolvedNode, ResolvedPool};
-use crate::types::{Prim, StrId};
+use crate::types::Prim;
 
 const SYM_RT_PREPARE_CALL: &str = "al_rt_prepare_call";
 const SYM_RT_PREPARE_CALL_VALUE: &str = "al_rt_prepare_call_value";
@@ -523,37 +523,6 @@ pub struct CompiledBody {
     pub code_size: u32,
 }
 
-/// The `EmitCtx` for the layout-only re-emission. On a gated body only
-/// `bool_variant` and `switch_variant_count` shape the emitted stream, and
-/// both come from the plan, so this run takes exactly the branches the real
-/// emission took. The interning answers only fill operands, never branch, so
-/// their stand-ins are constants.
-struct LayoutCtx<'a> {
-    bools: BoolCtors,
-    switch_counts: &'a HashMap<TypeId, u8>,
-}
-
-impl EmitCtx for LayoutCtx<'_> {
-    fn resolve_str(&self, _id: StrId) -> &str {
-        ""
-    }
-    fn intern_int(&mut self, _i: i64) -> i32 {
-        0
-    }
-    fn intern_str(&mut self, _s: &str) -> i32 {
-        0
-    }
-    fn intern_labels(&mut self, _tid: TypeId, _variant_idx: u16) -> i32 {
-        0
-    }
-    fn switch_variant_count(&self, tid: TypeId) -> Option<u8> {
-        self.switch_counts.get(&tid).copied()
-    }
-    fn bool_variant(&self, tid: TypeId, variant_idx: u16) -> Option<bool> {
-        self.bools.bool_variant(tid, variant_idx)
-    }
-}
-
 /// A resolved constant: stable bits plus the decoded views codegen bakes into
 /// instruction immediates. Only non-heap constants resolve, since a frozen
 /// heap constant's word is an address.
@@ -737,39 +706,28 @@ fn enum_ctor_sites(
     }
     // One recorded header per non-Bool ctor, in the same walk order as
     // `collect_ctor_atoms`. A length mismatch means emit and this walk
-    // disagree about the body, so interpret rather than pair them up wrong.
+    // disagree about the body, so refuse to pair them up wrong.
     if layout.ctor_headers.len() != atoms.len() {
         return None;
     }
-    let f = program.functions.get(plan.func_idx.index())?;
-    let start = usize::try_from(f.code_start).ok()?;
-    let len = usize::try_from(f.code_len).ok()?;
-    let code = program.code.get(start..start.checked_add(len)?)?;
     let consts: &[Value] = &program.constants;
     let mut freeze = freeze;
     let mut sites = Vec::with_capacity(atoms.len());
     for ((variant, _arity), site) in atoms.iter().zip(&layout.ctor_headers) {
-        let header = usize::try_from(site.at).ok()?;
-        // `emit_ctor`'s header, in order: [packed, enum name, variant name,
-        // labels], each a `PushConst`.
-        let cid = |i: usize| -> Option<usize> {
-            let ins = code.get(header + i)?;
-            (ins.op == Op::PushConst).then_some(ins.operand as usize)
-        };
-        let packed = consts.get(cid(0)?)?.as_int()? as u64;
+        let at = |i: i32| consts.get(usize::try_from(i).ok()?);
+        let packed = at(site.packed)?.as_int()? as u64;
         // The packed word must name the atom's own variant, or the pairing
         // has drifted.
         let expect = (variant.type_id.0 as u32 as u64) | ((variant.variant_idx as u64) << 32);
         if packed != expect {
             return None;
         }
-        let en = consts.get(cid(1)?)?;
-        let vn = consts.get(cid(2)?)?;
+        let en = at(site.enum_name)?;
+        let vn = at(site.variant_name)?;
         if en.as_str().is_none() || vn.as_str().is_none() {
             return None;
         }
-        let arr_const = consts.get(cid(3)?)?;
-        let arr = arr_const.as_array()?;
+        let arr = at(site.labels)?.as_array()?;
         let labels = match freeze.as_deref_mut() {
             Some(fb) => {
                 let mut items = Vec::with_capacity(arr.len());
@@ -1174,6 +1132,7 @@ fn declare_imports<M: Module>(
 pub(crate) fn native_set(
     plans: &[NativePlan],
     program: &crate::bytecode::Program,
+    layouts: &std::collections::HashMap<FuncIdx, FrameLayout>,
 ) -> HashSet<FuncIdx> {
     let consts: &[Value] = &program.constants;
     plans
@@ -1185,17 +1144,10 @@ pub(crate) fn native_set(
             if Uses::scan(&p.fun, p, &cmap).is_none() {
                 return false;
             }
-            // The ctor-site header positions come from the layout, so this
-            // check needs the same re-emission `compile` does.
-            let layout = emit::emit(
-                &p.fun,
-                &mut LayoutCtx {
-                    bools: p.bools,
-                    switch_counts: &p.switch_counts,
-                },
-            )
-            .layout;
-            enum_ctor_sites(p, program, &layout, None).is_some()
+            let Some(layout) = layouts.get(&p.func_idx) else {
+                return false;
+            };
+            enum_ctor_sites(p, program, layout, None).is_some()
         })
         .map(|p| p.func_idx)
         .collect()
@@ -1212,16 +1164,9 @@ pub fn compile<M: Module>(
     module: &mut M,
     plan: &NativePlan,
     program: &crate::bytecode::Program,
+    layout: &FrameLayout,
 ) -> Result<CompiledBody, Box<ModuleError>> {
     let consts: &[Value] = &program.constants;
-    let layout = emit::emit(
-        &plan.fun,
-        &mut LayoutCtx {
-            bools: plan.bools,
-            switch_counts: &plan.switch_counts,
-        },
-    )
-    .layout;
     let Some(cmap) = resolve_consts(&plan.fun, consts) else {
         // Every heap constant is interned into the program's frozen area, so
         // a mortal one here means the constant pool was built wrong.
@@ -1231,7 +1176,7 @@ pub fn compile<M: Module>(
         unsupported_node("use scan failing on a body every opcode has a lowering for")
     };
     let mut frozen = program.frozen.builder();
-    let Some(ctor_sites) = enum_ctor_sites(plan, program, &layout, Some(&mut frozen)) else {
+    let Some(ctor_sites) = enum_ctor_sites(plan, program, layout, Some(&mut frozen)) else {
         // The recorded header positions no longer line up with the emitted
         // code — an emission or peephole change drifted. There is no slower
         // mode to fall back to any more, and a wrong constant would miscompile
@@ -1259,7 +1204,17 @@ pub fn compile<M: Module>(
         let b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
         let fns = declare_imports(module, b.func)?;
         let live = cont_live_sets(&plan.fun.body);
-        let g = BodyGen::prologue(b, plan, live, layout, uses, cmap, ctor_sites, fns, ptr_ty);
+        let g = BodyGen::prologue(
+            b,
+            plan,
+            live,
+            layout.clone(),
+            uses,
+            cmap,
+            ctor_sites,
+            fns,
+            ptr_ty,
+        );
         g.run();
     }
     let clif = ctx.func.display().to_string();
@@ -3400,6 +3355,9 @@ fn split_self_tail(mut e: &CoreExpr) -> Option<(DropRun, DropRun, &[LocalId])> {
 mod tests {
     use std::mem::ManuallyDrop;
 
+    use crate::core_ir::emit::{self, EmitCtx};
+    use crate::types::StrId;
+
     use cranelift_codegen::settings::{self, Configurable};
     use cranelift_jit::{JITBuilder, JITModule};
     use cranelift_module::default_libcall_names;
@@ -3958,19 +3916,51 @@ mod tests {
 
     /// Plan + compile every function against the mock runtime symbols and
     /// finalize. Panics if a function the test expects to cover is rejected.
+    /// Per-body frame layouts, keyed the way `compile` looks them up.
+    type LayoutMap = std::collections::HashMap<FuncIdx, FrameLayout>;
+
     fn jit(fns: &[CoreFn], pool: &ResolvedPool, consts: &[Value]) -> Jit {
-        // Bodies without enum ctors never consult the program's bytecode,
-        // so a constants-only program suffices.
+        // No enum ctors here, so the bodies need no bytecode — but they still
+        // need the layout emit fixes, and any constant emit interns.
+        let area = std::sync::Arc::new(crate::frozen::FrozenArea::new());
+        let mut ctx = PoolingCtx {
+            fb: area.builder(),
+            consts: consts.to_vec(),
+            bools: BoolCtors::of(&test_prelude()),
+        };
+        let mut layouts = LayoutMap::new();
+        let mut functions = Vec::with_capacity(fns.len());
+        for (i, f) in fns.iter().enumerate() {
+            let out = emit::emit(f, &mut ctx);
+            layouts.insert(FuncIdx::from_usize(i), out.layout);
+            // No code: these bodies never consult it. The slot count does
+            // matter — it is the frame size the harness allocates.
+            functions.push(crate::bytecode::Function {
+                name: format!("f{i}").into(),
+                arity: f.params.len() as i32,
+                locals: out.locals.max(f.params.len() as i32),
+                capture_count: 0,
+                code_start: 0,
+                code_len: 0,
+            });
+        }
         let program = crate::bytecode::Program {
-            constants: consts.to_vec(),
+            constants: ctx.consts,
+            frozen: area,
+            functions,
             ..Default::default()
         };
-        jit_with(fns, pool, program)
+        jit_with(fns, pool, program, &layouts)
     }
 
     /// [`jit`] against a full test `Program`, which the enum-ctor tests need:
     /// `compile` reads header constants back from the emitted bytecode.
-    fn jit_with(fns: &[CoreFn], pool: &ResolvedPool, program: crate::bytecode::Program) -> Jit {
+    fn jit_with(
+        fns: &[CoreFn],
+        pool: &ResolvedPool,
+        program: crate::bytecode::Program,
+        layouts: &LayoutMap,
+    ) -> Jit {
         let mut flags = settings::builder();
         flags.set("use_colocated_libcalls", "false").unwrap();
         flags.set("enable_pinned_reg", "true").unwrap();
@@ -4023,19 +4013,23 @@ mod tests {
         let prelude = test_prelude();
         for (i, f) in fns.iter().enumerate() {
             let p = plan(FuncIdx::from_usize(i), f, pool, &prelude);
-            let body = compile(&mut module, &p, &program).expect("module error");
+            // The layout comes from the emission that built `program`, the
+            // way the real pipeline hands emit's output to the backend.
+            let layout = layouts
+                .get(&FuncIdx::from_usize(i))
+                .expect("a layout per body");
+            let body = compile(&mut module, &p, &program, layout).expect("module error");
             assert!(!body.clif.is_empty());
             clifs.push(body.clif);
-            let emitted = emit::emit(
-                f,
-                &mut LayoutCtx {
-                    bools: p.bools,
-                    switch_counts: &p.switch_counts,
-                },
-            );
+            let locals = program
+                .functions
+                .get(i)
+                .map(|fun| fun.locals)
+                .unwrap_or(0)
+                .max(f.params.len() as i32);
             metas.push(FnMeta {
                 arity: f.params.len(),
-                locals: emitted.locals.max(f.params.len() as i32) as usize,
+                locals: locals as usize,
             });
             ids.push(body.func_id);
         }
@@ -4146,7 +4140,10 @@ mod tests {
 
     /// Emit `fns` for real into a test `Program`. The frozen area is shared
     /// with the program, so `compile`'s label tuples outlive the baked code.
-    fn ctor_program(fns: &[CoreFn], base_consts: &[Value]) -> crate::bytecode::Program {
+    fn ctor_program(
+        fns: &[CoreFn],
+        base_consts: &[Value],
+    ) -> (crate::bytecode::Program, LayoutMap) {
         use std::sync::Arc;
         let area = Arc::new(crate::frozen::FrozenArea::new());
         let mut ctx = PoolingCtx {
@@ -4158,9 +4155,12 @@ mod tests {
             frozen: area,
             ..Default::default()
         };
+        let mut layouts: std::collections::HashMap<FuncIdx, FrameLayout> =
+            std::collections::HashMap::new();
         for (i, f) in fns.iter().enumerate() {
             let start = program.code.len() as i32;
             let out = emit::emit(f, &mut ctx);
+            layouts.insert(FuncIdx::from_usize(i), out.layout.clone());
             program.code.extend(out.code);
             program.functions.push(crate::bytecode::Function {
                 name: format!("f{i}").into(),
@@ -4172,7 +4172,7 @@ mod tests {
             });
         }
         program.constants = ctx.consts;
-        program
+        (program, layouts)
     }
 
     fn let_(id: u32, ty: RTy, rhs: Atom, body: CoreExpr) -> CoreExpr {
@@ -4383,7 +4383,8 @@ mod tests {
             constants: vec![heap_const],
             ..Default::default()
         };
-        let _ = compile(&mut module, &p, &heap_program);
+        let layout = test_layout(&f);
+        let _ = compile(&mut module, &p, &heap_program, &layout);
     }
 
     #[test]
@@ -4396,7 +4397,19 @@ mod tests {
             constants: vec![Value::small_int(7)],
             ..Default::default()
         };
-        compile(&mut module, &p, &ok_program).expect("immediate constants compile");
+        let layout = test_layout(&f);
+        compile(&mut module, &p, &ok_program, &layout).expect("immediate constants compile");
+    }
+
+    /// The layout `emit` fixes for `f`, as the real pipeline would hand it over.
+    fn test_layout(f: &CoreFn) -> FrameLayout {
+        let area = std::sync::Arc::new(crate::frozen::FrozenArea::new());
+        let mut ctx = PoolingCtx {
+            fb: area.builder(),
+            consts: Vec::new(),
+            bools: BoolCtors::of(&test_prelude()),
+        };
+        emit::emit(f, &mut ctx).layout
     }
 
     /// A bare JIT module for the compile-level tests.
@@ -5271,8 +5284,8 @@ mod tests {
             }),
             et,
         );
-        let program = ctor_program(std::slice::from_ref(&f), &test_consts());
-        let j = jit_with(&[f], &pool, program);
+        let (program, layouts) = ctor_program(std::slice::from_ref(&f), &test_consts());
+        let j = jit_with(&[f], &pool, program, &layouts);
         let (v, _) = run(&j, 0, &[Value::small_int(41)], 1 << 40);
         let e = v.as_enum().expect("the shim must build an Enum cell");
         assert_eq!(e.type_id(), TypeId(7));
@@ -5300,8 +5313,8 @@ mod tests {
             }),
             et,
         );
-        let program = ctor_program(std::slice::from_ref(&f), &test_consts());
-        let j = jit_with(&[f], &pool, program);
+        let (program, layouts) = ctor_program(std::slice::from_ref(&f), &test_consts());
+        let j = jit_with(&[f], &pool, program, &layouts);
 
         // Drive by hand: the parked cell must sit in the slot at rc == 1,
         // which `run`'s argument clone would break.
@@ -5370,8 +5383,8 @@ mod tests {
             }),
             et,
         );
-        let program = ctor_program(std::slice::from_ref(&f), &test_consts());
-        let j = jit_with(&[f], &pool, program);
+        let (program, layouts) = ctor_program(std::slice::from_ref(&f), &test_consts());
+        let j = jit_with(&[f], &pool, program, &layouts);
         // A shared `Drop` clears the slot to `small_int(0)`; the ctor must
         // fall through to a fresh allocation.
         let (v, _) = run(&j, 0, &[Value::small_int(0), Value::small_int(41)], 1 << 40);
@@ -5428,8 +5441,8 @@ mod tests {
     fn reusable_drop_hollows_a_unique_cell_and_parks_it_for_the_ctor() {
         let (mut pool, int) = int_pool();
         let f = reuse_pair_fn(&mut pool, int);
-        let program = ctor_program(std::slice::from_ref(&f), &test_consts());
-        let j = jit_with(&[f], &pool, program);
+        let (program, layouts) = ctor_program(std::slice::from_ref(&f), &test_consts());
+        let j = jit_with(&[f], &pool, program, &layouts);
         let mut vm = hand_vm(&j, 1 << 40);
 
         // A mortal heap child proves the hollow released it: the outside
@@ -5482,8 +5495,8 @@ mod tests {
     fn reusable_drop_of_a_shared_cell_releases_and_clears_the_slot() {
         let (mut pool, int) = int_pool();
         let f = reuse_pair_fn(&mut pool, int);
-        let program = ctor_program(std::slice::from_ref(&f), &test_consts());
-        let j = jit_with(&[f], &pool, program);
+        let (program, layouts) = ctor_program(std::slice::from_ref(&f), &test_consts());
+        let j = jit_with(&[f], &pool, program, &layouts);
         let mut vm = hand_vm(&j, 1 << 40);
 
         let cell = Value::enum_with_names_in(
@@ -5547,8 +5560,8 @@ mod tests {
             ),
             et,
         );
-        let program = ctor_program(std::slice::from_ref(&f), &test_consts());
-        let j = jit_with(&[f], &pool, program);
+        let (program, layouts) = ctor_program(std::slice::from_ref(&f), &test_consts());
+        let j = jit_with(&[f], &pool, program, &layouts);
 
         let mut heap = ProcHeap::new();
         let big = Value::int_in(&mut heap, i64::MAX);

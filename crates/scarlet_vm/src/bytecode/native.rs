@@ -85,7 +85,7 @@ pub enum OpCoverage {
 }
 
 /// The native lowering strategy for `op`. See [`OpCoverage`].
-pub fn op_coverage(op: Op) -> OpCoverage {
+fn op_coverage(op: Op) -> OpCoverage {
     match op {
         Op::PushGlobal
         | Op::PushTrue

@@ -1892,7 +1892,7 @@ impl<'a> EnumRef<'a> {
     }
     /// The `Str` value holding the enum type name (for re-construction).
     #[inline]
-    pub(crate) fn enum_name_value(&self) -> Value {
+    fn enum_name_value(&self) -> Value {
         // SAFETY: as above.
         unsafe { payload_value(self.obj, 2) }
     }
@@ -1903,7 +1903,7 @@ impl<'a> EnumRef<'a> {
     }
     /// The `Tuple`-of-`Str` value holding the field labels.
     #[inline]
-    pub(crate) fn labels_value(&self) -> Value {
+    fn labels_value(&self) -> Value {
         // SAFETY: as above.
         unsafe { payload_value(self.obj, 4) }
     }
@@ -1944,13 +1944,16 @@ pub struct SeqRef<'a> {
     root: &'a Value,
 }
 
+// `is_empty` is deliberately narrower than `len`: the workspace is this API's
+// whole world (hawk enforces that), and nothing outside the crate calls it.
+#[allow(clippy::len_without_is_empty)]
 impl<'a> SeqRef<'a> {
     #[inline]
     pub fn len(&self) -> usize {
         seq::len(self.root)
     }
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
     }
     #[inline]
@@ -2188,7 +2191,7 @@ pub fn take_freed_objects() -> u64 {
 /// Objects freed on this thread since the last [`take_freed_objects`], without
 /// resetting. The call checkpoint peeks this before deciding to drain.
 #[inline]
-pub fn freed_objects_pending() -> u64 {
+pub(crate) fn freed_objects_pending() -> u64 {
     FREED_OBJECTS.with(|c| c.get())
 }
 
@@ -2593,7 +2596,7 @@ pub fn range_len(s: i64, e: i64) -> i64 {
 /// Iterative: child pairs go onto an explicit worklist, so a 100k-deep cons
 /// list cannot overflow the native stack. Map keys are compared by fresh
 /// `values_equal` calls, each itself iterative.
-pub fn values_equal(a: &Value, b: &Value) -> bool {
+pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     let mut pending = EqPending::new();
     if !pair_equal(a, b, &mut pending) {
         return false;
@@ -2676,7 +2679,7 @@ fn pair_equal(a: &Value, b: &Value, pending: &mut EqPending) -> bool {
 /// Equality fast-reject hash: `values_equal` values must hash identically,
 /// unequal ones may collide. Every arm folds exactly what equality inspects;
 /// omitting a component is sound but forfeits the fast-reject for it.
-pub fn hash_value(v: &Value) -> u64 {
+pub(crate) fn hash_value(v: &Value) -> u64 {
     let mut h = HASH_BASIS;
     match v.kind() {
         ValueView::Int(i) => {
@@ -2789,7 +2792,7 @@ pub fn enum_name_prefix_hash(enum_name: &str, variant_name: &str) -> u64 {
 
 /// Fold payload value hashes into a precomputed [`enum_name_prefix_hash`].
 #[inline]
-pub fn enum_hash_with_payload(name_prefix_hash: u64, payload: &[Value]) -> u64 {
+fn enum_hash_with_payload(name_prefix_hash: u64, payload: &[Value]) -> u64 {
     let mut h = name_prefix_hash;
     for p in payload {
         h = fnv1a_combine(h, hash_value(p));

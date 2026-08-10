@@ -33,7 +33,7 @@ use crate::types::{InferEngine, Ty, TypeNode};
 /// Copies inference types into a [`ResolvedPool`], memoising per resolved `Ty`
 /// so a spine shared by many expressions is allocated once. Bound indices are
 /// numbered per `Zonker`, never across.
-pub struct Zonker<'e> {
+pub(crate) struct Zonker<'e> {
     eng: &'e InferEngine,
     /// Keyed by the *representative* `Ty`, so `find_ref`-equal types share a
     /// node. The bool is the `invented` bit, carried so a memo hit reports
@@ -139,7 +139,7 @@ impl<'e> Zonker<'e> {
 }
 
 /// A pool sized for the engine that will feed it, so `prim_of` stays honest.
-pub fn pool_for(eng: &InferEngine) -> ResolvedPool {
+pub(crate) fn pool_for(eng: &InferEngine) -> ResolvedPool {
     ResolvedPool::new(eng.prim_ids())
 }
 

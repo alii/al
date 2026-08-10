@@ -150,7 +150,11 @@ pub trait PatCtx {
 ///
 /// Each arm opens its own name scope: the pattern's binds are visible to the
 /// guard and the body and to nothing else.
-pub fn elaborate_arms<C: PatCtx>(cx: &mut C, scrut: RTy, arms: &[ast::MatchArm]) -> Vec<TypedArm> {
+pub(crate) fn elaborate_arms<C: PatCtx>(
+    cx: &mut C,
+    scrut: RTy,
+    arms: &[ast::MatchArm],
+) -> Vec<TypedArm> {
     arms.iter()
         .map(|arm| {
             let mark = cx.scope_mark();
@@ -165,7 +169,7 @@ pub fn elaborate_arms<C: PatCtx>(cx: &mut C, scrut: RTy, arms: &[ast::MatchArm])
 
 /// Elaborate one pattern against a scrutinee of type `scrut`. Binds it
 /// introduces stay in scope; the caller decides when to drop them.
-pub fn elaborate_pattern<C: PatCtx>(cx: &mut C, p: &ast::Pattern, scrut: RTy) -> TypedPat {
+fn elaborate_pattern<C: PatCtx>(cx: &mut C, p: &ast::Pattern, scrut: RTy) -> TypedPat {
     PatElab {
         cx,
         bound: HashMap::new(),

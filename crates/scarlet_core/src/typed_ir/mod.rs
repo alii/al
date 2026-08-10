@@ -18,11 +18,11 @@ pub mod eta;
 pub mod resolve;
 pub mod rty;
 pub(crate) use scarlet_types::slots;
-pub mod zonk;
+pub(crate) mod zonk;
 
-pub use elaborate::{
-    Elab, ElabCtx, OrShape, PreludeTys, WalkStep, elaborate_body, elaborate_toplevel,
-    elaborator_bug,
+pub use elaborate::WalkStep;
+pub(crate) use elaborate::{
+    ElabCtx, OrShape, PreludeTys, elaborate_body, elaborate_toplevel, elaborator_bug,
 };
 pub(crate) use eta::FnTable;
 pub(crate) use resolve::Denotation;

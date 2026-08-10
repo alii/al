@@ -56,7 +56,7 @@ pub struct OrShape {
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
-pub fn elaborator_bug(why: &'static str, span: Span) -> ! {
+pub(crate) fn elaborator_bug(why: &'static str, span: Span) -> ! {
     panic!(
         "internal compiler error: {why} at {span:?} is well-typed but was not elaborated. \
          Please report this as a compiler bug."
@@ -173,7 +173,7 @@ pub enum WalkStep {
 /// never entered the block node itself, so `walk_tys` does not start with its
 /// type.
 #[allow(clippy::too_many_arguments)]
-pub fn elaborate_body<C: ElabCtx>(
+pub(crate) fn elaborate_body<C: ElabCtx>(
     ctx: &mut C,
     pool: &mut ResolvedPool,
     fns: &mut FnTable,
@@ -190,7 +190,7 @@ pub fn elaborate_body<C: ElabCtx>(
 
 /// Elaborate a module's top level: an imported module's initialiser.
 /// [`elaborate_body`] with no parameters, over a `BlockExpression`.
-pub fn elaborate_toplevel<C: ElabCtx>(
+pub(crate) fn elaborate_toplevel<C: ElabCtx>(
     ctx: &mut C,
     pool: &mut ResolvedPool,
     fns: &mut FnTable,

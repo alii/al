@@ -33,6 +33,10 @@ pub fn disassemble_native(
     program: &Program,
     needle: &str,
     plans: Vec<NativePlan>,
+    layouts: &std::collections::HashMap<
+        scarlet_vm::FuncIdx,
+        scarlet_core::core_ir::emit::FrameLayout,
+    >,
 ) -> Result<String, String> {
     let mut out = render(program, Some(needle));
     let mut module = jit::jit_module().map_err(|e| e.to_string())?;
@@ -45,7 +49,10 @@ pub fn disassemble_native(
         if !f.name.contains(needle) {
             continue;
         }
-        match clif::compile(&mut module, &plan, program) {
+        let Some(layout) = layouts.get(&plan.func_idx) else {
+            continue;
+        };
+        match clif::compile(&mut module, &plan, program, layout) {
             Ok(body) => {
                 let _ = writeln!(
                     out,

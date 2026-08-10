@@ -60,13 +60,16 @@ fn compile_with_backend(src: &str) -> (bytecode::Program, Vec<String>) {
         "compile failed: {:?}\n---\n{src}",
         r.diagnostics
     );
-    let program = r.emitted.expect("a successful compile emits").program;
+    let emitted = r.emitted.expect("a successful compile emits");
+    let layouts = emitted.frame_layouts;
+    let program = emitted.program;
     let mut module = vm::jit::jit_module().expect("jit module");
     let mut defs = Vec::new();
     let plans = plans.take();
     for plan in &plans {
         {
-            let body = clif::compile(&mut module, plan, &program).expect("clif define");
+            let layout = layouts.get(&plan.func_idx).expect("a layout per body");
+            let body = clif::compile(&mut module, plan, &program, layout).expect("clif define");
             let name = program
                 .functions
                 .get(body.func_idx.index())

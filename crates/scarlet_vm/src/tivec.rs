@@ -23,6 +23,9 @@ pub struct TiVec<I: Idx, T> {
     _idx: PhantomData<fn(I) -> I>,
 }
 
+// No `is_empty`: nothing in the workspace needs it (hawk enforces the closed
+// world), and clippy would otherwise insist it accompany `len`.
+#[allow(clippy::len_without_is_empty)]
 impl<I: Idx, T> TiVec<I, T> {
     pub fn new() -> Self {
         TiVec {
@@ -33,10 +36,6 @@ impl<I: Idx, T> TiVec<I, T> {
 
     pub fn len(&self) -> usize {
         self.raw.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.raw.is_empty()
     }
 
     /// The index [`Self::push`] would return. Mint indices here, not from

@@ -295,7 +295,12 @@ fn main() -> process::ExitCode {
                     die("nothing to disassemble: the compile produced no program");
                 };
                 let plans = plans.take();
-                match scarlet::dis::disassemble_native(&emitted.program, needle, plans) {
+                match scarlet::dis::disassemble_native(
+                    &emitted.program,
+                    needle,
+                    plans,
+                    &emitted.frame_layouts,
+                ) {
                     Ok(text) => print!("{text}"),
                     Err(e) => die(e),
                 }
@@ -374,7 +379,7 @@ fn cmd_run(args: RunArgs) {
     let Some(emitted) = result.emitted else {
         die("nothing to run: the compile produced no program");
     };
-    publish_native(plans.take(), &emitted.program);
+    publish_native(plans.take(), &emitted.program, &emitted.frame_layouts);
 
     let mut argv = Vec::with_capacity(args.args.len() + 1);
     argv.push(args.entrypoint.clone());
@@ -392,7 +397,11 @@ fn cmd_run(args: RunArgs) {
 /// entries into the program's [`NativeTable`](bytecode::NativeTable). Any
 /// failure leaves slots empty and falls back to the bytecode, printing only
 /// under `SCARLET_NATIVE_DEBUG` so a default run's stderr stays empty.
-fn publish_native(plans: Vec<clif::NativePlan>, program: &bytecode::Program) {
+fn publish_native(
+    plans: Vec<clif::NativePlan>,
+    program: &bytecode::Program,
+    layouts: &std::collections::HashMap<scarlet_vm::FuncIdx, scarlet::core_ir::emit::FrameLayout>,
+) {
     use scarlet::tivec::Idx as _;
     if plans.is_empty() {
         return;
@@ -406,7 +415,13 @@ fn publish_native(plans: Vec<clif::NativePlan>, program: &bytecode::Program) {
     };
     let mut defs = Vec::with_capacity(plans.len());
     for plan in &plans {
-        let body = match clif::compile(&mut module, plan, program) {
+        let Some(layout) = layouts.get(&plan.func_idx) else {
+            die(format!(
+                "no frame layout recorded for fn#{}",
+                plan.func_idx.index()
+            ));
+        };
+        let body = match clif::compile(&mut module, plan, program, layout) {
             Ok(body) => body,
             Err(e) => die(format!("native compile failed: {e}")),
         };

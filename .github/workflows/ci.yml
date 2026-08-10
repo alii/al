@@ -2,8 +2,7 @@ name: CI
 
 on:
   push:
-    branches-ignore:
-      - master
+    branches: [master]
   pull_request:
 
 jobs:
@@ -13,10 +12,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
@@ -61,3 +58,27 @@ jobs:
       # corpus accepts must parse without an error node.
       - name: Corpus
         run: bun run corpus
+
+  # Dead-code gate: hawk treats the workspace as a closed world and fails on
+  # `pub` items nothing reachable from the `scarlet` binary uses. It links
+  # against rustc internals, so this pinned release must match the Rust
+  # version in rust-toolchain.toml — bump them together.
+  hawk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install hawk
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            https://github.com/astral-sh/hawk/releases/download/0.1.12/cargo-hawk-installer.sh | sh
+
+      - name: Hawk
+        run: cargo hawk check -D warnings

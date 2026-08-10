@@ -534,7 +534,7 @@ mod stdlib_native_gate_probe {
         let fn_name = |idx: FuncIdx| c.program.functions[idx.index()].name.to_string();
         let idxs: Vec<FuncIdx> = probes.iter().map(|p| p.idx).collect();
         let plans: Vec<clif::NativePlan> = probes.into_iter().map(|p| p.plan).collect();
-        let compilable = clif::native_set(&plans, &c.program);
+        let compilable = clif::native_set(&plans, &c.program, &c.frame_layouts);
 
         println!("== stdlib native coverage ==");
         println!("function table size: {}", c.program.functions.len());

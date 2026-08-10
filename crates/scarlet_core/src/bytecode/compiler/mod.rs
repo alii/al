@@ -169,6 +169,15 @@ enum FieldMismatch {
 #[derive(Debug)]
 pub struct Emitted {
     pub program: Program,
+    /// The frame layout `emit` fixed for each body, keyed by `FuncIdx`.
+    ///
+    /// The native backend needs the same slot assignment and the same
+    /// constructor-header constants the bytecode emission chose. Handing over
+    /// what emit actually produced is the only way to be sure they agree —
+    /// re-running emit against a stand-in context recovers the slots but not
+    /// the interned constants.
+    pub frame_layouts:
+        std::collections::HashMap<crate::core_ir::FuncIdx, crate::core_ir::emit::FrameLayout>,
     /// Lowered Core IR (typed ANF) for the whole program.
     /// Golden-snapshotted by `crates/scarlet/tests/core_ir.rs`.
     pub core: crate::core_ir::CoreProgram,
@@ -426,6 +435,9 @@ pub struct Compiler {
     /// spent on them. Summarised against the 100ms unit budget (under
     /// `SCARLET_NATIVE_DEBUG`) when the compile hands back its `Emitted`.
     native_stats: super::native::UnitStats,
+    /// Per-body frame layouts, drained into [`Emitted`].
+    frame_layouts:
+        std::collections::HashMap<crate::core_ir::FuncIdx, crate::core_ir::emit::FrameLayout>,
     /// Whether to buffer per-occurrence `RawRef`s and resolve them into the
     /// `HoverFact` table in `finalize_references`. Only `IncrementalSession`
     /// (the LSP) consumes `HoverFact`s; the free `compile`/`check` entry points
@@ -989,6 +1001,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         deferred_env_pin: None,
         native_hook: None,
         native_stats: super::native::UnitStats::default(),
+        frame_layouts: std::collections::HashMap::new(),
     }
 }
 
@@ -1258,6 +1271,7 @@ fn compile_impl(
         emitted: Some(Emitted {
             program: c.program,
             core: c.core,
+            frame_layouts: c.frame_layouts,
         }),
         diagnostics: c.engine.diagnostics,
         references,
@@ -4356,6 +4370,7 @@ impl Compiler {
             self.program.code.push(op_arg(Op::Jump, 0));
             let body_start = self.current_addr();
             let out = emit::emit(&w, self);
+            self.frame_layouts.insert(wrapper_idx, out.layout);
             self.program.code.extend(out.code);
             self.emit(Op::Ret);
             let end = self.current_addr();
@@ -4429,6 +4444,7 @@ impl Compiler {
         // body, `materialize_eta_wrappers`, has already run.
         let base = self.current_addr();
         let out = emit::emit(&core, self);
+        self.frame_layouts.insert(func_idx, out.layout);
         self.program.code.extend(out.code);
         // The frame is long closed, so this body owns its whole tail: the
         // `Ret`, and every field of the `Function` entry the walk reserved but

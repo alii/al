@@ -73,16 +73,14 @@ pub(crate) struct EmitOut {
 #[derive(Debug, Clone, Default)]
 pub struct FrameLayout {
     slots: TiVec<LocalId, Option<i32>>,
-    /// Function-relative address of the first header `PushConst` of each
-    /// non-Bool constructor site, in emission order — the order a straight
-    /// walk of the same Core meets the `Ctor` atoms.
+    /// The header of each non-Bool constructor site, in emission order — the
+    /// order a straight walk of the same Core meets the `Ctor` atoms.
     ///
-    /// The native backend needs the four header constants
-    /// (`packed`, enum name, variant name, labels), and cannot find them by
-    /// counting back from the `MakeEnumPayload`: a field is an arbitrary
-    /// expression, so it occupies an arbitrary number of instructions, and a
-    /// field can itself be a `PushConst`. The position is emitted knowledge,
-    /// so it is recorded rather than re-derived.
+    /// The native backend needs these four constants, and there is no way to
+    /// recover them from the emitted code: a field is an arbitrary expression,
+    /// so the header is not a fixed distance back from the `MakeEnumPayload`,
+    /// and a field can itself be a `PushConst`. They are emitted knowledge, so
+    /// they are recorded here rather than read back out of the bytecode.
     pub(crate) ctor_headers: Vec<CtorHeader>,
 }
 
@@ -90,8 +88,14 @@ pub struct FrameLayout {
 /// Both are decided during emission; see [`FrameLayout::ctor_headers`].
 #[derive(Debug, Clone, Copy)]
 pub struct CtorHeader {
-    /// Function-relative address of the first header `PushConst`.
-    pub(crate) at: i32,
+    /// `type_id | variant_idx << 32`, as a constant-pool index.
+    pub(crate) packed: i32,
+    /// The enum's name, as a constant-pool index.
+    pub(crate) enum_name: i32,
+    /// The variant's name, as a constant-pool index.
+    pub(crate) variant_name: i32,
+    /// The field-label tuple, as a constant-pool index.
+    pub(crate) labels: i32,
     /// Whether emit put an `Op::Reuse` before the `MakeEnumPayload`.
     pub(crate) reuse: bool,
 }
@@ -1170,7 +1174,6 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         let type_name = self.ctx.resolve_str(v.type_name).to_owned();
         let variant_name = self.ctx.resolve_str(v.variant_name).to_owned();
 
-        let ctor_at = self.here().to_operand();
         let id_c = self
             .ctx
             .intern_int((v.type_id.0 as u32 as i64) | ((v.variant_idx as i64) << 32));
@@ -1192,7 +1195,10 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             _ => 0,
         };
         self.ctor_headers.push(CtorHeader {
-            at: ctor_at,
+            packed: id_c,
+            enum_name: en_c,
+            variant_name: vn_c,
+            labels: lc,
             reuse: a == 1,
         });
         let prehash = enum_name_prefix_hash(&type_name, &variant_name);

@@ -28,14 +28,14 @@ pub mod value;
 use std::sync::Arc;
 
 pub use native::{
-    NativeCtx, NativeEntry, NativeStatus, NativeTable, OpCoverage, is_native_bridge_op,
-    is_native_park_op, is_native_try_op, op_coverage,
+    NativeCtx, NativeEntry, NativeStatus, NativeTable, is_native_bridge_op, is_native_park_op,
+    is_native_try_op,
 };
 pub use value::{
-    Arena, BinaryRef, ClosureRef, EnumRef, HeapTag, MapBacking, MapRef, SeqRef, SocketValue, Value,
-    ValueView, enum_hash_with_payload, enum_name_prefix_hash, freed_objects_pending, hash_value,
-    take_freed_objects, values_equal,
+    Arena, BinaryRef, ClosureRef, EnumRef, HeapTag, MapRef, SeqRef, SocketValue, Value, ValueView,
+    enum_name_prefix_hash, take_freed_objects,
 };
+pub(crate) use value::{MapBacking, freed_objects_pending, hash_value, values_equal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
