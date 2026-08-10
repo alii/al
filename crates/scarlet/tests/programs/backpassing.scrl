@@ -12,8 +12,8 @@ fn require_positive(n Int, k fn(Int) String) String {
 }
 
 fn describe(n Int) String {
-	x <- require_positive(n)
-	'got ${x}'
+	n <- require_positive(n)
+	'got ${n}'
 }
 
 fn feed(n Int, k fn(Int) Int) Int {
