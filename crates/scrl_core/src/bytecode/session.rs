@@ -604,6 +604,12 @@ impl IncrementalSession {
         base_dir: Option<&Path>,
         entry_module: ModulePath,
     ) -> CompileResult {
+        // Rewrite backpass sugar away before any typing pass, mirroring
+        // `compile_impl`.
+        let mut expr = expr.clone();
+        crate::desugar::desugar_expression(&mut expr);
+        let expr = &expr;
+
         // The prelude cannot be analysed on top of itself: tear the seed down
         // to `bare` and compile the buffer as the whole world. The next
         // ordinary check re-seeds below.

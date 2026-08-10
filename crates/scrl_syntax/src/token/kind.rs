@@ -21,6 +21,7 @@ pub enum Kind {
     BitwiseOr,
     Keyword(Keyword),
     PuncArrow,
+    PuncBackArrow,
     PuncComma,
     PuncColon,
     PuncSemicolon,
@@ -71,6 +72,7 @@ impl fmt::Display for Kind {
             Kind::BitwiseOr => "|",
             Kind::Keyword(kw) => kw.text(),
             Kind::PuncArrow => "->",
+            Kind::PuncBackArrow => "<-",
             Kind::PuncComma => ",",
             Kind::PuncColon => ":",
             Kind::PuncSemicolon => ";",
@@ -118,6 +120,7 @@ mod tests {
             Kind::LogicalOr,
             Kind::BitwiseOr,
             Kind::PuncArrow,
+            Kind::PuncBackArrow,
             Kind::PuncComma,
             Kind::PuncColon,
             Kind::PuncSemicolon,
@@ -170,6 +173,7 @@ mod tests {
                 | Kind::BitwiseOr
                 | Kind::Keyword(_)
                 | Kind::PuncArrow
+                | Kind::PuncBackArrow
                 | Kind::PuncComma
                 | Kind::PuncColon
                 | Kind::PuncSemicolon

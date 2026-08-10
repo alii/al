@@ -360,6 +360,10 @@ impl Scanner {
                     self.incr_pos();
                     self.new_token(Kind::BinOpen)
                 }
+                b'-' => {
+                    self.incr_pos();
+                    self.new_token(Kind::PuncBackArrow)
+                }
                 _ => self.new_token(Kind::PuncLt),
             },
             b'/' => self.new_token(Kind::PuncDiv),

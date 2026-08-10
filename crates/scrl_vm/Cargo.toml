@@ -1,5 +1,5 @@
 [package]
-name = "al_vm"
+name = "scrl_vm"
 version = "0.1.0"
 edition = "2024"
 
@@ -10,12 +10,12 @@ edition = "2024"
 # so the release binary carries no counter.
 #
 # It has to be a feature rather than `cfg(test)`: the tests that read it are
-# `al`'s integration tests, where `al_vm` is a plain dependency and its
+# `al`'s integration tests, where `scrl_vm` is a plain dependency and its
 # `cfg(test)` is false.
 alloc-counter = []
 
 # Interpreter dispatch instrumentation: per-opcode and per-function op
-# histograms dumped to stderr once a run passes AL_OP_HISTOGRAM_OPS ops.
+# histograms dumped to stderr once a run passes SCRL_OP_HISTOGRAM_OPS ops.
 # Off by default — a normal run must not write to stderr.
 op-histogram = []
 

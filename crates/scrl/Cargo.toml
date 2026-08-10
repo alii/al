@@ -1,17 +1,17 @@
 [package]
-name = "al"
+name = "scrl"
 version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
 [features]
-# Interpreter dispatch instrumentation — forwarded to `al_vm`, where the
+# Interpreter dispatch instrumentation — forwarded to `scrl_vm`, where the
 # dispatch loop lives. See its manifest.
-op-histogram = ["al_vm/op-histogram"]
+op-histogram = ["scrl_vm/op-histogram"]
 
 [dependencies]
-al_core = { path = "../al_core" }
-al_vm = { path = "../al_vm" }
+scrl_core = { path = "../scrl_core" }
+scrl_vm = { path = "../scrl_vm" }
 clap = { version = "4", features = ["derive"] }
 clap_mangen = "0.3"
 percent-encoding = "2"
@@ -20,11 +20,11 @@ serde_json = "1"
 ureq = "2"
 
 [build-dependencies]
-al_core = { path = "../al_core" }
+scrl_core = { path = "../scrl_core" }
 
 [dev-dependencies]
-al_core = { path = "../al_core" }
-al_vm = { path = "../al_vm", features = ["alloc-counter"] }
+scrl_core = { path = "../scrl_core" }
+scrl_vm = { path = "../scrl_vm", features = ["alloc-counter"] }
 cranelift-codegen = { workspace = true }
 cranelift-frontend = { workspace = true }
 cranelift-jit = { workspace = true }
@@ -33,6 +33,6 @@ cranelift-native = { workspace = true }
 serde_json = "1"
 
 [[bin]]
-name = "al"
+name = "scrl"
 path = "src/main.rs"
 

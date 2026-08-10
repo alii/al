@@ -534,6 +534,39 @@ impl Parser {
         false
     }
 
+    // Look ahead for `ident (, ident)* <-` on one line: a backpass statement.
+    // Anything else (a lone `<` comparison, a binding, a call) falls through
+    // to the other statement/expression paths.
+    fn is_backpass_ahead(&self) -> bool {
+        let mut i = self.index;
+        while matches!(self.tokens.get(i).map(|t| &t.kind), Some(Kind::Identifier(_))) {
+            if i > self.index
+                && self.tokens[i]
+                    .leading_trivia
+                    .iter()
+                    .any(|t| matches!(t, Trivia::Newline))
+            {
+                return false;
+            }
+            let Some(next) = self.tokens.get(i + 1) else {
+                return false;
+            };
+            if next
+                .leading_trivia
+                .iter()
+                .any(|t| matches!(t, Trivia::Newline))
+            {
+                return false;
+            }
+            match next.kind {
+                Kind::PuncBackArrow => return true,
+                Kind::PuncComma => i += 2,
+                _ => return false,
+            }
+        }
+        false
+    }
+
     // By value: parsing moves the diagnostics out, so a parser cannot be run
     // twice (the second run would report an empty program, silently).
     pub fn parse_program(mut self) -> ParseResult {
@@ -624,6 +657,9 @@ impl Parser {
                         self.parse_tuple_destructuring()?,
                     )));
                 }
+            }
+            Kind::Identifier(_) if self.is_backpass_ahead() => {
+                return Ok(ast::Node::Statement(Box::new(self.parse_backpass()?)));
             }
             Kind::Identifier(name) if self.is_binding_ahead() => {
                 if is_type_name(&name) {
@@ -916,6 +952,7 @@ impl Parser {
                     body.push(node);
                     if outcome == SyncOutcome::ConsumedCloser {
                         self.pop_context();
+                        self.check_backpass_tail(&body);
                         return Ok(ast::Expression::BlockExpression(ast::BlockExpression {
                             body,
                             span: self.span_from(block_span),
@@ -928,11 +965,22 @@ impl Parser {
 
         self.pop_context();
         self.eat(Kind::PuncCloseBrace)?;
+        self.check_backpass_tail(&body);
 
         Ok(ast::Expression::BlockExpression(ast::BlockExpression {
             body,
             span: self.span_from(block_span),
         }))
+    }
+
+    /// A backpass passes the *rest* of its block to the call, so one with
+    /// nothing after it has nothing to pass.
+    fn check_backpass_tail(&mut self, body: &[ast::Node]) {
+        if let Some(ast::Node::Statement(s)) = body.last()
+            && let ast::Statement::Backpass(bp) = s.as_ref()
+        {
+            self.error_at(bp.span, "nothing follows this backpass to pass into the call");
+        }
     }
 
     fn parse_array_expression(&mut self) -> PResult<ast::Expression> {
@@ -1999,6 +2047,50 @@ impl Parser {
                 span: self.span_from(span),
             },
         ))
+    }
+
+    /// `a, b <- call(args)`. Statement position only; the desugarer later
+    /// feeds the rest of the enclosing block to the call as a trailing
+    /// function argument, so the RHS must syntactically be a call.
+    fn parse_backpass(&mut self) -> PResult<ast::Statement> {
+        let span = self.current_span();
+        if self.current_context() != ParseContext::Block {
+            return Err(
+                "backpassing is not allowed at the top level of a module — use it inside a function or block".to_string(),
+            );
+        }
+
+        let mut binders = vec![self.parse_backpass_binder()?];
+        while self.kind() == Kind::PuncComma {
+            self.eat(Kind::PuncComma)?;
+            binders.push(self.parse_backpass_binder()?);
+        }
+        self.eat(Kind::PuncBackArrow)?;
+
+        let call = self.parse_expression()?;
+        if matches!(call, ast::Expression::OrExpression(_)) {
+            return Err("`or` is not allowed on a backpass statement".to_string());
+        }
+        if !matches!(call, ast::Expression::FunctionCallExpression(_)) {
+            return Err("backpassing requires a function call on the right of `<-`".to_string());
+        }
+
+        Ok(ast::Statement::Backpass(ast::BackpassBinding {
+            binders,
+            call,
+            span: self.span_from(span),
+        }))
+    }
+
+    fn parse_backpass_binder(&mut self) -> PResult<ast::Identifier> {
+        let id = self.eat_identifier("Expected binder name")?;
+        if id.name != "_" && is_type_name(&id.name) {
+            return Err(format!(
+                "backpass binders must be plain identifiers or `_`, got '{}'",
+                id.name
+            ));
+        }
+        Ok(id)
     }
 
     fn parse_binding(&mut self) -> PResult<ast::Statement> {

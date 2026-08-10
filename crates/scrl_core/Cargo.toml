@@ -1,17 +1,17 @@
 [package]
-name = "al_core"
+name = "scrl_core"
 version = "0.1.0"
 edition = "2024"
 
 [features]
-# Forwarded to `al_vm` — see its manifest. Kept here so a dependant can turn
+# Forwarded to `scrl_vm` — see its manifest. Kept here so a dependant can turn
 # the counter on through either crate.
-alloc-counter = ["al_vm/alloc-counter"]
+alloc-counter = ["scrl_vm/alloc-counter"]
 
 [dependencies]
-al_syntax = { path = "../al_syntax" }
-al_types = { path = "../al_types" }
-al_vm = { path = "../al_vm" }
+scrl_syntax = { path = "../scrl_syntax" }
+scrl_types = { path = "../scrl_types" }
+scrl_vm = { path = "../scrl_vm" }
 indexmap = { workspace = true }
 cranelift-codegen = { workspace = true }
 cranelift-frontend = { workspace = true }

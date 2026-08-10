@@ -1391,7 +1391,12 @@ fn declare_imports<M: Module>(
     let int_box = import(module, NATIVE_INT_BOX_SYMBOL, &[ptr, i64t], Some(i64t))?;
     let div_int = import(module, SYM_DIV_INT, &[i64t, i64t], Some(i64t))?;
     let mod_int = import(module, SYM_MOD_INT, &[i64t, i64t], Some(i64t))?;
-    let shim_op = import(module, SYM_SHIM_OP, &[ptr, i64t, i64t, ptr, i64t], Some(i64t))?;
+    let shim_op = import(
+        module,
+        SYM_SHIM_OP,
+        &[ptr, i64t, i64t, ptr, i64t],
+        Some(i64t),
+    )?;
     // The transfer helpers return a `PreparedCall`: two registers.
     let import2 =
         |module: &mut M, name: &str, params: &[ir::Type]| -> Result<FuncId, Box<ModuleError>> {
@@ -2217,7 +2222,10 @@ impl<'a> BodyGen<'a> {
                 let opv = self.b.ins().iconst(types::I64, i64::from(operand));
                 let n = self.b.ins().iconst(types::I64, args.len() as i64);
                 let vmx = self.vmx();
-                let call = self.b.ins().call(self.fns.shim_op, &[vmx, opc, opv, buf, n]);
+                let call = self
+                    .b
+                    .ins()
+                    .call(self.fns.shim_op, &[vmx, opc, opv, buf, n]);
                 self.opaque_result(call, want_int)
             }
             Atom::PrimOp { op, args, .. } => {

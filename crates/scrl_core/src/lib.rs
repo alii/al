@@ -23,7 +23,7 @@ pub mod typed_ir;
 
 // Re-exported at their historical paths so `al_core::parser`,
 // `al_core::types`, `al_core::heap` etc. keep naming one definition.
-pub use al_syntax::{ast, diagnostic, formatter, parser, scanner, span, term, token};
+pub use al_syntax::{ast, desugar, diagnostic, formatter, parser, scanner, span, term, token};
 pub use al_types::{type_def, types};
 pub use al_vm::{assert_send, assert_send_sync, frozen, heap, tivec};
 

@@ -790,7 +790,7 @@ impl VM {
                     // `code_start` added back.
                     ip = self.program.code[(code_start + instr.operand + idx) as usize].operand;
                 }
-                Op::ToString => self.to_string_op()?,
+                Op::ToString => self.op_to_string()?,
                 Op::StrConcatN => self.str_concat_n(instr.operand as usize)?,
                 Op::Halt => {
                     break;
@@ -1240,7 +1240,7 @@ impl VM {
     /// Concatenate the two strings on top of the stack.
     #[inline]
     /// `Op::ToString`: the operand's string image (a Str is its own image).
-    pub(super) fn to_string_op(&mut self) -> VmResult<()> {
+    pub(super) fn op_to_string(&mut self) -> VmResult<()> {
         let val = self.pop()?;
         if val.as_str().is_some() {
             self.stack.push(val);

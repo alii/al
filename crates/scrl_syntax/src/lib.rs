@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ast;
+pub mod desugar;
 pub mod diagnostic;
 pub mod formatter;
 pub mod module_path;

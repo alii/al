@@ -537,7 +537,8 @@ pub unsafe extern "C" fn al_shim_op(
     for i in 0..argc as usize {
         // SAFETY: `buf` holds `argc` initialized owned words; each transfers
         // its reference onto the value stack here, balanced by the op's pops.
-        vm.stack.push(unsafe { Value::from_bits(buf.add(i).read()) });
+        vm.stack
+            .push(unsafe { Value::from_bits(buf.add(i).read()) });
     }
     match vm.run_bridge_op(op_code as u8, operand as i32) {
         Ok(()) => match vm.stack.pop() {
@@ -577,7 +578,7 @@ impl VM {
             c if c == Op::StrContains as u8 => self.str_contains(),
             c if c == Op::StrTrim as u8 => self.str_trim(),
             c if c == Op::IntToString as u8 => self.int_to_string(),
-            c if c == Op::ToString as u8 => self.to_string_op(),
+            c if c == Op::ToString as u8 => self.op_to_string(),
             c if c == Op::StrConcatN as u8 => self.str_concat_n(operand as usize),
             c if c == Op::BinFromString as u8 => self.bin_from_string(),
             c if c == Op::BinToString as u8 => self.bin_to_string(),

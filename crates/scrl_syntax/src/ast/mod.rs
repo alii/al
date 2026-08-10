@@ -212,6 +212,19 @@ impl CtorDestructuringBinding {
     }
 }
 
+/// `a, b <- call(args)`: backpassing. Sugar for appending the rest of the
+/// enclosing block to the call as a trailing `fn(a, b) { ... }` argument;
+/// rewritten away by [`crate::desugar`] before type checking. `call` is
+/// always a [`FunctionCallExpression`] — the parser rejects anything else.
+/// A `_` binder is an [`Identifier`] named `_`, matching how a discarded
+/// function parameter is spelled.
+#[derive(Debug, Clone)]
+pub struct BackpassBinding {
+    pub binders: Vec<Identifier>,
+    pub call: Expression,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone)]
 pub struct FunctionParameter {
     pub identifier: Identifier,
@@ -372,6 +385,7 @@ pub enum Statement {
     TypedDiscard(TypedDiscard),
     CtorDestructuringBinding(CtorDestructuringBinding),
     VariableBinding(VariableBinding),
+    Backpass(BackpassBinding),
 }
 
 impl Statement {
@@ -383,6 +397,7 @@ impl Statement {
             Statement::TypedDiscard(x) => x.span,
             Statement::CtorDestructuringBinding(x) => x.span,
             Statement::VariableBinding(x) => x.span,
+            Statement::Backpass(x) => x.span,
         }
     }
 }

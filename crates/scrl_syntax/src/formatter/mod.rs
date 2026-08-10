@@ -347,6 +347,18 @@ impl Formatter {
                     self.expr(&s.init)
                 ]
             }
+            ast::Statement::Backpass(s) => {
+                let mut parts = Vec::new();
+                for (i, b) in s.binders.iter().enumerate() {
+                    if i > 0 {
+                        parts.push(text(", "));
+                    }
+                    parts.push(text(b.name.clone()));
+                }
+                parts.push(text(" <- "));
+                parts.push(self.expr(&s.call));
+                doc::concat(parts)
+            }
             ast::Statement::Declaration { decl, public } => self.declaration(decl, *public),
             ast::Statement::ImportDeclaration(s) => {
                 let mut out = vec![text("import "), text(s.path.to_string())];

@@ -1034,6 +1034,12 @@ fn compile_impl(
     pre: Option<&'static crate::static_ir::StaticStdlib>,
     native_hook: Option<NativeHook>,
 ) -> CompileResult {
+    // Backpass sugar is rewritten away here, before any typing pass, so
+    // inference and lowering never see a `Statement::Backpass`.
+    let mut expr = expr.clone();
+    crate::desugar::desugar_expression(&mut expr);
+    let expr = &expr;
+
     let mut c = new_compiler(base_dir, check_only);
     c.native_hook = native_hook;
     // The AL_NATIVE env contract is applied at program construction whether
@@ -2246,6 +2252,12 @@ impl Compiler {
                 // walking the body. By the time we reach one here it's already
                 // been resolved (or rejected) — nothing left to do.
             }
+            ast::Statement::Backpass(bp) => {
+                // Desugared away before compilation; one can only survive a
+                // parser rejection (e.g. at module top level), which already
+                // errored. Type the call so its own diagnostics still surface.
+                self.compile_expr(&bp.call);
+            }
         }
     }
 
@@ -2584,7 +2596,8 @@ impl Compiler {
         let hash = source_hash(&text);
         let mut sc = crate::scanner::new_scanner(text);
         let parser = crate::parser::new_parser(&mut sc);
-        let parsed = parser.parse_program();
+        let mut parsed = parser.parse_program();
+        crate::desugar::desugar_program(&mut parsed.ast);
         for d in parsed.diagnostics {
             // The span is `at` — the import site in the *importing* module —
             // so provenance is left for the importer's own stamping pass.
