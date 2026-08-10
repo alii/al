@@ -554,6 +554,10 @@ mod opc {
     pub const PROCESS_SPAWN: u8 = Op::ProcessSpawn as u8;
     pub const SEQ_DROP: u8 = Op::SeqDrop as u8;
     pub const SLEEP: u8 = Op::Sleep as u8;
+    pub const SUBJECT_NEW: u8 = Op::SubjectNew as u8;
+    pub const SUBJECT_RECEIVE: u8 = Op::SubjectReceive as u8;
+    pub const SUBJECT_RECEIVE_UNTIL: u8 = Op::SubjectReceiveUntil as u8;
+    pub const SUBJECT_SEND: u8 = Op::SubjectSend as u8;
     pub const SPAWN_LOCAL: u8 = Op::SpawnLocal as u8;
     pub const SPAWN_ON_EACH: u8 = Op::SpawnOnEach as u8;
     pub const STACK_DEPTH: u8 = Op::StackDepth as u8;
@@ -689,6 +693,8 @@ impl VM {
             opc::TCP_WRITE_PARTS => self.tcp_write_parts(reds),
             opc::DNS_RESOLVE => self.dns_resolve(reds),
             opc::SLEEP => self.sleep(),
+            opc::SUBJECT_RECEIVE => self.subject_receive(reds),
+            opc::SUBJECT_RECEIVE_UNTIL => self.subject_receive_until(reds),
             _ => proof_violation("run_park_op on an op is_native_park_op excludes"),
         }
     }
@@ -805,6 +811,8 @@ impl VM {
             opc::TCP_CLOSE_SERVER => self.tcp_close_server(),
             opc::SPAWN_LOCAL => self.process_spawn_local(reds),
             opc::SPAWN_ON_EACH => self.process_spawn_on_each(reds),
+            opc::SUBJECT_NEW => self.subject_new(),
+            opc::SUBJECT_SEND => self.subject_send(reds),
             // `Print` is the one void op: it pushes nothing, and the bytecode
             // emitter supplies the `()` with a following `PushNil`. The bridge
             // returns exactly one value, so it must do the same.

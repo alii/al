@@ -28,6 +28,7 @@ pub(super) fn value_type_name(v: &Value) -> String {
         ValueView::Closure(_) => "Function".to_string(),
         ValueView::Enum(e) => e.enum_name().to_string(),
         ValueView::Socket(_) => "Socket".to_string(),
+        ValueView::Subject(_) => "Subject".to_string(),
         ValueView::Nil => "Nil".to_string(),
         ValueView::Map(_) => "Map".to_string(),
     }
@@ -185,6 +186,9 @@ fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut S
         ValueView::Socket(s) => {
             let kind = if s.is_listener { "listener" } else { "socket" };
             let _ = write!(out, "<{}#{}>", kind, s.id);
+        }
+        ValueView::Subject(id) => {
+            let _ = write!(out, "<subject#{id}>");
         }
         ValueView::Range(a, z) => {
             // Render like the materialized array without building one:

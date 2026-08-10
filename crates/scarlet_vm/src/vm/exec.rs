@@ -829,6 +829,10 @@ impl VM {
                 Op::SpawnLocal => self.process_spawn_local(&mut reds)?,
                 Op::SpawnOnEach => self.process_spawn_on_each(&mut reds)?,
                 Op::Sleep => park!(self.sleep()),
+                Op::SubjectNew => self.subject_new()?,
+                Op::SubjectSend => self.subject_send(&mut reds)?,
+                Op::SubjectReceive => park!(self.subject_receive(&mut reds)),
+                Op::SubjectReceiveUntil => park!(self.subject_receive_until(&mut reds)),
                 // String and binary builtins (see `vm::text`).
                 Op::StrSplit => self.str_split()?,
                 Op::StrLen => self.str_len()?,

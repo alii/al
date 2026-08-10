@@ -401,6 +401,8 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
         ],
         Op::HttpHeaderGet | Op::MapGet => &[S::OptionSome, S::OptionNone],
         Op::Sleep => &[S::Unit],
+        Op::SubjectSend => &[S::Unit],
+        Op::SubjectReceiveUntil => &[S::ResultOk, S::ResultErr, S::Unit],
         _ => &[],
     }
 }

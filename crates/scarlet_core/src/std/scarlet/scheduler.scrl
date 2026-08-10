@@ -1,5 +1,5 @@
 /**
- * Lightweight processes.
+ * Lightweight processes and message passing.
  *
  * spawn(f) starts a new process running f. Processes are cheap (a few hundred
  * bytes, about a microsecond to start) — spawn freely, one per connection or
@@ -8,8 +8,17 @@
  * whole program. Processes share no mutable state: values are immutable, and
  * anything that crosses between processes behaves as a copy.
  *
+ * Processes talk through Subjects. A Subject(msg) is a typed mailbox: the
+ * process that calls subject() owns it and is the only one that may receive
+ * on it; the handle itself is a value — capture it in a spawned closure or
+ * send it inside a message (a reply address) — and any process holding it may
+ * send. receive(s) blocks until a message arrives; receive_within adds a
+ * timeout. Messages on one subject arrive in the order they were sent.
+ *
  * The program exits when every process has finished.
  */
+import scarlet/time.{Instant}
+import scarlet/time
 
 // The closure returns `Nil`, not a generic `a`: a spawned process has nowhere
 // to send a result — its return value is dropped — so a closure that produces a
@@ -35,3 +44,42 @@ pub fn spawn_per_core(f fn() Nil) Nil
 // keeps running. `ms <= 0` returns immediately.
 @vm(scheduler__sleep)
 pub fn sleep(ms Int) Nil
+
+// A typed mailbox. Created and owned by one process; sendable by any process
+// holding the handle. The type parameter is the one kind of message the
+// subject carries — model a process that handles several kinds with one sum
+// type, or with one subject per kind.
+pub type Subject(msg)
+
+// A new subject owned by the calling process. It dies with its owner: later
+// sends to it are dropped.
+@vm(scheduler__subject)
+pub fn subject() Subject(msg)
+
+// Deliver `m` to `s`'s owner. Fire-and-forget: it never blocks, and a message
+// to a finished process is silently dropped. The receiver gets a copy —
+// cheap for Binary payloads, whose bytes are shared, and a socket handle
+// crossing this way stays controlled by its original process.
+@vm(scheduler__send)
+pub fn send(s Subject(msg), m msg) Nil
+
+// The oldest message sent to `s`, parking the calling process until one
+// arrives. Only the owner may call this; a receive on another process's
+// subject is a runtime error.
+@vm(scheduler__receive)
+pub fn receive(s Subject(msg)) msg
+
+// As `receive`, but gives up `timeout_ms` milliseconds from now. The deadline
+// is captured once, up front, so it does not reset while waiting.
+pub fn receive_within(s Subject(msg), timeout_ms Int) Result(msg, Nil) {
+	receive_until(s, time.add_ms(time.monotonic(), timeout_ms))
+}
+
+// As `receive`, but errs with Nil once the absolute Instant `deadline`
+// (from `time.monotonic()`) is reached.
+pub fn receive_until(s Subject(msg), deadline Instant) Result(msg, Nil) {
+	receive_until_ms(s, time.to_deadline_ms(deadline))
+}
+
+@vm(scheduler__receive_until)
+fn receive_until_ms(s Subject(msg), deadline_ms Int) Result(msg, Nil)

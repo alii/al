@@ -76,6 +76,7 @@ mod inspect;
 mod io;
 /// JIT module construction and the runtime-symbol resolution seam.
 pub mod jit;
+mod mailbox;
 mod map;
 mod migrate;
 /// Public because the JIT finalize step registers
@@ -126,6 +127,9 @@ pub enum VmError {
         len: i64,
         what: &'static str,
     },
+    /// `scheduler.receive` on a subject the calling process did not create.
+    /// Only the owner may receive; the handle can travel, the right cannot.
+    ForeignReceive,
     /// Type-system invariant broken: a compiler bug, not user error. The
     /// runtime behind an `Internal`-errored run is leaked (see [`VM::run`]).
     Internal(Cow<'static, str>),
@@ -162,6 +166,12 @@ impl fmt::Display for VmError {
             }
             Self::IndexOutOfBounds { idx, len, what } => {
                 write!(f, "{what} index {idx} out of bounds (length {len})")
+            }
+            Self::ForeignReceive => {
+                write!(
+                    f,
+                    "receive: only the process that created a subject may receive on it"
+                )
             }
             Self::Internal(s) => {
                 write!(f, "internal VM error (compiler bug): {s}")
@@ -603,8 +613,10 @@ impl VM {
                     return Err(VmError::internal("Step::Dispatch escaped run_slice"));
                 }
                 Step::Done => {
-                    // The ended process's connections die with it.
+                    // The ended process's connections and mailboxes die with
+                    // it.
                     self.release_connections_of(self.current_pid);
+                    self.runtime.subject_close_all(self.current_pid);
                     // The finished process's result is its top-of-stack.
                     if self.current_is_main {
                         // Stash the (value, heap) pair together until the

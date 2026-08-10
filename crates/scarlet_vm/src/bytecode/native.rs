@@ -190,6 +190,8 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::ProcessSpawn
         | Op::SpawnLocal
         | Op::SpawnOnEach
+        | Op::SubjectNew
+        | Op::SubjectSend
         | Op::Monotonic
         | Op::Argv
         | Op::EnvMap
@@ -212,7 +214,9 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::TcpWrite
         | Op::TcpWriteParts
         | Op::DnsResolve
-        | Op::Sleep => OpCoverage::Park,
+        | Op::Sleep
+        | Op::SubjectReceive
+        | Op::SubjectReceiveUntil => OpCoverage::Park,
         Op::PushConst
         | Op::PushLocal
         | Op::StoreLocal

@@ -88,6 +88,7 @@ const HDR_INT: u64 = QNAN | 0x0001_0000_0000_0000;
 const HDR_BOOL: u64 = QNAN | 0x0002_0000_0000_0000;
 const HDR_NIL: u64 = QNAN | 0x0003_0000_0000_0000;
 const HDR_SOCKET: u64 = QNAN | 0x0004_0000_0000_0000;
+const HDR_SUBJECT: u64 = QNAN | 0x0005_0000_0000_0000;
 /// The sign bit makes `(bits & (SIGN|QNAN)) == (SIGN|QNAN)` the heap test,
 /// disjoint from the sign-clear immediate headers above.
 const HDR_PTR: u64 = SIGN | QNAN;
@@ -879,6 +880,9 @@ pub enum ValueView<'a> {
     Bool(bool),
     Nil,
     Socket(SocketValue),
+    /// A mailbox handle (`Subject(msg)`): the program-unique mailbox id. The
+    /// queue itself lives in the runtime's registry, never in the value.
+    Subject(u64),
     Str(&'a str),
     Array(SeqRef<'a>),
     Range(i64, i64),
@@ -1061,6 +1065,10 @@ impl Value {
         (self.0 & HDR_MASK) == HDR_SOCKET
     }
     #[inline(always)]
+    pub fn is_subject(&self) -> bool {
+        (self.0 & HDR_MASK) == HDR_SUBJECT
+    }
+    #[inline(always)]
     pub fn is_heap(&self) -> bool {
         (self.0 & (SIGN | QNAN)) == (SIGN | QNAN)
     }
@@ -1107,6 +1115,14 @@ impl Value {
             0
         };
         Value(HDR_SOCKET | listener | s.id as u32 as u64)
+    }
+
+    /// A mailbox handle by its registry id. Ids are minted by a monotonic
+    /// counter, so the 48-bit payload cannot be exhausted in practice.
+    #[inline]
+    pub fn subject(id: u64) -> Value {
+        debug_assert!(id <= PAYLOAD, "subject id exceeds the 48-bit payload");
+        Value(HDR_SUBJECT | (id & PAYLOAD))
     }
 
     // These allocate but never collect, so process-heap callers must have
@@ -1507,6 +1523,14 @@ impl Value {
         }
     }
     #[inline]
+    pub fn as_subject(&self) -> Option<u64> {
+        if self.is_subject() {
+            Some(self.0 & PAYLOAD)
+        } else {
+            None
+        }
+    }
+    #[inline]
     pub fn as_str(&self) -> Option<&str> {
         if self.is_tag(HeapTag::Str) {
             // SAFETY: tag-checked; lifetime constrained to `&self`.
@@ -1607,6 +1631,8 @@ impl Value {
             ValueView::Bool(self.0 & 1 == 1)
         } else if self.is_socket() {
             ValueView::Socket(decode_socket(self.0))
+        } else if self.is_subject() {
+            ValueView::Subject(self.0 & PAYLOAD)
         } else if self.is_heap() {
             let obj = self.heap_obj();
             // SAFETY: heap values point at live arena objects; each arm is
@@ -1660,6 +1686,7 @@ impl fmt::Debug for Value {
             ValueView::Bool(b) => write!(f, "Bool({b})"),
             ValueView::Nil => f.write_str("Nil"),
             ValueView::Socket(s) => write!(f, "Socket({}, listener={})", s.id, s.is_listener),
+            ValueView::Subject(id) => write!(f, "Subject({id})"),
             ValueView::Str(s) => write!(f, "Str({s:?})"),
             ValueView::Range(a, b) => write!(f, "Range({a}, {b})"),
             ValueView::Binary(b) => write!(f, "Binary({} bits)", b.bit_len()),
@@ -2689,6 +2716,9 @@ fn pair_equal(a: &Value, b: &Value, pending: &mut EqPending) -> bool {
         (ValueView::Socket(asv), ValueView::Socket(bsv)) => {
             asv.id == bsv.id && asv.is_listener == bsv.is_listener
         }
+        // Subject equality is identity: two handles are equal only when they
+        // name the same mailbox.
+        (ValueView::Subject(a), ValueView::Subject(b)) => a == b,
         (ValueView::Map(am), ValueView::Map(bm)) => match (am.backing(), bm.backing()) {
             (MapBacking::Hamt, MapBacking::Hamt) => super::hamt::hamts_equal(am, bm, pending),
             (MapBacking::Env, MapBacking::Env) => true,
@@ -2768,6 +2798,9 @@ pub(crate) fn hash_value(v: &Value) -> u64 {
             // Socket equality is identity: descriptor id plus role.
             h = fnv1a_combine(h, s.id as u64);
             h = fnv1a_combine(h, s.is_listener as u64);
+        }
+        ValueView::Subject(id) => {
+            h = fnv1a_combine(h, id);
         }
         ValueView::Nil => {
             // `Nil` is equal only to itself; any constant respects equality.

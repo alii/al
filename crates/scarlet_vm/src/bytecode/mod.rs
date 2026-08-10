@@ -319,6 +319,21 @@ pub enum Op {
     SpawnOnEach,
     /// Park the current process for `ms` milliseconds.
     Sleep,
+    /// Push a fresh `Subject` owned by the current process.
+    /// (scarlet/scheduler.subject)
+    SubjectNew,
+    /// `[subject, msg] -> Nil` — deep-copy `msg` into the subject's mailbox
+    /// and wake a parked receiver. Never blocks; a dead subject drops the
+    /// message. (scarlet/scheduler.send)
+    SubjectSend,
+    /// `[subject] -> msg` — pop the mailbox's oldest message, parking until
+    /// one arrives. Only the owning process may receive.
+    /// (scarlet/scheduler.receive)
+    SubjectReceive,
+    /// `[subject, deadline_ms] -> Result(msg, Nil)` — as `SubjectReceive`,
+    /// but `Err(Nil)` once the absolute monotonic-ms deadline passes.
+    /// (scarlet/scheduler.receive_until)
+    SubjectReceiveUntil,
     /// Push milliseconds elapsed since a process-global monotonic epoch (Int).
     Monotonic,
 
@@ -504,6 +519,10 @@ impl Op {
             | Op::SpawnLocal
             | Op::SpawnOnEach
             | Op::Sleep
+            | Op::SubjectNew
+            | Op::SubjectSend
+            | Op::SubjectReceive
+            | Op::SubjectReceiveUntil
             | Op::Monotonic
             | Op::Argv
             | Op::EnvMap
@@ -669,6 +688,10 @@ impl Op {
             | Op::SpawnLocal
             | Op::SpawnOnEach
             | Op::Sleep
+            | Op::SubjectNew
+            | Op::SubjectSend
+            | Op::SubjectReceive
+            | Op::SubjectReceiveUntil
             | Op::Monotonic
             | Op::Argv
             | Op::EnvMap
