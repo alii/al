@@ -1,6 +1,6 @@
 //! The native (Cranelift) backend's contract, pinned against the interpreter
 //! as a differential oracle: every test runs one program under
-//! `AL_NATIVE=off` and `AL_NATIVE=native` and demands identical output. The
+//! `SCARLET_NATIVE=off` and `SCARLET_NATIVE=native` and demands identical output. The
 //! env vars are set per child, so the mode `cargo test` inherited is
 //! irrelevant.
 
@@ -35,7 +35,7 @@ fn run_al_env(args: &[&str], envs: &[(&str, &str)]) -> AlOutput {
     }
 }
 
-/// Run `src` under one AL_NATIVE mode. `schedulers` pins AL_SCHEDULERS when
+/// Run `src` under one SCARLET_NATIVE mode. `schedulers` pins SCARLET_SCHEDULERS when
 /// the test's scheduling shape matters.
 fn run_mode(
     proj: &Project,
@@ -48,9 +48,9 @@ fn run_mode(
     std::fs::write(&path, src).unwrap();
     let path = path.to_string_lossy().into_owned();
     let scheds = schedulers.map(|n| n.to_string());
-    let mut envs: Vec<(&str, &str)> = vec![("AL_NATIVE", mode)];
+    let mut envs: Vec<(&str, &str)> = vec![("SCARLET_NATIVE", mode)];
     if let Some(s) = scheds.as_deref() {
-        envs.push(("AL_SCHEDULERS", s));
+        envs.push(("SCARLET_SCHEDULERS", s));
     }
     run_al_env(&["run", &path], &envs)
 }
@@ -280,7 +280,7 @@ fn mk_pick(k Int, x Int, y Int) Pick {\n\
 \tmatch k % 3 {\n\
 \t\t0 -> One(x)\n\
 \t\t1 -> Two(x, y)\n\
-\t\telse -> Zero\n\
+\t\t_ -> Zero\n\
 \t}\n\
 }\n\
 \n\
@@ -359,7 +359,7 @@ fn gen_fn(r: &mut Rng, idx: usize) -> String {
                 )
             }
             5 => format!(
-                "match {} % 3 {{\n\t\t0 -> {}\n\t\t1 -> {}\n\t\telse -> {}\n\t}}",
+                "match {} % 3 {{\n\t\t0 -> {}\n\t\t1 -> {}\n\t\t_ -> {}\n\t}}",
                 operand(r, t),
                 operand(r, t),
                 operand(r, t),
@@ -513,7 +513,7 @@ fn dis_native_prints_clif_for_fib() {
     let path = path.to_string_lossy().into_owned();
     let out = run_al_env(
         &["dis", &path, "--native", "fib"],
-        &[("AL_NATIVE", "native")],
+        &[("SCARLET_NATIVE", "native")],
     );
     assert!(
         out.success,

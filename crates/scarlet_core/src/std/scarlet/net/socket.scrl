@@ -51,7 +51,7 @@ fn read_exact_loop(c Socket, remaining Int, acc Binary) Result(Binary, NetError)
 
 // Read whatever data is available, up to `max` bytes, but wait no longer than
 // `timeout_ms` milliseconds for data to arrive. The deadline is captured once,
-// here in AL, as an absolute monotonic timestamp, so an internal re-run on a
+// here in Scarlet, as an absolute monotonic timestamp, so an internal re-run on a
 // spurious wakeup never resets the clock. Returns Ok(Data(b)) once bytes
 // arrive, Ok(Closed) if the peer closes the connection, or Err(TimedOut) once
 // the deadline passes with no data.

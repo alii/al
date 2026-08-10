@@ -313,7 +313,7 @@ pub struct JitDef {
 
 /// Resolve every pending relocation (where [`runtime_symbols`] names bind to
 /// their shim addresses), then publish each def's code address into the
-/// program's entry table, plus a [`perf_map`] line under `AL_PERF_MAP=1`.
+/// program's entry table, plus a [`perf_map`] line under `SCARLET_PERF_MAP=1`.
 ///
 /// Every declaration is checked against [`native_entry_signature`] first;
 /// that check is what keeps the `*const u8` → [`NativeEntry`] transmute

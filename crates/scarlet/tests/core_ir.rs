@@ -212,7 +212,7 @@ core_golden!(
     "fn step(n Int) Int {\n\
      \tmatch n % 2 {\n\
      \t\t0 -> n / 2\n\
-     \t\telse -> 3 * n + 1\n\
+     \t\t_ -> 3 * n + 1\n\
      \t}\n\
      }\n\
      step(7)\n"
@@ -240,7 +240,7 @@ core_golden!(
     "fn count(n Int, acc Int) Int {\n\
      \tmatch n {\n\
      \t\t0 -> acc\n\
-     \t\telse -> count(n - 1, acc + 1)\n\
+     \t\t_ -> count(n - 1, acc + 1)\n\
      \t}\n\
      }\n\
      count(3, 0)\n"
@@ -377,7 +377,7 @@ core_golden!(
      \t\t<<'POST'>> -> Post\n\
      \t\t<<'PUT'>> -> Put\n\
      \t\t<<'DELETE'>> -> Delete\n\
-     \t\telse -> Other(m)\n\
+     \t\t_ -> Other(m)\n\
      \t}\n\
      }\n\
      to_method(<<'PUT'>>)\n"
@@ -404,7 +404,7 @@ core_golden!(
      \tmatch n {\n\
      \t\t0 | 1 -> 1\n\
      \t\t2 | 3 | 4 -> 2\n\
-     \t\telse -> 0\n\
+     \t\t_ -> 0\n\
      \t}\n\
      }\n\
      small(3)\n"
@@ -585,7 +585,7 @@ fn binary_match_arm_bodies_lowered_once() {
          \t\t<<'PUT'>> -> 303\n\
          \t\t<<'DELETE'>> -> 404\n\
          \t\t<<'PATCH'>> -> 505\n\
-         \t\telse -> 606\n\
+         \t\t_ -> 606\n\
          \t}\n\
          }\n\
          code(<<'HEAD'>>)\n",
@@ -602,7 +602,7 @@ fn guarded_match_arm_bodies_lowered_once() {
          \tmatch x {\n\
          \t\tn if n < y -> 101\n\
          \t\tn if n > y -> 202\n\
-         \t\telse -> 303\n\
+         \t\t_ -> 303\n\
          \t}\n\
          }\n\
          band(1, 2)\n",
@@ -619,7 +619,7 @@ fn or_pattern_arm_bodies_lowered_once() {
          \tmatch n {\n\
          \t\t0 | 1 -> 101\n\
          \t\t2 | 3 | 4 -> 202\n\
-         \t\telse -> 303\n\
+         \t\t_ -> 303\n\
          \t}\n\
          }\n\
          cls(3)\n",
@@ -721,7 +721,7 @@ fn literal_ladder_stays_flat() {
          \tmatch n {\n\
          \t\t1 -> 'one'\n\
          \t\t2 -> 'two'\n\
-         \t\telse -> 'many'\n\
+         \t\t_ -> 'many'\n\
          \t}\n\
          }\n\
          lits(1)\n",

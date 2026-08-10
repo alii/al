@@ -145,6 +145,6 @@ pub fn reason_phrase(code Int) Binary {
 		508 -> rp_loop_detected
 		510 -> rp_not_extended
 		511 -> rp_network_auth_required
-		else -> rp_unknown
+		_ -> rp_unknown
 	}
 }

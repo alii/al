@@ -27,7 +27,9 @@ pub mod seq;
 pub mod value;
 use std::sync::Arc;
 
-pub use native::{NativeCtx, NativeEntry, NativeStatus, NativeTable, is_native_bridge_op};
+pub use native::{
+    NativeCtx, NativeEntry, NativeStatus, NativeTable, is_native_bridge_op, is_native_park_op,
+};
 pub use value::{
     Arena, BinaryRef, ClosureRef, EnumRef, HeapTag, MapBacking, MapRef, SeqRef, SocketValue, Value,
     ValueView, enum_hash_with_payload, enum_name_prefix_hash, freed_objects_pending, hash_value,

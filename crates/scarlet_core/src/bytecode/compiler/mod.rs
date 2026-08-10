@@ -337,6 +337,11 @@ pub struct Compiler {
     /// (params), so a use inside a nested closure marks the outer binding by
     /// walking the whole stack.
     pub(super) unused: Vec<HashMap<StrId, Span>>,
+    /// `_`-prefixed pattern binders whose discarded type must be re-examined
+    /// once inference for the module is final: discarding a value the type
+    /// system knows is `Nil` hides nothing, so the explicit `Nil` pattern is
+    /// required instead. Drained by [`Compiler::check_nil_discards`].
+    pub(super) nil_discards: Vec<(String, Ty, Span)>,
     pub(super) outer_scopes: Vec<Scope>,
     pub(super) local_count: i32,
     /// Entry-frame slot → `program.functions` index for every top-level `fn`
@@ -417,9 +422,9 @@ pub struct Compiler {
     pub(super) module_refs: ModuleReferences,
     check_only: bool,
     /// Whole-unit accounting for the native compile-at-load pass: how many
-    /// bodies the `AL_NATIVE` mode selected and how long the native hook
+    /// bodies the `SCARLET_NATIVE` mode selected and how long the native hook
     /// spent on them. Summarised against the 100ms unit budget (under
-    /// `AL_NATIVE_DEBUG`) when the compile hands back its `Emitted`.
+    /// `SCARLET_NATIVE_DEBUG`) when the compile hands back its `Emitted`.
     native_stats: super::native::UnitStats,
     /// Whether to buffer per-occurrence `RawRef`s and resolve them into the
     /// `HoverFact` table in `finalize_references`. Only `IncrementalSession`
@@ -613,7 +618,7 @@ struct LoweredBody {
 /// Fires for declared function bodies and for the eta wrappers elaboration
 /// mints; never for module toplevels or `__main__` (always-interpreted glue,
 /// no `FuncIdx` of their own), and never under `check_only`. Every fire is
-/// additionally gated on the process-wide `AL_NATIVE` mode
+/// additionally gated on the process-wide `SCARLET_NATIVE` mode
 /// ([`native::config`](super::native::config)): `off` suppresses the hook
 /// entirely, `native` (the default) fires for every body, and `mix` fires for
 /// a seeded per-function subset — so a backend never sees a body the mode
@@ -942,6 +947,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         undo_log: vec![],
         scope_marks: vec![],
         unused: vec![],
+        nil_discards: vec![],
         outer_scopes: vec![],
         local_count: 0,
         global_to_func: HashMap::new(),
@@ -1042,9 +1048,9 @@ fn compile_impl(
 
     let mut c = new_compiler(base_dir, check_only);
     c.native_hook = native_hook;
-    // The AL_NATIVE env contract is applied at program construction whether
+    // The SCARLET_NATIVE env contract is applied at program construction whether
     // or not a backend hook was installed: `config()` reads the env exactly
-    // once process-wide (echoing the mix seed when `AL_NATIVE_SEED` was set),
+    // once process-wide (echoing the mix seed when `SCARLET_NATIVE_SEED` was set),
     // and `off` drops the hook outright so no body can fire it.
     if super::native::config().mode == super::native::NativeMode::Off {
         c.native_hook = None;
@@ -1163,6 +1169,7 @@ fn compile_impl(
         c.begin_deferred_elaboration();
         top_ty = c.compile_expr(expr);
         c.end_deferred_elaboration();
+        c.check_nil_discards();
         c.pop_local_scope();
         // A bare expression has no module statement walk, but its outermost
         // *block* (an `if` arm, say) is still the first one the elaborator
@@ -1242,7 +1249,7 @@ fn compile_impl(
         // owns everything the bodies do not.
         fuse(&mut c.program.code, &c.program.functions);
         // Whole-unit native compile accounting, printed under
-        // `AL_NATIVE_DEBUG` and checked against the <100ms budget.
+        // `SCARLET_NATIVE_DEBUG` and checked against the <100ms budget.
         c.native_stats.log_summary(c.program.code.len());
     }
 
@@ -3221,9 +3228,44 @@ impl Compiler {
         self.record(name, ty, expr.span, doc);
         self.record_value_use(def, expr.span, ReferenceKind::Unqualified);
 
+        // `_`-prefixed locals are write-only: the prefix declares the value
+        // intentionally unused, so a read contradicts the declaration.
+        if name.starts_with('_') && matches!(kind, ValueKind::Local) {
+            let msg = match name.trim_start_matches('_') {
+                "" => format!(
+                    "'{name}' is a discard binding and cannot be read; give it a name to use its value"
+                ),
+                stripped => format!(
+                    "'{name}' is marked unused by its '_' prefix and cannot be read; rename it to '{stripped}'"
+                ),
+            };
+            self.error(msg, expr.span);
+            return ty;
+        }
+
         let bound = self.has_binding(name, &kind);
         self.check_named_value(name, None, expr.span, kind, bound);
         ty
+    }
+
+    /// Once a module's inference is final, reject any `_`-prefixed binder that
+    /// discarded a value the type system knows is `Nil`: there is nothing to
+    /// discard, and the explicit `Nil` pattern keeps the arm honest — it stops
+    /// compiling the day the type grows real data.
+    pub(super) fn check_nil_discards(&mut self) {
+        let checks = std::mem::take(&mut self.nil_discards);
+        for (name, ty, sp) in checks {
+            let rep = self.engine.find(ty);
+            if matches!(self.engine.node(rep), TypeNode::Con { id, .. } if self.prelude.nil.is(id))
+            {
+                self.error(
+                    format!(
+                        "'{name}' always matches Nil here; write the explicit 'Nil' pattern instead"
+                    ),
+                    sp,
+                );
+            }
+        }
     }
 
     fn no_runtime_binding(&mut self, name: &str, qualifier: Option<&str>, sp: Span) {
@@ -4299,7 +4341,7 @@ impl Compiler {
             // is the `FuncIdx` their reservation in `Self::elaborate` fixed.
             // Guarded on `check_only` here (unlike `elaborate_body`, which
             // returned before its hook) because a check still materializes
-            // wrappers. Gated on the `AL_NATIVE` mode like every hook fire.
+            // wrappers. Gated on the `SCARLET_NATIVE` mode like every hook fire.
             let wrapper_idx = crate::core_ir::FuncIdx::from_usize(base + i);
             if !self.check_only
                 && let Some(hook) = self.native_hook.as_mut()
@@ -4366,7 +4408,7 @@ impl Compiler {
         // The native-backend seam: this body's `RTy`s index `pool`, which dies
         // with this call — see [`NativeHook`]. Post-perceus, so the hook sees
         // the same Core IR (Drops, reuse tokens and all) that `emit` consumes.
-        // Gated on the `AL_NATIVE` mode (off/native/mix); the hook time feeds
+        // Gated on the `SCARLET_NATIVE` mode (off/native/mix); the hook time feeds
         // the whole-unit budget summary.
         if let Some(hook) = self.native_hook.as_mut()
             && super::native::config().includes(func_idx)
@@ -4967,6 +5009,15 @@ impl Compiler {
             self.get_or_create_local(name);
             self.register_local_binding(name, *ty, *sp);
         }
+        // Write-only (`_`-prefixed) binders go through the same registration
+        // so hover and go-to-definition see them; `compile_identifier` rejects
+        // reads, so no local slot is reserved and the elaborator (which lowers
+        // them to `Wild`) has no slot to claim. Their discarded types are
+        // re-checked once inference is final.
+        for (name, ty, sp) in b.write_only_bindings() {
+            self.register_local_binding(name, *ty, *sp);
+            self.nil_discards.push((name.to_string(), *ty, *sp));
+        }
     }
 
     /// Type-check the runtime size expressions of every `<<..>>` segment in
@@ -5014,7 +5065,7 @@ impl Compiler {
 /// destructuring-binding statements, which require an irrefutable pattern.
 fn pattern_is_refutable(p: &ast::Pattern) -> bool {
     match p {
-        ast::Pattern::Wildcard { .. } | ast::Pattern::Var { .. } => false,
+        ast::Pattern::Var { .. } => false,
         ast::Pattern::Tuple { elements, .. } => elements.iter().any(pattern_is_refutable),
         ast::Pattern::Or { first, rest, .. } => pattern_is_refutable(rest.last().unwrap_or(first)),
         _ => true,

@@ -54,9 +54,9 @@ fn route(req Request) Response {
 				Ok(text) -> http.text('echo: ${text}')
 				Err(Nil) -> http.text('echo: <not utf-8>')
 			}
-			else -> http.not_found()
+			_ -> http.not_found()
 		}
-		else -> http.not_found()
+		_ -> http.not_found()
 	}
 }
 
@@ -154,7 +154,7 @@ fn budget_body() Body {
 // deliverable at all. Neither happens on a loopback, so this only names them.
 fn sent(what String, r Result(Nil, DrainError)) Nil {
 	match r {
-		Ok(_) -> Nil
+		Ok(Nil) -> Nil
 		Err(SourceFailed(e)) -> println('${what}: source failed: ${string.inspect(e)}')
 		Err(SinkFailed(e)) -> println('${what}: sink failed: ${string.inspect(e)}')
 	}
@@ -210,7 +210,7 @@ fn read_body(
 			}
 		}
 		// The client above only ever sends a Content-Length body.
-		else -> Ok(<<>>)
+		_ -> Ok(<<>>)
 	}
 }
 
@@ -254,7 +254,7 @@ fn respond(sock Socket, target Binary, payload Binary) Nil {
 			socket.write(sock, fixed_head(5)) or Nil
 			counted('overrun', body.drain_counted(budget_body(), sock, 5))
 		}
-		else -> socket.write(sock, h1.serialize_head(404, [])) or Nil
+		_ -> socket.write(sock, h1.serialize_head(404, [])) or Nil
 	}
 }
 
@@ -264,7 +264,7 @@ fn serve_raw(sock Socket) Nil {
 		Ok((buf, Done(target: t, headers: hs, consumed: c, ..))) ->
 			respond(sock, t, read_body(sock, buf, c, hs, deadline) or <<>>)
 		// A malformed head, or a peer that hung up mid-head: nothing to answer.
-		else -> Nil
+		_ -> Nil
 	}
 	socket.close(sock) or Nil
 }

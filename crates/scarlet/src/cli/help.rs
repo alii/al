@@ -5,21 +5,31 @@ use clap::{Arg, ArgAction, Command};
 
 use scarlet_core::term::Palette;
 
-const LOGO: [&str; 2] = ["▄▀█ █░░", "█▀█ █▄▄"];
-const LEARN_MORE: &str = "https://al.alistair.sh";
+/// The brand mark: three horizontal bars, constructed, no curves. See
+/// scarletindustries/brand.
+const MARK: &str = "≡";
+const DOCS: &str = "https://scarlet.industries";
 
 /// Hand-maintained: clap can describe flags but not show idiomatic usage.
 fn examples_for(sub: &str) -> &'static [&'static str] {
     match sub {
-        "run" => &["al run hello.scrl", "al run server.scrl"],
-        "check" => &["al check src/main.scrl"],
-        "fmt" => &["al fmt .", "al fmt --check src/", "al fmt --stdin < a.scrl"],
+        "run" => &["scarlet run hello.scrl", "scarlet run server.scrl"],
+        "check" => &["scarlet check src/main.scrl"],
+        "fmt" => &[
+            "scarlet fmt .",
+            "scarlet fmt --check src/",
+            "scarlet fmt --stdin < a.scrl",
+        ],
         _ => &[],
     }
 }
 
 fn root_examples() -> &'static [&'static str] {
-    &["al run hello.scrl", "al check src/", "al fmt --check ."]
+    &[
+        "scarlet run hello.scrl",
+        "scarlet check src/",
+        "scarlet fmt --check .",
+    ]
 }
 
 fn is_hidden(c: &Command) -> bool {
@@ -120,21 +130,17 @@ fn footer(o: &mut String, p: &Palette, lead: &str, more: &str) {
         "\n  {}{lead}{}  {more}{}\n",
         p.dim,
         p.reset,
-        p.hyperlink(LEARN_MORE, LEARN_MORE)
+        p.hyperlink(DOCS, DOCS)
     );
 }
 
 fn logo_block(out: &mut String, p: &Palette, version: &str, tagline: &str) {
     let _ = writeln!(
         out,
-        "  {}{}{}    {}al{} {}{version}{}",
-        p.cyan, LOGO[0], p.reset, p.bold, p.reset, p.dim, p.reset
+        "  {}{MARK}{}  {}SCARLET{} {}{version}{}",
+        p.scarlet, p.reset, p.bold, p.reset, p.dim, p.reset
     );
-    let _ = writeln!(
-        out,
-        "  {}{}{}    {}{tagline}{}",
-        p.cyan, LOGO[1], p.reset, p.dim, p.reset
-    );
+    let _ = writeln!(out, "     {}{tagline}{}", p.dim, p.reset);
 }
 
 fn version_str(cmd: &Command) -> &str {
@@ -157,20 +163,20 @@ pub fn home(cmd: &Command) {
 
     heading(&mut o, &p, "QUICK START");
     let rows = [
-        ("al run <file>", "Run a program"),
-        ("al repl", "Start an interactive REPL"),
-        ("al --help", "Show all commands"),
+        ("scarlet run <file>", "Run a program"),
+        ("scarlet repl", "Start an interactive REPL"),
+        ("scarlet --help", "Show all commands"),
     ];
     let w = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
     for (l, d) in rows {
         row(&mut o, &p, l, d, w);
     }
 
-    footer(&mut o, &p, "Learn more", "");
+    footer(&mut o, &p, "Docs", "");
     print!("{o}");
 }
 
-/// `al --help` / `al help` — the full reference.
+/// `scarlet --help` / `scarlet help` — the full reference.
 fn full_help(cmd: &Command) -> String {
     let p = Palette::for_stdout();
     let mut o = String::new();
@@ -178,7 +184,7 @@ fn full_help(cmd: &Command) -> String {
     logo_block(&mut o, &p, version_str(cmd), &about_of(cmd));
 
     heading(&mut o, &p, "USAGE");
-    let _ = writeln!(o, "  {}al{} <command> [options]", p.bold, p.reset);
+    let _ = writeln!(o, "  {}scarlet{} <command> [options]", p.bold, p.reset);
 
     let subs: Vec<&Command> = cmd.get_subcommands().filter(|c| !is_hidden(c)).collect();
 
@@ -201,17 +207,17 @@ fn full_help(cmd: &Command) -> String {
     }
 
     examples_block(&mut o, &p, root_examples());
-    footer(&mut o, &p, "Learn more", "");
+    footer(&mut o, &p, "Docs", "");
     o
 }
 
-/// `al <cmd> --help` / `al help <cmd>` — one command in detail.
+/// `scarlet <cmd> --help` / `scarlet help <cmd>` — one command in detail.
 fn command_help(sub: &Command) -> String {
     let p = Palette::for_stdout();
     let name = sub.get_name();
     let mut o = String::new();
 
-    let _ = writeln!(o, "\n  {}al {name}{}{}", p.bold, p.reset, {
+    let _ = writeln!(o, "\n  {}scarlet {name}{}{}", p.bold, p.reset, {
         let a = about_of(sub);
         if a.is_empty() {
             String::new()
@@ -227,7 +233,7 @@ fn command_help(sub: &Command) -> String {
         .collect();
 
     heading(&mut o, &p, "USAGE");
-    let mut usage = format!("{}al {name}{}", p.bold, p.reset);
+    let mut usage = format!("{}scarlet {name}{}", p.bold, p.reset);
     for pa in &positionals {
         let _ = write!(usage, " {}", positional_token(pa));
     }
@@ -278,7 +284,7 @@ fn command_help(sub: &Command) -> String {
     }
 
     examples_block(&mut o, &p, examples_for(name));
-    footer(&mut o, &p, "See also", "al --help · ");
+    footer(&mut o, &p, "See also", "scarlet --help · ");
     o
 }
 
@@ -311,7 +317,7 @@ pub fn help(cmd: &Command, sub: Option<&str>) -> ExitCode {
 pub fn version(cmd: &Command) {
     let p = Palette::for_stdout();
     println!(
-        "{}al{} {}{}{}",
+        "{}scarlet{} {}{}{}",
         p.bold,
         p.reset,
         p.dim,
@@ -343,7 +349,7 @@ pub fn error(err: &clap::Error) {
 
     eprintln!("\n  {}error{}  {msg}", p.error, p.reset);
     eprintln!(
-        "  {}run {}al --help{}{} for usage{}\n",
+        "  {}run {}scarlet --help{}{} for usage{}\n",
         p.dim, p.bold, p.reset, p.dim, p.reset
     );
 }

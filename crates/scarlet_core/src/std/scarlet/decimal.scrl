@@ -173,35 +173,35 @@ pub fn compare(a Decimal, b Decimal) Order {
 pub fn eq(a Decimal, b Decimal) Bool {
 	match compare(a, b) {
 		Eq -> True
-		else -> False
+		_ -> False
 	}
 }
 
 pub fn lt(a Decimal, b Decimal) Bool {
 	match compare(a, b) {
 		Lt -> True
-		else -> False
+		_ -> False
 	}
 }
 
 pub fn lte(a Decimal, b Decimal) Bool {
 	match compare(a, b) {
 		Gt -> False
-		else -> True
+		_ -> True
 	}
 }
 
 pub fn gt(a Decimal, b Decimal) Bool {
 	match compare(a, b) {
 		Gt -> True
-		else -> False
+		_ -> False
 	}
 }
 
 pub fn gte(a Decimal, b Decimal) Bool {
 	match compare(a, b) {
 		Lt -> False
-		else -> True
+		_ -> True
 	}
 }
 
@@ -339,9 +339,9 @@ fn parse_parts(whole Binary, frac Binary) Option(Decimal) {
 			// w * 10^k + f overflows Int exactly when w exceeds
 			// (Int max - f) / 10^k; wrapping would corrupt the value.
 			Ok(f) if w <= { int.max_value - f } / pow10(k) -> Some(Decimal(w * pow10(k) + f, k))
-			else -> None
+			_ -> None
 		}
-		else -> None
+		_ -> None
 	}
 }
 

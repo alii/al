@@ -11,7 +11,7 @@
 #   scripts/bench.sh                      # measure, print one line per program
 #   scripts/bench.sh --save before.txt    # record a baseline
 #   scripts/bench.sh --baseline before.txt  # measure and diff against it
-#   scripts/bench.sh --reps 9 examples/bench_map.al   # override
+#   scripts/bench.sh --reps 9 examples/bench_map.scrl   # override
 #
 # Reports the *best* of N wall-clock runs: the minimum is the least
 # noise-contaminated estimate of the work actually done, and the thing that
@@ -40,7 +40,7 @@ done
 # arithmetic loops that typed-opcode recovery should speed up, and the map
 # workload that exercises the Perceus `Drop`/`Reuse` paths.
 if [[ ${#PROGRAMS[@]} -eq 0 ]]; then
-  PROGRAMS=(examples/bench_heavy.al examples/bench_typed.al examples/bench_map.al)
+  PROGRAMS=(examples/bench_heavy.scrl examples/bench_typed.scrl examples/bench_map.scrl)
 fi
 
 cargo build --release >/dev/null 2>&1
@@ -49,7 +49,7 @@ cargo build --release >/dev/null 2>&1
 best_of() {
   local prog="$1" best="" t
   for _ in $(seq "$REPS"); do
-    t=$( { /usr/bin/time -p ./target/release/al run "$prog" >/dev/null; } 2>&1 | awk '/^real/{print $2}')
+    t=$( { /usr/bin/time -p ./target/release/scarlet run "$prog" >/dev/null; } 2>&1 | awk '/^real/{print $2}')
     if [[ -z "$t" ]]; then
       echo "bench: $prog did not run" >&2
       exit 1

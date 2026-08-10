@@ -609,6 +609,7 @@ impl Compiler {
         // no SCC solved is now `Generic`, which only `zonk` cares about
         // (`Generic` is quantifiable, `Unbound` is an error).
         self.end_deferred_elaboration();
+        self.check_nil_discards();
 
         self.pop_local_scope();
     }

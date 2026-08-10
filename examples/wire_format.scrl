@@ -44,7 +44,7 @@ fn header(frame Binary) String {
 		<<'ALM', version:4, flags:4, len:16, _:binary>> -> {
 			'v${version} flags=${flags} len=${len}'
 		}
-		else -> 'not an ALM frame'
+		_ -> 'not an ALM frame'
 	}
 }
 
@@ -57,7 +57,7 @@ fn decode(frame Binary) Result(Sample, String) {
 	match frame {
 		<<'ALM', v:4, _:4, _:16, _:binary>> if v != VERSION -> { Err('unsupported version ${v}') }
 		<<'ALM', _:4, flags:4, len:16, payload:bytes(len)>> -> { parse_payload(payload, flags) }
-		else -> Err('truncated or foreign frame')
+		_ -> Err('truncated or foreign frame')
 	}
 }
 
@@ -72,10 +72,10 @@ fn parse_payload(payload Binary, flags Int) Result(Sample, String) {
 			unit = binary.slice_bytes(payload, sp + 1, binary.byte_size(payload) - sp - 1)
 			match (binary.to_string(name), binary.parse_int(digits, Dec), binary.to_string(unit)) {
 				(Ok(n), Ok(v), Ok(u)) -> Ok(Sample(n, v, u, flags == GAUGE))
-				else -> Err('malformed payload')
+				_ -> Err('malformed payload')
 			}
 		}
-		else -> Err('payload is not name=value unit')
+		_ -> Err('payload is not name=value unit')
 	}
 }
 
@@ -132,7 +132,7 @@ fn drain(buffer Binary, seen Int) Int {
 			println('  frame ${seen + 1}: ${text}')
 			drain(rest, seen + 1)
 		}
-		else -> {
+		_ -> {
 			println('  ${binary.byte_size(buffer)} bytes left over: wait for more')
 			seen
 		}
@@ -156,7 +156,7 @@ println('drained ${drain(buffered, 0)} whole frames')
 fn nibbles(b Binary) String {
 	match b {
 		<<hi:4, lo:4>> -> 'hi=${hi} lo=${lo}'
-		else -> 'not exactly one byte'
+		_ -> 'not exactly one byte'
 	}
 }
 
@@ -181,7 +181,7 @@ fn compact(n Int, width Int) Binary {
 fn read_compact(b Binary) Result(Int, Nil) {
 	match b {
 		<<width:8, n:size(width)>> -> Ok(n)
-		else -> Err(Nil)
+		_ -> Err(Nil)
 	}
 }
 
@@ -203,7 +203,7 @@ fn tag(label String, body Binary) Binary {
 fn first_codepoint(b Binary) Option(Int) {
 	match b {
 		<<c:utf8, ..>> -> Some(c)
-		else -> None
+		_ -> None
 	}
 }
 

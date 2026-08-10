@@ -15,8 +15,8 @@ import scarlet/http/status
 // the field views, the RFC 7230 §3.3.3 framing precedence — runs as native VM
 // builtins: one
 // op per request head instead of one op per byte. Every protocol DECISION
-// (keep-alive, 100-continue, how to frame the response) stays in AL, here and
-// in al/http.
+// (keep-alive, 100-continue, how to frame the response) stays in Scarlet, here and
+// in scarlet/http.
 
 // The HTTP/1.x minor version on the wire. HTTP/2 speaks a different framing
 // layer entirely and never reaches this parser, so it is deliberately absent —

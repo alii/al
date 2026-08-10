@@ -1246,7 +1246,9 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     ) {
         let src_ty = self.bind_ty(src);
         match pat {
-            ast::Pattern::Wildcard { .. } => {}
+            // Write-only `_`-prefixed names: nothing may read them, so the
+            // projection bind stays anonymous.
+            ast::Pattern::Var { name } if name.name.starts_with('_') => {}
             ast::Pattern::Var { name } => {
                 let sid = self.ctx.intern(&name.name);
                 self.bind_name(sid, src);

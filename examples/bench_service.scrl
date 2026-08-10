@@ -253,7 +253,7 @@ fn verify_session(req Request, t Tables) Option(User) {
 		fn(token) option.then(split_token(token), fn(parts) match parts {
 			(user, sig_bytes) -> match binary.parse_int(sig_bytes, Hex) {
 				Ok(sig) if sig == sign(user) -> find_by_name(t, user)
-				else -> None
+				_ -> None
 			}
 		}),
 	))
@@ -329,7 +329,7 @@ fn route(req Request, t Tables) Response {
 		Get -> match path {
 			<<'/'>> -> respond(200, VAL_TEXT, 'hello')
 			<<'/me'>> -> handle_me(req, t)
-			else -> if binary.byte_size(path) > USERS_PREFIX_LEN &&
+			_ -> if binary.byte_size(path) > USERS_PREFIX_LEN &&
 			binary.slice_bytes(path, 0, USERS_PREFIX_LEN) == USERS_PREFIX {
 				handle_user_by_id(path, t)
 			} else {
@@ -339,16 +339,16 @@ fn route(req Request, t Tables) Response {
 		Post -> match path {
 			<<'/login'>> -> handle_login(req, t)
 			<<'/logout'>> -> handle_logout()
-			else -> json(404, '{"error":"not found"}')
+			_ -> json(404, '{"error":"not found"}')
 		}
-		else -> json(405, '{"error":"method not allowed"}')
+		_ -> json(405, '{"error":"method not allowed"}')
 	}
 }
 
 fn port_arg() Int {
 	match process.argv() {
 		[_script, p, .._rest] -> binary.parse_int(binary.from_string(p), Dec) or DEFAULT_PORT
-		else -> DEFAULT_PORT
+		_ -> DEFAULT_PORT
 	}
 }
 

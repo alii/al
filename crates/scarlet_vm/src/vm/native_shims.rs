@@ -22,9 +22,10 @@
 
 use crate::TypeId;
 use crate::bytecode::value::{ReuseAddr, proof_violation, range_len};
-use crate::bytecode::{Op, Value, ValueView, seq};
+use crate::bytecode::{NativeStatus, Op, Value, ValueView, seq};
 
-use super::{VM, VmResult};
+use super::poll::{Parked, Resume};
+use super::{Step, VM, VmResult};
 
 /// Escape raw bits from an owned value without running its destructor. The
 /// reference it carries transfers to the returned bits.
@@ -540,7 +541,12 @@ pub unsafe extern "C" fn al_shim_op(
         vm.stack
             .push(unsafe { Value::from_bits(buf.add(i).read()) });
     }
-    match vm.run_bridge_op(op_code as u8, operand as i32) {
+    // The ops that charge reductions take a budget; compiled code spends the
+    // same counter the entry prologue and checkpoints use.
+    let mut reds = vm.native_reds;
+    let out = vm.run_bridge_op(op_code as u8, operand as i32, &mut reds);
+    vm.native_reds = reds;
+    match out {
         Ok(()) => match vm.stack.pop() {
             Some(v) => into_bits(v),
             None => proof_violation("bridge op produced no result"),
@@ -550,12 +556,91 @@ pub unsafe extern "C" fn al_shim_op(
     }
 }
 
+/// The bridge for [`is_native_park_op`](crate::bytecode::is_native_park_op)
+/// opcodes: the ops that can suspend the process.
+///
+/// Runs like [`al_shim_op`], but reports back a [`NativeStatus`] instead of a
+/// value, because the op may not finish. On completion the op has left its one
+/// result on the value stack and the caller pops it. On a park, the op's
+/// [`Resume`] picks which of the caller's two resume ordinals the frame
+/// re-enters at.
+///
+/// The value stack is left exactly as the op arranged it, which is what makes
+/// the retry protocol work: a retrying op pushes its operands back, and the
+/// caller's retry attempt passes `argc == 0` so this call consumes those same
+/// words instead of re-supplying them. Compiled code could not re-supply them
+/// anyway — a parking op's operands are often slotless temps with no home to
+/// reload from once the machine frame is gone.
+///
+/// # Safety
+/// `vmx` must point at the running scheduler's live `VM`; `buf` must point at
+/// `argc` initialized value words whose references the caller transfers;
+/// `op_code` must be one [`is_native_park_op`](crate::bytecode::is_native_park_op)
+/// admits, and both ordinals must name resume points of the running body.
+pub unsafe extern "C" fn al_shim_park_op(
+    vmx: *mut VM,
+    op_code: i64,
+    buf: *const u64,
+    argc: i64,
+    retry_ordinal: i64,
+    cont_ordinal: i64,
+) -> u64 {
+    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
+    let vm = unsafe { &mut *vmx };
+    for i in 0..argc as usize {
+        // SAFETY: `buf` holds `argc` initialized owned words, transferred here.
+        vm.stack
+            .push(unsafe { Value::from_bits(buf.add(i).read()) });
+    }
+    let mut reds = vm.native_reds;
+    let out = vm.run_park_op(op_code as u8, &mut reds);
+    vm.native_reds = reds;
+    match out {
+        Ok(None) => NativeStatus::Done as u64,
+        Ok(Some(parked)) => {
+            let ordinal = match parked.resume {
+                Resume::Retry => retry_ordinal,
+                Resume::Continue => cont_ordinal,
+            };
+            vm.frame_mut().ip = ordinal as i32;
+            vm.status_from_outcome(Ok(Step::Parked(parked.wait))) as u64
+        }
+        Err(e) => vm.status_from_outcome(Err(e)) as u64,
+    }
+}
+
+impl VM {
+    /// Dispatch an [`is_native_park_op`](crate::bytecode::is_native_park_op)
+    /// opcode to its interpreter method. Mirrors the interpreter's `park!`
+    /// arms; the two share the method bodies.
+    pub(super) fn run_park_op(&mut self, op_code: u8, reds: &mut i32) -> VmResult<Option<Parked>> {
+        match op_code {
+            c if c == Op::FileRead as u8 => self.file_read(reds),
+            c if c == Op::FileWrite as u8 => self.file_write(reds),
+            c if c == Op::TcpAccept as u8 => self.tcp_accept(reds),
+            c if c == Op::TcpConnect as u8 => self.tcp_connect(reds),
+            c if c == Op::TcpRead as u8 => self.tcp_read(reds),
+            c if c == Op::TcpReadUntil as u8 => self.tcp_read_until(reds),
+            c if c == Op::TcpWrite as u8 => self.tcp_write(reds),
+            c if c == Op::TcpWriteParts as u8 => self.tcp_write_parts(reds),
+            c if c == Op::DnsResolve as u8 => self.dns_resolve(reds),
+            c if c == Op::Sleep as u8 => self.sleep(),
+            _ => proof_violation("run_park_op on an op is_native_park_op excludes"),
+        }
+    }
+}
+
 impl VM {
     /// Dispatch an [`is_native_bridge_op`](crate::bytecode::is_native_bridge_op)
     /// opcode to its interpreter method. `operand` is the op's flattened
     /// immediate (unused by ops without one). Mirrors the interpreter's
     /// `run_slice` arms exactly; the two share the method bodies.
-    pub(super) fn run_bridge_op(&mut self, op_code: u8, operand: i32) -> VmResult<()> {
+    pub(super) fn run_bridge_op(
+        &mut self,
+        op_code: u8,
+        operand: i32,
+        reds: &mut i32,
+    ) -> VmResult<()> {
         match op_code {
             c if c == Op::Index as u8 => self.seq_index(),
             c if c == Op::IndexOr as u8 => self.seq_index_or(operand),
@@ -593,14 +678,97 @@ impl VM {
             c if c == Op::BinEqIgnoreAsciiCase as u8 => self.bin_eq_ignore_ascii_case(),
             c if c == Op::BinToAsciiLower as u8 => self.bin_to_ascii_lower(),
             c if c == Op::BinFromIntAscii as u8 => self.bin_from_int_ascii(),
+            c if c == Op::AddFloat as u8 => self.add_float(),
+            c if c == Op::SubFloat as u8 => self.sub_float(),
+            c if c == Op::MulFloat as u8 => self.mul_float(),
+            c if c == Op::DivFloat as u8 => self.div_float(),
+            c if c == Op::NegFloat as u8 => self.neg_float(),
+            c if c == Op::LtFloat as u8 => self.lt_float(),
+            c if c == Op::GtFloat as u8 => self.gt_float(),
+            c if c == Op::LteFloat as u8 => self.lte_float(),
+            c if c == Op::GteFloat as u8 => self.gte_float(),
+            c if c == Op::FloatFloor as u8 => self.float_floor(),
+            c if c == Op::FloatCeil as u8 => self.float_ceil(),
+            c if c == Op::FloatRound as u8 => self.float_round(),
+            c if c == Op::FloatTruncate as u8 => self.float_truncate(),
+            c if c == Op::FloatFromInt as u8 => self.float_from_int(),
+            c if c == Op::FloatToString as u8 => self.float_to_string(),
+            c if c == Op::Monotonic as u8 => self.monotonic(),
+            c if c == Op::IpParse as u8 => self.ip_parse(),
+            c if c == Op::HttpChunkDecode as u8 => self.http_chunk_decode(),
+            c if c == Op::Add as u8 => self.add(),
+            c if c == Op::Sub as u8 => self.sub(),
+            c if c == Op::Mul as u8 => self.mul(),
+            c if c == Op::Div as u8 => self.div(),
+            c if c == Op::Mod as u8 => self.rem(),
+            c if c == Op::Neg as u8 => self.neg(),
+            // The polymorphic comparisons: the emitter sends these here only
+            // when it could not prove both operands Int (the Int case lowers
+            // inline via `nop_of`).
+            c if c == Op::Eq as u8 => self.eq_values(),
+            c if c == Op::Neq as u8 => self.neq_values(),
+            c if c == Op::Lt as u8 => self.compare_push(|o| o.is_lt()),
+            c if c == Op::Gt as u8 => self.compare_push(|o| o.is_gt()),
+            c if c == Op::Lte as u8 => self.compare_push(|o| o.is_le()),
+            c if c == Op::Gte as u8 => self.compare_push(|o| o.is_ge()),
+            c if c == Op::TcpListen as u8 => self.tcp_listen(),
+            c if c == Op::TcpClose as u8 => self.tcp_close(reds),
+            c if c == Op::TcpCloseServer as u8 => self.tcp_close_server(),
+            c if c == Op::SpawnLocal as u8 => self.process_spawn_local(reds),
+            c if c == Op::SpawnOnEach as u8 => self.process_spawn_on_each(reds),
+            // `Print` is the one void op: it pushes nothing, and the bytecode
+            // emitter supplies the `()` with a following `PushNil`. The bridge
+            // returns exactly one value, so it must do the same.
+            c if c == Op::Print as u8 => {
+                self.print_op(reds)?;
+                self.stack.push(Value::nil());
+                Ok(())
+            }
             _ => proof_violation("run_bridge_op on an op is_native_bridge_op excludes"),
         }
     }
 }
 
+/// `Op::PushCapture`: capture `idx` of the closure this frame is running,
+/// borrowed. The frame's `captures` handle is the closure itself, and it is
+/// rooted for the frame's whole life, so the word stays live; the caller
+/// retains only where it keeps one. A shim rather than an inline load because
+/// the frame is not in the value stack's ABI-stable region.
+///
+/// # Safety
+/// `vmx` must point at the running scheduler's live `VM`, and `idx` must be in
+/// range for the running closure; the emitter guarantees both. The returned
+/// word carries no reference the caller owns.
+pub unsafe extern "C" fn al_shim_push_capture(vmx: *mut VM, idx: i64) -> u64 {
+    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
+    let vm = unsafe { &mut *vmx };
+    match vm
+        .frame()
+        .captures
+        .as_closure()
+        .and_then(|cl| cl.captures().get(idx as usize))
+    {
+        Some(v) => v.to_bits(),
+        // The compiler mints capture indices from the closure it built.
+        None => proof_violation("PushCapture index out of range for the running closure"),
+    }
+}
+
+/// `Op::PushSelf`: the closure this frame is running, borrowed. Same rooting
+/// argument as [`al_shim_push_capture`].
+///
+/// # Safety
+/// `vmx` must point at the running scheduler's live `VM`. The returned word
+/// carries no reference the caller owns.
+pub unsafe extern "C" fn al_shim_push_self(vmx: *mut VM) -> u64 {
+    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
+    let vm = unsafe { &mut *vmx };
+    vm.frame().captures.to_bits()
+}
+
 /// Every shim as `(symbol name, address)` for `JITBuilder::symbol`. These
 /// names are what the CLIF emitter's declared externals resolve against.
-pub fn shim_symbols() -> [(&'static str, *const u8); 24] {
+pub fn shim_symbols() -> [(&'static str, *const u8); 27] {
     [
         ("al_shim_push_global", al_shim_push_global as *const u8),
         ("al_shim_int_box", al_shim_int_box as *const u8),
@@ -638,6 +806,9 @@ pub fn shim_symbols() -> [(&'static str, *const u8); 24] {
         ("al_shim_div_int", al_shim_div_int as *const u8),
         ("al_shim_mod_int", al_shim_mod_int as *const u8),
         ("al_shim_op", al_shim_op as *const u8),
+        ("al_shim_push_capture", al_shim_push_capture as *const u8),
+        ("al_shim_push_self", al_shim_push_self as *const u8),
+        ("al_shim_park_op", al_shim_park_op as *const u8),
     ]
 }
 

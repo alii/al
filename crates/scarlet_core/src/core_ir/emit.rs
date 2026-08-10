@@ -80,6 +80,27 @@ pub struct FrameLayout {
     /// which is the order a straight walk of the same Core meets the call
     /// atoms, since calls are never hoisted (see [`is_hoistable`]).
     pub call_resume_ips: Vec<i32>,
+    /// Function-relative address of the first header `PushConst` of each
+    /// non-Bool constructor site, in emission order — the order a straight
+    /// walk of the same Core meets the `Ctor` atoms.
+    ///
+    /// The native backend needs the four header constants
+    /// (`packed`, enum name, variant name, labels), and cannot find them by
+    /// counting back from the `MakeEnumPayload`: a field is an arbitrary
+    /// expression, so it occupies an arbitrary number of instructions, and a
+    /// field can itself be a `PushConst`. The position is emitted knowledge,
+    /// so it is recorded rather than re-derived.
+    pub ctor_headers: Vec<CtorHeader>,
+}
+
+/// Where one constructor site's header sits, and whether it reused a cell.
+/// Both are decided during emission; see [`FrameLayout::ctor_headers`].
+#[derive(Debug, Clone, Copy)]
+pub struct CtorHeader {
+    /// Function-relative address of the first header `PushConst`.
+    pub at: i32,
+    /// Whether emit put an `Op::Reuse` before the `MakeEnumPayload`.
+    pub reuse: bool,
 }
 
 impl FrameLayout {
@@ -186,6 +207,7 @@ struct Emitter<'a, C: EmitCtx> {
     /// init and must all be emitted.
     alias_consts: bool,
     call_resume_ips: Vec<i32>,
+    ctor_headers: Vec<CtorHeader>,
     next_slot: i32,
     max_locals: i32,
     ctx: &'a mut C,
@@ -260,6 +282,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             scan: Scan::default(),
             alias_consts: false,
             call_resume_ips: Vec::new(),
+            ctor_headers: Vec::new(),
             next_slot: 0,
             max_locals: 0,
             ctx,
@@ -274,6 +297,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                 slots: self.slots,
                 locals: self.max_locals,
                 call_resume_ips: self.call_resume_ips,
+                ctor_headers: self.ctor_headers,
             },
         }
     }
@@ -1163,6 +1187,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         let type_name = self.ctx.resolve_str(v.type_name).to_owned();
         let variant_name = self.ctx.resolve_str(v.variant_name).to_owned();
 
+        let ctor_at = self.here().to_operand();
         let id_c = self
             .ctx
             .intern_int((v.type_id.0 as u32 as i64) | ((v.variant_idx as i64) << 32));
@@ -1183,6 +1208,10 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             }
             _ => 0,
         };
+        self.ctor_headers.push(CtorHeader {
+            at: ctor_at,
+            reuse: a == 1,
+        });
         let prehash = enum_name_prefix_hash(&type_name, &variant_name);
         let ph_c = self.ctx.intern_int(prehash as i64);
         self.push(op_ab(Op::MakeEnumPayload, a, fields.len() as u16, ph_c));

@@ -9,7 +9,7 @@ mod common;
 use common::Project;
 use common::wait_or_kill;
 
-/// Run `al run <prog>` with `AL_SCHEDULERS=<schedulers>` and capture output.
+/// Run `al run <prog>` with `SCARLET_SCHEDULERS=<schedulers>` and capture output.
 /// The wall-clock cap only turns a scheduler deadlock into a failure instead
 /// of a hung CI job; no assertion depends on how fast the run finishes.
 fn run_al_with_schedulers(proj: &Project, src: &str, schedulers: u32) -> String {
@@ -19,7 +19,7 @@ fn run_al_with_schedulers(proj: &Project, src: &str, schedulers: u32) -> String 
     let child = Command::new(env!("CARGO_BIN_EXE_scarlet"))
         .arg("run")
         .arg(&prog)
-        .env("AL_SCHEDULERS", schedulers.to_string())
+        .env("SCARLET_SCHEDULERS", schedulers.to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -30,12 +30,12 @@ fn run_al_with_schedulers(proj: &Project, src: &str, schedulers: u32) -> String 
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
-        "al run failed (or hung past 120s) under AL_SCHEDULERS={schedulers}\n\
+        "al run failed (or hung past 120s) under SCARLET_SCHEDULERS={schedulers}\n\
          --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
     );
     assert!(
         !stderr.contains("panicked"),
-        "runtime panicked under AL_SCHEDULERS={schedulers}:\n{stderr}"
+        "runtime panicked under SCARLET_SCHEDULERS={schedulers}:\n{stderr}"
     );
     stdout
 }
@@ -66,7 +66,7 @@ fn fib(n) {
 	match n {
 		0 -> 0
 		1 -> 1
-		else -> fib(n - 1) + fib(n - 2)
+		_ -> fib(n - 1) + fib(n - 2)
 	}
 }
 
@@ -102,7 +102,7 @@ println('main done')
     assert_lines_unordered(
         &stdout,
         &expected,
-        &format!("{spawns} spawns, AL_SCHEDULERS={schedulers}"),
+        &format!("{spawns} spawns, SCARLET_SCHEDULERS={schedulers}"),
     );
 }
 
@@ -138,7 +138,7 @@ array.each(1..6, fn(i) scheduler.spawn(fn() println('light ${i} ${fib(18)}')))
         .map(|i| format!("light {i} {}", fib(18)))
         .collect();
     expected.push(format!("deep {}", fib(26)));
-    assert_lines_unordered(&stdout, &expected, "deep recursion, AL_SCHEDULERS=2");
+    assert_lines_unordered(&stdout, &expected, "deep recursion, SCARLET_SCHEDULERS=2");
 }
 
 /// Migration while holding loaded globals. A `Value` copied out of the
@@ -174,5 +174,5 @@ println('main done')
         })
         .collect();
     expected.push("main done".to_string());
-    assert_lines_unordered(&stdout, &expected, "loaded globals, AL_SCHEDULERS=2");
+    assert_lines_unordered(&stdout, &expected, "loaded globals, SCARLET_SCHEDULERS=2");
 }

@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# Load-drive examples/bench_service.al and print requests/sec + p99 per endpoint.
+# Load-drive examples/bench_service.scrl and print requests/sec + p99 per endpoint.
 #
-#   scripts/bench_service.sh ./target/release/al [duration] [connections]
+#   scripts/bench_service.sh ./target/release/scarlet [duration] [connections]
 #
-# The al binary is $1 so two builds can be compared without rebuilding.
+# The scarlet binary is $1 so two builds can be compared without rebuilding.
 # The server is started here and killed on every exit path; nothing is left
 # behind. Run this OUTSIDE any sandbox — binding a port needs it off.
 set -euo pipefail
 
-AL=${1:?usage: bench_service.sh <path-to-al-binary> [duration] [connections]}
+BIN=${1:?usage: bench_service.sh <path-to-scarlet-binary> [duration] [connections]}
 DURATION=${2:-5s}
 CONNS=${3:-32}
 
-[[ -x $AL ]] || { echo "not executable: $AL" >&2; exit 1; }
+[[ -x $BIN ]] || { echo "not executable: $BIN" >&2; exit 1; }
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-SERVICE=$ROOT/examples/bench_service.al
+SERVICE=$ROOT/examples/bench_service.scrl
 OHA=${OHA:-/opt/homebrew/bin/oha}
 [[ -x $OHA ]] || OHA=$(command -v oha)
 
@@ -25,20 +25,20 @@ cleanup() {
     kill "$SRV_PID" 2>/dev/null || true
     wait "$SRV_PID" 2>/dev/null || true
   fi
-  pkill -f 'bench_service\.al' 2>/dev/null || true
+  pkill -f 'bench_service\.scrl' 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
 # A leaked server from an earlier run would answer on the port we are about to
 # probe and silently benchmark the wrong binary.
-pkill -f 'bench_service\.al' 2>/dev/null || true
+pkill -f 'bench_service\.scrl' 2>/dev/null || true
 sleep 0.3
 
 # A free port, from the kernel.
 PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
 BASE=http://127.0.0.1:$PORT
 
-"$AL" run "$SERVICE" "$PORT" >/dev/null 2>&1 &
+"$BIN" run "$SERVICE" "$PORT" >/dev/null 2>&1 &
 SRV_PID=$!
 
 for _ in $(seq 1 100); do
@@ -76,7 +76,7 @@ print(f"{sys.argv[1]:<18} rps={rps:.1f}\tp50={p50:.3f}ms\tp99={p99:.3f}ms\tnon2x
 PY
 }
 
-echo "# binary=$AL port=$PORT duration=$DURATION connections=$CONNS"
+echo "# binary=$BIN port=$PORT duration=$DURATION connections=$CONNS"
 report "GET /"          "$BASE/"
 report "POST /login"    -m POST -d 'user=user7&password=pw-7' "$BASE/login"
 report "GET /me"        -H "Cookie: $COOKIE" "$BASE/me"

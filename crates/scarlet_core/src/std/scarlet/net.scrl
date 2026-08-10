@@ -10,6 +10,7 @@ import scarlet/net/error.{
 	NetworkDown,
 	NetworkUnreachable,
 }
+import scarlet/result
 import scarlet/scheduler
 import scarlet/string
 
@@ -27,13 +28,9 @@ pub fn listen_addr(addr SocketAddress) Result(Server, NetError)
 // `resolve` before binding, so a name that requires DNS never stalls the
 // scheduler thread. IP literals resolve synchronously.
 pub fn listen(host String, port Int) Result(Server, NetError) {
-	match resolve(host) {
-		Ok(ip) -> match address.socket_address(ip, port) {
-			Ok(addr) -> listen_addr(addr)
-			Err(Nil) -> Err(InvalidPort)
-		}
-		Err(e) -> Err(e)
-	}
+	ip <- result.then(resolve(host))
+	addr <- result.then(result.replace_err(address.socket_address(ip, port), InvalidPort))
+	listen_addr(addr)
 }
 
 // Take the next incoming connection off the listener's queue, parking the
@@ -61,13 +58,9 @@ pub fn accept(s Server) Result(Option(Socket), NetError)
 // assigned port back with `local_addr` after binding port 0. A bind failure
 // is reported as `Err`.
 pub fn serve(host String, port Int, handler fn(Socket) Nil) Result(Server, NetError) {
-	match listen(host, port) {
-		Ok(server) -> {
-			serve_on(server, handler)
-			Ok(server)
-		}
-		Err(e) -> Err(e)
-	}
+	server <- result.then(listen(host, port))
+	serve_on(server, handler)
+	Ok(server)
 }
 
 // Serve connections from a listener already bound with `listen`, fanning the
@@ -135,13 +128,9 @@ pub fn resolve(host String) Result(IpAddress, NetError)
 // connection is established with the calling process parked — neither step
 // blocks the scheduler.
 pub fn connect(host String, port Int) Result(Socket, NetError) {
-	match resolve(host) {
-		Ok(ip) -> match address.socket_address(ip, port) {
-			Ok(addr) -> connect_addr(addr)
-			Err(Nil) -> Err(InvalidPort)
-		}
-		Err(e) -> Err(e)
-	}
+	ip <- result.then(resolve(host))
+	addr <- result.then(result.replace_err(address.socket_address(ip, port), InvalidPort))
+	connect_addr(addr)
 }
 
 // Connect to an already-resolved address. Useful to resolve once and connect

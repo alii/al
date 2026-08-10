@@ -93,6 +93,7 @@ use crate::bytecode::value::{
 };
 use crate::bytecode::{
     CtorRef, NativeCtx, NativeStatus, Op, PreludeBindings, TypeRef, Value, is_native_bridge_op,
+    is_native_park_op,
 };
 use crate::tivec::{Idx, TiVec};
 use crate::type_def::TypeId;
@@ -111,6 +112,7 @@ const SYM_RT_MAKE_CLOSURE: &str = "al_rt_make_closure";
 const SYM_DIV_INT: &str = "al_shim_div_int";
 const SYM_MOD_INT: &str = "al_shim_mod_int";
 const SYM_SHIM_OP: &str = "al_shim_op";
+const SYM_PARK_OP: &str = "al_shim_park_op";
 const SYM_ENUM_ALLOC: &str = "al_shim_enum_alloc";
 const SYM_MAKE_ARRAY: &str = "al_shim_make_array";
 const SYM_MAKE_TUPLE: &str = "al_shim_make_tuple";
@@ -124,6 +126,8 @@ const SYM_HTTP_HEADER_HAS: &str = "al_shim_http_header_has";
 const SYM_HTTP_SERIALIZE_HEAD: &str = "al_shim_http_serialize_head";
 const SYM_HTTP_FRAMING: &str = "al_shim_http_framing";
 const SYM_PUSH_GLOBAL: &str = "al_shim_push_global";
+const SYM_PUSH_CAPTURE: &str = "al_shim_push_capture";
+const SYM_PUSH_SELF: &str = "al_shim_push_self";
 
 /// A gated body, captured pool-independently at hook time. Everything only
 /// the per-body [`ResolvedPool`] could answer is resolved here.
@@ -446,6 +450,19 @@ impl Gate<'_> {
                 args,
                 imm: Imm::Index(_),
             } => args.is_empty().then_some(()),
+            // Reads of the closure this frame is running. Like `PushGlobal`
+            // these take no operand and go through a shim, because the frame
+            // is not in the value stack's ABI-stable region.
+            Atom::PrimOp {
+                op: Op::PushCapture,
+                args,
+                imm: Imm::Index(_),
+            } => args.is_empty().then_some(()),
+            Atom::PrimOp {
+                op: Op::PushSelf,
+                args,
+                imm: Imm::None,
+            } => args.is_empty().then_some(()),
             // A bare Bool head from `&&`/`||` lowering: a compile-time
             // immediate constant, no heap cell, no operand.
             Atom::PrimOp {
@@ -537,14 +554,16 @@ impl Gate<'_> {
             // interpreter errors are the type mismatches a well-typed program
             // never produces.
             Atom::PrimOp { op, .. } if is_native_bridge_op(*op) => Some(()),
+            // Suspension is expressed as two resume ordinals; see `eval_pure`.
+            Atom::PrimOp { op, .. } if is_native_park_op(*op) => Some(()),
             Atom::PrimOp { op, args, imm } => {
                 if *imm != Imm::None {
                     return None;
                 }
-                let (_, poly) = nop_of(*op)?;
-                if poly && !args.iter().all(|&x| self.is_int(x)) {
-                    return None;
-                }
+                // A polymorphic compare lowers inline only with both operands
+                // proven Int; otherwise it goes through the bridge, which runs
+                // the interpreter's own comparison.
+                let _ = (nop_of(*op)?, args);
                 Some(())
             }
             // Known/self dispatch through the entry table; a dynamic callee
@@ -690,6 +709,16 @@ pub(crate) mod gate_diag {
                 imm: Imm::Index(_),
             } => (!args.is_empty()).then(|| "push-global-args".into()),
             Atom::PrimOp {
+                op: Op::PushCapture,
+                args,
+                imm: Imm::Index(_),
+            } => (!args.is_empty()).then(|| "push-capture-args".into()),
+            Atom::PrimOp {
+                op: Op::PushSelf,
+                args,
+                imm: Imm::None,
+            } => (!args.is_empty()).then(|| "push-self-args".into()),
+            Atom::PrimOp {
                 op: Op::PushTrue | Op::PushFalse,
                 args,
                 imm: Imm::None,
@@ -751,14 +780,15 @@ pub(crate) mod gate_diag {
                 _ => Some("bin-byte-size-unproven".into()),
             },
             Atom::PrimOp { op, .. } if is_native_bridge_op(*op) => None,
+            Atom::PrimOp { op, .. } if is_native_park_op(*op) => None,
             Atom::PrimOp { op, args, imm } => {
                 if *imm != Imm::None {
                     return Some(format!("op:{op:?}"));
                 }
+                let _ = args;
                 match nop_of(*op) {
                     None => Some(format!("op:{op:?}")),
-                    Some((_, poly)) => (poly && !args.iter().all(|&x| g.is_int(x)))
-                        .then(|| format!("poly-non-int:{op:?}")),
+                    Some(_) => None,
                 }
             }
             Atom::Call { .. } | Atom::Closure { .. } => None,
@@ -891,7 +921,13 @@ fn resolve_const(consts: &[Value], c: super::ConstId, map: &mut ConstMap) -> Opt
         return Some(());
     }
     let v = consts.get(c.0 as usize)?;
-    if v.is_heap() {
+    // A heap constant is baked as its pointer bits, which is only sound if the
+    // cell outlives every compiled body. The compiler interns all heap
+    // constants into the program's frozen area, so they are immortal: the
+    // pointer stays valid for the program's life, and the retain/release gates
+    // skip them because the mortality bit is clear. A mortal heap value in the
+    // pool would be a dangling bake, so it still interprets.
+    if v.is_heap() && !v.is_immortal() {
         return None;
     }
     map.insert(
@@ -1039,6 +1075,7 @@ fn collect_ctor_atoms<'a>(e: &'a CoreExpr, out: &mut Vec<(&'a VariantRef, usize)
 fn enum_ctor_sites(
     plan: &NativePlan,
     program: &crate::bytecode::Program,
+    layout: &FrameLayout,
     freeze: Option<&mut crate::frozen::FrozenBuilder>,
 ) -> Option<Vec<EnumCtorSite>> {
     let mut atoms = Vec::new();
@@ -1047,33 +1084,30 @@ fn enum_ctor_sites(
     if atoms.is_empty() {
         return Some(Vec::new());
     }
+    // One recorded header per non-Bool ctor, in the same walk order as
+    // `collect_ctor_atoms`. A length mismatch means emit and this walk
+    // disagree about the body, so interpret rather than pair them up wrong.
+    if layout.ctor_headers.len() != atoms.len() {
+        return None;
+    }
     let f = program.functions.get(plan.func_idx.index())?;
     let start = usize::try_from(f.code_start).ok()?;
     let len = usize::try_from(f.code_len).ok()?;
     let code = program.code.get(start..start.checked_add(len)?)?;
     let consts: &[Value] = &program.constants;
     let mut freeze = freeze;
-    let mut makes = code
-        .iter()
-        .enumerate()
-        .filter(|(_, i)| i.op == Op::MakeEnumPayload);
     let mut sites = Vec::with_capacity(atoms.len());
-    for (variant, arity) in atoms {
-        let (at, make) = makes.next()?;
-        if make.b as usize != arity {
-            return None;
-        }
-        let reuse = make.a != 0;
-        // `emit_ctor`'s site shape, back to front: [id, en, vn, labels]
-        // consts, `arity` field pushes, an optional `Reuse`, the make.
-        let header = at.checked_sub(4 + arity + usize::from(reuse))?;
+    for ((variant, _arity), site) in atoms.iter().zip(&layout.ctor_headers) {
+        let header = usize::try_from(site.at).ok()?;
+        // `emit_ctor`'s header, in order: [packed, enum name, variant name,
+        // labels], each a `PushConst`.
         let cid = |i: usize| -> Option<usize> {
             let ins = code.get(header + i)?;
             (ins.op == Op::PushConst).then_some(ins.operand as usize)
         };
         let packed = consts.get(cid(0)?)?.as_int()? as u64;
-        // The packed word must name the atom's own variant, or the cursor
-        // pairing has drifted.
+        // The packed word must name the atom's own variant, or the pairing
+        // has drifted.
         let expect = (variant.type_id.0 as u32 as u64) | ((variant.variant_idx as u64) << 32);
         if packed != expect {
             return None;
@@ -1105,11 +1139,8 @@ fn enum_ctor_sites(
             enum_name: en.to_bits(),
             variant_name: vn.to_bits(),
             labels,
-            reuse,
+            reuse: site.reuse,
         });
-    }
-    if makes.next().is_some() {
-        return None;
     }
     Some(sites)
 }
@@ -1159,7 +1190,7 @@ impl Uses {
         self.reuse_claimed.get(id).copied().unwrap_or(false)
     }
 
-    fn atom(&mut self, a: &Atom) {
+    fn atom(&mut self, a: &Atom, plan: &NativePlan) {
         match a {
             Atom::Local(x) => self.need_word(*x),
             Atom::Const(_) => {}
@@ -1196,15 +1227,22 @@ impl Uses {
                 }
                 // `PushGlobal` reads the entry frame, not a local; the Bool
                 // heads are nullary constants. Neither has an operand.
-                Op::PushGlobal | Op::PushTrue | Op::PushFalse => {}
-                // The bridge hands every operand to the shim as an owned word.
-                _ if is_native_bridge_op(*op) => {
+                Op::PushGlobal | Op::PushCapture | Op::PushSelf | Op::PushTrue | Op::PushFalse => {}
+                // The bridges hand every operand to their shim as an owned word.
+                _ if is_native_bridge_op(*op) || is_native_park_op(*op) => {
                     for &x in args {
                         self.need_word(x);
                     }
                 }
                 _ => match nop_of(*op) {
                     Some((NOp::Not, _)) => {
+                        for &x in args {
+                            self.need_word(x);
+                        }
+                    }
+                    // A poly compare the plan cannot prove Int-only takes the
+                    // bridge, which wants owned words.
+                    Some((_, true)) if !args.iter().all(|&x| plan.is_int(x)) => {
                         for &x in args {
                             self.need_word(x);
                         }
@@ -1248,7 +1286,7 @@ impl Uses {
         loop {
             match e {
                 CoreExpr::Let { rhs, body, .. } => {
-                    self.atom(rhs);
+                    self.atom(rhs, plan);
                     e = body;
                 }
                 CoreExpr::LetJoin { join, body, .. }
@@ -1292,7 +1330,7 @@ impl Uses {
                     return Some(());
                 }
                 CoreExpr::Tail(a) => {
-                    self.atom(a);
+                    self.atom(a, plan);
                     return Some(());
                 }
                 CoreExpr::Goto(_) => return Some(()),
@@ -1332,10 +1370,13 @@ struct RtRefs {
     http_serialize_head: ir::FuncRef,
     http_framing: ir::FuncRef,
     push_global: ir::FuncRef,
+    push_capture: ir::FuncRef,
+    push_self: ir::FuncRef,
     int_box: ir::FuncRef,
     div_int: ir::FuncRef,
     mod_int: ir::FuncRef,
     shim_op: ir::FuncRef,
+    park_op: ir::FuncRef,
     prepare_call: ir::FuncRef,
     prepare_call_value: ir::FuncRef,
     prepare_tail: ir::FuncRef,
@@ -1388,6 +1429,8 @@ fn declare_imports<M: Module>(
     )?;
     let http_framing = import(module, SYM_HTTP_FRAMING, &[ptr, i64t], Some(i64t))?;
     let push_global = import(module, SYM_PUSH_GLOBAL, &[ptr, i64t], Some(i64t))?;
+    let push_capture = import(module, SYM_PUSH_CAPTURE, &[ptr, i64t], Some(i64t))?;
+    let push_self = import(module, SYM_PUSH_SELF, &[ptr], Some(i64t))?;
     let int_box = import(module, NATIVE_INT_BOX_SYMBOL, &[ptr, i64t], Some(i64t))?;
     let div_int = import(module, SYM_DIV_INT, &[i64t, i64t], Some(i64t))?;
     let mod_int = import(module, SYM_MOD_INT, &[i64t, i64t], Some(i64t))?;
@@ -1395,6 +1438,12 @@ fn declare_imports<M: Module>(
         module,
         SYM_SHIM_OP,
         &[ptr, i64t, i64t, ptr, i64t],
+        Some(i64t),
+    )?;
+    let park_op = import(
+        module,
+        SYM_PARK_OP,
+        &[ptr, i64t, ptr, i64t, i64t, i64t],
         Some(i64t),
     )?;
     // The transfer helpers return a `PreparedCall`: two registers.
@@ -1440,10 +1489,13 @@ fn declare_imports<M: Module>(
         http_serialize_head: module.declare_func_in_func(http_serialize_head, func),
         http_framing: module.declare_func_in_func(http_framing, func),
         push_global: module.declare_func_in_func(push_global, func),
+        push_capture: module.declare_func_in_func(push_capture, func),
+        push_self: module.declare_func_in_func(push_self, func),
         int_box: module.declare_func_in_func(int_box, func),
         div_int: module.declare_func_in_func(div_int, func),
         mod_int: module.declare_func_in_func(mod_int, func),
         shim_op: module.declare_func_in_func(shim_op, func),
+        park_op: module.declare_func_in_func(park_op, func),
         prepare_call: module.declare_func_in_func(prepare_call, func),
         prepare_call_value: module.declare_func_in_func(prepare_call_value, func),
         prepare_tail: module.declare_func_in_func(prepare_tail, func),
@@ -1468,7 +1520,20 @@ pub fn native_set(plans: &[NativePlan], program: &crate::bytecode::Program) -> H
             let Some(cmap) = resolve_consts(&p.fun, consts) else {
                 return false;
             };
-            Uses::scan(&p.fun, p, &cmap).is_some() && enum_ctor_sites(p, program, None).is_some()
+            if Uses::scan(&p.fun, p, &cmap).is_none() {
+                return false;
+            }
+            // The ctor-site header positions come from the layout, so this
+            // check needs the same re-emission `compile` does.
+            let layout = emit::emit(
+                &p.fun,
+                &mut LayoutCtx {
+                    bools: p.bools,
+                    switch_counts: &p.switch_counts,
+                },
+            )
+            .layout;
+            enum_ctor_sites(p, program, &layout, None).is_some()
         })
         .map(|p| p.func_idx)
         .collect()
@@ -1502,7 +1567,7 @@ pub fn compile<M: Module>(
         return Ok(None);
     };
     let mut frozen = program.frozen.builder();
-    let Some(ctor_sites) = enum_ctor_sites(plan, program, Some(&mut frozen)) else {
+    let Some(ctor_sites) = enum_ctor_sites(plan, program, &layout, Some(&mut frozen)) else {
         // The bytecode no longer matches the emit shape the scan expects —
         // an emission or peephole change drifted. Interpreting is safe, but
         // say so: a silent fallback here once meant a whole release ran
@@ -1565,6 +1630,17 @@ fn cont_live_sets(body: &CoreExpr) -> Vec<HashSet<LocalId>> {
         Read(LocalId),
         Boundary,
     }
+    /// A parking op resumes at one of two ordinals (retry / continue), so it
+    /// contributes two boundaries here — matching the emitter's two
+    /// `next_cont` calls.
+    fn park_boundaries(a: &Atom, ev: &mut Vec<Ev>) -> bool {
+        let park = matches!(a, Atom::PrimOp { op, .. } if is_native_park_op(*op));
+        if park {
+            ev.push(Ev::Boundary);
+            ev.push(Ev::Boundary);
+        }
+        park
+    }
     fn collect(e: &CoreExpr, in_join: bool, ev: &mut Vec<Ev>) {
         let mut e = e;
         loop {
@@ -1574,6 +1650,7 @@ fn cont_live_sets(body: &CoreExpr) -> Vec<HashSet<LocalId>> {
                     if matches!(rhs, Atom::Call { .. }) {
                         ev.push(Ev::Boundary);
                     }
+                    park_boundaries(rhs, ev);
                     e = body;
                 }
                 CoreExpr::LetJoin { join, body, .. } => {
@@ -1604,6 +1681,9 @@ fn cont_live_sets(body: &CoreExpr) -> Vec<HashSet<LocalId>> {
                     if in_join && matches!(a, Atom::Call { .. }) {
                         ev.push(Ev::Boundary);
                     }
+                    // Unconditional, unlike a tail call: a parked op resumes
+                    // into this body whatever position it sits in.
+                    park_boundaries(a, ev);
                     return;
                 }
                 CoreExpr::Goto(_) => return,
@@ -1874,18 +1954,51 @@ impl<'a> BodyGen<'a> {
         FrameSlots::new(&self.layout, base).store_slot_no_release(&mut self.b, slot, zero);
     }
 
+    /// The word view of `id`, always. A cached view is the register copy; a
+    /// miss re-materialises from the local's home — its frame slot, or its
+    /// constant bits.
+    ///
+    /// A miss is normal, not a failure: a continuation drops every register
+    /// copy, and `reload_cached_views` only restores the locals it can prove
+    /// live. Reaching a use *is* the proof that this local is live, so its
+    /// slot still holds its value and reloading it here is sound. The reload
+    /// is deliberately a bare `ir::Value` rather than a `def_var`: defining
+    /// the Variable inside one branch would not dominate a sibling branch's
+    /// use.
     fn word_of(&mut self, id: LocalId) -> ir::Value {
-        match self.words.get(id).copied().flatten() {
-            Some(v) => self.b.use_var(v),
-            None => unsupported_node("word view"),
+        if let Some(v) = self.words.get(id).copied().flatten() {
+            return self.b.use_var(v);
         }
+        self.rematerialize_word(id)
     }
 
-    fn int_of(&mut self, id: LocalId) -> ir::Value {
-        match self.ints.get(id).copied().flatten() {
-            Some(v) => self.b.use_var(v),
-            None => unsupported_node("int view"),
+    /// [`Self::word_of`]'s miss path: the home read, split out so `int_of`
+    /// shares it.
+    fn rematerialize_word(&mut self, id: LocalId) -> ir::Value {
+        if let Some(slot) = self.layout.slot(id) {
+            return self.load_slot(slot);
         }
+        if let Some((bits, _)) = self.const_locals.get(id).copied().flatten() {
+            return self.b.ins().iconst(types::I64, bits as i64);
+        }
+        // Slotless and non-constant: a single-use temp, whose one use is in
+        // the region that defined it, so its register copy is always present
+        // above. Landing here means the frame plan dropped a slot a live
+        // local needed.
+        unsupported_node("word view: local with no slot and no constant home")
+    }
+
+    /// The raw `i64` view of `id`, always. Mirrors [`Self::word_of`]: a miss
+    /// re-derives the word from the local's home and unboxes it.
+    fn int_of(&mut self, id: LocalId) -> ir::Value {
+        if let Some(v) = self.ints.get(id).copied().flatten() {
+            return self.b.use_var(v);
+        }
+        if let Some((_, Some(i))) = self.const_locals.get(id).copied().flatten() {
+            return self.b.ins().iconst(types::I64, i);
+        }
+        let w = self.rematerialize_word(id);
+        unbox_int(&mut self.b, &self.facts, w)
     }
 
     /// An owned word for a consuming use. A slotted local keeps its slot's
@@ -2023,6 +2136,28 @@ impl<'a> BodyGen<'a> {
                 let n = self.b.ins().iconst(types::I64, i64::from(*slot));
                 let vmx = self.vmx();
                 let call = self.b.ins().call(self.fns.push_global, &[vmx, n]);
+                let w = self.b.inst_results(call)[0];
+                self.field_result(w, want_word, want_int)
+            }
+            // The shim hands back a borrowed word from the running closure;
+            // `field_result` retains only where this use keeps it, matching the
+            // interpreter's `clone()`.
+            Atom::PrimOp {
+                op: Op::PushCapture,
+                imm: Imm::Index(idx),
+                ..
+            } => {
+                let n = self.b.ins().iconst(types::I64, i64::from(*idx));
+                let vmx = self.vmx();
+                let call = self.b.ins().call(self.fns.push_capture, &[vmx, n]);
+                let w = self.b.inst_results(call)[0];
+                self.field_result(w, want_word, want_int)
+            }
+            Atom::PrimOp {
+                op: Op::PushSelf, ..
+            } => {
+                let vmx = self.vmx();
+                let call = self.b.ins().call(self.fns.push_self, &[vmx]);
                 let w = self.b.inst_results(call)[0];
                 self.field_result(w, want_word, want_int)
             }
@@ -2215,7 +2350,89 @@ impl<'a> BodyGen<'a> {
             // immediate the method reads; ops without one pass 0. An Int result
             // (StrLen, BinBitSize, MapSize, BinByteAt) is a boxed word
             // `opaque_result` unboxes on demand.
+            // A parking op owns two resume ordinals.
+            //
+            // The first attempt runs here, where the operands are still in
+            // registers, and hands them to the shim. If the op parks with
+            // `Resume::Retry` it has pushed its operands back onto the value
+            // stack, so the retry attempt passes `argc == 0` and the shim
+            // consumes those words instead — compiled code could not re-supply
+            // them, since a parking op's operands are usually slotless temps
+            // with no home once the machine frame is gone.
+            //
+            // `cont_blk` is both the completion path and the resume target for
+            // the ops whose waker leaves the result on the stack. Every block
+            // an entry dispatch can land on re-establishes the frame base and
+            // its register views before touching a slot.
+            Atom::PrimOp { op, args, .. } if is_native_park_op(*op) => {
+                let (retry_ord, retry_blk) = self.next_cont();
+                let (cont_ord, cont_blk) = self.next_cont();
+                let opc = i64::from(*op as u8);
+
+                let attempt = |g: &mut Self, buf: ir::Value, argc: i64| {
+                    let o = g.b.ins().iconst(types::I64, opc);
+                    let n = g.b.ins().iconst(types::I64, argc);
+                    let r = g.b.ins().iconst(types::I64, retry_ord);
+                    let c = g.b.ins().iconst(types::I64, cont_ord);
+                    let vmx = g.vmx();
+                    let call = g.b.ins().call(g.fns.park_op, &[vmx, o, buf, n, r, c]);
+                    let status = g.b.inst_results(call)[0];
+                    let bail = g.b.create_block();
+                    g.b.set_cold_block(bail);
+                    let done =
+                        g.b.ins()
+                            .icmp_imm(IntCC::Equal, status, NativeStatus::Done as u64 as i64);
+                    g.b.ins().brif(done, cont_blk, &[], bail, &[]);
+                    g.b.seal_block(bail);
+                    g.b.switch_to_block(bail);
+                    g.b.ins().return_(&[status]);
+                };
+
+                // First attempt: operands are live here.
+                let buf = self.arg_buffer(args);
+                attempt(self, buf, args.len() as i64);
+
+                // Retry: re-entered by the dispatch with the operands already
+                // on the value stack.
+                self.b.switch_to_block(retry_blk);
+                let nb = self.frame_base_now();
+                self.b.def_var(self.base, nb);
+                let live = self.cont_live[(retry_ord - 1) as usize].clone();
+                self.reload_cached_views(&live);
+                let empty = self.arg_buffer(&[]);
+                attempt(self, empty, 0);
+
+                self.b.switch_to_block(cont_blk);
+                let nb = self.frame_base_now();
+                self.b.def_var(self.base, nb);
+                let live = self.cont_live[(cont_ord - 1) as usize].clone();
+                self.reload_cached_views(&live);
+                let vmx = self.vmx();
+                let pop = self.b.ins().call(self.fns.rt_pop, &[vmx]);
+                let w = self.b.inst_results(pop)[0];
+                let int = want_int.then(|| unbox_int(&mut self.b, &self.facts, w));
+                AtomVal { word: Some(w), int }
+            }
             Atom::PrimOp { op, args, imm } if is_native_bridge_op(*op) => {
+                let operand = super::emit::imm_operand(*op, *imm);
+                let buf = self.arg_buffer(args);
+                let opc = self.b.ins().iconst(types::I64, i64::from(*op as u8));
+                let opv = self.b.ins().iconst(types::I64, i64::from(operand));
+                let n = self.b.ins().iconst(types::I64, args.len() as i64);
+                let vmx = self.vmx();
+                let call = self
+                    .b
+                    .ins()
+                    .call(self.fns.shim_op, &[vmx, opc, opv, buf, n]);
+                self.opaque_result(call, want_int)
+            }
+            // A polymorphic compare whose operands are not both proven Int
+            // cannot use the Int fast path; run the interpreter's own
+            // comparison through the bridge instead.
+            Atom::PrimOp { op, args, imm }
+                if matches!(nop_of(*op), Some((_, true)))
+                    && !args.iter().all(|&x| self.plan.is_int(x)) =>
+            {
                 let operand = super::emit::imm_operand(*op, *imm);
                 let buf = self.arg_buffer(args);
                 let opc = self.b.ins().iconst(types::I64, i64::from(*op as u8));

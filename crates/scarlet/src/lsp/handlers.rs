@@ -42,7 +42,7 @@ impl Workspace {
             let path = graph
                 .module_path(target)
                 .map_or(String::new(), |p| p.join("/"));
-            let mut value = format!("```al\nimport {path}\n```\n\n*module*");
+            let mut value = format!("```scarlet\nimport {path}\n```\n\n*module*");
             if let Some(d) = graph.module_doc(target) {
                 value.push_str("\n\n---\n\n");
                 value.push_str(&clean_doc_comment(d));
@@ -56,7 +56,11 @@ impl Workspace {
                 Some((_, ty, _)) => format!("{} {}", def.name, labelled(ty, def.param_names())),
                 None => def.name.clone(),
             };
-            let mut value = format!("```al\n{}\n```\n\n*{}*", signature, def.entity().noun());
+            let mut value = format!(
+                "```scarlet\n{}\n```\n\n*{}*",
+                signature,
+                def.entity().noun()
+            );
             if let Some(d) = &def.doc {
                 value.push_str("\n\n---\n\n");
                 value.push_str(&clean_doc_comment(d));

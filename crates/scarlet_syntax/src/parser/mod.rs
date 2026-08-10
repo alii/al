@@ -955,7 +955,6 @@ impl Parser {
                     body.push(node);
                     if outcome == SyncOutcome::ConsumedCloser {
                         self.pop_context();
-                        self.check_backpass_tail(&body);
                         return Ok(ast::Expression::BlockExpression(ast::BlockExpression {
                             body,
                             span: self.span_from(block_span),
@@ -968,25 +967,11 @@ impl Parser {
 
         self.pop_context();
         self.eat(Kind::PuncCloseBrace)?;
-        self.check_backpass_tail(&body);
 
         Ok(ast::Expression::BlockExpression(ast::BlockExpression {
             body,
             span: self.span_from(block_span),
         }))
-    }
-
-    /// A backpass passes the *rest* of its block to the call, so one with
-    /// nothing after it has nothing to pass.
-    fn check_backpass_tail(&mut self, body: &[ast::Node]) {
-        if let Some(ast::Node::Statement(s)) = body.last()
-            && let ast::Statement::Backpass(bp) = s.as_ref()
-        {
-            self.error_at(
-                bp.span,
-                "nothing follows this backpass to pass into the call",
-            );
-        }
     }
 
     fn parse_array_expression(&mut self) -> PResult<ast::Expression> {
@@ -1250,7 +1235,12 @@ impl Parser {
                         // Stopped at this arm's `->`: use a placeholder so the
                         // body still parses and the loop advances instead of
                         // re-erroring on the same token.
-                        ArmRecovery::AtArrow => ast::Pattern::Wildcard { span: err_span },
+                        ArmRecovery::AtArrow => ast::Pattern::Var {
+                            name: ast::Identifier {
+                                name: "_".to_string(),
+                                span: err_span,
+                            },
+                        },
                         ArmRecovery::Resume => continue,
                     }
                 }
@@ -1439,16 +1429,12 @@ impl Parser {
     fn parse_pattern_atom_inner(&mut self) -> PResult<ast::Pattern> {
         let start = self.current_span();
         match self.kind() {
-            Kind::Keyword(Keyword::Else) => {
-                self.eat(Kind::Keyword(Keyword::Else))?;
-                Ok(ast::Pattern::Wildcard { span: start })
-            }
+            Kind::Keyword(Keyword::Else) => Err(
+                "'else' is not a pattern; bind a name or use '_' as the fallback arm".to_string(),
+            ),
             Kind::Identifier(_) => {
                 let id_span = self.current_span();
                 let name = self.eat_name("Expected pattern")?;
-                if name == "_" {
-                    return Ok(ast::Pattern::Wildcard { span: id_span });
-                }
                 // `io.NotFound(path)`: a ctor reached through a module
                 // qualifier, so it need not be imported by name. `p.field` is
                 // not a pattern, so nothing else can look like this.
@@ -2710,11 +2696,9 @@ mod tests {
     }
 
     #[test]
-    fn test_backpass_must_not_end_its_block() {
-        assert_single_error(
-            "{\nx <- g(1)\n}",
-            "nothing follows this backpass to pass into the call",
-        );
+    fn test_backpass_may_end_its_block() {
+        let r = assert_no_errors("{\n_ <- g(1)\n}");
+        assert_backpass(first_block_node(&r), &["_"]);
     }
 
     #[test]
@@ -2975,7 +2959,7 @@ mod tests {
         );
         assert_has_error(
             &format!(
-                "match x {{ {}y{} -> 1, else -> 2 }}",
+                "match x {{ {}y{} -> 1, _ -> 2 }}",
                 "S(".repeat(n),
                 ")".repeat(n)
             ),
@@ -3053,16 +3037,16 @@ mod tests {
 
     #[test]
     fn test_binary_pattern() {
-        assert_no_errors("match b { <<a, b>> -> a + b\n else -> 0 }");
-        assert_no_errors("match b { <<x:4, y:4>> -> x\n else -> 0 }");
-        assert_no_errors("match b { <<_:8, body:bytes(n), rest:binary>> -> body\n else -> b }");
-        assert_no_errors("match b { <<1, 2, ..rest>> -> rest\n else -> b }");
-        assert_no_errors("match b { <<1, 2, ..>> -> 0\n else -> 0 }");
-        assert_no_errors("match b { <<>> -> 0\n else -> 1 }");
+        assert_no_errors("match b { <<a, b>> -> a + b\n _ -> 0 }");
+        assert_no_errors("match b { <<x:4, y:4>> -> x\n _ -> 0 }");
+        assert_no_errors("match b { <<_:8, body:bytes(n), rest:binary>> -> body\n _ -> b }");
+        assert_no_errors("match b { <<1, 2, ..rest>> -> rest\n _ -> b }");
+        assert_no_errors("match b { <<1, 2, ..>> -> 0\n _ -> 0 }");
+        assert_no_errors("match b { <<>> -> 0\n _ -> 1 }");
     }
 
     #[test]
     fn test_binary_pattern_rest_must_be_last() {
-        assert_has_error("match b { <<..r, 1>> -> r\n else -> b }", "last segment");
+        assert_has_error("match b { <<..r, 1>> -> r\n _ -> b }", "last segment");
     }
 }

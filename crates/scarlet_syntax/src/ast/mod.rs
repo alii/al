@@ -587,9 +587,6 @@ pub struct BinaryLiteral {
 
 #[derive(Debug, Clone)]
 pub enum Pattern {
-    Wildcard {
-        span: Span,
-    },
     Var {
         name: Identifier,
     },
@@ -700,7 +697,6 @@ pub enum PatternBinder<'a> {
 impl Pattern {
     pub fn span(&self) -> Span {
         match self {
-            Pattern::Wildcard { span } => *span,
             Pattern::Var { name } => name.span,
             Pattern::Constructor { span, .. } => *span,
             Pattern::Tuple { span, .. } => *span,
@@ -721,7 +717,7 @@ impl Pattern {
         f: &mut dyn FnMut(PatternBinder<'a>),
     ) {
         match self {
-            Pattern::Wildcard { .. } | Pattern::Literal(_) | Pattern::Range { .. } => {}
+            Pattern::Literal(_) | Pattern::Range { .. } => {}
             Pattern::Var { name } => f(PatternBinder::Name(name)),
             Pattern::Constructor { args, .. } => {
                 for arg in args {

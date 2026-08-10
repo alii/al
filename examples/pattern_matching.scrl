@@ -49,7 +49,7 @@ fn status_class(code Int) String {
 		300..400 -> 'redirect'
 		400..500 -> 'client error'
 		500..600 -> 'server error'
-		else -> 'unclassified'
+		_ -> 'unclassified'
 	}
 }
 
@@ -59,7 +59,7 @@ fn effect(method String) String {
 		'GET' | 'HEAD' -> 'read'
 		'POST' | 'PUT' | 'PATCH' -> 'write'
 		'DELETE' -> 'remove'
-		else -> 'unknown'
+		_ -> 'unknown'
 	}
 }
 

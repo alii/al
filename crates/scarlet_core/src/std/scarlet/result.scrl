@@ -12,6 +12,16 @@ pub fn map_err(r Result(a, e), f fn(e) e2) Result(a, e2) {
 	}
 }
 
+// Swap the contentless error of a `Result(_, Nil)` for a meaningful one. The
+// input error is pinned to Nil like `unwrap`'s: replacing an error that
+// carries data would silently discard it — consume those with `map_err`.
+pub fn replace_err(r Result(a, Nil), err e) Result(a, e) {
+	match r {
+		Ok(a) -> Ok(a)
+		Err(Nil) -> Err(err)
+	}
+}
+
 pub fn then(r Result(a, e), f fn(a) Result(b, e)) Result(b, e) {
 	match r {
 		Ok(x) -> f(x)

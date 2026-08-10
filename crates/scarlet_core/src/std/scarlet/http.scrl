@@ -21,13 +21,14 @@ import scarlet/net/socket.{Socket, Data, Closed}
 import scarlet/net/error.{NetError}
 import scarlet/binary.{Dec}
 import scarlet/int
+import scarlet/result
 import scarlet/time.{Instant}
 
 // The HTTP/1.1 server core: the typed Request/Response surface a handler sees,
 // and the connection driver that frames requests off a socket and drives
-// responses back. The sans-IO parsing/framing lives in al/http/h1 (imported
+// responses back. The sans-IO parsing/framing lives in scarlet/http/h1 (imported
 // one-way; h1 never imports this module, which keeps the layering acyclic);
-// the streaming body primitive lives in al/http/body.
+// the streaming body primitive lives in scarlet/http/body.
 //
 // Request bodies reach the handler under ONE delivery model, chosen to make
 // keep-alive safe against request smuggling: the driver reads the whole
@@ -152,7 +153,7 @@ fn to_method(m Binary) Method {
 		<<'PATCH'>> -> Patch
 		<<'HEAD'>> -> Head
 		<<'OPTIONS'>> -> Options
-		else -> Other(m)
+		_ -> Other(m)
 	}
 }
 
@@ -285,9 +286,9 @@ fn serve_conn(
 	// An exhausted `buf` parses to NeedMore off an empty window; guarding that
 	// with an `off >= byte_size` test measured worse, so the parse is unconditional.
 	match h1.parse_request(buf, off) {
-		NeedMore -> match flush(sock, pending) {
-			Err(e) -> Err(e)
-			Ok(_) -> match socket.read_until(sock, READ_SIZE, deadline) {
+		NeedMore -> {
+			_ <- result.then(flush(sock, pending))
+			match socket.read_until(sock, READ_SIZE, deadline) {
 				Ok(Data(more)) -> serve_conn(sock, carry(buf, off, more), 0, deadline, handler, [])
 				Ok(Closed) -> Ok(Nil)
 				Err(e) -> Err(e)
@@ -322,9 +323,9 @@ fn reject(sock Socket, pending Array(Binary), status Int) Nil {
 fn flush(sock Socket, pending Array(Binary)) Result(Nil, NetError) {
 	match pending {
 		[] -> Ok(Nil)
-		else -> match socket.write_parts(sock, pending) {
-			Ok(_) -> Ok(Nil)
-			Err(e) -> Err(e)
+		_ -> {
+			_ <- result.then(socket.write_parts(sock, pending))
+			Ok(Nil)
 		}
 	}
 }
@@ -376,19 +377,15 @@ fn handle(
 			// The body is read off the socket: anything still pending must go
 			// out first, or the client could sit waiting for those responses
 			// before it sends the body we are about to wait for.
-			match flush(sock, pending) {
-				Err(e) -> Err(e)
-				Ok(_) -> read_body(sock, buf, consumed, n, deadline, head, handler)
-			}
+			_ <- result.then(flush(sock, pending))
+			read_body(sock, buf, consumed, n, deadline, head, handler)
 		}
 		// Chunked body: same flush-first reasoning as Content-Length, and the
 		// same absolute body deadline.
 		Chunked -> {
 			deadline = body_deadline()
-			match flush(sock, pending) {
-				Err(e) -> Err(e)
-				Ok(_) -> read_chunked_body(sock, buf, consumed, deadline, head, handler)
-			}
+			_ <- result.then(flush(sock, pending))
+			read_chunked_body(sock, buf, consumed, deadline, head, handler)
 		}
 	}
 }
@@ -409,27 +406,19 @@ fn read_body(
 	head ReqHead,
 	handler fn(Request) Response,
 ) Result(Nil, NetError) {
-	match maybe_continue(sock, head.flags) {
-		Err(e) -> Err(e)
-		Ok(_) -> {
-			avail = binary.byte_size(buf) - consumed
-			buffered = int.min(avail, n)
-			head_bytes = binary.slice_bytes(buf, consumed, buffered)
-			need = n - buffered
-			match body.collect(body.content_length(sock, need, deadline), MAX_BODY) {
-				Err(e) -> Err(e)
-				// Pending responses were flushed before the body was read, so
-				// this request starts a fresh batch.
-				Ok(tail) -> {
-					req = build_request(head, [], body.from_binary(binary.append(head_bytes, tail)))
-					if avail > n {
-						respond_and_continue(sock, buf, consumed + n, req, handler, [])
-					} else {
-						respond_and_continue(sock, EMPTY, 0, req, handler, [])
-					}
-				}
-			}
-		}
+	_ <- result.then(maybe_continue(sock, head.flags))
+	avail = binary.byte_size(buf) - consumed
+	buffered = int.min(avail, n)
+	head_bytes = binary.slice_bytes(buf, consumed, buffered)
+	need = n - buffered
+	tail <- result.then(body.collect(body.content_length(sock, need, deadline), MAX_BODY))
+	// Pending responses were flushed before the body was read, so this
+	// request starts a fresh batch.
+	req = build_request(head, [], body.from_binary(binary.append(head_bytes, tail)))
+	if avail > n {
+		respond_and_continue(sock, buf, consumed + n, req, handler, [])
+	} else {
+		respond_and_continue(sock, EMPTY, 0, req, handler, [])
 	}
 }
 
@@ -444,10 +433,8 @@ fn read_chunked_body(
 	head ReqHead,
 	handler fn(Request) Response,
 ) Result(Nil, NetError) {
-	match maybe_continue(sock, head.flags) {
-		Err(e) -> Err(e)
-		Ok(_) -> chunked_loop(sock, buf, off, deadline, head, handler)
-	}
+	_ <- result.then(maybe_continue(sock, head.flags))
+	chunked_loop(sock, buf, off, deadline, head, handler)
 }
 
 // The chunked read/decode loop. The native decoder (h1.chunk_decode) scans
@@ -591,55 +578,51 @@ fn respond(
 				Unsized(b) -> match version {
 					Http11 -> {
 						chunked = headers.set(hdrs, NAME_TRANSFER_ENCODING, VAL_CHUNKED)
-						match flush(sock, pending) {
-							Err(e) -> Err(e)
-							Ok(_) -> match body.probe(sanitize_trailers(b)) {
-								// The body SOURCE failed on its very first pull,
-								// before this response's head was written: the
-								// framed 500 is still deliverable, so send it
-								// instead of dropping the connection unanswered.
-								Err(_) -> replace_with_500(sock, [])
-								Ok(
-									probed,
-								) -> match body.drain_chunked_with_head(
-									h1.serialize_head(resp.status, chunked),
-									probed,
-									sock,
-								) {
-									Ok(_) -> finish_buffered(sock, close_after, [])
-									// Past the probe the head is on the wire:
-									// whichever side failed, aborting mid-stream
-									// is the only outcome that lets the peer see
-									// the chunked body as truncated.
-									Err(body.SourceFailed(e)) -> Err(e)
-									Err(body.SinkFailed(e)) -> Err(e)
-								}
+						_ <- result.then(flush(sock, pending))
+						match body.probe(sanitize_trailers(b)) {
+							// The body SOURCE failed on its very first pull,
+							// before this response's head was written: the
+							// framed 500 is still deliverable, so send it
+							// instead of dropping the connection unanswered.
+							Err(_) -> replace_with_500(sock, [])
+							Ok(
+								probed,
+							) -> match body.drain_chunked_with_head(
+								h1.serialize_head(resp.status, chunked),
+								probed,
+								sock,
+							) {
+								Ok(Nil) -> finish_buffered(sock, close_after, [])
+								// Past the probe the head is on the wire:
+								// whichever side failed, aborting mid-stream
+								// is the only outcome that lets the peer see
+								// the chunked body as truncated.
+								Err(body.SourceFailed(e)) -> Err(e)
+								Err(body.SinkFailed(e)) -> Err(e)
 							}
 						}
 					}
 					Http10 -> {
 						closing = headers.set(hdrs, NAME_CONNECTION, VAL_CLOSE)
-						match flush(sock, pending) {
-							Err(e) -> Err(e)
-							Ok(_) -> match body.probe(b) {
-								// Same pre-write window as the chunked arm: the
-								// head has not gone out, a framed 500 still can.
-								Err(_) -> replace_with_500(sock, [])
-								Ok(
-									probed,
-								) -> match body.drain_with_head(
-									h1.serialize_head(resp.status, closing),
-									probed,
-									sock,
-								) {
-									Ok(_) -> Ok(Close)
-									// Mid-stream failure of either side: abort.
-									// (Close-delimited framing means the peer
-									// cannot tell truncation from completion —
-									// an HTTP/1.0 limitation, not a choice.)
-									Err(body.SourceFailed(e)) -> Err(e)
-									Err(body.SinkFailed(e)) -> Err(e)
-								}
+						_ <- result.then(flush(sock, pending))
+						match body.probe(b) {
+							// Same pre-write window as the chunked arm: the
+							// head has not gone out, a framed 500 still can.
+							Err(_) -> replace_with_500(sock, [])
+							Ok(
+								probed,
+							) -> match body.drain_with_head(
+								h1.serialize_head(resp.status, closing),
+								probed,
+								sock,
+							) {
+								Ok(Nil) -> Ok(Close)
+								// Mid-stream failure of either side: abort.
+								// (Close-delimited framing means the peer
+								// cannot tell truncation from completion —
+								// an HTTP/1.0 limitation, not a choice.)
+								Err(body.SourceFailed(e)) -> Err(e)
+								Err(body.SinkFailed(e)) -> Err(e)
 							}
 						}
 					}
@@ -663,10 +646,8 @@ fn replace_with_500(sock Socket, pending Array(Binary)) Result(Sent, NetError) {
 // Sent's variants literal.
 fn finish_buffered(sock Socket, close_after Bool, parts Array(Binary)) Result(Sent, NetError) {
 	if close_after {
-		match flush(sock, parts) {
-			Ok(_) -> Ok(Close)
-			Err(e) -> Err(e)
-		}
+		_ <- result.then(flush(sock, parts))
+		Ok(Close)
 	} else {
 		Ok(KeepAlive(parts))
 	}
@@ -710,7 +691,7 @@ fn conn_headers(version Version, close_after Bool, hs Headers) Headers {
 fn head_only_headers(method Method, hs Headers, b ResponseBody) Headers {
 	match (method, b) {
 		(Head, Fixed(len, _)) -> with_length(hs, len)
-		else -> hs
+		_ -> hs
 	}
 }
 
@@ -774,21 +755,21 @@ fn buffer_body(
 			if got > len {
 				replace_with_500(sock, pending)
 			} else {
-				match flush(sock, [..pending, h1.serialize_head(status, hdrs), first, second]) {
-					Err(e) -> Err(e)
-					Ok(_) -> match body.drain_counted(rest, sock, len - got) {
-						// The head and its Content-Length are on the wire:
-						// whichever side failed, nothing framed is deliverable
-						// any more — abort so the peer sees the truncation.
-						Err(body.SourceFailed(e)) -> Err(e)
-						Err(body.SinkFailed(e)) -> Err(e)
-						Ok(body.Complete) -> finish_buffered(sock, close_after, [])
-						// Short or over-long after the head (and its
-						// Content-Length) is on the wire: closing is the only
-						// way to keep the next response in frame.
-						Ok(body.Short(_)) -> Ok(Close)
-						Ok(body.Overran(_)) -> Ok(Close)
-					}
+				_ <- result.then(
+					flush(sock, [..pending, h1.serialize_head(status, hdrs), first, second]),
+				)
+				match body.drain_counted(rest, sock, len - got) {
+					// The head and its Content-Length are on the wire:
+					// whichever side failed, nothing framed is deliverable
+					// any more — abort so the peer sees the truncation.
+					Err(body.SourceFailed(e)) -> Err(e)
+					Err(body.SinkFailed(e)) -> Err(e)
+					Ok(body.Complete) -> finish_buffered(sock, close_after, [])
+					// Short or over-long after the head (and its
+					// Content-Length) is on the wire: closing is the only
+					// way to keep the next response in frame.
+					Ok(body.Short(_)) -> Ok(Close)
+					Ok(body.Overran(_)) -> Ok(Close)
 				}
 			}
 		}
@@ -818,7 +799,7 @@ fn sanitize_trailers(b Body) Body {
 fn suppress_body(method Method, status Int) Bool {
 	match method {
 		Head -> True
-		else -> status == 204 || status == 304
+		_ -> status == 204 || status == 304
 	}
 }
 

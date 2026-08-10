@@ -9,7 +9,7 @@ use crate::scanner;
 use crate::vm;
 
 pub fn run(version: &str) {
-    println!("al {} REPL", version);
+    println!("scarlet {} REPL", version);
     println!("Type expressions to evaluate. Use 'exit' or Ctrl+D to quit.");
     println!();
 

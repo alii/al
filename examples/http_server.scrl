@@ -63,13 +63,13 @@ fn route(req Request) Response {
 		Get -> match http.path(req) {
 			<<'/'>> -> respond(200, 'al http server\n')
 			<<'/hello'>> -> hello(req)
-			else -> http.not_found()
+			_ -> http.not_found()
 		}
 		Post -> match http.path(req) {
 			<<'/echo'>> -> echo(req)
-			else -> http.not_found()
+			_ -> http.not_found()
 		}
-		else -> respond(405, 'method not allowed\n')
+		_ -> respond(405, 'method not allowed\n')
 	}
 	http.with_header(response, NAME_SERVER, VAL_AL)
 }

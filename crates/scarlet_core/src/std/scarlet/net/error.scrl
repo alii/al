@@ -1,7 +1,7 @@
 // Typed errors for network and socket operations. Three kinds of variant live
 // here: the errno-mirroring ones (TimedOut through PermissionDenied, plus the
 // Errno catch-all), which the VM maps from the raw OS errno (names mirror
-// Rust's std::io::ErrorKind); UnexpectedEof and MessageTooLarge, raised by AL
+// Rust's std::io::ErrorKind); UnexpectedEof and MessageTooLarge, raised by Scarlet
 // stdlib protocol code; and UnalignedBinary and InvalidPort, raised by the VM
 // itself. Either way a caller `match`es the exact failure rather than parsing
 // a message string.
@@ -38,7 +38,7 @@ pub type NetError {
 	// A write was handed a binary that is not a whole number of bytes.
 	UnalignedBinary
 	// A port number outside 0..=65535 was passed to listen/connect. Raised by
-	// the AL wrappers before the VM is reached: an opaque `SocketAddress`
+	// the Scarlet wrappers before the VM is reached: an opaque `SocketAddress`
 	// cannot carry an out-of-range port, so this is checked at construction.
 	InvalidPort
 	// An OS error with no dedicated variant above, carrying its raw errno so it

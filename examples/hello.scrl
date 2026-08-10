@@ -2,6 +2,6 @@
 
 println('hello, world')
 
-name = 'AL'
+name = 'Scarlet'
 println('hello from ${name}')
 println('2 + 2 = ${2 + 2}')

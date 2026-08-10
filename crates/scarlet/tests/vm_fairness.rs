@@ -6,7 +6,7 @@
 //! suspended frame is `ip = 0` with the next iteration's arguments already in
 //! locals.
 //!
-//! Fairness is asserted through ORDER, never timing. Under `AL_SCHEDULERS=1`
+//! Fairness is asserted through ORDER, never timing. Under `SCARLET_SCHEDULERS=1`
 //! scheduling is FIFO round-robin, so a light sibling finishing before a
 //! million-iteration spinner is only possible if the spinner was preempted.
 //! A missing checkpoint inverts the order deterministically, never flakily.
@@ -30,7 +30,7 @@ fn run_single_scheduler(tag: &str, src: &str) -> String {
     let child = Command::new(env!("CARGO_BIN_EXE_scarlet"))
         .arg("run")
         .arg(&prog)
-        .env("AL_SCHEDULERS", "1")
+        .env("SCARLET_SCHEDULERS", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -41,7 +41,7 @@ fn run_single_scheduler(tag: &str, src: &str) -> String {
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
-        "al run failed (or hung past 120s) under AL_SCHEDULERS=1\n\
+        "al run failed (or hung past 120s) under SCARLET_SCHEDULERS=1\n\
          --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
     );
     stdout

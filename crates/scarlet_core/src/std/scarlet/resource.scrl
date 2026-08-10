@@ -1,0 +1,31 @@
+// Bracket-style resource management: acquire, hand the resource to `next`,
+// and release it on the way out — whatever `next` returned. Designed for
+// backpassing, where `next` is the rest of the block:
+//
+//	conn <- resource.with(fn() connect(pool), fn(c) disconnect(pool, c))
+//	query(conn, '...')
+//
+// A domain wrapper is just partial application of the first two arguments:
+//
+//	pub fn with_conn(pool Pool, next fn(Conn) a) a {
+//		resource.with(fn() connect(pool), fn(c) disconnect(pool, c), next)
+//	}
+
+import scarlet/result
+
+pub fn with(acquire fn() r, release fn(r) Nil, next fn(r) a) a {
+	res = acquire()
+	result = next(res)
+	release(res)
+	result
+}
+
+// `with` for a fallible acquisition: an `Err` from `acquire` is returned
+// as-is and `next` never runs; on `Ok` the resource is used and released
+// like `with`, and `next`'s value comes back wrapped in `Ok`.
+pub fn try_with(acquire fn() Result(r, e), release fn(r) Nil, next fn(r) a) Result(a, e) {
+	resource <- result.map(acquire())
+	result = next(resource)
+	release(resource)
+	result
+}

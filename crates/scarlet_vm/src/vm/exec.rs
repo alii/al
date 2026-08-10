@@ -25,10 +25,10 @@ use crate::heap::ProcHeap;
 use crate::tivec::Idx;
 use smallvec::SmallVec;
 
-use super::poll::monotonic_now_ms;
+use super::poll::{Resume, monotonic_now_ms};
 use super::{
-    CallFrame, IO_REDUCTION_COST, REDUCTION_BUDGET, Step, VM, VmError, VmResult, f64_str, freeze,
-    inspect, value_type_name,
+    CallFrame, IO_REDUCTION_COST, REDUCTION_BUDGET, Step, VM, VmError, VmResult, freeze, inspect,
+    value_type_name,
 };
 
 /// Objects freed per reduction charged by [`VM::charge_reclamation`]. Tuned so
@@ -102,12 +102,6 @@ impl VM {
                 self.stack.push(Value::$ctor($body));
             }};
         }
-        macro_rules! un {
-            ($acc:ident, $ctor:ident, |$a:ident| $body:expr) => {{
-                let $a = self.pop()?.$acc();
-                self.stack.push(Value::$ctor($body));
-            }};
-        }
         // `push_int` boxes the rare out-of-range spill.
         macro_rules! bin_int {
             ($acc:ident, |$a:ident, $b:ident| $body:expr) => {{
@@ -139,10 +133,16 @@ impl VM {
             }};
         }
         // `Some(step)` means the process parked and the slice is over.
+        // The op says *where* to resume; only here is it known that a
+        // resume point is a bytecode index, so the arithmetic lives here.
         macro_rules! park {
             ($call:expr) => {{
-                if let Some(step) = $call? {
-                    return Ok(step);
+                if let Some(parked) = $call? {
+                    self.frame_mut().ip = match parked.resume {
+                        Resume::Retry => ip - 1,
+                        Resume::Continue => ip,
+                    };
+                    return Ok(Step::Parked(parked.wait));
                 }
             }};
         }
@@ -526,16 +526,7 @@ impl VM {
                 Op::Mul => self.mul()?,
                 Op::Div => self.div()?,
                 Op::Mod => self.rem()?,
-                Op::Neg => {
-                    let a = self.pop()?;
-                    if let Some(i) = a.as_int() {
-                        self.push_int(i.wrapping_neg());
-                    } else if let Some(f) = a.as_float() {
-                        self.stack.push(Value::float(-f));
-                    } else {
-                        return Err(VmError::type_mismatch("negate", "Int or Float", &a));
-                    }
-                }
+                Op::Neg => self.neg()?,
 
                 // Emitted only when unification proved both operands concrete,
                 // so the tag is a debug-only invariant (`as_*_typed`). Totality
@@ -559,29 +550,15 @@ impl VM {
                     })
                 }
                 Op::NegInt => un_int!(as_int_typed, |a| a.wrapping_neg()),
-                Op::AddFloat => bin!(as_float_typed, float, |a, b| a + b),
-                Op::SubFloat => bin!(as_float_typed, float, |a, b| a - b),
-                Op::MulFloat => bin!(as_float_typed, float, |a, b| a * b),
-                Op::DivFloat => {
-                    bin!(as_float_typed, float, |a, b| if b == 0.0 {
-                        0.0
-                    } else {
-                        a / b
-                    })
-                }
-                Op::NegFloat => un!(as_float_typed, float, |a| -a),
+                Op::AddFloat => self.add_float()?,
+                Op::SubFloat => self.sub_float()?,
+                Op::MulFloat => self.mul_float()?,
+                Op::DivFloat => self.div_float()?,
+                Op::NegFloat => self.neg_float()?,
                 Op::AddStr => self.str_concat2()?,
 
-                Op::Eq => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    self.stack.push(Value::bool(values_equal(&a, &b)));
-                }
-                Op::Neq => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    self.stack.push(Value::bool(!values_equal(&a, &b)));
-                }
+                Op::Eq => self.eq_values()?,
+                Op::Neq => self.neq_values()?,
                 Op::Lt => self.compare_push(|o| o.is_lt())?,
                 Op::Gt => self.compare_push(|o| o.is_gt())?,
                 Op::Lte => self.compare_push(|o| o.is_le())?,
@@ -593,10 +570,10 @@ impl VM {
                 Op::GteInt => bin!(as_int_typed, bool, |a, b| a >= b),
                 Op::EqInt => bin!(as_int_typed, bool, |a, b| a == b),
                 Op::NeqInt => bin!(as_int_typed, bool, |a, b| a != b),
-                Op::LtFloat => bin!(as_float_typed, bool, |a, b| a < b),
-                Op::GtFloat => bin!(as_float_typed, bool, |a, b| a > b),
-                Op::LteFloat => bin!(as_float_typed, bool, |a, b| a <= b),
-                Op::GteFloat => bin!(as_float_typed, bool, |a, b| a >= b),
+                Op::LtFloat => self.lt_float()?,
+                Op::GtFloat => self.gt_float()?,
+                Op::LteFloat => self.lte_float()?,
+                Op::GteFloat => self.gte_float()?,
 
                 Op::Not => {
                     let a = self.pop()?;
@@ -709,19 +686,11 @@ impl VM {
                     let val = self.frame().captures.clone();
                     self.stack.push(val);
                 }
-                Op::Print => {
-                    let val = self.pop()?;
-                    println!("{}", inspect(&val, &self.program));
-                    // A write syscall, blocking on a full pipe: charge it like
-                    // other I/O.
-                    reds -= IO_REDUCTION_COST;
-                }
+                Op::Print => self.print_op(&mut reds)?,
                 Op::StackDepth => {
                     self.stack.push(Value::small_int(self.frames.len() as i64));
                 }
-                Op::Monotonic => {
-                    self.stack.push(Value::small_int(monotonic_now_ms()));
-                }
+                Op::Monotonic => self.monotonic()?,
                 Op::Argv => self.argv()?,
                 Op::EnvMap => self.env_map()?,
                 Op::MapGet => self.map_get()?,
@@ -797,24 +766,24 @@ impl VM {
                 }
                 // I/O, timer and process opcodes: anything that can park the
                 // process or offload to the blocking pool (see `vm::io`).
-                Op::FileRead => park!(self.file_read(ip, &mut reds)),
-                Op::FileWrite => park!(self.file_write(ip, &mut reds)),
+                Op::FileRead => park!(self.file_read(&mut reds)),
+                Op::FileWrite => park!(self.file_write(&mut reds)),
                 Op::TcpListen => self.tcp_listen()?,
-                Op::TcpAccept => park!(self.tcp_accept(ip, &mut reds)),
-                Op::TcpConnect => park!(self.tcp_connect(ip, &mut reds)),
-                Op::TcpRead => park!(self.tcp_read(ip, &mut reds)),
-                Op::TcpReadUntil => park!(self.tcp_read_until(ip, &mut reds)),
-                Op::TcpWrite => park!(self.tcp_write(ip, &mut reds)),
-                Op::TcpWriteParts => park!(self.tcp_write_parts(ip, &mut reds)),
+                Op::TcpAccept => park!(self.tcp_accept(&mut reds)),
+                Op::TcpConnect => park!(self.tcp_connect(&mut reds)),
+                Op::TcpRead => park!(self.tcp_read(&mut reds)),
+                Op::TcpReadUntil => park!(self.tcp_read_until(&mut reds)),
+                Op::TcpWrite => park!(self.tcp_write(&mut reds)),
+                Op::TcpWriteParts => park!(self.tcp_write_parts(&mut reds)),
                 Op::TcpClose => self.tcp_close(&mut reds)?,
                 Op::TcpCloseServer => self.tcp_close_server()?,
                 Op::TcpLocalAddr => self.tcp_local_addr()?,
-                Op::DnsResolve => park!(self.dns_resolve(ip, &mut reds)),
+                Op::DnsResolve => park!(self.dns_resolve(&mut reds)),
                 Op::IpParse => self.ip_parse()?,
                 Op::ProcessSpawn => self.process_spawn(&mut reds)?,
                 Op::SpawnLocal => self.process_spawn_local(&mut reds)?,
                 Op::SpawnOnEach => self.process_spawn_on_each(&mut reds)?,
-                Op::Sleep => park!(self.sleep(ip)),
+                Op::Sleep => park!(self.sleep()),
                 // String and binary builtins (see `vm::text`).
                 Op::StrSplit => self.str_split()?,
                 Op::StrLen => self.str_len()?,
@@ -853,32 +822,12 @@ impl VM {
                 Op::HttpSerializeHead => self.http_serialize_head()?,
                 // Float→Int casts use saturating `as i64`; Value floats are
                 // canonicalized finite (no NaN/Inf), so these stay total.
-                Op::FloatFloor => {
-                    let f = self.pop_float("float.floor")?;
-                    self.push_int(f.floor() as i64);
-                }
-                Op::FloatCeil => {
-                    let f = self.pop_float("float.ceil")?;
-                    self.push_int(f.ceil() as i64);
-                }
-                Op::FloatRound => {
-                    let f = self.pop_float("float.round")?;
-                    self.push_int(f.round() as i64);
-                }
-                Op::FloatTruncate => {
-                    let f = self.pop_float("float.truncate")?;
-                    self.push_int(f.trunc() as i64);
-                }
-                Op::FloatFromInt => {
-                    let n = self.pop_int("float.from_int")?;
-                    self.stack.push(Value::float(n as f64));
-                }
-                Op::FloatToString => {
-                    let f = self.pop_float("float.to_string")?;
-                    let s = f64_str(f);
-                    let v = Value::str_in(&mut self.heap, &s);
-                    self.stack.push(v);
-                }
+                Op::FloatFloor => self.float_floor()?,
+                Op::FloatCeil => self.float_ceil()?,
+                Op::FloatRound => self.float_round()?,
+                Op::FloatTruncate => self.float_truncate()?,
+                Op::FloatFromInt => self.float_from_int()?,
+                Op::FloatToString => self.float_to_string()?,
                 // Perceus drop-guided reuse (frame-limited, ICFP'22).
                 Op::Drop => {
                     // Last use of this local. If the frame holds the only
@@ -1167,7 +1116,7 @@ impl VM {
 
     /// Pop a numeric value as `f64`. Coerces Int, like `Op::Neg` and friends.
     #[inline]
-    fn pop_float(&mut self, op: &'static str) -> VmResult<f64> {
+    pub(super) fn pop_float(&mut self, op: &'static str) -> VmResult<f64> {
         let v = self.pop()?;
         if let Some(f) = v.as_float() {
             Ok(f)
@@ -1239,6 +1188,23 @@ impl VM {
 
     /// Concatenate the two strings on top of the stack.
     #[inline]
+    /// `Op::Print` — write the operand's image to stdout. A write syscall
+    /// blocks on a full pipe, so it is charged like the other I/O ops.
+    pub(super) fn print_op(&mut self, reds: &mut i32) -> VmResult<()> {
+        let val = self.pop()?;
+        println!("{}", inspect(&val, &self.program));
+        *reds -= IO_REDUCTION_COST;
+        Ok(())
+    }
+
+    /// `Op::Monotonic` — the monotonic clock in milliseconds. A plain read:
+    /// it never parks, so compiled code reaches it through the same bridge as
+    /// the other pure ops.
+    pub(super) fn monotonic(&mut self) -> VmResult<()> {
+        self.stack.push(Value::small_int(monotonic_now_ms()));
+        Ok(())
+    }
+
     /// `Op::ToString`: the operand's string image (a Str is its own image).
     pub(super) fn op_to_string(&mut self) -> VmResult<()> {
         let val = self.pop()?;
@@ -1284,6 +1250,35 @@ impl VM {
     }
 
     /// `+` — the one arithmetic op with a non-numeric case, Str + Str.
+    /// `Op::Neg` — the untyped negation fallback.
+    pub(super) fn neg(&mut self) -> VmResult<()> {
+        let a = self.pop()?;
+        if let Some(i) = a.as_int() {
+            self.push_int(i.wrapping_neg());
+        } else if let Some(f) = a.as_float() {
+            self.stack.push(Value::float(-f));
+        } else {
+            return Err(VmError::type_mismatch("negate", "Int or Float", &a));
+        }
+        Ok(())
+    }
+
+    /// `Op::Eq` — structural equality over any two values.
+    pub(super) fn eq_values(&mut self) -> VmResult<()> {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        self.stack.push(Value::bool(values_equal(&a, &b)));
+        Ok(())
+    }
+
+    /// `Op::Neq` — the negation of [`Self::eq_values`].
+    pub(super) fn neq_values(&mut self) -> VmResult<()> {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        self.stack.push(Value::bool(!values_equal(&a, &b)));
+        Ok(())
+    }
+
     pub(super) fn add(&mut self) -> VmResult<()> {
         let both_str = self.peek_at(1).is_some_and(|v| v.as_str().is_some())
             && self.peek_at(0).is_some_and(|v| v.as_str().is_some());

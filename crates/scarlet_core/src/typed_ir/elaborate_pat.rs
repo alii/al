@@ -288,10 +288,10 @@ impl<C: PatCtx> PatElab<'_, C> {
     }
 
     /// A `..name` rest binder. The parser leaves a `.._` rest as a binding
-    /// named `_`, and the check walk never records `_`, so `_` must not reach
-    /// [`Self::bind`]'s duplicate abort.
+    /// named `_`; `_`-prefixed names are write-only and may repeat, so they
+    /// must not reach [`Self::bind`]'s duplicate abort.
     fn rest_bind(&mut self, id: &ast::Identifier, ty: RTy) -> PatRest {
-        if id.name == "_" {
+        if id.name.starts_with('_') {
             PatRest::Discard
         } else {
             PatRest::Bind(self.bind(&id.name, ty, id.span))
@@ -300,7 +300,12 @@ impl<C: PatCtx> PatElab<'_, C> {
 
     fn pat(&mut self, p: &ast::Pattern, scrut: RTy) -> TypedPat {
         match p {
-            ast::Pattern::Wildcard { .. } => TypedPat::Wild { ty: scrut },
+            // `_`-prefixed binders are write-only (the checker rejects reads)
+            // and may repeat, so they lower to `Wild` rather than sharing the
+            // one-bind-per-name map.
+            ast::Pattern::Var { name } if name.name.starts_with('_') => {
+                TypedPat::Wild { ty: scrut }
+            }
             ast::Pattern::Var { name } => TypedPat::Bind(self.bind(&name.name, scrut, name.span)),
             ast::Pattern::Literal(ast::PatternLiteral::Number(n)) => {
                 let value = self.cx.number_const(n);
@@ -710,7 +715,7 @@ mod tests {
     }
 
     fn wild() -> ast::Pattern {
-        ast::Pattern::Wildcard { span: Span::DUMMY }
+        ast::Pattern::Var { name: ident("_") }
     }
 
     fn num(v: i64) -> ast::NumberLiteral {

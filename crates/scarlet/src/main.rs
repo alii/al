@@ -163,7 +163,7 @@ fn compile_source(
     result
 }
 
-fn find_al_files(path: &str) -> io::Result<Vec<PathBuf>> {
+fn find_scarlet_files(path: &str) -> io::Result<Vec<PathBuf>> {
     let p = Path::new(path);
     if p.is_file() {
         if path.ends_with(".scrl") {
@@ -222,7 +222,7 @@ fn read_file_or_die(path: &str) -> String {
 fn main() -> process::ExitCode {
     // clap is the parser and command model only; `scarlet::cli` renders all
     // help/version/error/man output. The meta flags are intercepted before clap
-    // so they work without satisfying required args (`al run --help`).
+    // so they work without satisfying required args (`scarlet run --help`).
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let cmd = Cli::command();
 
@@ -393,7 +393,7 @@ fn cmd_run(args: RunArgs) {
 /// JIT every hook-captured plan into one immortal module and publish the
 /// entries into the program's [`NativeTable`](bytecode::NativeTable). Any
 /// failure leaves slots empty and falls back to the bytecode, printing only
-/// under `AL_NATIVE_DEBUG` so a default run's stderr stays empty.
+/// under `SCARLET_NATIVE_DEBUG` so a default run's stderr stays empty.
 fn publish_native(plans: Vec<clif::NativePlan>, program: &bytecode::Program) {
     use scarlet::tivec::Idx as _;
     if plans.is_empty() {
@@ -494,7 +494,7 @@ fn cmd_fmt(args: FmtArgs) {
 
     let path = args.path.as_deref().unwrap_or(".");
 
-    let files = find_al_files(path).unwrap_or_else(|e| die(e));
+    let files = find_scarlet_files(path).unwrap_or_else(|e| die(e));
 
     if files.is_empty() {
         println!("No .scrl files found");
@@ -594,12 +594,13 @@ fn cmd_upgrade(version: Option<String>) -> Result<(), String> {
         return Err("unsupported OS".to_string());
     };
 
-    let asset_name = format!("al-{os_name}-{arch}");
+    let asset_name = format!("scarlet-{os_name}-{arch}");
     // Download next to the target so the rename is same-device; temp_dir is
     // often tmpfs on Linux, which fails with EXDEV.
     let tmp_path = current_exe.with_extension("new");
-    let download_url =
-        format!("https://github.com/alii/scarlet/releases/download/{tag}/{asset_name}");
+    let download_url = format!(
+        "https://github.com/scarletindustries/language/releases/download/{tag}/{asset_name}"
+    );
 
     println!("Downloading {tag}...");
 

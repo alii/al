@@ -439,7 +439,7 @@ fn a_bad_qualified_pattern_is_a_diagnostic_not_a_crash() {
     proj.write("color.scrl", COLOR_SRC);
     proj.write(
         "unknown_qual.scrl",
-        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tnope.Red -> 0\n\t\telse -> 1\n\t}\n}\nprintln(v(color.Red))\n",
+        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tnope.Red -> 0\n\t\t_ -> 1\n\t}\n}\nprintln(v(color.Red))\n",
     );
     project_rejects(
         &proj,
@@ -450,7 +450,7 @@ fn a_bad_qualified_pattern_is_a_diagnostic_not_a_crash() {
 
     proj.write(
         "unknown_member.scrl",
-        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tcolor.Purple -> 0\n\t\telse -> 1\n\t}\n}\nprintln(v(color.Red))\n",
+        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tcolor.Purple -> 0\n\t\t_ -> 1\n\t}\n}\nprintln(v(color.Red))\n",
     );
     project_rejects(
         &proj,

@@ -50,6 +50,7 @@ impl OrFrame {
 pub struct PatternBindings {
     frames: Vec<OrFrame>,
     initial: IndexMap<String, (Ty, Span)>,
+    write_only: Vec<(String, Ty, Span)>,
 }
 
 impl PatternBindings {
@@ -57,6 +58,7 @@ impl PatternBindings {
         Self {
             frames: Vec::new(),
             initial: IndexMap::new(),
+            write_only: Vec::new(),
         }
     }
 
@@ -64,11 +66,20 @@ impl PatternBindings {
     pub fn clear(&mut self) {
         self.frames.clear();
         self.initial.clear();
+        self.write_only.clear();
     }
 
     /// The canonical bindings this pattern introduces, in insertion order.
     pub fn bindings(&self) -> impl Iterator<Item = (&str, &(Ty, Span))> {
         self.initial.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// `_`-prefixed bindings, in source order. They are typed like any other
+    /// binding (so hover works) but are never readable, so they sit outside
+    /// the canonical set: duplicates are legal and or-pattern alternatives
+    /// need not agree on them.
+    pub fn write_only_bindings(&self) -> impl Iterator<Item = (&str, &Ty, &Span)> {
+        self.write_only.iter().map(|(k, t, s)| (k.as_str(), t, s))
     }
 
     /// Has `name` already been bound on the current path through the pattern?
@@ -97,7 +108,8 @@ impl PatternBindings {
     /// `engine`) on duplicate-var, extra-var-in-alternative, or a type
     /// mismatch between alternatives.
     fn bind(&mut self, name: &str, ty: Ty, span: Span, engine: &mut InferEngine) -> bool {
-        if name == "_" {
+        if name.starts_with('_') {
+            self.write_only.push((name.to_string(), ty, span));
             return true;
         }
         if self.already_bound(name) {
@@ -317,17 +329,21 @@ mod tests {
         (e, int_ty, Span::DUMMY, PatternBindings::new())
     }
 
-    // `_` may appear repeatedly, so it is never recorded as a binding.
+    // `_`-prefixed names may appear repeatedly: they are typed but write-only,
+    // outside the canonical set.
     #[test]
-    fn wildcard_is_not_bound_and_default_is_empty() {
+    fn underscore_names_are_write_only() {
         let (mut e, int_ty, sp, mut b) = setup();
         assert!(b.initial.is_empty());
 
         assert!(b.sink().bind("_", int_ty, sp, &mut e));
+        assert!(b.sink().bind("_", int_ty, sp, &mut e));
+        assert!(b.sink().bind("_x", int_ty, sp, &mut e));
         assert!(
             b.initial.is_empty(),
-            "'_' must not be recorded as a binding"
+            "'_'-prefixed names must not join the canonical set"
         );
+        assert_eq!(b.write_only.len(), 3);
 
         assert!(b.sink().bind("x", int_ty, sp, &mut e));
         assert_eq!(b.initial.len(), 1);

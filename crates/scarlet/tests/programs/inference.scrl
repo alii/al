@@ -219,7 +219,7 @@ println(!False || False && True)
 // A type declared with no body is *external*: a nominal type with no
 // constructors. It is how the stdlib names a value that only the runtime can
 // make (scarlet/net's `Server`). The checker tracks it like any other type — it
-// unifies, it instantiates `Array(a)` — but no expression in AL produces one,
+// unifies, it instantiates `Array(a)` — but no expression in Scarlet produces one,
 // so `hold` type checks and can never be called.
 type Handle
 

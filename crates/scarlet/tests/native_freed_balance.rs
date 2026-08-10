@@ -25,15 +25,15 @@ use scarlet::heap::ProcHeap;
 use scarlet::tivec::Idx as _;
 use scarlet::{bytecode, vm};
 
-/// Pin `AL_NATIVE=native` before the process-wide config is first read, so
+/// Pin `SCARLET_NATIVE=native` before the process-wide config is first read, so
 /// these tests exercise the native backend whatever mode `cargo test`
 /// inherited. Every `#[test]` here calls this before compiling anything.
 fn pin_native_mode() {
     static PIN: std::sync::Once = std::sync::Once::new();
     PIN.call_once(|| {
-        // SAFETY: called before any env read of AL_NATIVE in this process;
+        // SAFETY: called before any env read of SCARLET_NATIVE in this process;
         // all tests in this binary funnel through this `Once` first.
-        unsafe { std::env::set_var("AL_NATIVE", "native") };
+        unsafe { std::env::set_var("SCARLET_NATIVE", "native") };
     });
 }
 

@@ -154,6 +154,46 @@ pub(super) const EVENTS_CAPACITY: usize = 1024;
 pub(super) static EPOCH: OnceLock<Instant> = OnceLock::new();
 
 /// Milliseconds since [`EPOCH`], saturating at `i64::MAX`.
+/// Where a parked op resumes once its [`Wait`] fires.
+///
+/// A parking op decides this, but only its caller knows how to express it: the
+/// interpreter rewinds or advances `ip`, while a compiled body picks one of two
+/// resume ordinals. Returning the choice as a value keeps the bytecode-specific
+/// arithmetic out of the ops, so the same op body serves both backends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Resume {
+    /// Re-run the instruction. The op pushed its operands back before parking,
+    /// so re-executing it is what finishes the operation.
+    Retry,
+    /// Continue past the instruction: the wake path leaves the result on the
+    /// stack (`finish_connect`, the offloaded blocking ops, `sleep`).
+    Continue,
+}
+
+/// A parked op's outcome: what to wait on, and where to resume.
+pub(super) struct Parked {
+    pub(super) wait: Wait,
+    pub(super) resume: Resume,
+}
+
+impl Parked {
+    /// Park and re-run the instruction on wake.
+    pub(super) fn retry(wait: Wait) -> Parked {
+        Parked {
+            wait,
+            resume: Resume::Retry,
+        }
+    }
+
+    /// Park and continue past the instruction on wake.
+    pub(super) fn cont(wait: Wait) -> Parked {
+        Parked {
+            wait,
+            resume: Resume::Continue,
+        }
+    }
+}
+
 pub(super) fn monotonic_now_ms() -> i64 {
     let ms = EPOCH.get_or_init(Instant::now).elapsed().as_millis();
     ms.min(i64::MAX as u128) as i64

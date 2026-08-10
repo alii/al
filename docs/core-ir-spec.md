@@ -6,7 +6,7 @@
 
 Phase 2 (Perceus on the AST walker) regressed bench_typed 0.61→0.77 because last-use is unknowable during a forward AST emit — it hedged with Nop holes on every read. ANF makes last-use a trivial linear scan. Koka, Lean (LCNF), Swift (SIL), OCaml (Lambda) all put Perceus/ARC/mode-inference on exactly this shape of IR.
 
-## The IR (`crates/al_core/src/core_ir/mod.rs`)
+## The IR (`crates/scarlet_core/src/core_ir/mod.rs`)
 
 ```rust
 pub struct CoreFn {
@@ -45,7 +45,7 @@ pub enum Alias  { Unique, Shared }             // α
 
 Every operand is a `LocalId`. Every intermediate is a `Let`. Types on every bind.
 
-## Pipeline (`crates/al_core/src/bytecode/compiler.rs` → orchestrates)
+## Pipeline (`crates/scarlet_core/src/bytecode/compiler.rs` → orchestrates)
 
 1. **`lower(ast, engine) → CoreFn`** — walk typechecked AST, emit ANF. Each subexpression becomes a `Let`; the AST's implicit evaluation order becomes explicit `Let` nesting. Resolve every `Ty` via `engine.find()` at lowering time (types are stable post-inference).
 2. **`perceus(core) → core`** — Koka's algorithm on Core: linear backward scan marks last-use, inserts `Drop`, pairs same-shape drops with dominated `Ctor` for reuse. Frame-limited (ICFP'22): pairing never crosses `Call`. Sets `alias` on each bind.
@@ -59,8 +59,8 @@ Later passes slot in at step 2: `mode_infer(core)` sets `region`; a `simplify(co
 - Phase 2's VM opcodes (`Op::Drop`, `Op::Reuse`, `is_unique`, `reuse_or_alloc`, `MakeEnum a=1` reuse path) are the target — keep them. Phase 2's compiler.rs analysis (`last_use`, `reuse_candidates`, `slot_tys`, Nop-hole reservation) is deleted.
 - Core is per-function; a `CoreProgram` holds `Vec<CoreFn>` + constants + module toplevel.
 - Loop-carried reuse: perceus pass on a tail-recursive `CoreFn` may pair a `Drop` at end-of-body with a `Ctor` at start-of-body (same frame after `TailCallSelf`); VM's `collapse_tail_frame` must NOT drain reuse slots for self-tail-calls.
-- Printer: `impl Display for CoreExpr` for debugging + golden tests (`crates/al/tests/core_ir.rs` — snapshot Core for a few programs).
-- Bench gate: after perceus pass is on, `examples/bench_typed.al` must be ≤ 0.61s (Phase 1) AND `dot_loop` must show measurable reuse (alloc counter << 2M).
+- Printer: `impl Display for CoreExpr` for debugging + golden tests (`crates/scarlet/tests/core_ir.rs` — snapshot Core for a few programs).
+- Bench gate: after perceus pass is on, `examples/bench_typed.scrl` must be ≤ 0.61s (Phase 1) AND `dot_loop` must show measurable reuse (alloc counter << 2M).
 
 ## Prior art to consult
 

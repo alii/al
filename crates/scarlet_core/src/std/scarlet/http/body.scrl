@@ -154,13 +154,13 @@ pub fn drain_with_head(head Binary, body Body, sock Socket) Result(Nil, DrainErr
 fn drain_prefixed(prefix Array(Binary), body Body, sock Socket) Result(Nil, DrainError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> match socket.write_parts(sock, [..prefix, data]) {
-			Ok(_) -> drain_prefixed([], next, sock)
+			Ok(Nil) -> drain_prefixed([], next, sock)
 			Err(e) -> Err(SinkFailed(e))
 		}
 		Ok(Done(_)) -> match prefix {
 			[] -> Ok(Nil)
-			else -> match socket.write_parts(sock, prefix) {
-				Ok(_) -> Ok(Nil)
+			_ -> match socket.write_parts(sock, prefix) {
+				Ok(Nil) -> Ok(Nil)
 				Err(e) -> Err(SinkFailed(e))
 			}
 		}
@@ -197,7 +197,7 @@ fn drain_counted_from(body Body, sock Socket, limit Int, written Int) Result(Dra
 				Ok(Overran(written))
 			} else {
 				match socket.write(sock, data) {
-					Ok(_) -> drain_counted_from(next, sock, limit, total)
+					Ok(Nil) -> drain_counted_from(next, sock, limit, total)
 					Err(e) -> Err(SinkFailed(e))
 				}
 			}
@@ -244,7 +244,7 @@ fn drain_chunked_prefixed(prefix Array(Binary), body Body, sock Socket) Result(N
 			size -> {
 				header = binary.append(binary.from_int_ascii(size, Hex), CRLF)
 				match socket.write_parts(sock, [..prefix, header, data, CRLF]) {
-					Ok(_) -> drain_chunked_prefixed([], next, sock)
+					Ok(Nil) -> drain_chunked_prefixed([], next, sock)
 					Err(e) -> Err(SinkFailed(e))
 				}
 			}
@@ -252,10 +252,10 @@ fn drain_chunked_prefixed(prefix Array(Binary), body Body, sock Socket) Result(N
 		Ok(Done(trailers)) -> {
 			terminator = match trailers {
 				[] -> [LAST_CHUNK]
-				else -> [ZERO, CRLF, ..headers.render(trailers), CRLF]
+				_ -> [ZERO, CRLF, ..headers.render(trailers), CRLF]
 			}
 			match socket.write_parts(sock, [..prefix, ..terminator]) {
-				Ok(_) -> Ok(Nil)
+				Ok(Nil) -> Ok(Nil)
 				Err(e) -> Err(SinkFailed(e))
 			}
 		}

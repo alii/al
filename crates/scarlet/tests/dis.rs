@@ -69,7 +69,7 @@ fn every_jump_target_is_inside_its_own_function() {
         FACT,
         "fn pick(n Int) Int {\n\tm = if n < 2 { 1 } else { 2 }\n\tm + 1\n}\nprintln(pick(5))\n",
         "import scarlet/array\ntype W {\n\tW(v Int)\n}\nfn go(xs Array(Int)) Int {\n\tws = array.map(xs, W)\n\tif array.length(ws) > 2 { 111 } else { 222 }\n}\nprintln(go([1]))\n",
-        "fn cls(n Int) Int {\n\tmatch n {\n\t\t0 -> 1\n\t\t1 -> 2\n\t\telse -> 3\n\t}\n}\nprintln(cls(1))\n",
+        "fn cls(n Int) Int {\n\tmatch n {\n\t\t0 -> 1\n\t\t1 -> 2\n\t\t_ -> 3\n\t}\n}\nprintln(cls(1))\n",
     ] {
         let p = program_of(src);
         for f in &p.functions {
@@ -221,7 +221,7 @@ fn an_infallible_match_keeps_the_flat_lowering() {
          \tmatch n {\n\
          \t\t1 -> 'one'\n\
          \t\t2 -> 'two'\n\
-         \t\telse -> 'many'\n\
+         \t\t_ -> 'many'\n\
          \t}\n\
          }\n\
          println(area(Circle(2)) + single((1, 2)))\n\

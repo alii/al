@@ -71,7 +71,7 @@ pub fn disassemble_native(
     if !listed {
         let _ = writeln!(
             out,
-            "\n; no native body matches {needle:?} (not covered, or excluded by AL_NATIVE)"
+            "\n; no native body matches {needle:?} (not covered, or excluded by SCARLET_NATIVE)"
         );
     }
     Ok(out)

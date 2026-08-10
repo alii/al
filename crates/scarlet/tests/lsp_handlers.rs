@@ -1085,7 +1085,7 @@ fn hover_shows_parameter_names_across_the_stdlib_blob() {
 /// A constructor's labels come from `ValueKind::Constructor.field_labels`.
 #[test]
 fn hover_shows_a_constructors_field_labels() {
-    let src = "import scarlet/io.{NotFound}\n\nfn f(e IoError) String {\n\tmatch e {\n\t\tNotFound(p) -> p\n\t\telse -> ''\n\t}\n}\nprintln(1)\n";
+    let src = "import scarlet/io.{NotFound}\n\nfn f(e IoError) String {\n\tmatch e {\n\t\tNotFound(p) -> p\n\t\t_ -> ''\n\t}\n}\nprintln(1)\n";
     let (_p, mut s, uri) = open_single("hover_ctor", src);
     let md = hover_md(&mut s, &uri, 4, 4); // the `NotFound` pattern
     assert!(

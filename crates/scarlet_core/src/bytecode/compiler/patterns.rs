@@ -44,7 +44,6 @@ impl Compiler {
                 }
                 ok
             }
-            ast::Pattern::Wildcard { .. } => true,
             ast::Pattern::Var { name } => b.bind(&name.name, expected, name.span, &mut self.engine),
             ast::Pattern::Literal(lit) => {
                 let (lit_ty, sp) = match lit {

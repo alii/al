@@ -125,7 +125,7 @@ struct BlockingPool {
 
 impl BlockingPool {
     fn new() -> Self {
-        let max_total = std::env::var("AL_BLOCKING_THREADS")
+        let max_total = std::env::var("SCARLET_BLOCKING_THREADS")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| (1..=4096).contains(&n))
@@ -803,9 +803,9 @@ fn resolve_host(host: &str) -> std::io::Result<std::net::IpAddr> {
         })
 }
 
-/// How many schedulers to run: `AL_SCHEDULERS`, else one per CPU core.
+/// How many schedulers to run: `SCARLET_SCHEDULERS`, else one per CPU core.
 pub(super) fn scheduler_count() -> usize {
-    let from_env = std::env::var("AL_SCHEDULERS")
+    let from_env = std::env::var("SCARLET_SCHEDULERS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&n| (1..=256).contains(&n));

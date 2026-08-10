@@ -125,13 +125,13 @@ Safe because `CoreExpr`'s control flow is structured (`If`/`Match`/`Tail`), so e
 
 Two things to verify rather than assume:
 1. `Function.code_start` must still be recorded — it is how the VM enters a function. It is written by the appender, which knows the insertion point.
-2. `crates/al_core/src/bytecode/peephole.rs` is the other consumer of jump operands. Its module comment (line 13) documents the round-trip verbatim, and line 28 does `let t = instr.operand as usize;` to index the code slice. It already works within one function's code, so relative targets simplify it. Update that comment.
+2. `crates/scarlet_core/src/bytecode/peephole.rs` is the other consumer of jump operands. Its module comment (line 13) documents the round-trip verbatim, and line 28 does `let t = instr.operand as usize;` to index the code slice. It already works within one function's code, so relative targets simplify it. Update that comment.
 
 If some jump genuinely crosses a function boundary, that is a real finding: report it and fall back to `link`-resolves-absolute, naming the jump that forced it.
 
 ### Operand spaces become distinct types
 
-`Instruction.operand: i32` currently means jump-target OR local-slot OR const-id OR func-idx OR arity, chosen by opcode. Introduce `CodeAddr`, `LocalSlot`, `ConstId`, `FuncIdx`, `Arity`. Consider `typed-index-collections`' `TiVec<CodeAddr, Instruction>` so indexing code with a `LocalSlot` does not compile. al already did this once, for `TypeId`.
+`Instruction.operand: i32` currently means jump-target OR local-slot OR const-id OR func-idx OR arity, chosen by opcode. Introduce `CodeAddr`, `LocalSlot`, `ConstId`, `FuncIdx`, `Arity`. Consider `typed-index-collections`' `TiVec<CodeAddr, Instruction>` so indexing code with a `LocalSlot` does not compile. Scarlet already did this once, for `TypeId`.
 
 The wire format stays a packed `i32`; the newtypes exist above the encoding boundary.
 
@@ -162,8 +162,8 @@ If at T5 it turns out `lower` still needs an escape hatch, that is the most inte
 
 ## Constraints — outcomes, not tokens
 
-- **Correctness over compile speed.** A slower `al build` is acceptable and expected. Say how much slower.
-- **The interpreter must not regress.** `examples/bench_typed.al`, `examples/bench_map.al`, and an amplified `fib(36)`+`count(8e7)` must hold. This work is compile-time only, so a runtime change is a bug — except where recovering lost typed opcodes makes it *faster*, which is a win worth reporting.
+- **Correctness over compile speed.** A slower `Scarlet build` is acceptable and expected. Say how much slower.
+- **The interpreter must not regress.** `examples/bench_typed.scrl`, `examples/bench_map.scrl`, and an amplified `fib(36)`+`count(8e7)` must hold. This work is compile-time only, so a runtime change is a bug — except where recovering lost typed opcodes makes it *faster*, which is a win worth reporting.
 - Recovering the typed opcodes that `fresh_var()` was suppressing may change the emitted instruction mix. That is the point. Report before/after opcode histograms for an inferred-type function.
 - **Every guard must be a type, an exhaustive match, or a behavioural test.** Never a test that greps source text. Never a hardcoded list of symbol names. A previous attempt produced `const COLD_INLINE_NEVER_HANDLERS: &[&str]` plus a `.rs`-file scanner; it was reverted.
 - Do not weaken, skip, or delete a test. Do not add a cargo feature. Do not bypass git hooks.
@@ -172,9 +172,9 @@ If at T5 it turns out `lower` still needs an escape hatch, that is the most inte
 
 Both are live regression tests today; they must still pass, and they must pass *because the shape makes them impossible*, not because a check was added.
 
-```al
+```scarlet
 // eta-wrapper jump miscompile — was a VM index-out-of-bounds
-import al/array
+import scarlet/array
 type W { W(v Int) }
 fn pick(xs Array(Int)) Int {
 	ws = array.map(xs, W)
@@ -183,17 +183,17 @@ fn pick(xs Array(Int)) Int {
 println(pick([1]))        // 222
 println(pick([1, 2, 3]))  // 111
 ```
-```al
+```scarlet
 // field access on an inferred match binding — was a lower panic
 type User { User(id Int name String) }
-fn f() Int { match Some(User(7, 'al')) { None -> 0  Some(u) -> u.id } }
+fn f() Int { match Some(User(7, 'Scarlet')) { None -> 0  Some(u) -> u.id } }
 println(f())              // 7
 ```
 
 ## Acceptance
 
 1. `lower`'s signature takes no `&mut` and returns no `Result`. `LowerError` and `DiagnosticCode::InternalError` are deleted.
-2. `grep -c 'fresh_var()' crates/al_core/src/core_ir/lower.rs` → 0, because it does not have an engine. (This is an *outcome* of the signature, not a rule to satisfy.)
+2. `grep -c 'fresh_var()' crates/scarlet_core/src/core_ir/lower.rs` → 0, because it does not have an engine. (This is an *outcome* of the signature, not a rule to satisfy.)
 3. No `emit` path produces an absolute address; `link` is the only place addresses are written.
 4. All tests green (currently 727+). Both regressions above green.
 5. `cargo clippy --all-targets` → 0 errors, 0 warnings. `cargo fmt --check` clean.
@@ -209,4 +209,4 @@ The typed IR is a prerequisite for the effects/comptime work in `docs/effects-co
 2. **`IncrementalSession` caches `ModuleInterface` + `ModuleReferences` keyed on watermarks.** A new IR between typecheck and lower must not break incremental invalidation. Check `bytecode/session.rs`.
 3. **Spans.** `closure_info` is keyed by `Span`. If `TypedExpr` nodes carry their own identity, that table can die; verify no other consumer depends on span-keying.
 4. **Memory.** A second full IR for a large program doubles peak AST memory. Acceptable; measure it.
-5. **The stdlib is precompiled at build time** (`precompile_stdlib()` from `crates/al/build.rs`). The new pipeline must work there too, and `build.rs`'s only dependency is `al_core`.
+5. **The stdlib is precompiled at build time** (`precompile_stdlib()` from `crates/scarlet/build.rs`). The new pipeline must work there too, and `build.rs`'s only dependency is `scarlet_core`.

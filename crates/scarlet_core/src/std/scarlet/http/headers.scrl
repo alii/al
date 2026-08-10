@@ -136,7 +136,7 @@ fn is_token_byte(b Int) Bool {
 // A field value must not contain CR, LF or NUL: a bare CR/LF ends the field
 // line early — the response-splitting primitive — and NUL is flatly forbidden
 // by RFC 9110 §5.5. Each forbidden byte is ruled out by one native index_of
-// scan rather than an AL call per value byte — `valid` runs on every response
+// scan rather than an Scarlet call per value byte — `valid` runs on every response
 // the driver writes, and values carry most of a header block's bytes.
 fn valid_value(value Binary) Bool {
 	lacks(value, cr) && lacks(value, lf) && lacks(value, nul)

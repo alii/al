@@ -258,6 +258,8 @@ impl Compiler {
         self.undo_log.clear();
         self.scope_marks.clear();
         self.unused.clear();
+        // Queued entries hold `Ty` indices into the arena just rewound.
+        self.nil_discards.clear();
         self.outer_scopes.clear();
         self.captures.clear();
         self.capture_names.clear();

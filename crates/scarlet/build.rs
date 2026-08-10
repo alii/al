@@ -311,7 +311,9 @@ fn quantvar(qv: &QuantVar) -> String {
     } else {
         format!("{:?}", qv.name)
     };
-    lit!(QuantVar: constraint = opt_constraint(qv.constraint), name = name, origin_id = "None")
+    // `origin_id: None` (and so a meaningless epoch): the rigid self-reference
+    // case never applies to a scheme hydrated from the static blob.
+    lit!(QuantVar: constraint = opt_constraint(qv.constraint), name = name, origin_id = "None", epoch = "0")
 }
 
 fn valuekind(k: ValueKind) -> String {

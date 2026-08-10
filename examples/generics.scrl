@@ -1,4 +1,4 @@
-// Generics and Hindley-Milner inference. AL infers the most general type a
+// Generics and Hindley-Milner inference. Scarlet infers the most general type a
 // definition can have; an annotation is documentation the compiler checks, not
 // information it needs. Lowercase names in a type position are type variables.
 

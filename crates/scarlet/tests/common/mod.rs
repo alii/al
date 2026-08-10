@@ -27,7 +27,7 @@ fn write_temp(source: &str) -> std::path::PathBuf {
     let mut tmp = std::env::temp_dir();
     let pid = std::process::id();
     let tid = format!("{:?}", std::thread::current().id());
-    tmp.push(format!("al_{pid}_{}.scrl", hash_str(&tid)));
+    tmp.push(format!("scarlet_{pid}_{}.scrl", hash_str(&tid)));
     let mut f = std::fs::File::create(&tmp).expect("create temp file");
     f.write_all(source.as_bytes()).expect("write temp file");
     tmp

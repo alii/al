@@ -58,12 +58,21 @@ fn stdlib_result() {
          println(result.then(Err('e'), fn(x) Ok(x + 1)))\n",
         "Ok(6)\nErr(e)\n",
     );
-    // unwrap: Err discards the error and returns the default.
+    // unwrap: only defined for Result(a, Nil) — the Err carries nothing to
+    // discard, so it collapses to the default.
     run_outputs(
         "import scarlet/result\n\
          println(result.unwrap(Ok(5), 0))\n\
-         println(result.unwrap(Err('e'), 99))\n",
+         println(result.unwrap(Err(Nil), 99))\n",
         "5\n99\n",
+    );
+    // replace_err: the Nil error is swapped for a meaningful one; Ok passes
+    // through untouched.
+    run_outputs(
+        "import scarlet/result\n\
+         println(result.replace_err(Ok(5), 'boom'))\n\
+         println(result.replace_err(Err(Nil), 'boom'))\n",
+        "Ok(5)\nErr(boom)\n",
     );
     run_outputs(
         "import scarlet/result\n\
@@ -79,6 +88,36 @@ fn stdlib_result() {
          println(result.map(Err('e'), fn(x) x + 1))\n\
          println(result.map_err(Ok(5), fn(e) e))\n",
         "Err(e)\nOk(5)\n",
+    );
+}
+
+#[test]
+fn stdlib_resource() {
+    // Acquire, use, release — in that order — and the use's value comes back.
+    run_outputs(
+        "import scarlet/resource\n\
+         r = resource.with(fn() 10, fn(c) println('release ${c}'), fn(c) c * 2)\n\
+         println(r)\n",
+        "release 10\n20\n",
+    );
+    // try_with: Ok acquires, uses, releases; Err short-circuits, releasing
+    // and using nothing.
+    run_outputs(
+        "import scarlet/resource\n\
+         println(resource.try_with(fn() Ok(1), fn(c) println('release ${c}'), fn(c) c + 1))\n\
+         println(resource.try_with(fn() Err(Nil), fn(_) println('never'), fn(c Int) c))\n",
+        "release 1\nOk(2)\nErr(Nil)\n",
+    );
+    // The backpass idiom: the rest of the block is `next`, and a trailing
+    // backpass passes an empty (Nil) continuation.
+    run_outputs(
+        "import scarlet/resource\n\
+         fn demo() Nil {\n\
+         \tconn <- resource.with(fn() 7, fn(_) Nil)\n\
+         \tprintln('conn ${conn}')\n\
+         }\n\
+         println(demo())\n",
+        "conn 7\nNil\n",
     );
 }
 
@@ -305,7 +344,7 @@ fn stdlib_binary() {
         "import scarlet/binary\n\
          r = match <<195, 169>> {\n\
          \t<<c:utf8, ..>> -> c\n\
-         \telse -> 0\n\
+         \t_ -> 0\n\
          }\n\
          println(r)\n",
         "233\n",
@@ -358,7 +397,7 @@ fn stdlib_binary_byte_at() {
          println(binary.byte_at(b, 0 - 1))\n\
          tail = match b {\n\
          \t<<_, ..rest>> -> rest\n\
-         \telse -> b\n\
+         \t_ -> b\n\
          }\n\
          println(binary.byte_at(tail, 0))\n",
         "65\n90\n-1\n-1\n90\n",
@@ -390,7 +429,7 @@ fn stdlib_http_builtins() {
          \t\tChunked -> 0 - 2\n\
          \t\tInvalid(s) -> s\n\
          \t}\n\
-         \telse -> 0 - 1\n\
+         \t_ -> 0 - 1\n\
          }\n\
          println(r)\n",
     );
@@ -455,7 +494,7 @@ fn native_and_al_token_matching_agree() {
              value = binary.from_string('{value}')\n\
              native = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\nConnection: {value}\\r\\n\\r\\n'), 0) {{\n\
              \tDone(_, _, _, _, flags, _) -> flags.conn_close\n\
-             \telse -> False\n\
+             \t_ -> False\n\
              }}\n\
              al = headers.contains_token([Header(name: name, value: value)], name, binary.from_string('close'))\n\
              println(native)\n\

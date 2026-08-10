@@ -107,6 +107,58 @@ pub fn is_native_bridge_op(op: Op) -> bool {
             | Op::BinEqIgnoreAsciiCase
             | Op::BinToAsciiLower
             | Op::BinFromIntAscii
+            | Op::AddFloat
+            | Op::SubFloat
+            | Op::MulFloat
+            | Op::DivFloat
+            | Op::NegFloat
+            | Op::LtFloat
+            | Op::GtFloat
+            | Op::LteFloat
+            | Op::GteFloat
+            | Op::FloatFloor
+            | Op::FloatCeil
+            | Op::FloatRound
+            | Op::FloatTruncate
+            | Op::FloatFromInt
+            | Op::FloatToString
+            | Op::Monotonic
+            | Op::IpParse
+            | Op::HttpChunkDecode
+            | Op::TcpListen
+            | Op::TcpClose
+            | Op::TcpCloseServer
+            | Op::SpawnLocal
+            | Op::SpawnOnEach
+            | Op::Print
+            | Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Mod
+            | Op::Neg
+    )
+}
+
+/// The opcodes that can suspend the process. Compiled code lowers each to one
+/// `al_shim_park_op` call guarded by two resume ordinals — one that re-runs the
+/// op, one that continues past it — chosen by the `Resume` the op returns.
+///
+/// Separate from [`is_native_bridge_op`] because these need that resume
+/// scaffolding; the two sets must stay disjoint.
+pub fn is_native_park_op(op: Op) -> bool {
+    matches!(
+        op,
+        Op::FileRead
+            | Op::FileWrite
+            | Op::TcpAccept
+            | Op::TcpConnect
+            | Op::TcpRead
+            | Op::TcpReadUntil
+            | Op::TcpWrite
+            | Op::TcpWriteParts
+            | Op::DnsResolve
+            | Op::Sleep
     )
 }
 
@@ -252,13 +304,13 @@ impl std::fmt::Debug for NativeTable {
     }
 }
 
-/// What `AL_NATIVE` asked for. Read exactly once per process. See [`config`]
+/// What `SCARLET_NATIVE` asked for. Read exactly once per process. See [`config`]
 /// for the seed and stderr rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NativeMode {
     /// Interpret everything; no function is handed to the native backend.
     Off,
-    /// Compile every eligible function. The default when `AL_NATIVE` is unset.
+    /// Compile every eligible function. The default when `SCARLET_NATIVE` is unset.
     #[default]
     Native,
     /// Compile a seeded random subset, to shake out native/interpreter
@@ -302,7 +354,7 @@ fn parse(mode: Option<&str>, seed: Option<&str>) -> Parsed {
         Some("mix") => NativeMode::Mix,
         Some(other) => {
             warnings.push(format!(
-                "al: unknown AL_NATIVE value {other:?} (expected off|native|mix); using native"
+                "al: unknown SCARLET_NATIVE value {other:?} (expected off|native|mix); using native"
             ));
             NativeMode::Native
         }
@@ -312,7 +364,7 @@ fn parse(mode: Option<&str>, seed: Option<&str>) -> Parsed {
             Ok(n) => Some(n),
             Err(_) => {
                 warnings.push(format!(
-                    "al: AL_NATIVE_SEED {s:?} is not a u64; drawing a random seed"
+                    "al: SCARLET_NATIVE_SEED {s:?} is not a u64; drawing a random seed"
                 ));
                 None
             }
@@ -326,15 +378,15 @@ fn parse(mode: Option<&str>, seed: Option<&str>) -> Parsed {
     }
 }
 
-/// The process-wide config, reading `AL_NATIVE` / `AL_NATIVE_SEED` on first
-/// use and never again. The seed is echoed to stderr only when `AL_NATIVE_SEED`
+/// The process-wide config, reading `SCARLET_NATIVE` / `SCARLET_NATIVE_SEED` on first
+/// use and never again. The seed is echoed to stderr only when `SCARLET_NATIVE_SEED`
 /// was explicitly set: golden tests assert an empty stderr, and the whole suite
-/// must run under `AL_NATIVE=mix` unchanged.
+/// must run under `SCARLET_NATIVE=mix` unchanged.
 pub fn config() -> &'static NativeConfig {
     static CONFIG: std::sync::OnceLock<NativeConfig> = std::sync::OnceLock::new();
     CONFIG.get_or_init(|| {
-        let mode_var = std::env::var("AL_NATIVE").ok();
-        let seed_var = std::env::var("AL_NATIVE_SEED").ok();
+        let mode_var = std::env::var("SCARLET_NATIVE").ok();
+        let seed_var = std::env::var("SCARLET_NATIVE_SEED").ok();
         let parsed = parse(mode_var.as_deref(), seed_var.as_deref());
         for w in &parsed.warnings {
             eprintln!("{w}");
@@ -382,10 +434,10 @@ fn splitmix64(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Whether `AL_NATIVE_DEBUG` asked for native-backend diagnostics. Read once.
+/// Whether `SCARLET_NATIVE_DEBUG` asked for native-backend diagnostics. Read once.
 pub fn debug() -> bool {
     static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *DEBUG.get_or_init(|| std::env::var_os("AL_NATIVE_DEBUG").is_some())
+    *DEBUG.get_or_init(|| std::env::var_os("SCARLET_NATIVE_DEBUG").is_some())
 }
 
 /// One debug line per selected function, so a `mix` subset is observable.
@@ -409,7 +461,7 @@ impl UnitStats {
         self.elapsed += elapsed;
     }
 
-    /// The whole-unit summary, printed only under `AL_NATIVE_DEBUG`.
+    /// The whole-unit summary, printed only under `SCARLET_NATIVE_DEBUG`.
     pub fn log_summary(&self, instrs: usize) {
         if !debug() {
             return;

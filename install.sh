@@ -1,14 +1,14 @@
 #!/bin/bash
 set -e
 
-# AL installer script
-# Usage: curl -fsSL al.alistair.sh/install.sh | bash
+# Scarlet installer script
+# Usage: curl -fsSL scarlet.industries/install.sh | bash
 
-INSTALL_DIR="$HOME/.al/bin"
-BINARY_NAME="al"
-REPO="alii/al"
+INSTALL_DIR="$HOME/.scarlet/bin"
+BINARY_NAME="scarlet"
+REPO="scarletindustries/language"
 
-echo "Installing AL..."
+echo "Installing Scarlet..."
 
 # Detect architecture
 ARCH=$(uname -m)
@@ -26,7 +26,7 @@ case $OS in
     *) echo "Unsupported OS: $OS"; exit 1 ;;
 esac
 
-ASSET_NAME="al-$OS-$ARCH"
+ASSET_NAME="scarlet-$OS-$ARCH"
 DOWNLOAD_URL="https://github.com/$REPO/releases/download/canary/$ASSET_NAME"
 
 # Create install directory
@@ -35,7 +35,7 @@ mkdir -p "$INSTALL_DIR"
 curl -fsSL "$DOWNLOAD_URL" -o "$INSTALL_DIR/$BINARY_NAME"
 chmod +x "$INSTALL_DIR/$BINARY_NAME"
 
-echo "Installed AL to $INSTALL_DIR/$BINARY_NAME"
+echo "Installed Scarlet to $INSTALL_DIR/$BINARY_NAME"
 
 # Add to PATH if not already there
 add_to_path() {
@@ -43,11 +43,11 @@ add_to_path() {
     local shell_name="$2"
 
     if [ -f "$rc_file" ]; then
-        if ! grep -q 'export PATH="$HOME/.al/bin:$PATH"' "$rc_file" 2>/dev/null; then
+        if ! grep -q 'export PATH="$HOME/.scarlet/bin:$PATH"' "$rc_file" 2>/dev/null; then
             echo "" >> "$rc_file"
-            echo '# AL' >> "$rc_file"
-            echo 'export PATH="$HOME/.al/bin:$PATH"' >> "$rc_file"
-            echo "Added ~/.al/bin to PATH in $rc_file"
+            echo '# Scarlet' >> "$rc_file"
+            echo 'export PATH="$HOME/.scarlet/bin:$PATH"' >> "$rc_file"
+            echo "Added ~/.scarlet/bin to PATH in $rc_file"
             return 0
         else
             return 1  # Already in PATH
@@ -76,11 +76,11 @@ case $SHELL_NAME in
     fish)
         FISH_CONFIG="$HOME/.config/fish/config.fish"
         if [ -f "$FISH_CONFIG" ]; then
-            if ! grep -q 'set -gx PATH $HOME/.al/bin $PATH' "$FISH_CONFIG" 2>/dev/null; then
+            if ! grep -q 'set -gx PATH $HOME/.scarlet/bin $PATH' "$FISH_CONFIG" 2>/dev/null; then
                 echo "" >> "$FISH_CONFIG"
-                echo "# AL" >> "$FISH_CONFIG"
-                echo 'set -gx PATH $HOME/.al/bin $PATH' >> "$FISH_CONFIG"
-                echo "Added ~/.al/bin to PATH in $FISH_CONFIG"
+                echo "# Scarlet" >> "$FISH_CONFIG"
+                echo 'set -gx PATH $HOME/.scarlet/bin $PATH' >> "$FISH_CONFIG"
+                echo "Added ~/.scarlet/bin to PATH in $FISH_CONFIG"
                 PATH_ADDED=true
             fi
         fi
@@ -92,12 +92,12 @@ if [ "$PATH_ADDED" = true ]; then
     echo "Restart your shell or run:"
     echo "  source ~/.$SHELL_NAME*rc"
     echo ""
-    echo "Then run 'al' to get started"
-elif echo "$PATH" | grep -q "$HOME/.al/bin"; then
-    echo "Run 'al' to get started"
+    echo "Then run 'scarlet' to begin"
+elif echo "$PATH" | grep -q "$HOME/.scarlet/bin"; then
+    echo "Run 'scarlet' to begin"
 else
-    echo "Add ~/.al/bin to your PATH:"
-    echo "  export PATH=\"\$HOME/.al/bin:\$PATH\""
+    echo "Add ~/.scarlet/bin to your PATH:"
+    echo "  export PATH=\"\$HOME/.scarlet/bin:\$PATH\""
     echo ""
-    echo "Then run 'al' to get started"
+    echo "Then run 'scarlet' to begin"
 fi

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Airtight O(n^2) -> O(n) gate for the list/sequence path.
 #
-# bench_list_{1x,2x,4x}.al are identical programs at sizes N, 2N, 4N.
+# bench_list_{1x,2x,4x}.scrl are identical programs at sizes N, 2N, 4N.
 # The per-doubling time ratio is scale-invariant and intrinsic to the
 # algorithm's complexity class:
 #
@@ -16,15 +16,15 @@ cargo build --release 2>/dev/null
 best() {
   local f=$1 best=99999 t
   for _ in 1 2 3 4 5; do
-    t=$( { /usr/bin/time -p ./target/release/al run "$f" >/dev/null; } 2>&1 | awk '/^real/{print $2}')
+    t=$( { /usr/bin/time -p ./target/release/scarlet run "$f" >/dev/null; } 2>&1 | awk '/^real/{print $2}')
     [ -n "$t" ] && awk -v t="$t" -v b="$best" 'BEGIN{exit !(t<b)}' && best=$t
   done
   echo "$best"
 }
 
-t1=$(best examples/bench_list_1x.al)
-t2=$(best examples/bench_list_2x.al)
-t4=$(best examples/bench_list_4x.al)
+t1=$(best examples/bench_list_1x.scrl)
+t2=$(best examples/bench_list_2x.scrl)
+t4=$(best examples/bench_list_4x.scrl)
 
 echo "bench_list_1x_real_seconds $t1"
 echo "bench_list_2x_real_seconds $t2"

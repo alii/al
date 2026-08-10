@@ -56,17 +56,14 @@ fn desugar_body(body: &mut Vec<Node>) {
 }
 
 /// `call(args)` plus the nodes after the statement → `call(args, fn(..) {
-/// rest })`. An empty `rest` (a parse error the parser already reported)
-/// leaves the call bare rather than fabricating an empty body.
+/// rest })`. A backpass ending its block passes an empty continuation: the
+/// lambda body is an empty block, which evaluates to Nil.
 fn rebuild_backpass(bp: BackpassBinding, rest: Vec<Node>) -> Expression {
     let BackpassBinding {
         binders,
         mut call,
         span,
     } = bp;
-    if rest.is_empty() {
-        return call;
-    }
     // The parser only builds a backpass whose RHS is a call.
     if let Expression::FunctionCallExpression(fc) = &mut call {
         let body_span = match (rest.first(), rest.last()) {
@@ -219,10 +216,7 @@ fn desugar_expr(e: &mut Expression) {
 // expressions, which can hold blocks.
 fn desugar_pattern(p: &mut Pattern) {
     match p {
-        Pattern::Wildcard { .. }
-        | Pattern::Var { .. }
-        | Pattern::Literal(_)
-        | Pattern::Range { .. } => {}
+        Pattern::Var { .. } | Pattern::Literal(_) | Pattern::Range { .. } => {}
         Pattern::Constructor { args, .. } => {
             for a in args {
                 desugar_pattern_arg(a);

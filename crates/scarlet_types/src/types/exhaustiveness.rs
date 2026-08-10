@@ -463,7 +463,7 @@ fn bin_pattern_key(segments: &[ast::BinSegmentPat], has_rest: bool) -> String {
     let mut key = String::from("#bin:");
     for seg in segments {
         match &seg.value {
-            ast::Pattern::Wildcard { .. } | ast::Pattern::Var { .. } => key.push('_'),
+            ast::Pattern::Var { .. } => key.push('_'),
             ast::Pattern::Literal(ast::PatternLiteral::Number(n)) => key.push_str(&n.value),
             ast::Pattern::Literal(ast::PatternLiteral::String(s)) => {
                 let _ = write!(key, "s{}:{}", s.value.len(), s.value);
@@ -565,7 +565,7 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
         }
     }
     match p {
-        ast::Pattern::Wildcard { .. } | ast::Pattern::Var { .. } => Pat::Wildcard,
+        ast::Pattern::Var { .. } => Pat::Wildcard,
         ast::Pattern::Literal(lit) => match lit {
             ast::PatternLiteral::Number(n) => nullary(interner.intern(&format!("lit:{}", n.value))),
             ast::PatternLiteral::String(s) => {

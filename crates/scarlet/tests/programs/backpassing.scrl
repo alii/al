@@ -51,6 +51,23 @@ fn use_resource() Nil {
 	println('use ${r}')
 }
 
+fn resource(acquire fn() resource, release fn(resource) Nil, next) {
+	resource = acquire()
+	result = next(resource)
+	release(resource)
+	result
+}
+
+fn with_conn(pool, next) {
+	println(pool)
+	resource(fn() 10, fn(_) Nil, next)
+}
+
+pub fn test() {
+	conn <- with_conn(my_pool)
+	// todo
+}
+
 println(describe(5))
 println(describe(-3))
 println(nested())

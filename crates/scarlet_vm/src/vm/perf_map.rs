@@ -1,11 +1,11 @@
-//! `AL_PERF_MAP=1` perf-map writer: symbol lines for JIT-compiled code.
+//! `SCARLET_PERF_MAP=1` perf-map writer: symbol lines for JIT-compiled code.
 //!
 //! `perf` symbolises samples in anonymous executable mappings by reading
 //! `/tmp/perf-<pid>.map`, one `HEXSTART HEXSIZE name` line per JIT symbol.
 //! [`record`] appends one per finalized function so JIT'd Scarlet code attributes
 //! to its Scarlet function instead of `[unknown]`.
 //!
-//! Enabled by `AL_PERF_MAP=1` exactly. The file is truncated on first record,
+//! Enabled by `SCARLET_PERF_MAP=1` exactly. The file is truncated on first record,
 //! so a recycled pid cannot inherit a stale map, then appended to. The handle
 //! stays open for the process lifetime, like the code mapping itself.
 
@@ -13,10 +13,10 @@ use std::fs::File;
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
 
-/// Whether `AL_PERF_MAP=1` asked for a perf map. Read once per process.
+/// Whether `SCARLET_PERF_MAP=1` asked for a perf map. Read once per process.
 pub fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("AL_PERF_MAP").is_ok_and(|v| v == "1"))
+    *ENABLED.get_or_init(|| std::env::var("SCARLET_PERF_MAP").is_ok_and(|v| v == "1"))
 }
 
 /// The per-process map path perf reads. Literal `/tmp`, not the platform
@@ -42,7 +42,7 @@ fn file() -> Option<&'static Mutex<File>> {
         match File::create(&path) {
             Ok(f) => Some(Mutex::new(f)),
             Err(err) => {
-                eprintln!("al: AL_PERF_MAP: cannot create {path}: {err}");
+                eprintln!("al: SCARLET_PERF_MAP: cannot create {path}: {err}");
                 None
             }
         }

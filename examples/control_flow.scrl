@@ -1,5 +1,5 @@
 // Values, bindings, operators and blocks, pricing one line of an order.
-// Almost everything in AL is an expression: `if` yields a value, and so does a
+// Almost everything in Scarlet is an expression: `if` yields a value, and so does a
 // `{ ... }` block — there is no `return`.
 
 import scarlet/array
@@ -28,7 +28,7 @@ fn discount_percent(units Int) Int {
 // Returns the amount payable and the amount saved.
 fn price_line(unit_cents Int, units Int) (Int, Int) {
 	subtotal = unit_cents * units
-	// `{ ... }` is AL's grouping form. Parentheses build tuples, they do not
+	// `{ ... }` is Scarlet's grouping form. Parentheses build tuples, they do not
 	// group, so `(subtotal * pct) / 100` would not mean what you want.
 	discount = { subtotal * discount_percent(units) } / 100
 	payable = subtotal - discount

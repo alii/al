@@ -38,7 +38,7 @@ fn file_write_then_read_roundtrips() {
 path = '__PATH__'
 match io.write_text(path, 'hello-io') {
 	Err(e) -> println('WRITE-FAILED: ${e}')
-	Ok(_) -> match io.read_text(path) {
+	Ok(Nil) -> match io.read_text(path) {
 		Ok(s) -> println('roundtrip: ${s}')
 		Err(e) -> println('READ-FAILED: ${e}')
 	}
@@ -79,9 +79,9 @@ fn tcp_echo_server_roundtrip() {
 		println('peer ${address.to_string(sock.peer)}')
 		match socket.read(sock, 4096) {
 			Ok(Data(data)) -> match socket.write(sock, data) {
-				Ok(_) -> match socket.close(sock) {
-					Ok(_) -> match net.close(server) {
-						Ok(_) -> println('served')
+				Ok(Nil) -> match socket.close(sock) {
+					Ok(Nil) -> match net.close(server) {
+						Ok(Nil) -> println('served')
 						Err(e) -> println('close-server-failed: ${e}')
 					}
 					Err(e) -> println('close-failed: ${e}')
@@ -160,7 +160,7 @@ match net.listen('127.0.0.1', 0) {
 					match socket.read_exact(conn, 11) {
 						Ok(data) -> match binary.to_string(data) {
 							Ok(text) -> println('echoed: ${text}')
-							Err(_) -> println('not utf8')
+							Err(Nil) -> println('not utf8')
 						}
 						Err(e) -> println('client read failed: ${e}')
 					}
@@ -231,7 +231,7 @@ fn tcp_read_within_returns_data() {
 	Ok(Some(sock)) -> match socket.read_within(sock, 4096, 5000) {
 		Ok(Data(data)) -> match binary.to_string(data) {
 			Ok(text) -> println('got: ${text}')
-			Err(_) -> println('not-utf8')
+			Err(Nil) -> println('not-utf8')
 		}
 		Ok(Closed) -> println('peer-closed')
 		Err(e) -> println('read-failed: ${e}')
@@ -262,7 +262,7 @@ fn file_write_unaligned_binary_errors() {
 match io.write_file('__PATH__', <<1:4>>) {
 	Err(UnalignedBinary) -> println('rejected')
 	Err(_) -> println('wrong-error')
-	Ok(_) -> println('wrote')
+	Ok(Nil) -> println('wrote')
 }
 "#
     .replace("__PATH__", &data.display().to_string());
@@ -706,7 +706,7 @@ fn http_server_body_source_failure_yields_framed_500() {
 	match http.path(req) {
 		<<'/fixed'>> -> Response(status: 200, headers: [], body: Fixed(5, fn() Err(UnexpectedEof)))
 		<<'/unsized'>> -> Response(status: 200, headers: [], body: Unsized(fn() Err(UnexpectedEof)))
-		else -> http.text('ok')
+		_ -> http.text('ok')
 	}
 })"#,
     );
@@ -783,7 +783,7 @@ fn run_with_schedulers(tag: &str, src: &str, schedulers: u32, secs: u64) -> (Opt
     let child = std::process::Command::new(env!("CARGO_BIN_EXE_scarlet"))
         .arg("run")
         .arg(&prog)
-        .env("AL_SCHEDULERS", schedulers.to_string())
+        .env("SCARLET_SCHEDULERS", schedulers.to_string())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -853,11 +853,11 @@ match net.listen('127.0.0.1', 0) {
         let (code, out) = run_with_schedulers("accept_foreign", src, schedulers, 25);
         assert!(
             code.is_some(),
-            "wedged at AL_SCHEDULERS={schedulers} (accept never saw the connection)"
+            "wedged at SCARLET_SCHEDULERS={schedulers} (accept never saw the connection)"
         );
         assert!(
             out.contains("got pong"),
-            "AL_SCHEDULERS={schedulers}:\n{out}"
+            "SCARLET_SCHEDULERS={schedulers}:\n{out}"
         );
     }
 }

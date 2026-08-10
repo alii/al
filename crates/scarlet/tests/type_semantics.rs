@@ -598,7 +598,7 @@ fn binary_string_literal_patterns() {
         "import scarlet/binary\n\
          r = match binary.from_string('GET /index.html') {\n\
          \t<<'GET ', ..rest>> -> binary.to_string(rest)\n\
-         \telse -> Err(Nil)\n\
+         \t_ -> Err(Nil)\n\
          }\n\
          println(r)\n",
         "Ok(/index.html)\n",
@@ -608,7 +608,7 @@ fn binary_string_literal_patterns() {
         "import scarlet/binary\n\
          r = match binary.from_string('POST /x') {\n\
          \t<<'POST ':utf8, ..>> -> 1\n\
-         \telse -> 0\n\
+         \t_ -> 0\n\
          }\n\
          println(r)\n",
         "1\n",
@@ -619,7 +619,7 @@ fn binary_string_literal_patterns() {
          fn is_get(b Binary) Bool {\n\
          \tmatch b {\n\
          \t\t<<'GET'>> -> True\n\
-         \t\telse -> False\n\
+         \t\t_ -> False\n\
          \t}\n\
          }\n\
          println(is_get(binary.from_string('GET')))\n\
@@ -634,7 +634,7 @@ fn binary_string_literal_patterns() {
          \t<<'GET ', ..>> -> 'get'\n\
          \t<<'DELETE /very/long/path/that/overruns', ..>> -> 'overrun'\n\
          \t<<'DELETE ', ..>> -> 'delete'\n\
-         \telse -> 'other'\n\
+         \t_ -> 'other'\n\
          }\n\
          println(r)\n",
         "delete\n",
@@ -644,7 +644,7 @@ fn binary_string_literal_patterns() {
         "import scarlet/binary\n\
          r = match binary.from_string('HTTP/1.1') {\n\
          \t<<'HTTP/1.', minor>> -> minor - 48\n\
-         \telse -> 0 - 1\n\
+         \t_ -> 0 - 1\n\
          }\n\
          println(r)\n",
         "1\n",
@@ -654,7 +654,7 @@ fn binary_string_literal_patterns() {
         "import scarlet/binary\n\
          r = match binary.from_string('héllo world') {\n\
          \t<<'héllo ', ..rest>> -> binary.to_string(rest)\n\
-         \telse -> Err(Nil)\n\
+         \t_ -> Err(Nil)\n\
          }\n\
          println(r)\n",
         "Ok(world)\n",
@@ -664,7 +664,7 @@ fn binary_string_literal_patterns() {
         "import scarlet/binary\n\
          r = match binary.from_string('\\r\\nrest') {\n\
          \t<<13, 10, ..rest>> -> binary.byte_size(rest)\n\
-         \telse -> 0 - 1\n\
+         \t_ -> 0 - 1\n\
          }\n\
          println(r)\n",
         "4\n",
@@ -676,7 +676,7 @@ fn binary_string_literal_patterns() {
          packet = <<1:4, 2:4, 'AB', 7>>\n\
          r = match packet {\n\
          \t<<1:4, 2:4, 'AB', n>> -> n\n\
-         \telse -> 0 - 1\n\
+         \t_ -> 0 - 1\n\
          }\n\
          println(r)\n",
         "7\n",
@@ -694,7 +694,7 @@ fn binary_string_literal_patterns() {
         "import scarlet/binary\n\
          r = match binary.from_string('AB') {\n\
          \t<<'AB':16>> -> 1\n\
-         \telse -> 0\n\
+         \t_ -> 0\n\
          }\n\
          println(r)\n",
         "Type mismatch",
@@ -708,7 +708,7 @@ fn binary_literal_and_pattern_e2e() {
         "import scarlet/binary\n\
          r = match binary.from_string('AB') {\n\
          \t<<a, b>> -> a + b\n\
-         \telse -> 0\n\
+         \t_ -> 0\n\
          }\n\
          println(r)\n",
         "131\n",

@@ -69,6 +69,7 @@ use smallvec::SmallVec;
 mod binary;
 mod collections;
 mod exec;
+mod float;
 mod freeze;
 mod http;
 mod inspect;
@@ -87,7 +88,7 @@ pub mod native_shims;
 /// untouched.
 #[cfg(feature = "op-histogram")]
 pub mod op_histogram;
-/// The `AL_PERF_MAP=1` perf-map writer: one `/tmp/perf-<pid>.map` symbol line
+/// The `SCARLET_PERF_MAP=1` perf-map writer: one `/tmp/perf-<pid>.map` symbol line
 /// per JIT-compiled body.
 pub mod perf_map;
 mod poll;
@@ -98,7 +99,7 @@ mod tests;
 mod text;
 
 pub use inspect::inspect;
-use inspect::{f64_str, value_type_name};
+use inspect::value_type_name;
 use migrate::Migrant;
 use native::NativePending;
 use poll::Wait;

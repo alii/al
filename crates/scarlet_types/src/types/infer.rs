@@ -284,6 +284,11 @@ pub struct QuantVar {
     /// Display name; `StrId::NONE` when unset.
     pub name: StrId,
     pub origin_id: Option<i32>,
+    /// The engine's `var_epoch` when `origin_id` was minted. `instantiate`
+    /// honours `origin_id` (the rigid self-reference case) only within the
+    /// same epoch: `truncate_to` restarts var numbering, so a later compile's
+    /// rigid var can share the number without being the same variable.
+    pub epoch: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -421,6 +426,11 @@ pub struct InferEngine {
 
     vars: Vec<TyVarState>,
     next_var_id: i32,
+    /// Bumped by every [`truncate_to`](Self::truncate_to), which clears `vars`
+    /// and restarts `next_var_id`. A var id is only meaningful paired with the
+    /// epoch it was minted in: a scheme's `QuantVar::origin_id` from an earlier
+    /// epoch must never alias a same-numbered var minted after the reset.
+    var_epoch: u32,
     current_level: i32,
     /// Var id -> display name.
     var_names: HashMap<i32, StrId>,
@@ -667,6 +677,7 @@ impl InferEngine {
 
         self.vars.clear();
         self.next_var_id = 0;
+        self.var_epoch = self.var_epoch.wrapping_add(1);
         self.current_level = 0;
         self.var_names.clear();
         self.used_names.clear();
@@ -1248,6 +1259,7 @@ impl InferEngine {
                     constraint,
                     name,
                     origin_id: Some(*id),
+                    epoch: self.var_epoch,
                 }
             })
             .collect();
@@ -1429,7 +1441,11 @@ impl InferEngine {
         };
         for (i, slot) in subst.iter_mut().enumerate() {
             let q = self.quants[start + i];
+            // The rigid self-reference case: honour `origin_id` only for a
+            // scheme minted this epoch — after a `truncate_to`, an equal id
+            // names a different (re-minted) variable.
             *slot = if let Some(id) = q.origin_id
+                && q.epoch == self.var_epoch
                 && rigid_ids.contains(&id)
             {
                 self.push(TypeNode::Var(id))

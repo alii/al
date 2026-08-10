@@ -1,4 +1,5 @@
 import scarlet/binary
+import scarlet/result
 
 // Typed errors for filesystem operations, mirroring Rust's std::io::ErrorKind
 // (the POSIX/errno failure set). Path-bearing variants carry the path they
@@ -39,13 +40,8 @@ pub fn read_file(path String) Result(Binary, IoError)
 pub fn write_file(path String, data Binary) Result(Nil, IoError)
 
 pub fn read_text(path String) Result(String, IoError) {
-	match read_file(path) {
-		Ok(b) -> match binary.to_string(b) {
-			Ok(s) -> Ok(s)
-			Err(Nil) -> Err(InvalidData(path))
-		}
-		Err(e) -> Err(e)
-	}
+	b <- result.then(read_file(path))
+	result.replace_err(binary.to_string(b), InvalidData(path))
 }
 
 pub fn write_text(path String, s String) Result(Nil, IoError) {

@@ -669,7 +669,7 @@ fn double(x Int) Int { x * 2 }\n";
 /// program's `NativeTable`.
 ///
 /// `must_native` names the functions the caller's parity claim rides on. Its
-/// table slot must be filled whenever `AL_NATIVE` selected it; otherwise a
+/// table slot must be filled whenever `SCARLET_NATIVE` selected it; otherwise a
 /// coverage-gate rejection silently interprets the "native" run and the parity
 /// assertion compares the interpreter to itself.
 fn compile_native(src: &str, must_native: &[&str]) -> bytecode::Program {
@@ -731,7 +731,7 @@ fn compile_native(src: &str, must_native: &[&str]) -> bytecode::Program {
         if cfg.includes(idx) {
             assert!(
                 program.native.get(idx).is_some(),
-                "AL_NATIVE mode {:?} selected `{name}` but no native body was \
+                "SCARLET_NATIVE mode {:?} selected `{name}` but no native body was \
                  published (coverage gate rejected it?); the native half of this \
                  alloc-count parity test would silently interpret",
                 cfg.mode

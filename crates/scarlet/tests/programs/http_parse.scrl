@@ -55,7 +55,7 @@ fn vis_from(b Binary, i Int, len Int, acc String) String {
 			10 -> '\\n'
 			9 -> '\\t'
 			0 -> '\\0'
-			else -> binary.to_string(binary.slice_bytes(b, i, 1)) or '?'
+			_ -> binary.to_string(binary.slice_bytes(b, i, 1)) or '?'
 		}
 		vis_from(b, i + 1, len, '${acc}${piece}')
 	}
@@ -209,7 +209,7 @@ match h1.parse_request(dup, 0) {
 		}
 		println('duplicate host: get returns first = ${first}')
 	}
-	else -> println('duplicate host: parse failed')
+	_ -> println('duplicate host: parse failed')
 }
 
 // Ingress accepts a NUL inside a field value — the head scanner does not
@@ -221,7 +221,7 @@ nul_req = <<'GET / HTTP/1.1\r\nX-N: a\0b\r\n\r\n'>>
 show_parse('nul in value parses', nul_req)
 match h1.parse_request(nul_req, 0) {
 	Done(_, _, _, hdrs, _, _) -> println('nul in value: headers.valid = ${headers.valid(hdrs)}')
-	else -> println('nul in value: parse failed')
+	_ -> println('nul in value: parse failed')
 }
 
 println('')
@@ -248,7 +248,7 @@ match h1.parse_request(req, 0) {
 		println('x-missing: ${missing}')
 		println('has x-custom: ${headers.has(hdrs, <<'X-CUSTOM'>>)}')
 	}
-	else -> println('parse failed')
+	_ -> println('parse failed')
 }
 
 println('')
@@ -316,10 +316,10 @@ match h1.parse_request(pipelined, 0) {
 		match h1.parse_request(pipelined, consumed1) {
 			Done(_, target2, _, _, _, consumed2) ->
 				println('second: ${str(target2)} (consumed ${consumed2})')
-			else -> println('second parse failed')
+			_ -> println('second parse failed')
 		}
 	}
-	else -> println('first parse failed')
+	_ -> println('first parse failed')
 }
 
 println('')
@@ -418,7 +418,7 @@ match h1.parse_request(chunked_req, 0) {
 	Done(_, target1, _, hdrs1, _, head_end) -> {
 		f = match h1.framing(hdrs1) {
 			Chunked -> 'chunked'
-			else -> 'other'
+			_ -> 'other'
 		}
 		println('head: target=${str(target1)} framing=${f} consumed=${head_end}')
 		match h1.chunk_decode(chunked_req, head_end, 1048576) {
@@ -427,13 +427,13 @@ match h1.parse_request(chunked_req, 0) {
 				match h1.parse_request(chunked_req, body_end) {
 					Done(_, target2, _, _, _, _) ->
 						println('next pipelined request: ${str(target2)}')
-					else -> println('next request parse failed')
+					_ -> println('next request parse failed')
 				}
 			}
-			else -> println('body decode failed')
+			_ -> println('body decode failed')
 		}
 	}
-	else -> println('head parse failed')
+	_ -> println('head parse failed')
 }
 
 println('')
@@ -452,7 +452,7 @@ show_close = fn(label String, req2 Binary) match h1.parse_request(req2, 0) {
 				flags,
 			)} want100=${h1.want_100_continue(flags)}',
 		)
-	else -> println('${label}: parse failed')
+	_ -> println('${label}: parse failed')
 }
 show_close('http11 default', keep)
 show_close('http11 close', close)
@@ -565,9 +565,9 @@ shown = array.map(methods, fn(name) {
 			<<'PATCH'>> -> 'Patch'
 			<<'HEAD'>> -> 'Head'
 			<<'OPTIONS'>> -> 'Options'
-			else -> 'Other(${str(m)})'
+			_ -> 'Other(${str(m)})'
 		}
-		else -> 'parse failed'
+		_ -> 'parse failed'
 	}
 })
 println(list(shown))

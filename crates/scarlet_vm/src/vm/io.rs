@@ -47,9 +47,9 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::abi::{self, AbiSlot};
 use crate::bytecode::{BinaryRef, SocketValue, Value};
 
-use super::poll::{EPOCH, Wait, monotonic_now_ms};
+use super::poll::{EPOCH, Parked, Wait, monotonic_now_ms};
 use super::sched::BlockingOp;
-use super::{IO_REDUCTION_COST, Step, VM, VmError, VmResult, bin_ref, lock, str_ref};
+use super::{IO_REDUCTION_COST, VM, VmError, VmResult, bin_ref, lock, str_ref};
 
 impl VM {
     // Method contract for this family: `ip` is the already-advanced
@@ -58,17 +58,16 @@ impl VM {
     // slice (the process parked), `None` continues; ops that never park
     // return `()`.
 
-    pub(super) fn file_read(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
+    pub(super) fn file_read(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
         *reds -= IO_REDUCTION_COST;
         let path_v = self.pop_str("io.read_file")?;
         let path = str_ref(&path_v).to_string();
-        self.frame_mut().ip = ip;
-        Ok(Some(Step::Parked(Wait::offloaded(BlockingOp::ReadFile(
+        Ok(Some(Parked::cont(Wait::offloaded(BlockingOp::ReadFile(
             path,
         )))))
     }
 
-    pub(super) fn file_write(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
+    pub(super) fn file_write(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
         *reds -= IO_REDUCTION_COST;
         let bin_v = self.pop_binary("io.write_file")?;
         let path_v = self.pop_str("io.write_file")?;
@@ -79,8 +78,7 @@ impl VM {
             return Ok(None);
         }
         let bytes = bin_ref(&bin_v).full_bytes().into_owned();
-        self.frame_mut().ip = ip;
-        Ok(Some(Step::Parked(Wait::offloaded(BlockingOp::WriteFile(
+        Ok(Some(Parked::cont(Wait::offloaded(BlockingOp::WriteFile(
             str_ref(&path_v).to_string(),
             bytes,
         )))))
@@ -109,7 +107,7 @@ impl VM {
         Ok(())
     }
 
-    pub(super) fn tcp_accept(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
+    pub(super) fn tcp_accept(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
         *reds -= IO_REDUCTION_COST;
         let sv = self.pop_listener("net.accept")?;
         let accept_res = match self.listener_for_accept(sv.id) {
@@ -138,15 +136,14 @@ impl VM {
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 // Park until readable, then re-run this instruction.
                 self.stack.push(Value::socket(sv));
-                self.frame_mut().ip = ip - 1;
-                return Ok(Some(Step::Parked(Wait::readable(sv.id))));
+                return Ok(Some(Parked::retry(Wait::readable(sv.id))));
             }
             Err(e) => self.push_net(Err(e))?,
         }
         Ok(None)
     }
 
-    pub(super) fn tcp_connect(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
+    pub(super) fn tcp_connect(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
         *reds -= IO_REDUCTION_COST;
         // The hostname was already resolved off-scheduler by scarlet/net.connect.
         let addr_v = self.pop()?;
@@ -171,8 +168,7 @@ impl VM {
                 let id = self.alloc_socket_id();
                 match self.track_pending(id, socket) {
                     Ok(()) => {
-                        self.frame_mut().ip = ip;
-                        return Ok(Some(Step::Parked(Wait::connecting(id))));
+                        return Ok(Some(Parked::cont(Wait::connecting(id))));
                     }
                     // Unwatchable means unwakeable: report instead of parking.
                     Err(e) => self.push_net(Err(e))?,
@@ -183,7 +179,7 @@ impl VM {
         Ok(None)
     }
 
-    pub(super) fn tcp_read(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
+    pub(super) fn tcp_read(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
         *reds -= IO_REDUCTION_COST;
         let max = self.pop_int("socket.read")?;
         let sock_val = self.pop()?;
@@ -195,15 +191,14 @@ impl VM {
                 // Park until readable, then re-run this instruction.
                 self.stack.push(sock_val);
                 self.stack.push(Value::small_int(max as i64));
-                self.frame_mut().ip = ip - 1;
-                return Ok(Some(Step::Parked(Wait::readable(sv.id))));
+                return Ok(Some(Parked::retry(Wait::readable(sv.id))));
             }
             Err(e) => self.push_net(Err(e))?,
         }
         Ok(None)
     }
 
-    pub(super) fn tcp_read_until(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
+    pub(super) fn tcp_read_until(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
         *reds -= IO_REDUCTION_COST;
         // Stack, top first: the deadline as an absolute monotonic ms, the max
         // byte count, then the socket. Scarlet captures the deadline once, so a
@@ -230,10 +225,9 @@ impl VM {
                     self.stack.push(sock_val);
                     self.stack.push(Value::small_int(max as i64));
                     self.stack.push(Value::small_int(deadline_ms));
-                    self.frame_mut().ip = ip - 1;
                     let deadline = *EPOCH.get_or_init(Instant::now)
                         + Duration::from_millis(deadline_ms.max(0) as u64);
-                    return Ok(Some(Step::Parked(Wait::read_with_deadline(
+                    return Ok(Some(Parked::retry(Wait::read_with_deadline(
                         sv.id, deadline,
                     ))));
                 }
@@ -243,7 +237,7 @@ impl VM {
         Ok(None)
     }
 
-    pub(super) fn tcp_write(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
+    pub(super) fn tcp_write(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
         *reds -= IO_REDUCTION_COST;
         let bin_v = self.pop_binary("socket.write")?;
         let sock_val = self.pop()?;
@@ -265,15 +259,14 @@ impl VM {
             // The binary is byte-aligned; unaligned was rejected above.
             let tail = self.tail_view(bin, offset);
             self.stack.push(tail);
-            self.frame_mut().ip = ip - 1;
-            return Ok(Some(Step::Parked(Wait::writable(sv.id))));
+            return Ok(Some(Parked::retry(Wait::writable(sv.id))));
         }
         let nil = self.make_nil()?;
         self.push_net(result.map(|_| nil))?;
         Ok(None)
     }
 
-    pub(super) fn tcp_write_parts(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
+    pub(super) fn tcp_write_parts(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
         *reds -= IO_REDUCTION_COST;
         let parts_val = self.pop()?;
         let sock_val = self.pop()?;
@@ -330,8 +323,7 @@ impl VM {
             self.stack.push(sock_val);
             let arr = Value::array_in(&mut self.heap, &remaining);
             self.stack.push(arr);
-            self.frame_mut().ip = ip - 1;
-            return Ok(Some(Step::Parked(Wait::writable(sv.id))));
+            return Ok(Some(Parked::retry(Wait::writable(sv.id))));
         }
         let nil = self.make_nil()?;
         self.push_net(result.map(|_| nil))?;
@@ -442,7 +434,7 @@ impl VM {
         Ok(())
     }
 
-    pub(super) fn dns_resolve(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
+    pub(super) fn dns_resolve(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
         *reds -= IO_REDUCTION_COST;
         let host_v = self.pop_str("net.resolve")?;
         let host = str_ref(&host_v);
@@ -455,8 +447,7 @@ impl VM {
         }
         // getaddrinfo has no readiness signal, so offload it to the pool.
         let host = host.to_string();
-        self.frame_mut().ip = ip;
-        Ok(Some(Step::Parked(Wait::offloaded(BlockingOp::ResolveDns(
+        Ok(Some(Parked::cont(Wait::offloaded(BlockingOp::ResolveDns(
             host,
         )))))
     }
@@ -493,16 +484,15 @@ impl VM {
         Ok(())
     }
 
-    pub(super) fn sleep(&mut self, ip: i32) -> VmResult<Option<Step>> {
+    pub(super) fn sleep(&mut self) -> VmResult<Option<Parked>> {
         let ms = self.pop_int("scheduler.sleep")?;
         let nil = self.make_nil()?;
         self.stack.push(nil);
         if ms > 0 {
             // The Nil result is already pushed, so the wake resumes at the
             // next instruction.
-            self.frame_mut().ip = ip;
             let deadline = Instant::now() + Duration::from_millis(ms as u64);
-            return Ok(Some(Step::Parked(Wait::until(deadline))));
+            return Ok(Some(Parked::cont(Wait::until(deadline))));
         }
         Ok(None)
     }

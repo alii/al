@@ -38,7 +38,7 @@ fn symbol(c String) Token {
 		'/' -> Slash
 		'(' -> Open
 		')' -> Close
-		else -> Assign
+		_ -> Assign
 	}
 }
 
@@ -72,7 +72,7 @@ fn take_word(chars Array(String)) (String, Array(String)) {
 			(tail, left) = take_word(rest)
 			(c + tail, left)
 		}
-		else -> ('', chars)
+		_ -> ('', chars)
 	}
 }
 
@@ -121,7 +121,7 @@ fn more_terms(left Expr, tokens Array(Token)) Parsed {
 	match tokens {
 		[Plus, ..rest] -> result.then(term(rest), fn(s) more_terms(Add(left, s.0), s.1))
 		[Minus, ..rest] -> result.then(term(rest), fn(s) more_terms(Sub(left, s.0), s.1))
-		else -> Ok((left, tokens))
+		_ -> Ok((left, tokens))
 	}
 }
 
@@ -133,7 +133,7 @@ fn more_factors(left Expr, tokens Array(Token)) Parsed {
 	match tokens {
 		[Star, ..rest] -> result.then(factor(rest), fn(s) more_factors(Mul(left, s.0), s.1))
 		[Slash, ..rest] -> result.then(factor(rest), fn(s) more_factors(Div(left, s.0), s.1))
-		else -> Ok((left, tokens))
+		_ -> Ok((left, tokens))
 	}
 }
 

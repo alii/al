@@ -6,7 +6,7 @@
 //! synchronization mechanism.
 //!
 //! The dump fires once from slice entry as soon as `TOTAL_OPS` passes
-//! `AL_OP_HISTOGRAM_OPS` (default 20M), since a served-load run is never asked
+//! `SCARLET_OP_HISTOGRAM_OPS` (default 20M), since a served-load run is never asked
 //! to stop. Names are resolved at dump time from the live `Program`, so no name
 //! table rides the hot path.
 //!
@@ -14,7 +14,7 @@
 //! the dispatch loop head. Measure with
 //!
 //! ```text
-//! AL_NATIVE=off ./target/release/al run …
+//! SCARLET_NATIVE=off ./target/release/al run …
 //! ```
 //!
 //! Otherwise a JIT'd function reads 0.00% and every interpreted function's
@@ -69,7 +69,7 @@ fn threshold() -> u64 {
     static CACHED: AtomicU64 = AtomicU64::new(0);
     match CACHED.load(Ordering::Relaxed) {
         0 => {
-            let t = std::env::var("AL_OP_HISTOGRAM_OPS")
+            let t = std::env::var("SCARLET_OP_HISTOGRAM_OPS")
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .filter(|t| *t > 0)
@@ -83,13 +83,13 @@ fn threshold() -> u64 {
 
 /// Write both histograms to stderr, biggest share first. The header names the
 /// native mode because the sample's scope depends on it: under anything but
-/// `AL_NATIVE=off` the missing bodies are exactly the hot ones.
+/// `SCARLET_NATIVE=off` the missing bodies are exactly the hot ones.
 pub fn dump_op_counts(program: &Program) {
     let total = TOTAL_OPS.load(Ordering::Relaxed).max(1);
     let mode = native::config().mode;
     let mut out = String::new();
     out.push_str(&format!(
-        "\n=== op histogram ({} ops sampled, AL_NATIVE={}) ===\n",
+        "\n=== op histogram ({} ops sampled, SCARLET_NATIVE={}) ===\n",
         TOTAL_OPS.load(Ordering::Relaxed),
         mode_name(mode)
     ));
@@ -97,7 +97,7 @@ pub fn dump_op_counts(program: &Program) {
         out.push_str(
             "!!! INCOMPLETE SAMPLE: natively-compiled bodies bypass the dispatch\n\
              !!! loop and are NOT counted — every share below is a share of\n\
-             !!! *interpreted* ops, not of Scarlet ops. Re-run with AL_NATIVE=off\n\
+             !!! *interpreted* ops, not of Scarlet ops. Re-run with SCARLET_NATIVE=off\n\
              !!! before comparing these numbers to an interpreter baseline.\n",
         );
     }
@@ -153,7 +153,7 @@ pub fn dump_op_counts(program: &Program) {
     let _ = err.flush();
 }
 
-/// `AL_NATIVE`'s spelling of the live mode, so the header quotes back a value
+/// `SCARLET_NATIVE`'s spelling of the live mode, so the header quotes back a value
 /// an operator would set.
 fn mode_name(mode: NativeMode) -> &'static str {
     match mode {

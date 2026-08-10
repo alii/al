@@ -633,7 +633,7 @@ mod tests {
     // vector, which would otherwise freeze the example corpus.
     const HELLO_SRC: &str = "// Hello world, plus string interpolation with ${}.\n\nprintln('hello, world')\n\nname = 'Scarlet'\nprintln('hello from ${name}')\nprintln('2 + 2 = ${2 + 2}')\n";
 
-    const FIZZBUZZ_SRC: &str = "fn fizzbuzz(n Int) String {\n\tmatch (n % 3, n % 5) {\n\t\t(0, 0) -> 'FizzBuzz'\n\t\t(0, _) -> 'Fizz'\n\t\t(_, 0) -> 'Buzz'\n\t\telse -> '${n}'\n\t}\n}\n\nfn run(n Int, last Int) Nil {\n\tif n > last {\n\t\tNil\n\t} else {\n\t\tprintln(fizzbuzz(n))\n\t\trun(n + 1, last)\n\t}\n}\n\nrun(1, 20)\n";
+    const FIZZBUZZ_SRC: &str = "fn fizzbuzz(n Int) String {\n\tmatch (n % 3, n % 5) {\n\t\t(0, 0) -> 'FizzBuzz'\n\t\t(0, _) -> 'Fizz'\n\t\t(_, 0) -> 'Buzz'\n\t\t_ -> '${n}'\n\t}\n}\n\nfn run(n Int, last Int) Nil {\n\tif n > last {\n\t\tNil\n\t} else {\n\t\tprintln(fizzbuzz(n))\n\t\trun(n + 1, last)\n\t}\n}\n\nrun(1, 20)\n";
 
     #[test]
     fn scans_hello_world() {
@@ -675,8 +675,8 @@ mod tests {
             PuncOpenParen, num("0"), PuncComma, ident("_"), PuncCloseParen, PuncArrow, lit("Fizz"),
             // (_, 0) -> 'Buzz'
             PuncOpenParen, ident("_"), PuncComma, num("0"), PuncCloseParen, PuncArrow, lit("Buzz"),
-            // else -> '${n}'
-            Keyword(Kw::Else), PuncArrow, InterpStringStart, PuncOpenBrace, ident("n"), PuncCloseBrace, InterpStringEnd,
+            // _ -> '${n}'
+            ident("_"), PuncArrow, InterpStringStart, PuncOpenBrace, ident("n"), PuncCloseBrace, InterpStringEnd,
             // } }
             PuncCloseBrace, PuncCloseBrace,
             // fn run(n Int, last Int) Nil {

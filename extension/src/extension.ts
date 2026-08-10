@@ -22,8 +22,8 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   client = new LanguageClient(
-    "al-lsp",
-    "AL Language Server",
+    "scarlet-lsp",
+    "Scarlet Language Server",
     serverOptions,
     clientOptions
   );

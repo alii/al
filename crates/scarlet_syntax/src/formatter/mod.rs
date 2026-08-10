@@ -925,11 +925,7 @@ impl Formatter {
                 Some(g) => d![text(" if "), self.expr(g)],
                 None => nil(),
             };
-            let head = if matches!(arm.pattern, ast::Pattern::Wildcard { .. }) {
-                text("else")
-            } else {
-                self.pattern(&arm.pattern)
-            };
+            let head = self.pattern(&arm.pattern);
             let body = self.expr(&arm.body);
             // A body that ends the line itself hugs the arrow. Anything else
             // gets a break point after the arrow, so an overflowing arm wraps
@@ -953,7 +949,6 @@ impl Formatter {
     fn pattern(&self, p: &ast::Pattern) -> Doc {
         use ast::Pattern as P;
         match p {
-            P::Wildcard { .. } => text("_"),
             P::Var { name } => text(name.name.clone()),
             P::Literal(ast::PatternLiteral::Number(n)) => text(n.value.clone()),
             P::Literal(ast::PatternLiteral::String(s)) => text(quoted(&s.value)),
@@ -1303,13 +1298,13 @@ mod tests {
              "fn test() {\n\t//\n}\n"),
             ("short_or_pattern_stays_flat",
              "fn f(x Int) Int {\n\tmatch x {\n\t\t1 | 2 | 3 -> 10\n\t\t_ -> 0\n\t}\n}\n",
-             "fn f(x Int) Int {\n\tmatch x {\n\t\t1 | 2 | 3 -> 10\n\t\telse -> 0\n\t}\n}\n"),
+             "fn f(x Int) Int {\n\tmatch x {\n\t\t1 | 2 | 3 -> 10\n\t\t_ -> 0\n\t}\n}\n"),
             ("leading_pipe_is_normalized",
              "fn f(x Int) Int {\n\tmatch x {\n\t\t| 1\n\t\t| 2 -> 10\n\t\t_ -> 0\n\t}\n}\n",
-             "fn f(x Int) Int {\n\tmatch x {\n\t\t1 | 2 -> 10\n\t\telse -> 0\n\t}\n}\n"),
+             "fn f(x Int) Int {\n\tmatch x {\n\t\t1 | 2 -> 10\n\t\t_ -> 0\n\t}\n}\n"),
             ("wide_or_pattern_breaks_at_pipes",
              "fn f(e NetError) Nil {\n\tmatch e {\n\t\tErr(NotConnected) | Err(TimedOut) | Err(ConnectionRefused) | Err(BrokenPipe) | Err(AddrInUse) | Err(AddrNotAvailable) -> Nil\n\t\t_ -> Nil\n\t}\n}\n",
-             "fn f(e NetError) Nil {\n\tmatch e {\n\t\tErr(NotConnected)\n\t\t| Err(TimedOut)\n\t\t| Err(ConnectionRefused)\n\t\t| Err(BrokenPipe)\n\t\t| Err(AddrInUse)\n\t\t| Err(AddrNotAvailable) -> Nil\n\t\telse -> Nil\n\t}\n}\n"),
+             "fn f(e NetError) Nil {\n\tmatch e {\n\t\tErr(NotConnected)\n\t\t| Err(TimedOut)\n\t\t| Err(ConnectionRefused)\n\t\t| Err(BrokenPipe)\n\t\t| Err(AddrInUse)\n\t\t| Err(AddrNotAvailable) -> Nil\n\t\t_ -> Nil\n\t}\n}\n"),
             ("backpass_single_binder",
              "fn f() Int {\n\tx <- g(1)\n\tx\n}\n",
              "fn f() Int {\n\tx <- g(1)\n\tx\n}\n"),
@@ -1348,12 +1343,12 @@ mod tests {
     }
 
     #[test]
-    fn match_top_level_wildcard_emits_else() {
+    fn match_wildcard_arms_format_as_written() {
         let out = fmt("fn f(x Int) String { match x { 1 -> 'one'\n _ -> 'other' } }\n");
-        assert!(out.contains("else -> 'other'\n"), "got: {out}");
-        let out2 = fmt("fn g(o Option(Int)) String { match o { Some(_) -> 'y'\n else -> 'n' } }\n");
+        assert!(out.contains("_ -> 'other'\n"), "got: {out}");
+        let out2 = fmt("fn g(o Option(Int)) String { match o { Some(_) -> 'y'\n _ -> 'n' } }\n");
         assert!(out2.contains("Some(_) -> 'y'"), "nested _: {out2}");
-        assert!(out2.contains("else -> 'n'\n"), "top else: {out2}");
+        assert!(out2.contains("_ -> 'n'\n"), "top _: {out2}");
     }
 
     #[test]
@@ -1396,7 +1391,7 @@ mod tests {
 
     #[test]
     fn match_arg_hugs_call_parens() {
-        let src = "println(match 10 {\n\t0 -> 'zero'\n\telse -> 'else'\n})\n";
+        let src = "println(match 10 {\n\t0 -> 'zero'\n\t_ -> 'else'\n})\n";
         assert_eq!(fmt(src), src);
     }
 
@@ -1475,8 +1470,7 @@ mod tests {
 
     #[test]
     fn binary_pattern_round_trip() {
-        let out =
-            fmt("fn f(b Binary) Int { match b { <<a, b:4, _:4, ..rest>> -> a\n else -> 0 } }\n");
+        let out = fmt("fn f(b Binary) Int { match b { <<a, b:4, _:4, ..rest>> -> a\n _ -> 0 } }\n");
         assert!(out.contains("<<a, b:4, _:4, ..rest>> -> a"), "got:\n{out}");
         let out2 = fmt("fn g(b Binary) Int { match b { <<x, ..>> -> x\n <<>> -> 0 } }\n");
         assert!(out2.contains("<<x, ..>> -> x"), "got:\n{out2}");
@@ -1489,7 +1483,7 @@ mod tests {
         // comma after `..`, so the output would not parse.
         let src = "result = match value {\n\tVeryLongConstructorNameHere(first_argument_name, \
                    second_argument_name, third_argument_name, fourth_argument_name, \
-                   fifth_argument_name, ..) -> 1\n\telse -> 0\n}\n";
+                   fifth_argument_name, ..) -> 1\n\t_ -> 0\n}\n";
         let out = fmt(src);
         assert!(
             out.contains("\t\t.."),
@@ -1505,12 +1499,12 @@ mod tests {
         // An overflowing arm wraps after the `->`, one indent deeper. The
         // pattern must stay intact.
         let src = "match x {\n\tSome(value) -> quite_long_function_name(value, another_argument, \
-                   and_yet_another_long_argument_here)\n\telse -> None\n}\n";
+                   and_yet_another_long_argument_here)\n\t_ -> None\n}\n";
         let out = fmt(src);
         assert_eq!(
             out,
             "match x {\n\tSome(value) ->\n\t\tquite_long_function_name(value, another_argument, \
-             and_yet_another_long_argument_here)\n\telse -> None\n}\n"
+             and_yet_another_long_argument_here)\n\t_ -> None\n}\n"
         );
     }
 
@@ -1518,19 +1512,19 @@ mod tests {
     fn long_guarded_match_arm_breaks_after_arrow() {
         // Pattern and guard share the head line; the body wraps after `->`.
         let src = "match x {\n\tSome(value) if value <= some_limit(value) - tolerance -> \
-                   build_result(value, scale_factor, offset)\n\telse -> None\n}\n";
+                   build_result(value, scale_factor, offset)\n\t_ -> None\n}\n";
         let out = fmt(src);
         assert_eq!(
             out,
             "match x {\n\tSome(value) if value <= some_limit(value) - tolerance ->\n\t\t\
-             build_result(value, scale_factor, offset)\n\telse -> None\n}\n"
+             build_result(value, scale_factor, offset)\n\t_ -> None\n}\n"
         );
     }
 
     #[test]
     fn match_arm_block_body_hugs_arrow() {
         // A body that ends the line itself keeps hugging the arrow.
-        let src = "match x {\n\tSome(v) -> match v {\n\t\t0 -> 'zero'\n\t\telse -> 'more'\n\t}\n\telse -> 'none'\n}\n";
+        let src = "match x {\n\tSome(v) -> match v {\n\t\t0 -> 'zero'\n\t\t_ -> 'more'\n\t}\n\t_ -> 'none'\n}\n";
         assert_eq!(fmt(src), src);
     }
 
@@ -1613,7 +1607,7 @@ mod tests {
     /// resolves through the module, `NotFound` needs an import.
     #[test]
     fn a_qualified_constructor_pattern_keeps_its_qualifier() {
-        let src = "match e {\n\tio.NotFound(path) -> path\n\tio.Denied -> 'no'\n\telse -> ''\n}\n";
+        let src = "match e {\n\tio.NotFound(path) -> path\n\tio.Denied -> 'no'\n\t_ -> ''\n}\n";
         let out = fmt(src);
         assert!(out.contains("io.NotFound(path)"), "{out}");
         assert!(out.contains("io.Denied"), "{out}");
@@ -1797,12 +1791,11 @@ mod tests {
     fn hard_breaking_match_inside_interpolation_gets_real_layout() {
         // A `match` inside `${…}` must lay out at the enclosing indent, not be
         // spliced in as text pre-rendered at indent 0.
-        let src =
-            "fn f(y Int) String {\n\t'value: ${match y { 0 -> 'zero'\n else -> 'other' }}'\n}\n";
+        let src = "fn f(y Int) String {\n\t'value: ${match y { 0 -> 'zero'\n _ -> 'other' }}'\n}\n";
         let out = fmt(src);
         assert_eq!(
             out,
-            "fn f(y Int) String {\n\t'value: ${match y {\n\t\t0 -> 'zero'\n\t\telse -> 'other'\n\t}}'\n}\n"
+            "fn f(y Int) String {\n\t'value: ${match y {\n\t\t0 -> 'zero'\n\t\t_ -> 'other'\n\t}}'\n}\n"
         );
         assert_round_trips(&out);
     }
