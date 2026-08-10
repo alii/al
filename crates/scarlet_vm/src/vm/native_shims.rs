@@ -556,6 +556,119 @@ unsafe extern "C" fn al_shim_op(
     }
 }
 
+/// Each dispatched opcode's discriminant as a named constant, so the
+/// dispatchers below can `match` on them directly — patterns, not guard
+/// chains, which is what lets the compiler emit a jump table.
+mod opc {
+    use super::Op;
+
+    pub const ADD: u8 = Op::Add as u8;
+    pub const ADD_FLOAT: u8 = Op::AddFloat as u8;
+    pub const ADD_STR: u8 = Op::AddStr as u8;
+    pub const APPEND: u8 = Op::Append as u8;
+    pub const ARGV: u8 = Op::Argv as u8;
+    pub const ARRAY_CONCAT: u8 = Op::ArrayConcat as u8;
+    pub const ARRAY_LEN: u8 = Op::ArrayLen as u8;
+    pub const ARRAY_SLICE: u8 = Op::ArraySlice as u8;
+    pub const BIN_APPEND: u8 = Op::BinAppend as u8;
+    pub const BIN_BIT_SIZE: u8 = Op::BinBitSize as u8;
+    pub const BIN_BYTE_AT: u8 = Op::BinByteAt as u8;
+    pub const BIN_BYTE_SIZE: u8 = Op::BinByteSize as u8;
+    pub const BIN_CONCAT_N: u8 = Op::BinConcatN as u8;
+    pub const BIN_EQ_IGNORE_ASCII_CASE: u8 = Op::BinEqIgnoreAsciiCase as u8;
+    pub const BIN_FROM_INT: u8 = Op::BinFromInt as u8;
+    pub const BIN_FROM_INT_ASCII: u8 = Op::BinFromIntAscii as u8;
+    pub const BIN_FROM_STRING: u8 = Op::BinFromString as u8;
+    pub const BIN_INDEX_OF: u8 = Op::BinIndexOf as u8;
+    pub const BIN_MATCH_PREFIX: u8 = Op::BinMatchPrefix as u8;
+    pub const BIN_PARSE_INT: u8 = Op::BinParseInt as u8;
+    pub const BIN_READ_INT: u8 = Op::BinReadInt as u8;
+    pub const BIN_READ_UTF8: u8 = Op::BinReadUtf8 as u8;
+    pub const BIN_SLICE: u8 = Op::BinSlice as u8;
+    pub const BIN_TAKE: u8 = Op::BinTake as u8;
+    pub const BIN_TO_ASCII_LOWER: u8 = Op::BinToAsciiLower as u8;
+    pub const BIN_TO_STRING: u8 = Op::BinToString as u8;
+    pub const BIN_VIEW: u8 = Op::BinView as u8;
+    pub const DIV: u8 = Op::Div as u8;
+    pub const DIV_FLOAT: u8 = Op::DivFloat as u8;
+    pub const DNS_RESOLVE: u8 = Op::DnsResolve as u8;
+    pub const ELEM_AT: u8 = Op::ElemAt as u8;
+    pub const ENV_MAP: u8 = Op::EnvMap as u8;
+    pub const EQ: u8 = Op::Eq as u8;
+    pub const FILE_READ: u8 = Op::FileRead as u8;
+    pub const FILE_WRITE: u8 = Op::FileWrite as u8;
+    pub const FLOAT_CEIL: u8 = Op::FloatCeil as u8;
+    pub const FLOAT_FLOOR: u8 = Op::FloatFloor as u8;
+    pub const FLOAT_FROM_INT: u8 = Op::FloatFromInt as u8;
+    pub const FLOAT_ROUND: u8 = Op::FloatRound as u8;
+    pub const FLOAT_TO_STRING: u8 = Op::FloatToString as u8;
+    pub const FLOAT_TRUNCATE: u8 = Op::FloatTruncate as u8;
+    pub const GET_FIELD: u8 = Op::GetField as u8;
+    pub const GT: u8 = Op::Gt as u8;
+    pub const GT_FLOAT: u8 = Op::GtFloat as u8;
+    pub const GTE: u8 = Op::Gte as u8;
+    pub const GTE_FLOAT: u8 = Op::GteFloat as u8;
+    pub const HTTP_CHUNK_DECODE: u8 = Op::HttpChunkDecode as u8;
+    pub const HTTP_FRAMING: u8 = Op::HttpFraming as u8;
+    pub const HTTP_HEADER_GET: u8 = Op::HttpHeaderGet as u8;
+    pub const HTTP_HEADER_HAS: u8 = Op::HttpHeaderHas as u8;
+    pub const HTTP_HEADERS_VALID: u8 = Op::HttpHeadersValid as u8;
+    pub const HTTP_PARSE_HEAD: u8 = Op::HttpParseHead as u8;
+    pub const HTTP_SERIALIZE_HEAD: u8 = Op::HttpSerializeHead as u8;
+    pub const INDEX: u8 = Op::Index as u8;
+    pub const INDEX_OR: u8 = Op::IndexOr as u8;
+    pub const INT_TO_STRING: u8 = Op::IntToString as u8;
+    pub const IP_PARSE: u8 = Op::IpParse as u8;
+    pub const LT: u8 = Op::Lt as u8;
+    pub const LT_FLOAT: u8 = Op::LtFloat as u8;
+    pub const LTE: u8 = Op::Lte as u8;
+    pub const LTE_FLOAT: u8 = Op::LteFloat as u8;
+    pub const MAKE_RANGE: u8 = Op::MakeRange as u8;
+    pub const MAP_DELETE: u8 = Op::MapDelete as u8;
+    pub const MAP_GET: u8 = Op::MapGet as u8;
+    pub const MAP_HAS: u8 = Op::MapHas as u8;
+    pub const MAP_KEYS: u8 = Op::MapKeys as u8;
+    pub const MAP_NEW: u8 = Op::MapNew as u8;
+    pub const MAP_SET: u8 = Op::MapSet as u8;
+    pub const MAP_SIZE: u8 = Op::MapSize as u8;
+    pub const MAP_TO_LIST: u8 = Op::MapToList as u8;
+    pub const MAP_VALUES: u8 = Op::MapValues as u8;
+    pub const MOD: u8 = Op::Mod as u8;
+    pub const MONOTONIC: u8 = Op::Monotonic as u8;
+    pub const MUL: u8 = Op::Mul as u8;
+    pub const MUL_FLOAT: u8 = Op::MulFloat as u8;
+    pub const NEG: u8 = Op::Neg as u8;
+    pub const NEG_FLOAT: u8 = Op::NegFloat as u8;
+    pub const NEQ: u8 = Op::Neq as u8;
+    pub const PREPEND: u8 = Op::Prepend as u8;
+    pub const PRINT: u8 = Op::Print as u8;
+    pub const PROCESS_SPAWN: u8 = Op::ProcessSpawn as u8;
+    pub const SEQ_DROP: u8 = Op::SeqDrop as u8;
+    pub const SLEEP: u8 = Op::Sleep as u8;
+    pub const SPAWN_LOCAL: u8 = Op::SpawnLocal as u8;
+    pub const SPAWN_ON_EACH: u8 = Op::SpawnOnEach as u8;
+    pub const STACK_DEPTH: u8 = Op::StackDepth as u8;
+    pub const STR_CONCAT_N: u8 = Op::StrConcatN as u8;
+    pub const STR_CONTAINS: u8 = Op::StrContains as u8;
+    pub const STR_LEN: u8 = Op::StrLen as u8;
+    pub const STR_SPLIT: u8 = Op::StrSplit as u8;
+    pub const STR_TRIM: u8 = Op::StrTrim as u8;
+    pub const SUB: u8 = Op::Sub as u8;
+    pub const SUB_FLOAT: u8 = Op::SubFloat as u8;
+    pub const TCP_ACCEPT: u8 = Op::TcpAccept as u8;
+    pub const TCP_CLOSE: u8 = Op::TcpClose as u8;
+    pub const TCP_CLOSE_SERVER: u8 = Op::TcpCloseServer as u8;
+    pub const TCP_CONNECT: u8 = Op::TcpConnect as u8;
+    pub const TCP_LISTEN: u8 = Op::TcpListen as u8;
+    pub const TCP_LOCAL_ADDR: u8 = Op::TcpLocalAddr as u8;
+    pub const TCP_READ: u8 = Op::TcpRead as u8;
+    pub const TCP_READ_UNTIL: u8 = Op::TcpReadUntil as u8;
+    pub const TCP_WRITE: u8 = Op::TcpWrite as u8;
+    pub const TCP_WRITE_PARTS: u8 = Op::TcpWriteParts as u8;
+    pub const TO_STRING: u8 = Op::ToString as u8;
+    pub const TUPLE_INDEX: u8 = Op::TupleIndex as u8;
+}
+
 /// The bridge for [`is_native_try_op`](crate::bytecode::is_native_try_op)
 /// opcodes: the ops with a reachable runtime error.
 ///
@@ -592,7 +705,7 @@ impl VM {
     /// opcode to its interpreter method.
     fn run_try_op(&mut self, op_code: u8, _operand: i32) -> VmResult<()> {
         match op_code {
-            c if c == Op::ArraySlice as u8 => self.seq_slice(),
+            opc::ARRAY_SLICE => self.seq_slice(),
             _ => proof_violation("run_try_op on an op is_native_try_op excludes"),
         }
     }
@@ -657,16 +770,16 @@ impl VM {
     /// arms; the two share the method bodies.
     fn run_park_op(&mut self, op_code: u8, reds: &mut i32) -> VmResult<Option<Parked>> {
         match op_code {
-            c if c == Op::FileRead as u8 => self.file_read(reds),
-            c if c == Op::FileWrite as u8 => self.file_write(reds),
-            c if c == Op::TcpAccept as u8 => self.tcp_accept(reds),
-            c if c == Op::TcpConnect as u8 => self.tcp_connect(reds),
-            c if c == Op::TcpRead as u8 => self.tcp_read(reds),
-            c if c == Op::TcpReadUntil as u8 => self.tcp_read_until(reds),
-            c if c == Op::TcpWrite as u8 => self.tcp_write(reds),
-            c if c == Op::TcpWriteParts as u8 => self.tcp_write_parts(reds),
-            c if c == Op::DnsResolve as u8 => self.dns_resolve(reds),
-            c if c == Op::Sleep as u8 => self.sleep(),
+            opc::FILE_READ => self.file_read(reds),
+            opc::FILE_WRITE => self.file_write(reds),
+            opc::TCP_ACCEPT => self.tcp_accept(reds),
+            opc::TCP_CONNECT => self.tcp_connect(reds),
+            opc::TCP_READ => self.tcp_read(reds),
+            opc::TCP_READ_UNTIL => self.tcp_read_until(reds),
+            opc::TCP_WRITE => self.tcp_write(reds),
+            opc::TCP_WRITE_PARTS => self.tcp_write_parts(reds),
+            opc::DNS_RESOLVE => self.dns_resolve(reds),
+            opc::SLEEP => self.sleep(),
             _ => proof_violation("run_park_op on an op is_native_park_op excludes"),
         }
     }
@@ -679,114 +792,114 @@ impl VM {
     /// `run_slice` arms exactly; the two share the method bodies.
     fn run_bridge_op(&mut self, op_code: u8, operand: i32, reds: &mut i32) -> VmResult<()> {
         match op_code {
-            c if c == Op::Index as u8 => self.seq_index(),
-            c if c == Op::IndexOr as u8 => self.seq_index_or(operand),
-            c if c == Op::ElemAt as u8 => self.elem_at(operand),
-            c if c == Op::SeqDrop as u8 => self.seq_drop(),
-            c if c == Op::ArrayConcat as u8 => self.seq_concat(),
-            c if c == Op::MakeRange as u8 => self.make_range(),
-            c if c == Op::MapGet as u8 => self.map_get(),
-            c if c == Op::MapHas as u8 => self.map_has(),
-            c if c == Op::MapKeys as u8 => self.map_keys(),
-            c if c == Op::MapValues as u8 => self.map_values(),
-            c if c == Op::MapSize as u8 => self.map_size(),
-            c if c == Op::MapNew as u8 => self.map_new(),
-            c if c == Op::MapSet as u8 => self.map_set(),
-            c if c == Op::MapDelete as u8 => self.map_delete(),
-            c if c == Op::MapToList as u8 => self.map_to_list(),
-            c if c == Op::EnvMap as u8 => self.env_map(),
-            c if c == Op::StrSplit as u8 => self.str_split(),
-            c if c == Op::StrLen as u8 => self.str_len(),
-            c if c == Op::StrContains as u8 => self.str_contains(),
-            c if c == Op::StrTrim as u8 => self.str_trim(),
-            c if c == Op::IntToString as u8 => self.int_to_string(),
-            c if c == Op::ToString as u8 => self.op_to_string(),
-            c if c == Op::StrConcatN as u8 => self.str_concat_n(operand as usize),
-            c if c == Op::BinFromString as u8 => self.bin_from_string(),
-            c if c == Op::BinToString as u8 => self.bin_to_string(),
-            c if c == Op::BinBitSize as u8 => self.bin_bit_size(),
-            c if c == Op::BinSlice as u8 => self.bin_slice(),
-            c if c == Op::BinAppend as u8 => self.bin_append(),
-            c if c == Op::BinConcatN as u8 => self.bin_concat_n(operand as usize),
-            c if c == Op::BinMatchPrefix as u8 => self.bin_match_prefix(),
-            c if c == Op::BinIndexOf as u8 => self.bin_index_of(),
-            c if c == Op::BinByteAt as u8 => self.bin_byte_at(),
-            c if c == Op::BinParseInt as u8 => self.bin_parse_int(),
-            c if c == Op::BinEqIgnoreAsciiCase as u8 => self.bin_eq_ignore_ascii_case(),
-            c if c == Op::BinToAsciiLower as u8 => self.bin_to_ascii_lower(),
-            c if c == Op::BinFromIntAscii as u8 => self.bin_from_int_ascii(),
-            c if c == Op::AddFloat as u8 => self.add_float(),
-            c if c == Op::SubFloat as u8 => self.sub_float(),
-            c if c == Op::MulFloat as u8 => self.mul_float(),
-            c if c == Op::DivFloat as u8 => self.div_float(),
-            c if c == Op::NegFloat as u8 => self.neg_float(),
-            c if c == Op::LtFloat as u8 => self.lt_float(),
-            c if c == Op::GtFloat as u8 => self.gt_float(),
-            c if c == Op::LteFloat as u8 => self.lte_float(),
-            c if c == Op::GteFloat as u8 => self.gte_float(),
-            c if c == Op::FloatFloor as u8 => self.float_floor(),
-            c if c == Op::FloatCeil as u8 => self.float_ceil(),
-            c if c == Op::FloatRound as u8 => self.float_round(),
-            c if c == Op::FloatTruncate as u8 => self.float_truncate(),
-            c if c == Op::FloatFromInt as u8 => self.float_from_int(),
-            c if c == Op::FloatToString as u8 => self.float_to_string(),
-            c if c == Op::Monotonic as u8 => self.monotonic(),
-            c if c == Op::IpParse as u8 => self.ip_parse(),
-            c if c == Op::HttpChunkDecode as u8 => self.http_chunk_decode(),
-            c if c == Op::Add as u8 => self.add(),
-            c if c == Op::Sub as u8 => self.sub(),
-            c if c == Op::Mul as u8 => self.mul(),
-            c if c == Op::Div as u8 => self.div(),
-            c if c == Op::Mod as u8 => self.rem(),
-            c if c == Op::Neg as u8 => self.neg(),
+            opc::INDEX => self.seq_index(),
+            opc::INDEX_OR => self.seq_index_or(operand),
+            opc::ELEM_AT => self.elem_at(operand),
+            opc::SEQ_DROP => self.seq_drop(),
+            opc::ARRAY_CONCAT => self.seq_concat(),
+            opc::MAKE_RANGE => self.make_range(),
+            opc::MAP_GET => self.map_get(),
+            opc::MAP_HAS => self.map_has(),
+            opc::MAP_KEYS => self.map_keys(),
+            opc::MAP_VALUES => self.map_values(),
+            opc::MAP_SIZE => self.map_size(),
+            opc::MAP_NEW => self.map_new(),
+            opc::MAP_SET => self.map_set(),
+            opc::MAP_DELETE => self.map_delete(),
+            opc::MAP_TO_LIST => self.map_to_list(),
+            opc::ENV_MAP => self.env_map(),
+            opc::STR_SPLIT => self.str_split(),
+            opc::STR_LEN => self.str_len(),
+            opc::STR_CONTAINS => self.str_contains(),
+            opc::STR_TRIM => self.str_trim(),
+            opc::INT_TO_STRING => self.int_to_string(),
+            opc::TO_STRING => self.op_to_string(),
+            opc::STR_CONCAT_N => self.str_concat_n(operand as usize),
+            opc::BIN_FROM_STRING => self.bin_from_string(),
+            opc::BIN_TO_STRING => self.bin_to_string(),
+            opc::BIN_BIT_SIZE => self.bin_bit_size(),
+            opc::BIN_SLICE => self.bin_slice(),
+            opc::BIN_APPEND => self.bin_append(),
+            opc::BIN_CONCAT_N => self.bin_concat_n(operand as usize),
+            opc::BIN_MATCH_PREFIX => self.bin_match_prefix(),
+            opc::BIN_INDEX_OF => self.bin_index_of(),
+            opc::BIN_BYTE_AT => self.bin_byte_at(),
+            opc::BIN_PARSE_INT => self.bin_parse_int(),
+            opc::BIN_EQ_IGNORE_ASCII_CASE => self.bin_eq_ignore_ascii_case(),
+            opc::BIN_TO_ASCII_LOWER => self.bin_to_ascii_lower(),
+            opc::BIN_FROM_INT_ASCII => self.bin_from_int_ascii(),
+            opc::ADD_FLOAT => self.add_float(),
+            opc::SUB_FLOAT => self.sub_float(),
+            opc::MUL_FLOAT => self.mul_float(),
+            opc::DIV_FLOAT => self.div_float(),
+            opc::NEG_FLOAT => self.neg_float(),
+            opc::LT_FLOAT => self.lt_float(),
+            opc::GT_FLOAT => self.gt_float(),
+            opc::LTE_FLOAT => self.lte_float(),
+            opc::GTE_FLOAT => self.gte_float(),
+            opc::FLOAT_FLOOR => self.float_floor(),
+            opc::FLOAT_CEIL => self.float_ceil(),
+            opc::FLOAT_ROUND => self.float_round(),
+            opc::FLOAT_TRUNCATE => self.float_truncate(),
+            opc::FLOAT_FROM_INT => self.float_from_int(),
+            opc::FLOAT_TO_STRING => self.float_to_string(),
+            opc::MONOTONIC => self.monotonic(),
+            opc::IP_PARSE => self.ip_parse(),
+            opc::HTTP_CHUNK_DECODE => self.http_chunk_decode(),
+            opc::ADD => self.add(),
+            opc::SUB => self.sub(),
+            opc::MUL => self.mul(),
+            opc::DIV => self.div(),
+            opc::MOD => self.rem(),
+            opc::NEG => self.neg(),
             // The polymorphic comparisons: the emitter sends these here only
             // when it could not prove both operands Int (the Int case lowers
             // inline via `nop_of`).
-            c if c == Op::Eq as u8 => self.eq_values(),
-            c if c == Op::Neq as u8 => self.neq_values(),
-            c if c == Op::Lt as u8 => self.compare_push(|o| o.is_lt()),
-            c if c == Op::Gt as u8 => self.compare_push(|o| o.is_gt()),
-            c if c == Op::Lte as u8 => self.compare_push(|o| o.is_le()),
-            c if c == Op::Gte as u8 => self.compare_push(|o| o.is_ge()),
+            opc::EQ => self.eq_values(),
+            opc::NEQ => self.neq_values(),
+            opc::LT => self.compare_push(|o| o.is_lt()),
+            opc::GT => self.compare_push(|o| o.is_gt()),
+            opc::LTE => self.compare_push(|o| o.is_le()),
+            opc::GTE => self.compare_push(|o| o.is_ge()),
             // The checked twins of the proof-dependent fast paths: the
             // emitter sends a site here when the type could not be proven, so
             // the unchecked shim would have been unsound.
-            c if c == Op::TupleIndex as u8 => self.tuple_index(operand),
-            c if c == Op::Append as u8 => self.seq_append(operand),
-            c if c == Op::Prepend as u8 => self.seq_prepend(operand),
-            c if c == Op::ArrayLen as u8 => self.seq_len(),
-            c if c == Op::BinByteSize as u8 => self.bin_byte_size(),
-            c if c == Op::HttpParseHead as u8 => self.http_parse_head(),
-            c if c == Op::HttpHeadersValid as u8 => self.http_headers_valid(),
-            c if c == Op::HttpFraming as u8 => self.http_framing(),
-            c if c == Op::HttpHeaderHas as u8 => self.http_header_has(),
-            c if c == Op::HttpSerializeHead as u8 => self.http_serialize_head(),
-            c if c == Op::AddStr as u8 => self.str_concat2(),
-            c if c == Op::GetField as u8 => self.get_field(operand),
-            c if c == Op::BinFromInt as u8 => self.bin_from_int(),
-            c if c == Op::BinReadInt as u8 => self.bin_read_int(),
-            c if c == Op::BinTake as u8 => self.bin_take(),
-            c if c == Op::BinView as u8 => self.bin_view(),
+            opc::TUPLE_INDEX => self.tuple_index(operand),
+            opc::APPEND => self.seq_append(operand),
+            opc::PREPEND => self.seq_prepend(operand),
+            opc::ARRAY_LEN => self.seq_len(),
+            opc::BIN_BYTE_SIZE => self.bin_byte_size(),
+            opc::HTTP_PARSE_HEAD => self.http_parse_head(),
+            opc::HTTP_HEADERS_VALID => self.http_headers_valid(),
+            opc::HTTP_FRAMING => self.http_framing(),
+            opc::HTTP_HEADER_HAS => self.http_header_has(),
+            opc::HTTP_SERIALIZE_HEAD => self.http_serialize_head(),
+            opc::ADD_STR => self.str_concat2(),
+            opc::GET_FIELD => self.get_field(operand),
+            opc::BIN_FROM_INT => self.bin_from_int(),
+            opc::BIN_READ_INT => self.bin_read_int(),
+            opc::BIN_TAKE => self.bin_take(),
+            opc::BIN_VIEW => self.bin_view(),
             // Pushes (codepoint, nbits); Core sees one `(Int, Int)`, and the
             // bytecode emitter follows the op with a `MakeTuple 2`.
-            c if c == Op::BinReadUtf8 as u8 => {
+            opc::BIN_READ_UTF8 => {
                 self.bin_read_utf8()?;
                 self.make_tuple(2)
             }
-            c if c == Op::HttpHeaderGet as u8 => self.http_header_get(),
-            c if c == Op::StackDepth as u8 => self.stack_depth(),
-            c if c == Op::TcpLocalAddr as u8 => self.tcp_local_addr(),
-            c if c == Op::ProcessSpawn as u8 => self.process_spawn(reds),
-            c if c == Op::Argv as u8 => self.argv(),
-            c if c == Op::TcpListen as u8 => self.tcp_listen(),
-            c if c == Op::TcpClose as u8 => self.tcp_close(reds),
-            c if c == Op::TcpCloseServer as u8 => self.tcp_close_server(),
-            c if c == Op::SpawnLocal as u8 => self.process_spawn_local(reds),
-            c if c == Op::SpawnOnEach as u8 => self.process_spawn_on_each(reds),
+            opc::HTTP_HEADER_GET => self.http_header_get(),
+            opc::STACK_DEPTH => self.stack_depth(),
+            opc::TCP_LOCAL_ADDR => self.tcp_local_addr(),
+            opc::PROCESS_SPAWN => self.process_spawn(reds),
+            opc::ARGV => self.argv(),
+            opc::TCP_LISTEN => self.tcp_listen(),
+            opc::TCP_CLOSE => self.tcp_close(reds),
+            opc::TCP_CLOSE_SERVER => self.tcp_close_server(),
+            opc::SPAWN_LOCAL => self.process_spawn_local(reds),
+            opc::SPAWN_ON_EACH => self.process_spawn_on_each(reds),
             // `Print` is the one void op: it pushes nothing, and the bytecode
             // emitter supplies the `()` with a following `PushNil`. The bridge
             // returns exactly one value, so it must do the same.
-            c if c == Op::Print as u8 => {
+            opc::PRINT => {
                 self.print_op(reds)?;
                 // `Op::PushNil` pushes the prelude's `Nil` *constructor*, not
                 // the primitive nil word — callers match on it as an enum.

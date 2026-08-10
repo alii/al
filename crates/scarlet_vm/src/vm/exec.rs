@@ -159,6 +159,25 @@ impl VM {
                 let func_locals = $func_locals;
                 let func_code_start = $func_code_start;
                 let args_start = self.stack.len() - arity as usize;
+                // One warmth tick per call of a body with no entry yet; the
+                // call that crosses the threshold compiles it, so the flag
+                // read below already sees the fresh entry.
+                let target_native = self
+                    .program
+                    .native
+                    .get(FuncIdx::from_usize(target_idx as usize))
+                    .is_some();
+                let target_native = if target_native {
+                    true
+                } else {
+                    self.program
+                        .native
+                        .note_interpreted_call(FuncIdx::from_usize(target_idx as usize));
+                    self.program
+                        .native
+                        .get(FuncIdx::from_usize(target_idx as usize))
+                        .is_some()
+                };
 
                 if $tail {
                     self.collapse_tail_frame(base_slot, args_start);
@@ -166,6 +185,10 @@ impl VM {
                     f.func_idx = target_idx;
                     f.code_start = func_code_start;
                     f.ip = 0;
+                    // The collapsed frame sits at ip 0, where the bytecode
+                    // and resume-ordinal coordinate spaces coincide — the one
+                    // point a frame may switch engines.
+                    f.native = target_native;
                     f.captures = $captures;
                 } else {
                     self.frame_mut().ip = ip;
@@ -173,11 +196,7 @@ impl VM {
                         func_idx: target_idx,
                         code_start: func_code_start,
                         ip: 0,
-                        native: self
-                            .program
-                            .native
-                            .get(FuncIdx::from_usize(target_idx as usize))
-                            .is_some(),
+                        native: target_native,
                         base_slot: args_start,
                         captures: $captures,
                     });
@@ -215,15 +234,8 @@ impl VM {
         // bytecode position the trampoline later misreads as a resume ordinal.
         macro_rules! native_entry_check {
             ($target:expr) => {{
-                // The frame the caller just pushed recorded this same answer;
-                // both must agree, so read it from the frame.
-                if !self.frame().native {
-                    // Interpreting it: count the call, so a body that turns
-                    // out to be hot gets compiled.
-                    self.program
-                        .native
-                        .note_interpreted_call(FuncIdx::from_usize($target as usize));
-                }
+                // The frame the caller just entered recorded whether it runs
+                // native; warmth was already counted at the call edge.
                 if self.frame().native {
                     let _ = $target;
                     // Hand the pushed frame to the trampoline; it re-enters
@@ -299,11 +311,31 @@ impl VM {
                         arity as usize,
                         func_locals as usize,
                     );
+                    // A back-edge counts for warmth like a call: a loop
+                    // entered once must still cross the threshold (a server's
+                    // accept loop is called exactly once and spins for the
+                    // process's life). The edge that crosses it compiles the
+                    // body, and the flag flip below moves this very loop onto
+                    // the compiled code at its next iteration.
+                    self.program
+                        .native
+                        .note_interpreted_call(FuncIdx::from_usize(func_idx as usize));
+                    let now_native = self
+                        .program
+                        .native
+                        .get(FuncIdx::from_usize(func_idx as usize))
+                        .is_some();
                     let f = self.frame_mut();
                     f.ip = 0;
+                    // Sound only because the frame sits at ip 0, where the
+                    // two ip coordinate spaces coincide.
+                    f.native = now_native;
                 } else {
                     // A self-call from inside a capture-carrying closure must
                     // see the same captures.
+                    self.program
+                        .native
+                        .note_interpreted_call(FuncIdx::from_usize(func_idx as usize));
                     let captures = self.frame().captures.clone();
                     self.frame_mut().ip = ip;
                     self.frames.push(CallFrame {
@@ -376,13 +408,7 @@ impl VM {
 
                 match self.frames.last() {
                     None => break,
-                    Some(f)
-                        if self
-                            .program
-                            .native
-                            .get(FuncIdx::from_usize(f.func_idx as usize))
-                            .is_some() =>
-                    {
+                    Some(f) if f.native => {
                         // Returning into a compiled caller: its `ip` is a
                         // resume ordinal only the trampoline may dispatch.
                         self.native_reds = reds;

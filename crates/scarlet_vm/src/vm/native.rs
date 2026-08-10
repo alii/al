@@ -188,7 +188,27 @@ impl VM {
             .get(FuncIdx::from_usize(target as usize))
         {
             Some(entry) => PreparedCall::enter(entry, 0),
-            None => PreparedCall::status(NativeStatus::Done),
+            None => {
+                // The callee will interpret; count the call so a body only
+                // ever reached from compiled callers can still warm. The call
+                // that crosses the threshold compiles it — enter the fresh
+                // entry right away (the frame sits at ip 0, the one point the
+                // two ip coordinate spaces coincide).
+                self.program
+                    .native
+                    .note_interpreted_call(FuncIdx::from_usize(target as usize));
+                match self
+                    .program
+                    .native
+                    .get(FuncIdx::from_usize(target as usize))
+                {
+                    Some(entry) => {
+                        self.frame_mut().native = true;
+                        PreparedCall::enter(entry, 0)
+                    }
+                    None => PreparedCall::status(NativeStatus::Done),
+                }
+            }
         }
     }
 
@@ -225,11 +245,19 @@ impl VM {
         debug_assert_eq!(func.capture_count, 0);
         let args_start = self.stack.len() - arity as usize;
         let base = self.frame().base_slot;
+        let native = self
+            .program
+            .native
+            .get(FuncIdx::from_usize(target as usize))
+            .is_some();
         self.collapse_tail_frame(base, args_start);
         let f = self.frame_mut();
         f.func_idx = target;
         f.code_start = code_start;
         f.ip = 0;
+        // ip 0 is the one point the two ip coordinate spaces coincide, so the
+        // collapsed frame may switch engines here.
+        f.native = native;
         // Assigning the capture-free sentinel releases the caller's closure
         // handle, as the interpreter's tail branch does.
         f.captures = Value::small_int(0);
@@ -293,11 +321,17 @@ impl VM {
         let (arity, locals, code_start) = (func.arity, func.locals, func.code_start);
         let args_start = self.stack.len() - arity as usize;
         let base = self.frame().base_slot;
+        let native = self
+            .program
+            .native
+            .get(FuncIdx::from_usize(target as usize))
+            .is_some();
         self.collapse_tail_frame(base, args_start);
         let f = self.frame_mut();
         f.func_idx = target;
         f.code_start = code_start;
         f.ip = 0;
+        f.native = native;
         f.captures = callee;
         for _ in arity..locals {
             self.stack.push(Value::small_int(0));
@@ -388,16 +422,6 @@ pub(crate) unsafe extern "C" fn al_rt_checkpoint(vmx: *mut VM) -> NativeStatus {
 /// function's frame on top.
 #[allow(unsafe_code)] // the frame-slot access seam; contract above
 pub(crate) unsafe extern "C" fn al_rt_frame_base(vmx: *mut VM) -> *mut u64 {
-    if std::env::var("ALTRACE2").is_ok() {
-        let vm2 = unsafe { &*vmx };
-        eprintln!(
-            "FRAMEBASE frames={} stack={} topfn={} ip={}",
-            vm2.frames.len(),
-            vm2.stack.len(),
-            vm2.frames.last().map(|f| f.func_idx).unwrap_or(-1),
-            vm2.frames.last().map(|f| f.ip).unwrap_or(-1)
-        );
-    }
     // SAFETY: `vmx` is the running scheduler's live VM per the contract.
     let vm = unsafe { &mut *vmx };
     let base = vm.frame().base_slot;
@@ -439,21 +463,10 @@ pub(crate) unsafe extern "C" fn al_rt_ret_transfer(vmx: *mut VM, result: u64) ->
                 .get(FuncIdx::from_usize(parent.func_idx as usize))
         })
         .flatten();
-    let r = match parent_entry {
+    match parent_entry {
         Some(entry) => PreparedCall::enter(entry, i64::from(parent.ip)),
         None => PreparedCall::status(NativeStatus::Done),
-    };
-    if std::env::var("ALTRACE").is_ok() {
-        eprintln!(
-            "RET parent_fn={} parent_ip={} frames={} stack={} entry={}",
-            parent.func_idx,
-            parent.ip,
-            vm.frames.len(),
-            vm.stack.len(),
-            !r.entry.is_null()
-        );
     }
-    r
 }
 
 /// Non-tail call from a compiled body, as a transfer. Pushes the args and the
@@ -477,13 +490,6 @@ pub(crate) unsafe extern "C" fn al_rt_prepare_call(
     unsafe { push_args(vm, args, argc) };
     vm.frame_mut().ip = resume as i32;
     vm.push_known_frame(target as i32);
-    if std::env::var("ALTRACE").is_ok() {
-        eprintln!(
-            "PREPCALL target={target} resume={resume} frames={} stack={}",
-            vm.frames.len(),
-            vm.stack.len()
-        );
-    }
     vm.prepared(target as i32)
 }
 
@@ -531,13 +537,6 @@ pub(crate) unsafe extern "C" fn al_rt_prepare_tail(
     // SAFETY: `args`/`argc` per the contract.
     unsafe { push_args(vm, args, argc) };
     vm.collapse_known_frame(target as i32);
-    if std::env::var("ALTRACE").is_ok() {
-        eprintln!(
-            "PREPTAIL target={target} frames={} stack={}",
-            vm.frames.len(),
-            vm.stack.len()
-        );
-    }
     vm.prepared(target as i32)
 }
 
@@ -574,14 +573,6 @@ unsafe extern "C" fn al_rt_prepare_tail_value(
 pub(crate) unsafe extern "C" fn al_rt_pop(vmx: *mut VM) -> u64 {
     // SAFETY: `vmx` is the running scheduler's live VM per the contract.
     let vm = unsafe { &mut *vmx };
-    if std::env::var("ALTRACE").is_ok() {
-        eprintln!(
-            "POP frames={} stack={} topfn={}",
-            vm.frames.len(),
-            vm.stack.len(),
-            vm.frames.last().map(|f| f.func_idx).unwrap_or(-1)
-        );
-    }
     match vm.stack.pop() {
         Some(v) => std::mem::ManuallyDrop::new(v).to_bits(),
         None => crate::bytecode::value::proof_violation("continuation with an empty stack"),

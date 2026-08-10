@@ -167,6 +167,32 @@ scheduler.spawn_local(fn() {
     );
 }
 
+/// A body entered exactly once must still warm: the self-tail back-edge
+/// counts toward the threshold, and the crossing edge compiles the body and
+/// flips the running frame onto the fresh entry mid-loop. The debug line is
+/// the witness that the compile fired inside the single call.
+#[test]
+fn single_call_loop_warms_and_flips_mid_run() {
+    let src = "fn spin(n Int, acc Int) Int {
+	if n == 0 { acc } else { spin(n - 1, acc + 1) }
+}
+
+println(spin(3000000, 0))
+";
+    let proj = Project::new("midloop_warm");
+    let path = proj.dir.join("prog.scrl");
+    std::fs::write(&path, src).unwrap();
+    let path = path.to_string_lossy().into_owned();
+    let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
+    assert!(out.success, "run failed:\n{}", out.stderr);
+    assert_eq!(out.stdout, "3000000\n");
+    assert!(
+        out.stderr.contains("warmed"),
+        "a single-call loop must warm via its back-edge; stderr:\n{}",
+        out.stderr
+    );
+}
+
 /// (d) Int overflow spill past ±2^47, where Ints leave the NaN-box payload,
 /// and at the i64 wrap. The recursion warms both functions mid-run, so the
 /// pinned literals hold across the interp→native switch.
