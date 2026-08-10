@@ -19,6 +19,9 @@ pub fn then(r Result(a, e), f fn(a) Result(b, e)) Result(b, e) {
 	}
 }
 
+// Unwrap a result that has a Nil error type. The error is not generic
+// intentionally, as it is usually a mistake to be ignoring
+// error values. Most of the time you would want to consume them.
 pub fn unwrap(r Result(a, Nil), default e) Result(a, e) {
 	match r {
 		Ok(a) -> Ok(a)
