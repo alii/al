@@ -2,7 +2,7 @@
   "name": "scarlet-lang",
   "displayName": "Scarlet",
   "description": "Scarlet language support for Visual Studio Code. Syntax highlighting, diagnostics, completions, and formatting.",
-  "version": "0.0.1",
+  "version": "0.0.3",
   "publisher": "alistaiir",
   "author": {
     "name": "Alistair Smith",
@@ -36,9 +36,6 @@
     "Programming Languages",
     "Formatters"
   ],
-  "activationEvents": [
-    "onLanguage:scarlet"
-  ],
   "main": "./out/extension.js",
   "contributes": {
     "languages": [
@@ -52,8 +49,8 @@
           ".scrl"
         ],
         "icon": {
-          "light": "./images/icon.png",
-          "dark": "./images/icon.png"
+          "light": "./images/file-icon-light.svg",
+          "dark": "./images/file-icon-dark.svg"
         },
         "configuration": "./language-configuration.json"
       }
