@@ -9,7 +9,20 @@ A statically-typed and expression-oriented programming language for developer pr
 ---
 
 ```scarlet
-println("Hello from Scarlet.")
+type Shape {
+	Circle(r Float)
+	Rect(w Float, h Float)
+}
+
+fn area(s Shape) Float {
+	match s {
+		Circle(r) -> 3.14159 * r * r
+		Rect(w, h) -> w * h
+	}
+}
+
+shapes = [Circle(r: 2.0), Rect(w: 3.0, h: 4.0), Circle(r: 1.0)]
+println('total area: ${array.fold(shapes, 0.0, fn(acc, s) acc + area(s))}')
 ```
 
 ```
