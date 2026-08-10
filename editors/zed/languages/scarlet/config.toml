@@ -1,4 +1,5 @@
 name = "Scarlet"
+grammar = "scarlet"
 path_suffixes = ["scrl"]
 line_comments = ["// "]
 block_comment = ["/* ", " */"]

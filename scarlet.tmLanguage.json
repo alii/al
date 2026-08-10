@@ -1,248 +1,396 @@
 {
   "name": "Scarlet",
-  "scopeName": "source.scrl",
   "patterns": [
-    { "include": "#comments" },
-    { "include": "#attributes" },
-    { "include": "#strings" },
-    { "include": "#characters" },
-    { "include": "#numbers" },
-    { "include": "#import-statement" },
-    { "include": "#type-definition" },
-    { "include": "#function-definition" },
-    { "include": "#const-definition" },
-    { "include": "#variable-with-type" },
-    { "include": "#backpass-binding" },
-    { "include": "#keywords" },
-    { "include": "#constants" },
-    { "include": "#module-qualified-access" },
-    { "include": "#constructor-call" },
-    { "include": "#function-call" },
-    { "include": "#labeled-argument" },
-    { "include": "#types" },
-    { "include": "#operators" },
-    { "include": "#punctuation" }
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#attributes"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#binary"
+    },
+    {
+      "include": "#import-statement"
+    },
+    {
+      "include": "#type-definition"
+    },
+    {
+      "include": "#function-definition"
+    },
+    {
+      "include": "#const-definition"
+    },
+    {
+      "include": "#variable-with-type"
+    },
+    {
+      "include": "#backpass-binding"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#module-qualified-access"
+    },
+    {
+      "include": "#constructor-call"
+    },
+    {
+      "include": "#function-call"
+    },
+    {
+      "include": "#labeled-argument"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    }
   ],
   "repository": {
     "attributes": {
       "patterns": [
         {
-          "name": "meta.attribute.scrl",
-          "match": "(@)([a-zA-Z_][a-zA-Z0-9_]*)(\\()?([a-zA-Z_][a-zA-Z0-9_]*)?(\\))?",
           "captures": {
-            "1": { "name": "punctuation.definition.attribute.scrl" },
-            "2": { "name": "entity.name.function.decorator.scrl" },
-            "3": { "name": "punctuation.brackets.round.scrl" },
-            "4": { "name": "string.unquoted.attribute.scrl" },
-            "5": { "name": "punctuation.brackets.round.scrl" }
-          }
+            "1": {
+              "name": "punctuation.definition.attribute.scrl"
+            },
+            "2": {
+              "name": "entity.name.function.decorator.scrl"
+            },
+            "3": {
+              "name": "punctuation.brackets.round.scrl"
+            },
+            "4": {
+              "name": "string.unquoted.attribute.scrl"
+            },
+            "5": {
+              "name": "punctuation.brackets.round.scrl"
+            }
+          },
+          "match": "(@)([a-zA-Z_][a-zA-Z0-9_]*)(\\()?([a-zA-Z_][a-zA-Z0-9_]*)?(\\))?",
+          "name": "meta.attribute.scrl"
+        }
+      ]
+    },
+    "backpass-binding": {
+      "captures": {
+        "1": {
+          "patterns": [
+            {
+              "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
+              "name": "variable.other.scrl"
+            }
+          ]
+        },
+        "2": {
+          "name": "keyword.operator.backpass.scrl"
+        }
+      },
+      "comment": "Backpass statement: binder(s) <- call(...)",
+      "match": "\\b([a-z_][a-zA-Z0-9_]*(?:\\s*,\\s*[a-z_][a-zA-Z0-9_]*)*)\\s*(<-)"
+    },
+    "binary": {
+      "begin": "<<",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.binary.begin.scrl"
+        }
+      },
+      "comment": "Bit-string literal or pattern: <<expr:spec, ..rest>>. The spec names are contextual identifiers, not keywords.",
+      "end": ">>",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.binary.end.scrl"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#strings"
+        },
+        {
+          "include": "#numbers"
+        },
+        {
+          "captures": {
+            "1": {
+              "name": "punctuation.separator.colon.scrl"
+            },
+            "2": {
+              "name": "storage.type.binary-spec.scrl"
+            }
+          },
+          "match": "(:)\\s*(size|bytes)(?=\\s*\\()"
+        },
+        {
+          "captures": {
+            "1": {
+              "name": "punctuation.separator.colon.scrl"
+            },
+            "2": {
+              "name": "storage.type.binary-spec.scrl"
+            }
+          },
+          "match": "(:)\\s*(binary|utf8)\\b"
+        },
+        {
+          "match": "\\.\\.",
+          "name": "keyword.operator.spread.scrl"
+        },
+        {
+          "include": "#constants"
+        },
+        {
+          "include": "#module-qualified-access"
+        },
+        {
+          "include": "#constructor-call"
+        },
+        {
+          "include": "#function-call"
+        },
+        {
+          "include": "#types"
+        },
+        {
+          "include": "#operators"
+        },
+        {
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
+          "name": "variable.other.scrl"
+        },
+        {
+          "include": "#punctuation"
         }
       ]
     },
     "comments": {
       "patterns": [
         {
-          "name": "comment.line.double-slash.scrl",
-          "match": "//.*$"
+          "match": "//.*$",
+          "name": "comment.line.double-slash.scrl"
         },
         {
-          "name": "comment.block.documentation.scrl",
-          "begin": "/\\*\\*",
+          "begin": "/\\*\\*(?!/)",
+          "comment": "`/**` opens a doc comment, but `/**/` does not.",
           "end": "\\*/",
-          "patterns": [
-            {
-              "name": "keyword.other.documentation.scrl",
-              "match": "@(param|returns|example|throws|deprecated)\\b"
-            }
-          ]
+          "name": "comment.block.documentation.scrl"
         },
         {
-          "name": "comment.block.scrl",
           "begin": "/\\*",
-          "end": "\\*/"
+          "end": "\\*/",
+          "name": "comment.block.scrl"
         }
       ]
     },
-    "strings": {
-      "patterns": [
-        {
-          "name": "string.quoted.single.scrl",
-          "begin": "'",
-          "end": "'|$",
-          "patterns": [
-            {
-              "name": "constant.character.escape.scrl",
-              "match": "\\\\."
-            },
-            {
-              "name": "meta.interpolation.scrl",
-              "begin": "\\$\\{",
-              "end": "\\}",
-              "beginCaptures": {
-                "0": { "name": "punctuation.section.interpolation.begin.scrl" }
-              },
-              "endCaptures": {
-                "0": { "name": "punctuation.section.interpolation.end.scrl" }
-              },
-              "patterns": [{ "include": "#interpolation-expression" }]
-            },
-            {
-              "name": "variable.other.interpolation.scrl",
-              "match": "\\$[a-zA-Z_][a-zA-Z0-9_]*"
-            }
-          ]
+    "const-definition": {
+      "captures": {
+        "1": {
+          "name": "storage.modifier.visibility.scrl"
         },
-        {
-          "name": "string.quoted.double.scrl",
-          "begin": "\"",
-          "end": "\"|$",
-          "patterns": [
-            {
-              "name": "constant.character.escape.scrl",
-              "match": "\\\\."
-            },
-            {
-              "name": "meta.interpolation.scrl",
-              "begin": "\\$\\{",
-              "end": "\\}",
-              "beginCaptures": {
-                "0": { "name": "punctuation.section.interpolation.begin.scrl" }
-              },
-              "endCaptures": {
-                "0": { "name": "punctuation.section.interpolation.end.scrl" }
-              },
-              "patterns": [{ "include": "#interpolation-expression" }]
-            },
-            {
-              "name": "variable.other.interpolation.scrl",
-              "match": "\\$[a-zA-Z_][a-zA-Z0-9_]*"
-            }
-          ]
-        }
-      ]
-    },
-    "numbers": {
-      "patterns": [
-        {
-          "name": "constant.numeric.float.scrl",
-          "match": "\\b\\d+\\.\\d+\\b"
+        "2": {
+          "name": "keyword.other.const.scrl"
         },
-        {
-          "name": "constant.numeric.integer.scrl",
-          "match": "\\b\\d+\\b"
-        }
-      ]
-    },
-    "interpolation-expression": {
-      "patterns": [
-        { "include": "#strings" },
-        { "include": "#numbers" },
-        { "include": "#constants" },
-        { "include": "#module-qualified-access" },
-        { "include": "#constructor-call" },
-        { "include": "#function-call" },
-        { "include": "#types" },
-        { "include": "#operators" },
-        {
-          "name": "variable.other.scrl",
-          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+        "3": {
+          "name": "entity.name.function.scrl"
         },
-        { "include": "#punctuation" }
-      ]
-    },
-    "characters": {
-      "patterns": [
-        {
-          "name": "string.quoted.other.character.scrl",
-          "match": "`[^`]`"
+        "4": {
+          "name": "entity.name.type.scrl"
+        },
+        "5": {
+          "name": "keyword.operator.assignment.scrl"
         }
-      ]
-    },
-    "import-statement": {
-      "begin": "\\b(import)\\b",
-      "beginCaptures": {
-        "1": { "name": "keyword.control.import.scrl" }
       },
-      "end": "(?=$|\\n)",
+      "comment": "The declared name is scoped like a fn declaration name so themes colour toplevel value declarations uniformly.",
+      "match": "\\b(pub\\s+)?(const)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?:([A-Z][a-zA-Z0-9_]*)\\s*)?(=)"
+    },
+    "constants": {
+      "comment": "Prelude constructors themes expect as language constants.",
       "patterns": [
         {
-          "name": "keyword.control.import.scrl",
-          "match": "\\b(as)\\b"
+          "match": "\\b(True|False)\\b",
+          "name": "constant.language.boolean.scrl"
         },
         {
-          "name": "punctuation.separator.path.scrl",
-          "match": "/"
-        },
-        {
-          "name": "entity.name.type.scrl",
-          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
-        },
-        {
-          "name": "entity.name.namespace.scrl",
-          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
-        },
-        {
-          "name": "punctuation.accessor.scrl",
-          "match": "\\."
-        },
-        { "include": "#punctuation" }
+          "match": "\\bNil\\b",
+          "name": "constant.language.nil.scrl"
+        }
       ]
     },
-    "type-definition": {
+    "constructor-call": {
+      "captures": {
+        "1": {
+          "name": "entity.name.function.constructor.scrl"
+        }
+      },
+      "comment": "Constructor invocation / pattern: Uppercase optionally followed by (",
+      "match": "\\b([A-Z][a-zA-Z0-9_]*)(?=\\s*\\()"
+    },
+    "field-decl": {
       "patterns": [
         {
-          "comment": "type alias: type Name(params) = Type",
-          "match": "\\b(pub\\s+)?(type)\\s+([A-Z][a-zA-Z0-9_]*)(?:\\s*\\(([^)]*)\\))?\\s*(=)",
           "captures": {
-            "1": { "name": "storage.modifier.visibility.scrl" },
-            "2": { "name": "keyword.other.type.scrl" },
-            "3": { "name": "entity.name.type.scrl" },
-            "4": {
-              "patterns": [
-                {
-                  "name": "variable.other.type.scrl",
-                  "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
-                }
-              ]
+            "1": {
+              "name": "variable.other.member.scrl"
             },
-            "5": { "name": "keyword.operator.assignment.scrl" }
-          }
-        },
-        {
-          "comment": "opaque type: pub type Name(params) — no body, ends at EOL",
-          "match": "\\b(pub\\s+)?(type)\\s+([A-Z][a-zA-Z0-9_]*)(?:\\s*\\(([^)]*)\\))?\\s*$",
-          "captures": {
-            "1": { "name": "storage.modifier.visibility.scrl" },
-            "2": { "name": "keyword.other.type.scrl" },
-            "3": { "name": "entity.name.type.scrl" },
-            "4": {
-              "patterns": [
-                {
-                  "name": "variable.other.type.scrl",
-                  "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
-                }
-              ]
+            "2": {
+              "name": "entity.name.type.scrl"
             }
-          }
+          },
+          "comment": "Field label + concrete type",
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([A-Z][a-zA-Z0-9_]*)\\b"
         },
         {
-          "comment": "type definition: type Name(params) { ... }",
-          "begin": "\\b(pub\\s+)?(type)\\s+([A-Z][a-zA-Z0-9_]*)(?:\\s*(\\())?",
-          "beginCaptures": {
-            "1": { "name": "storage.modifier.visibility.scrl" },
-            "2": { "name": "keyword.other.type.scrl" },
-            "3": { "name": "entity.name.type.scrl" },
-            "4": { "name": "punctuation.definition.typeparameters.begin.scrl" }
+          "captures": {
+            "1": {
+              "name": "variable.other.member.scrl"
+            },
+            "2": {
+              "name": "variable.other.type.scrl"
+            }
           },
-          "end": "\\}",
-          "endCaptures": {
-            "0": { "name": "punctuation.definition.type.end.scrl" }
+          "comment": "Field label + type parameter",
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([a-z_][a-zA-Z0-9_]*)\\b"
+        },
+        {
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b",
+          "name": "entity.name.type.scrl"
+        },
+        {
+          "match": ",",
+          "name": "punctuation.separator.comma.scrl"
+        },
+        {
+          "include": "#punctuation"
+        }
+      ]
+    },
+    "function-call": {
+      "captures": {
+        "1": {
+          "name": "entity.name.function.scrl"
+        }
+      },
+      "comment": "Function calls",
+      "match": "\\b([a-z_][a-zA-Z0-9_]*)(?=\\s*\\()"
+    },
+    "function-definition": {
+      "begin": "\\b(pub\\s+)?(fn)\\s+([a-z_][a-zA-Z0-9_]*)",
+      "beginCaptures": {
+        "1": {
+          "name": "storage.modifier.visibility.scrl"
+        },
+        "2": {
+          "name": "keyword.other.fn.scrl"
+        },
+        "3": {
+          "name": "entity.name.function.scrl"
+        }
+      },
+      "end": "(?=\\{|\\n|$)",
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#function-params"
+        },
+        {
+          "include": "#type-args"
+        },
+        {
+          "match": "\\bfn\\b",
+          "name": "keyword.other.fn.scrl"
+        },
+        {
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b",
+          "name": "entity.name.type.scrl"
+        },
+        {
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
+          "name": "variable.other.type.scrl"
+        }
+      ]
+    },
+    "function-params": {
+      "begin": "\\G\\s*(\\()",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.parameters.begin.scrl"
+        }
+      },
+      "comment": "The param list opens immediately after the function name (\\G) and closes at the matching paren. Nested type-argument parens are consumed by #type-args so the inner ) of e.g. Option(a) cannot end the list early.",
+      "end": "\\)",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.parameters.end.scrl"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#type-args"
+        },
+        {
+          "captures": {
+            "1": {
+              "name": "variable.parameter.scrl"
+            },
+            "2": {
+              "name": "entity.name.type.scrl"
+            }
           },
-          "patterns": [
-            { "include": "#comments" },
-            { "include": "#generic-params" },
-            { "include": "#type-body" }
-          ]
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([A-Z][a-zA-Z0-9_]*)\\b"
+        },
+        {
+          "captures": {
+            "1": {
+              "name": "variable.parameter.scrl"
+            },
+            "2": {
+              "name": "keyword.other.fn.scrl"
+            }
+          },
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+(fn)\\b"
+        },
+        {
+          "captures": {
+            "1": {
+              "name": "variable.parameter.scrl"
+            },
+            "2": {
+              "name": "variable.other.type.scrl"
+            }
+          },
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([a-z_][a-zA-Z0-9_]*)\\b"
+        },
+        {
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
+          "name": "variable.parameter.scrl"
+        },
+        {
+          "match": ",",
+          "name": "punctuation.separator.comma.scrl"
         }
       ]
     },
@@ -250,370 +398,526 @@
       "begin": "(?<=\\()",
       "end": "\\)",
       "endCaptures": {
-        "0": { "name": "punctuation.definition.typeparameters.end.scrl" }
+        "0": {
+          "name": "punctuation.definition.typeparameters.end.scrl"
+        }
       },
       "patterns": [
         {
-          "name": "variable.other.type.scrl",
-          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
+          "name": "variable.other.type.scrl"
         },
         {
-          "name": "punctuation.separator.comma.scrl",
-          "match": ","
+          "match": ",",
+          "name": "punctuation.separator.comma.scrl"
         }
       ]
     },
-    "type-body": {
-      "begin": "\\{",
+    "import-statement": {
+      "begin": "\\b(import)\\b",
       "beginCaptures": {
-        "0": { "name": "punctuation.definition.type.begin.scrl" }
-      },
-      "end": "(?=\\})",
-      "patterns": [
-        { "include": "#comments" },
-        {
-          "comment": "Constructor with payload: Ctor(label Type, ...)",
-          "begin": "\\b([A-Z][a-zA-Z0-9_]*)\\s*(\\()",
-          "beginCaptures": {
-            "1": { "name": "entity.name.function.constructor.scrl" },
-            "2": { "name": "punctuation.definition.parameters.begin.scrl" }
-          },
-          "end": "\\)",
-          "endCaptures": {
-            "0": { "name": "punctuation.definition.parameters.end.scrl" }
-          },
-          "patterns": [{ "include": "#field-decl" }]
-        },
-        {
-          "comment": "Nullary constructor",
-          "name": "entity.name.function.constructor.scrl",
-          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
-        },
-        { "include": "#field-decl" }
-      ]
-    },
-    "field-decl": {
-      "patterns": [
-        {
-          "comment": "Field label + concrete type",
-          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([A-Z][a-zA-Z0-9_]*)\\b",
-          "captures": {
-            "1": { "name": "variable.other.member.scrl" },
-            "2": { "name": "entity.name.type.scrl" }
-          }
-        },
-        {
-          "comment": "Field label + type parameter",
-          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([a-z_][a-zA-Z0-9_]*)\\b",
-          "captures": {
-            "1": { "name": "variable.other.member.scrl" },
-            "2": { "name": "variable.other.type.scrl" }
-          }
-        },
-        {
-          "name": "entity.name.type.scrl",
-          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
-        },
-        {
-          "name": "punctuation.separator.comma.scrl",
-          "match": ","
-        },
-        { "include": "#punctuation" }
-      ]
-    },
-    "function-definition": {
-      "begin": "\\b(pub\\s+)?(fn)\\s+([a-z_][a-zA-Z0-9_]*)",
-      "beginCaptures": {
-        "1": { "name": "storage.modifier.visibility.scrl" },
-        "2": { "name": "keyword.other.fn.scrl" },
-        "3": { "name": "entity.name.function.scrl" }
-      },
-      "end": "(?=\\{|\\n|$)",
-      "patterns": [
-        { "include": "#comments" },
-        { "include": "#function-params" },
-        { "include": "#type-args" },
-        {
-          "name": "keyword.other.fn.scrl",
-          "match": "\\bfn\\b"
-        },
-        {
-          "name": "keyword.operator.arrow.scrl",
-          "match": "->"
-        },
-        {
-          "name": "entity.name.type.scrl",
-          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
-        },
-        {
-          "name": "variable.other.type.scrl",
-          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
-        }
-      ]
-    },
-    "function-params": {
-      "comment": "The param list opens immediately after the function name (\\G) and closes at the matching paren. Nested type-argument parens are consumed by #type-args so the inner ) of e.g. Option(a) cannot end the list early.",
-      "begin": "\\G\\s*(\\()",
-      "beginCaptures": {
-        "1": { "name": "punctuation.definition.parameters.begin.scrl" }
-      },
-      "end": "\\)",
-      "endCaptures": {
-        "0": { "name": "punctuation.definition.parameters.end.scrl" }
-      },
-      "patterns": [
-        { "include": "#comments" },
-        { "include": "#type-args" },
-        {
-          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([A-Z][a-zA-Z0-9_]*)\\b",
-          "captures": {
-            "1": { "name": "variable.parameter.scrl" },
-            "2": { "name": "entity.name.type.scrl" }
-          }
-        },
-        {
-          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+(fn)\\b",
-          "captures": {
-            "1": { "name": "variable.parameter.scrl" },
-            "2": { "name": "keyword.other.fn.scrl" }
-          }
-        },
-        {
-          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([a-z_][a-zA-Z0-9_]*)\\b",
-          "captures": {
-            "1": { "name": "variable.parameter.scrl" },
-            "2": { "name": "variable.other.type.scrl" }
-          }
-        },
-        {
-          "name": "variable.parameter.scrl",
-          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
-        },
-        {
-          "name": "punctuation.separator.comma.scrl",
-          "match": ","
-        }
-      ]
-    },
-    "type-args": {
-      "comment": "Balanced ( ... ) for a parametrized/fn type. Recursive so Option(List(a)) and Result(a, e) nest correctly.",
-      "begin": "\\(",
-      "beginCaptures": {
-        "0": { "name": "punctuation.definition.typeparameters.begin.scrl" }
-      },
-      "end": "\\)",
-      "endCaptures": {
-        "0": { "name": "punctuation.definition.typeparameters.end.scrl" }
-      },
-      "patterns": [
-        { "include": "#comments" },
-        {
-          "name": "keyword.other.fn.scrl",
-          "match": "\\bfn\\b"
-        },
-        {
-          "name": "keyword.operator.arrow.scrl",
-          "match": "->"
-        },
-        {
-          "name": "entity.name.type.scrl",
-          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
-        },
-        { "include": "#type-args" },
-        {
-          "name": "variable.other.type.scrl",
-          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
-        },
-        {
-          "name": "punctuation.separator.comma.scrl",
-          "match": ","
-        }
-      ]
-    },
-    "const-definition": {
-      "comment": "The declared name is scoped like a fn declaration name so themes colour toplevel value declarations uniformly.",
-      "match": "\\b(pub\\s+)?(const)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*(=)",
-      "captures": {
-        "1": { "name": "storage.modifier.visibility.scrl" },
-        "2": { "name": "keyword.other.const.scrl" },
-        "3": { "name": "entity.name.function.scrl" },
-        "4": { "name": "keyword.operator.assignment.scrl" }
-      }
-    },
-    "variable-with-type": {
-      "comment": "Variable declaration with type annotation: name Type = ...",
-      "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([A-Z][a-zA-Z0-9_]*)\\s*(=)",
-      "captures": {
-        "1": { "name": "variable.other.scrl" },
-        "2": { "name": "entity.name.type.scrl" },
-        "3": { "name": "keyword.operator.assignment.scrl" }
-      }
-    },
-    "backpass-binding": {
-      "comment": "Backpass statement: binder(s) <- call(...)",
-      "match": "\\b([a-z_][a-zA-Z0-9_]*(?:\\s*,\\s*[a-z_][a-zA-Z0-9_]*)*)\\s*(<-)",
-      "captures": {
         "1": {
-          "patterns": [
-            {
-              "name": "variable.other.scrl",
-              "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
-            }
-          ]
+          "name": "keyword.control.import.scrl"
+        }
+      },
+      "end": "(?=$|\\n)",
+      "patterns": [
+        {
+          "match": "\\b(as)\\b",
+          "name": "keyword.control.import.scrl"
         },
-        "2": { "name": "keyword.operator.backpass.scrl" }
-      }
+        {
+          "match": "/",
+          "name": "punctuation.separator.path.scrl"
+        },
+        {
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b",
+          "name": "entity.name.type.scrl"
+        },
+        {
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
+          "name": "entity.name.namespace.scrl"
+        },
+        {
+          "match": "\\.",
+          "name": "punctuation.accessor.scrl"
+        },
+        {
+          "include": "#punctuation"
+        }
+      ]
+    },
+    "interpolation-expression": {
+      "patterns": [
+        {
+          "include": "#strings"
+        },
+        {
+          "include": "#numbers"
+        },
+        {
+          "include": "#binary"
+        },
+        {
+          "include": "#keywords"
+        },
+        {
+          "include": "#constants"
+        },
+        {
+          "include": "#module-qualified-access"
+        },
+        {
+          "include": "#constructor-call"
+        },
+        {
+          "include": "#function-call"
+        },
+        {
+          "include": "#labeled-argument"
+        },
+        {
+          "include": "#types"
+        },
+        {
+          "include": "#operators"
+        },
+        {
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
+          "name": "variable.other.scrl"
+        },
+        {
+          "include": "#punctuation"
+        }
+      ]
     },
     "keywords": {
       "patterns": [
         {
-          "name": "keyword.control.scrl",
-          "match": "\\b(if|else|match|in|or|assert)\\b"
+          "match": "\\b(in|match|if|else|or)\\b",
+          "name": "keyword.control.scrl"
         },
         {
-          "name": "keyword.control.import.scrl",
-          "match": "\\b(import|as)\\b"
+          "match": "\\b(import|as)\\b",
+          "name": "keyword.control.import.scrl"
         },
         {
-          "name": "storage.modifier.visibility.scrl",
-          "match": "\\bpub\\b"
+          "match": "\\b(pub|opaque)\\b",
+          "name": "storage.modifier.visibility.scrl"
         },
         {
-          "name": "keyword.other.scrl",
-          "match": "\\b(fn|type|const)\\b"
+          "match": "\\b(fn|type|const)\\b",
+          "name": "keyword.other.scrl"
         }
       ]
-    },
-    "constants": {
-      "patterns": [
-        {
-          "name": "constant.language.boolean.true.scrl",
-          "match": "\\btrue\\b"
-        },
-        {
-          "name": "constant.language.boolean.false.scrl",
-          "match": "\\bfalse\\b"
-        },
-        {
-          "name": "constant.language.scrl",
-          "match": "\\b(Nil|None|Some|Ok|Err)\\b"
-        }
-      ]
-    },
-    "module-qualified-access": {
-      "comment": "module.name access (lowercase qualifier)",
-      "match": "\\b([a-z_][a-zA-Z0-9_]*)(\\.)(?=[A-Za-z_])",
-      "captures": {
-        "1": { "name": "entity.name.namespace.scrl" },
-        "2": { "name": "punctuation.accessor.scrl" }
-      }
-    },
-    "constructor-call": {
-      "comment": "Constructor invocation / pattern: Uppercase optionally followed by (",
-      "match": "\\b([A-Z][a-zA-Z0-9_]*)(?=\\s*\\()",
-      "captures": {
-        "1": { "name": "entity.name.function.constructor.scrl" }
-      }
-    },
-    "function-call": {
-      "comment": "Function calls",
-      "match": "\\b([a-z_][a-zA-Z0-9_]*)(?=\\s*\\()",
-      "captures": {
-        "1": { "name": "entity.name.function.scrl" }
-      }
     },
     "labeled-argument": {
-      "comment": "Labeled call argument: label: value",
-      "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(:)",
       "captures": {
-        "1": { "name": "variable.parameter.label.scrl" },
-        "2": { "name": "punctuation.separator.colon.scrl" }
-      }
+        "1": {
+          "name": "variable.parameter.label.scrl"
+        },
+        "2": {
+          "name": "punctuation.separator.colon.scrl"
+        }
+      },
+      "comment": "Labeled call argument: label: value",
+      "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(:)"
     },
-    "types": {
+    "module-qualified-access": {
+      "captures": {
+        "1": {
+          "name": "entity.name.namespace.scrl"
+        },
+        "2": {
+          "name": "punctuation.accessor.scrl"
+        }
+      },
+      "comment": "module.name access (lowercase qualifier)",
+      "match": "\\b([a-z_][a-zA-Z0-9_]*)(\\.)(?=[A-Za-z_])"
+    },
+    "numbers": {
       "patterns": [
         {
-          "comment": "Standalone type name",
-          "name": "entity.name.type.scrl",
-          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+          "match": "\\b\\d+\\.\\d+\\b",
+          "name": "constant.numeric.float.scrl"
+        },
+        {
+          "match": "\\b\\d+\\b",
+          "name": "constant.numeric.integer.scrl"
         }
       ]
     },
     "operators": {
       "patterns": [
         {
-          "name": "keyword.operator.arrow.scrl",
-          "match": "->"
+          "match": "(\\+\\+|--|;|\\?)",
+          "name": "invalid.illegal.unsupported-operator.scrl"
         },
         {
-          "name": "keyword.operator.backpass.scrl",
-          "match": "<-"
+          "match": "(->)",
+          "name": "keyword.operator.arrow.scrl"
         },
         {
-          "name": "keyword.operator.spread.scrl",
-          "match": "\\.\\."
+          "match": "(<-)",
+          "name": "keyword.operator.backpass.scrl"
         },
         {
-          "name": "keyword.operator.comparison.scrl",
-          "match": "(==|!=|<=|>=|<|>)"
+          "match": "(\\.\\.)",
+          "name": "keyword.operator.spread.scrl"
         },
         {
-          "name": "keyword.operator.logical.scrl",
-          "match": "(&&|\\|\\||!)"
+          "match": "(!=|<=|==|>=|<|>)",
+          "name": "keyword.operator.comparison.scrl"
         },
         {
-          "name": "keyword.operator.arithmetic.scrl",
-          "match": "(\\+|-|\\*|/|%)"
+          "match": "(&&|\\|\\||!)",
+          "name": "keyword.operator.logical.scrl"
         },
         {
-          "name": "keyword.operator.assignment.scrl",
-          "match": "="
+          "match": "(\\|)",
+          "name": "keyword.operator.pattern.scrl"
         },
         {
-          "name": "keyword.operator.attribute.scrl",
-          "match": "@"
+          "match": "(%|\\*|\\+|-|\\/)",
+          "name": "keyword.operator.arithmetic.scrl"
+        },
+        {
+          "match": "(=)",
+          "name": "keyword.operator.assignment.scrl"
+        },
+        {
+          "match": "(@)",
+          "name": "keyword.operator.attribute.scrl"
         }
       ]
     },
     "punctuation": {
       "patterns": [
         {
-          "name": "punctuation.separator.comma.scrl",
-          "match": ","
+          "match": ",",
+          "name": "punctuation.separator.comma.scrl"
         },
         {
-          "name": "punctuation.separator.colon.scrl",
-          "match": ":"
+          "match": ":",
+          "name": "punctuation.separator.colon.scrl"
         },
         {
-          "name": "punctuation.accessor.scrl",
-          "match": "\\."
+          "match": "\\.",
+          "name": "punctuation.accessor.scrl"
         },
         {
-          "name": "punctuation.section.braces.begin.scrl",
-          "match": "\\{"
+          "match": "\\(",
+          "name": "punctuation.section.parens.begin.scrl"
         },
         {
-          "name": "punctuation.section.braces.end.scrl",
-          "match": "\\}"
+          "match": "\\)",
+          "name": "punctuation.section.parens.end.scrl"
         },
         {
-          "name": "punctuation.section.brackets.begin.scrl",
-          "match": "\\["
+          "match": "\\{",
+          "name": "punctuation.section.braces.begin.scrl"
         },
         {
-          "name": "punctuation.section.brackets.end.scrl",
-          "match": "\\]"
+          "match": "\\}",
+          "name": "punctuation.section.braces.end.scrl"
         },
         {
-          "name": "punctuation.section.parens.begin.scrl",
-          "match": "\\("
+          "match": "\\[",
+          "name": "punctuation.section.brackets.begin.scrl"
         },
         {
-          "name": "punctuation.section.parens.end.scrl",
-          "match": "\\)"
+          "match": "\\]",
+          "name": "punctuation.section.brackets.end.scrl"
         }
       ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "begin": "'",
+          "end": "'|$",
+          "name": "string.quoted.single.scrl",
+          "patterns": [
+            {
+              "match": "\\\\[ntr0\"'\\\\$]",
+              "name": "constant.character.escape.scrl"
+            },
+            {
+              "match": "\\\\.",
+              "name": "invalid.illegal.escape.scrl"
+            },
+            {
+              "begin": "\\$\\{",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.begin.scrl"
+                }
+              },
+              "end": "\\}",
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.end.scrl"
+                }
+              },
+              "name": "meta.interpolation.scrl",
+              "patterns": [
+                {
+                  "include": "#interpolation-expression"
+                }
+              ]
+            },
+            {
+              "match": "\\$[a-zA-Z_][a-zA-Z0-9_]*",
+              "name": "variable.other.interpolation.scrl"
+            }
+          ]
+        },
+        {
+          "begin": "\"",
+          "end": "\"|$",
+          "name": "string.quoted.double.scrl",
+          "patterns": [
+            {
+              "match": "\\\\[ntr0\"'\\\\$]",
+              "name": "constant.character.escape.scrl"
+            },
+            {
+              "match": "\\\\.",
+              "name": "invalid.illegal.escape.scrl"
+            },
+            {
+              "begin": "\\$\\{",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.begin.scrl"
+                }
+              },
+              "end": "\\}",
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.end.scrl"
+                }
+              },
+              "name": "meta.interpolation.scrl",
+              "patterns": [
+                {
+                  "include": "#interpolation-expression"
+                }
+              ]
+            },
+            {
+              "match": "\\$[a-zA-Z_][a-zA-Z0-9_]*",
+              "name": "variable.other.interpolation.scrl"
+            }
+          ]
+        }
+      ]
+    },
+    "type-args": {
+      "begin": "\\(",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.typeparameters.begin.scrl"
+        }
+      },
+      "comment": "Balanced ( ... ) for a parametrized/fn type. Recursive so Option(List(a)) and Result(a, e) nest correctly.",
+      "end": "\\)",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.typeparameters.end.scrl"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "match": "\\bfn\\b",
+          "name": "keyword.other.fn.scrl"
+        },
+        {
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b",
+          "name": "entity.name.type.scrl"
+        },
+        {
+          "include": "#type-args"
+        },
+        {
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
+          "name": "variable.other.type.scrl"
+        },
+        {
+          "match": ",",
+          "name": "punctuation.separator.comma.scrl"
+        }
+      ]
+    },
+    "type-body": {
+      "begin": "\\{",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.type.begin.scrl"
+        }
+      },
+      "end": "(?=\\})",
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "begin": "\\b([A-Z][a-zA-Z0-9_]*)\\s*(\\()",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.constructor.scrl"
+            },
+            "2": {
+              "name": "punctuation.definition.parameters.begin.scrl"
+            }
+          },
+          "comment": "Constructor with payload: Ctor(label Type, ...)",
+          "end": "\\)",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.parameters.end.scrl"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#field-decl"
+            }
+          ]
+        },
+        {
+          "comment": "Nullary constructor",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b",
+          "name": "entity.name.function.constructor.scrl"
+        },
+        {
+          "include": "#field-decl"
+        }
+      ]
+    },
+    "type-definition": {
+      "patterns": [
+        {
+          "captures": {
+            "1": {
+              "name": "storage.modifier.visibility.scrl"
+            },
+            "2": {
+              "name": "storage.modifier.visibility.scrl"
+            },
+            "3": {
+              "name": "keyword.other.type.scrl"
+            },
+            "4": {
+              "name": "entity.name.type.scrl"
+            },
+            "5": {
+              "patterns": [
+                {
+                  "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
+                  "name": "variable.other.type.scrl"
+                }
+              ]
+            },
+            "6": {
+              "name": "keyword.operator.assignment.scrl"
+            }
+          },
+          "comment": "type alias: type Name(params) = Type",
+          "match": "\\b(pub\\s+)?(opaque\\s+)?(type)\\s+([A-Z][a-zA-Z0-9_]*)(?:\\s*\\(([^)]*)\\))?\\s*(=)"
+        },
+        {
+          "captures": {
+            "1": {
+              "name": "storage.modifier.visibility.scrl"
+            },
+            "2": {
+              "name": "storage.modifier.visibility.scrl"
+            },
+            "3": {
+              "name": "keyword.other.type.scrl"
+            },
+            "4": {
+              "name": "entity.name.type.scrl"
+            },
+            "5": {
+              "patterns": [
+                {
+                  "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
+                  "name": "variable.other.type.scrl"
+                }
+              ]
+            }
+          },
+          "comment": "external type: type Name(params) with no body, ends at EOL",
+          "match": "\\b(pub\\s+)?(opaque\\s+)?(type)\\s+([A-Z][a-zA-Z0-9_]*)(?:\\s*\\(([^)]*)\\))?\\s*$"
+        },
+        {
+          "begin": "\\b(pub\\s+)?(opaque\\s+)?(type)\\s+([A-Z][a-zA-Z0-9_]*)(?:\\s*(\\())?",
+          "beginCaptures": {
+            "1": {
+              "name": "storage.modifier.visibility.scrl"
+            },
+            "2": {
+              "name": "storage.modifier.visibility.scrl"
+            },
+            "3": {
+              "name": "keyword.other.type.scrl"
+            },
+            "4": {
+              "name": "entity.name.type.scrl"
+            },
+            "5": {
+              "name": "punctuation.definition.typeparameters.begin.scrl"
+            }
+          },
+          "comment": "type definition: type Name(params) { ... }",
+          "end": "\\}",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.type.end.scrl"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#comments"
+            },
+            {
+              "include": "#generic-params"
+            },
+            {
+              "include": "#type-body"
+            }
+          ]
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "comment": "Standalone type name",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b",
+          "name": "entity.name.type.scrl"
+        }
+      ]
+    },
+    "variable-with-type": {
+      "captures": {
+        "1": {
+          "name": "variable.other.scrl"
+        },
+        "2": {
+          "name": "entity.name.type.scrl"
+        },
+        "3": {
+          "name": "keyword.operator.assignment.scrl"
+        }
+      },
+      "comment": "Variable declaration with type annotation: name Type = ...",
+      "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([A-Z][a-zA-Z0-9_]*)\\s*(=)"
     }
-  }
+  },
+  "scopeName": "source.scrl"
 }

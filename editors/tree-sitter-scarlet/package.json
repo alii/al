@@ -1,0 +1,16 @@
+{
+  "name": "tree-sitter-scarlet",
+  "version": "0.1.0",
+  "description": "Scarlet grammar for tree-sitter",
+  "repository": "https://github.com/scarletindustries/language",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test",
+    "corpus": "./check-corpus.sh"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.25.8"
+  }
+}

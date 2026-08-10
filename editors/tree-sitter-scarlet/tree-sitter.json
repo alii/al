@@ -1,0 +1,19 @@
+{
+  "grammars": [
+    {
+      "name": "scarlet",
+      "camelcase": "Scarlet",
+      "scope": "source.scrl",
+      "file-types": ["scrl"],
+      "injection-regex": "^scarlet$"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Scarlet grammar for tree-sitter",
+    "links": {
+      "repository": "https://github.com/scarletindustries/language"
+    }
+  }
+}
