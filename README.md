@@ -13,8 +13,8 @@ println("Hello from Scarlet.")
 ```
 
 ```
-scarlet run <file.scrl>      Run a program
-scarlet repl               Start interactive REPL
-scarlet check <file.scrl>    Type-check without running
+scarlet run <file.scrl>         Run a program
+scarlet repl                    Start interactive REPL
+scarlet check <file.scrl>       Type-check without running
 scarlet fmt [glob path]         Format source files
 ```
