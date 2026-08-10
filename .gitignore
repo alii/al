@@ -14,7 +14,7 @@ bin/
 *.db
 node_modules
 dist
-extension/out
+editors/vscode/out
 /target/
 /docs/
 *.vsix

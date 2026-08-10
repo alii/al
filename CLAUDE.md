@@ -10,7 +10,7 @@ The AST is defined in `crates/scarlet_syntax/src/ast/mod.rs`. When changing AST 
 
 The HM type inferencer lives in `crates/scarlet_types/src/types/infer.rs`. Type definitions are in `type_def/mod.rs`. Exhaustiveness checking is in `types/exhaustiveness.rs`.
 
-For the VSCode extension in `extension/`, use Bun for package management and running scripts (e.g., `bun install`, `bun run compile`).
+Editor extensions live in `editors/`. For the VSCode extension in `editors/vscode/`, use Bun for package management and running scripts (e.g., `bun install`, `bun run compile`). The Zed extension in `editors/zed/` is a standalone Rust crate (not a workspace member — Zed builds it for wasm32-wasip2 itself).
 
 I have aliased cat to be `bat`, which when piping with STDIN will add a "STDIN" string on the first line. For this reason, use `/bin/cat` explicitly for catting when piping
 
