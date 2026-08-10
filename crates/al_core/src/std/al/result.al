@@ -19,6 +19,13 @@ pub fn then(r Result(a, e), f fn(a) Result(b, e)) Result(b, e) {
 	}
 }
 
+pub fn unwrap(r Result(a, Nil), default e) Result(a, e) {
+	match r {
+		Ok(a) -> Ok(a)
+		Err(Nil) -> Err(default)
+	}
+}
+
 pub fn is_ok(r Result(a, e)) Bool {
 	match r {
 		Ok(_) -> True
