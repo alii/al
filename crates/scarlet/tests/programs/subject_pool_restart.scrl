@@ -1,0 +1,200 @@
+// A worker pool built on subjects, stopped and restarted. Regression for a
+// native-backend miscompile: branch arms used to share frame slots, and the
+// compiled park/resume machinery addresses slots by local identity, so one
+// arm's dead temp could zero another arm's live value — this program
+// segfaulted at the second `start`. Slots are per-local now (`emit_branches`);
+// this pins the whole pool lifecycle end to end.
+
+import scarlet/scheduler
+import scarlet/scheduler.{Subject}
+
+type Health {
+	Healthy
+	Broken
+}
+
+type Job {
+	run fn(Result(Int, String)) Health
+}
+
+type Task {
+	Work(job Job)
+	Quit
+}
+
+type Request {
+	Run(job Job)
+	Ready(worker Subject(Task))
+	Stop(done Subject(Nil))
+}
+
+fn ask(gateway Subject(Request), next fn(Int) Result(a, String)) Result(a, String) {
+	reply = scheduler.subject()
+	scheduler.send(
+		gateway,
+		Run(
+			job: Job(run: fn(lease) {
+				outcome = bind(lease, next)
+				scheduler.send(reply, outcome)
+				health(outcome)
+			}),
+		),
+	)
+	scheduler.receive(reply)
+}
+
+fn bind(r Result(Int, String), f fn(Int) Result(a, String)) Result(a, String) {
+	match r {
+		Ok(v) -> f(v)
+		Err(e) -> Err(e)
+	}
+}
+
+fn health(outcome Result(a, String)) Health {
+	match outcome {
+		Ok(_) -> Healthy
+		Err(_) -> Broken
+	}
+}
+
+fn labour(gateway Subject(Request), inbox Subject(Task), held Option(Int), seed Int) Nil {
+	match scheduler.receive(inbox) {
+		Quit -> Nil
+		Work(job) -> {
+			lease = match held {
+				Some(v) -> Ok(v)
+				None -> Ok(seed + 1)
+			}
+			kept = retain(lease, run(job, lease))
+			scheduler.send(gateway, Ready(inbox))
+			labour(gateway, inbox, kept, seed + 1)
+		}
+	}
+}
+
+fn run(job Job, lease Result(Int, String)) Health {
+	match job {
+		Job(f) -> f(lease)
+	}
+}
+
+fn retain(lease Result(Int, String), verdict Health) Option(Int) {
+	match (lease, verdict) {
+		(Ok(v), Healthy) -> Some(v)
+		(Ok(_), Broken) -> None
+		(Err(_), _) -> None
+	}
+}
+
+fn serve(
+	gateway Subject(Request),
+	idle Array(Subject(Task)),
+	queued Array(Job),
+	live Int,
+	closing Array(Subject(Nil)),
+) Nil {
+	if live == 0 {
+		each_send(closing)
+	} else {
+		match scheduler.receive(gateway) {
+			Run(job) -> match idle {
+				[worker, ..rest] -> {
+					scheduler.send(worker, Work(job))
+					serve(gateway, rest, queued, live, closing)
+				}
+				[] -> serve(gateway, idle, [job, ..queued], live, closing)
+			}
+			Ready(worker) -> match queued {
+				[job, ..rest] -> {
+					scheduler.send(worker, Work(job))
+					serve(gateway, idle, rest, live, closing)
+				}
+				[] -> match closing {
+					[] -> serve(gateway, [worker, ..idle], queued, live, closing)
+					_ -> {
+						scheduler.send(worker, Quit)
+						serve(gateway, idle, queued, live - 1, closing)
+					}
+				}
+			}
+			Stop(done) -> {
+				quit_all(idle)
+				serve(gateway, [], queued, live - length_of(idle), [done, ..closing])
+			}
+		}
+	}
+}
+
+fn quit_all(ws Array(Subject(Task))) Nil {
+	match ws {
+		[] -> Nil
+		[w, ..rest] -> {
+			scheduler.send(w, Quit)
+			quit_all(rest)
+		}
+	}
+}
+
+fn each_send(ds Array(Subject(Nil))) Nil {
+	match ds {
+		[] -> Nil
+		[d, ..rest] -> {
+			scheduler.send(d, Nil)
+			each_send(rest)
+		}
+	}
+}
+
+fn length_of(xs Array(a)) Int {
+	match xs {
+		[] -> 0
+		[_, ..rest] -> 1 + length_of(rest)
+	}
+}
+
+fn start() Subject(Request) {
+	boot = scheduler.subject()
+	scheduler.spawn(fn() {
+		gateway = scheduler.subject()
+		scheduler.spawn(fn() {
+			inbox = scheduler.subject()
+			scheduler.send(gateway, Ready(inbox))
+			labour(gateway, inbox, None, 0)
+		})
+		scheduler.send(boot, gateway)
+		serve(gateway, [], [], 1, [])
+	})
+	scheduler.receive(boot)
+}
+
+fn stop(gateway Subject(Request)) Nil {
+	done = scheduler.subject()
+	scheduler.send(gateway, Stop(done))
+	scheduler.receive(done)
+}
+
+fn beat(gateway Subject(Request), left Int, ok Int) Int {
+	if left == 0 {
+		ok
+	} else {
+		outcome = if left == 7 {
+			ask(gateway, fn(_) Err('broken'))
+		} else {
+			ask(gateway, fn(v) Ok(v))
+		}
+		match outcome {
+			Ok(_) -> beat(gateway, left - 1, ok + 1)
+			Err(_) -> beat(gateway, left - 1, ok)
+		}
+	}
+}
+
+a = start()
+_ = ask(a, fn(v) Ok(v))
+_ = ask(a, fn(v) Ok(v))
+stop(a)
+println('first pool stopped')
+b = start()
+println('second pool: ${ask(b, fn(v) Ok(v))}')
+stop(b)
+println('done')

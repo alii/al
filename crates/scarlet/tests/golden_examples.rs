@@ -227,6 +227,9 @@ suite! {
         // The deterministic slice of the effectful stdlib. Everything is pinned
         // as a derived fact, never a clock reading or an env value.
         effects,
+        // Subjects: a worker pool stopped and restarted; pins the native
+        // park/resume + frame-slot contract (each local owns its slot).
+        subject_pool_restart,
         // Subjects: send/receive ordering, park/wake, timeouts, owner death.
         // Cross-sender interleavings are asserted as aggregates only.
         messages,

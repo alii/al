@@ -255,11 +255,14 @@ fn an_infallible_match_keeps_the_flat_lowering() {
             (Ret, 0),
             (PushLocal, 0),
             (UnwrapEnum, 0),
+            // Each arm's binds get fresh slots: the native backend addresses
+            // slots by local identity, so the local-to-slot map must be
+            // injective (see `emit_branches`).
+            (StoreLocal, 3),
             (StoreLocal, 2),
-            (StoreLocal, 1),
             (Drop, 0),
-            (PushLocal, 1),
             (PushLocal, 2),
+            (PushLocal, 3),
             (MulInt, 0),
             (Ret, 0),
         ]

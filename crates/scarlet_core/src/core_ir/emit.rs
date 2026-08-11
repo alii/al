@@ -804,9 +804,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                     e = self.emit_bound_atom(bind, rhs, body, &[]);
                 }
                 CoreExpr::LetJoin { bind, join, body } => {
-                    let mark = self.next_slot;
                     self.emit_expr_in(join, false);
-                    self.next_slot = mark;
                     let slot = self.bind(bind);
                     self.push(op_arg(Op::StoreLocal, slot));
                     e = body;
@@ -821,7 +819,6 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                         redeclared_join(*id);
                     }
                     self.joins[*id] = Some(Vec::new());
-                    let mark = self.next_slot;
                     self.emit_expr_in(body, tail);
                     // In value position the body falls through with its value
                     // and must skip the cont block. In tail position every
@@ -833,11 +830,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                         None => unbound_join(*id),
                     };
                     self.patch_all(&pending);
-                    // The cont only references locals bound before this node,
-                    // so the body's temps are dead on every `Goto` edge.
-                    self.next_slot = mark;
                     self.emit_expr_in(cont, tail);
-                    self.next_slot = mark;
                     if let Some(skip) = skip {
                         self.patch(skip);
                     }
@@ -926,17 +919,18 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
     }
 
     /// Emit `then`/`els` after the conditional jump at `else_j`. Both arms
-    /// restart slot allocation from the current mark: they are mutually
-    /// exclusive, so their temps may overlap. A tail or diverging arm gets no
-    /// merge jump — it could never execute.
+    /// give every arm's temps their own slots. Arms are mutually exclusive,
+    /// so sharing one slot range between them would be sound for the
+    /// interpreter — but the native backend addresses slots by local
+    /// identity at park resumes and refcount drops, so two locals sharing a
+    /// slot lets one arm's dead tenant zero the other arm's live value (the
+    /// subjects pool segfault). Fresh slots per arm make the local-to-slot
+    /// map injective, which that machinery relies on.
     fn emit_branches(&mut self, else_j: CodeAddr, then: &CoreExpr, els: &CoreExpr, tail: bool) {
-        let mark = self.next_slot;
         self.emit_expr_in(then, tail);
-        self.next_slot = mark;
         let end_j = (!tail && !diverges(then)).then(|| self.jump(Op::Jump));
         self.patch(else_j);
         self.emit_expr_in(els, tail);
-        self.next_slot = mark;
         if let Some(end_j) = end_j {
             self.patch(end_j);
         }
@@ -1269,7 +1263,6 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         let scrut_slot = self.slot(scrut);
         for ((pat, body), &tag) in arms.iter().zip(tags) {
             self.patch(table[tag as usize]);
-            let mark = self.next_slot;
             if let CorePat::Ctor { fields, .. } = pat {
                 self.emit_payload_binds(scrut_slot, fields);
             }
@@ -1278,7 +1271,6 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             if !tail && !diverges(body) {
                 ends.push(self.jump(Op::Jump));
             }
-            self.next_slot = mark;
         }
         self.patch_all(&ends);
     }
@@ -1287,7 +1279,6 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         let scrut_slot = self.slot(scrut);
         let mut ends: Vec<CodeAddr> = Vec::with_capacity(arms.len());
         for (pat, body) in arms {
-            let mark = self.next_slot;
             let fail = match pat {
                 CorePat::Ctor { variant, fields } => {
                     self.push(op_arg(Op::PushLocal, scrut_slot));
@@ -1328,7 +1319,6 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             if let Some(f) = fail {
                 self.patch(f);
             }
-            self.next_slot = mark;
         }
         // Unreachable when the source match was exhaustive. Reaching it means
         // a checker or lowering defect, and halting beats returning a nil that
