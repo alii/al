@@ -685,6 +685,42 @@ const WALK_TY_PENDING: Ty = Ty(u32::MAX);
 /// A region with no unfilled slot left in it. Checked wherever a region leaves
 /// the compiler for the elaborator: a `WALK_TY_PENDING` that got that far would
 /// index the engine's node arena out of bounds.
+/// How many levels of a recursive type's variant tables exhaustiveness must
+/// see for these patterns: the deepest constructor nesting, with wildcards and
+/// bindings costing nothing. One extra level is added at the call sites so
+/// witness rendering at the boundary still has variants to name.
+fn pattern_unroll_depth(p: &ast::Pattern) -> usize {
+    fn arg_depth(a: &ast::PatternArg) -> usize {
+        match a {
+            ast::PatternArg::Positional(p) | ast::PatternArg::Labeled { pattern: p, .. } => {
+                pattern_unroll_depth(p)
+            }
+        }
+    }
+    match p {
+        ast::Pattern::Constructor { args, .. } => 1 + args.iter().map(arg_depth).max().unwrap_or(0),
+        ast::Pattern::Tuple { elements, .. } => {
+            1 + elements.iter().map(pattern_unroll_depth).max().unwrap_or(0)
+        }
+        ast::Pattern::Array { elements, .. } => {
+            1 + elements
+                .iter()
+                .map(|e| match e {
+                    ast::ArrayPatternElement::Pattern(p) => pattern_unroll_depth(p),
+                    ast::ArrayPatternElement::Spread { .. } => 0,
+                })
+                .max()
+                .unwrap_or(0)
+        }
+        ast::Pattern::Or { first, rest, .. } => rest
+            .iter()
+            .map(pattern_unroll_depth)
+            .fold(pattern_unroll_depth(first), usize::max),
+        ast::Pattern::Literal(_) | ast::Pattern::Range { .. } | ast::Pattern::Binary { .. } => 1,
+        ast::Pattern::Var { .. } => 0,
+    }
+}
+
 fn walk_region_is_filled(region: &[WalkStep]) -> bool {
     !region.contains(&WalkStep::Ty(WALK_TY_PENDING))
 }
@@ -2268,7 +2304,10 @@ impl Compiler {
                 self.type_pattern_sizes(&pattern);
 
                 if typed_ok {
-                    let resolved = self.engine.resolve(init_ty, Some(&self.env));
+                    let depth = pattern_unroll_depth(&pattern) + 1;
+                    let resolved =
+                        self.engine
+                            .resolve_for_patterns(init_ty, Some(&self.env), depth);
                     let mut um = UsefulnessMatrix::new(resolved);
                     let pat = um.lower(&pattern);
                     if let Some(missing) = um.find_missing(&[pat]) {
@@ -2693,6 +2732,24 @@ impl Compiler {
         let out = f(self);
         self.retain_namespaces = prev;
         out
+    }
+
+    /// Session rewind support: a balanced enter/leave pair leaves both module-
+    /// frame vectors empty, so anything found here means a frame was carried
+    /// across compiles, where its undo entries would evict an unrelated
+    /// compile's locals. Cleared in release so a survivor cannot do damage,
+    /// asserted in debug so the unbalanced path gets found.
+    pub(crate) fn reset_module_frames(&mut self) {
+        debug_assert!(
+            self.locals_frame_marks.is_empty(),
+            "module frame survived across reset_to"
+        );
+        debug_assert!(
+            self.locals_frame_undo.is_empty(),
+            "module-frame undo entries survived across reset_to"
+        );
+        self.locals_frame_marks.clear();
+        self.locals_frame_undo.clear();
     }
 
     /// Snapshot the enclosing module's per-module state into a `ModuleFrame`
@@ -5046,7 +5103,16 @@ impl Compiler {
         }
 
         if !any_pattern_err {
-            let resolved_subj = self.engine.resolve(subject_ty, Some(&self.env));
+            let depth = m
+                .arms
+                .iter()
+                .map(|arm| pattern_unroll_depth(&arm.pattern))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let resolved_subj =
+                self.engine
+                    .resolve_for_patterns(subject_ty, Some(&self.env), depth);
             let mut um = UsefulnessMatrix::new(resolved_subj);
             let all_pats: Vec<Pat> = m.arms.iter().map(|arm| um.lower(&arm.pattern)).collect();
             // Guarded arms don't contribute to exhaustiveness (the guard may be

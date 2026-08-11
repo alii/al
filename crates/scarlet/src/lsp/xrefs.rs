@@ -4,6 +4,39 @@ use crate::bytecode;
 use crate::reference;
 use crate::span::Span;
 
+/// Cross-edit identity of a definition: its defining file, name, and entity
+/// kind. A [`reference::DefId`] is unusable as this key twice over: its span
+/// shifts with any edit above it in the defining file, and its `ModuleId`
+/// depends on how the analysis was rooted (the same file is `./lib` when
+/// imported but the bare entry module when queried directly, and an edit
+/// flips which mapping answers). The file URI is the identity both sides can
+/// always compute. This key survives every edit short of the rename itself,
+/// which rewrites the edges anyway.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct StableDefId {
+    file: String,
+    name: String,
+    entity: reference::EntityKind,
+}
+
+impl StableDefId {
+    /// Build the key for `def` as seen from `request_uri`'s graph. `None` when
+    /// the defining module has no file (an embedded stdlib module), which
+    /// needs no reverse edges: nothing on disk imports it by path.
+    pub(super) fn of(
+        graph: &reference::ReferenceGraph,
+        request_uri: &str,
+        def: &reference::Definition,
+    ) -> Option<Self> {
+        let file = super::wire::uri_for(graph, request_uri, def.defid.module)?;
+        Some(StableDefId {
+            file,
+            name: def.name.clone(),
+            entity: def.defid.entity,
+        })
+    }
+}
+
 /// One dependent-file occurrence of a cross-module definition. Carries its own
 /// URI so it survives a later analysis rooted at a different file.
 #[derive(Clone)]
@@ -17,13 +50,13 @@ pub(super) struct Xref {
 /// retain. A position query re-roots compilation at the queried file, and a
 /// file's importers are never in its own import closure, so their references
 /// into it would vanish. Every analysis records the entry file's cross-module
-/// uses here, keyed by target [`reference::DefId`] (stable across re-roots: the
-/// session interner is append-only). `by_file` lets a re-analysis of one file
+/// uses here, keyed by [`StableDefId`], which survives edits to the defining
+/// file (a `DefId`'s span does not). `by_file` lets a re-analysis of one file
 /// replace exactly its own contribution.
 #[derive(Default)]
 pub(super) struct WorkspaceXrefs {
-    by_def: HashMap<reference::DefId, Vec<Xref>>,
-    by_file: HashMap<String, Vec<reference::DefId>>,
+    by_def: HashMap<StableDefId, Vec<Xref>>,
+    by_file: HashMap<String, Vec<StableDefId>>,
 }
 
 impl WorkspaceXrefs {
@@ -31,7 +64,7 @@ impl WorkspaceXrefs {
     pub(super) fn refresh(
         &mut self,
         uri: &str,
-        found: Vec<(reference::DefId, Span, reference::ReferenceKind)>,
+        found: Vec<(StableDefId, Span, reference::ReferenceKind)>,
     ) {
         if let Some(defs) = self.by_file.remove(uri) {
             for d in defs {
@@ -43,9 +76,9 @@ impl WorkspaceXrefs {
                 }
             }
         }
-        let mut touched: Vec<reference::DefId> = Vec::new();
+        let mut touched: Vec<StableDefId> = Vec::new();
         for (target, span, kind) in found {
-            self.by_def.entry(target).or_default().push(Xref {
+            self.by_def.entry(target.clone()).or_default().push(Xref {
                 uri: uri.to_string(),
                 span,
                 kind,
@@ -58,8 +91,8 @@ impl WorkspaceXrefs {
     }
 
     /// Every persisted dependent-file occurrence of `def`.
-    pub(super) fn callers(&self, def: reference::DefId) -> &[Xref] {
-        self.by_def.get(&def).map_or(&[], Vec::as_slice)
+    pub(super) fn callers(&self, def: &StableDefId) -> &[Xref] {
+        self.by_def.get(def).map_or(&[], Vec::as_slice)
     }
 }
 

@@ -811,6 +811,40 @@ fn rename_from_library_declaration_rewrites_dependent_callers() {
     assert_rename_spans_lib_and_main(&resp, &main_uri, &lib_uri, "salute");
 }
 
+/// The staleness regression: edit lib.scrl so every span in it shifts, THEN
+/// rename from the moved declaration. The persisted reverse edge for
+/// main.scrl was recorded before the edit; a span-carrying key would miss it
+/// and the rename would silently drop main.scrl's call site, breaking the
+/// workspace with no diagnostic. The xref key must survive the edit.
+#[test]
+fn rename_after_library_edit_still_rewrites_dependent_callers() {
+    let (_p, mut s, main_uri, lib_uri) = xmod_project();
+
+    // Simulate didChange: a blank line prepended to lib.scrl moves greet's
+    // declaration down one line. main.scrl stays open but un-reanalysed.
+    let edited = "\npub fn greet() Int { 7 }\n";
+    s.open_document(&lib_uri, edited);
+
+    let (l, c) = cursor(edited, "greet", 1, 1);
+    let resp = rename_at(&mut s, &lib_uri, l, c, "salute")
+        .expect("a rename after an edit to the library must still be allowed");
+    let changes = resp
+        .get("changes")
+        .and_then(Json::as_object)
+        .expect("a WorkspaceEdit with a `changes` map");
+    assert!(
+        changes.contains_key(main_uri.as_str()),
+        "the dependent caller in main.scrl must be rewritten after lib.scrl \
+         was edited; dropping it silently breaks the workspace: {changes:?}"
+    );
+    let main_edits = changes[main_uri.as_str()].as_array().expect("edits array");
+    assert_eq!(
+        main_edits.len(),
+        1,
+        "exactly the `greet` of `lib.greet()`: {main_edits:?}"
+    );
+}
+
 #[test]
 fn find_references_from_library_declaration_when_only_library_is_open() {
     // main.scrl is never opened as a tab, so only the one-time workspace scan

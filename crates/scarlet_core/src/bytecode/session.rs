@@ -280,6 +280,7 @@ impl Compiler {
         // different path than it did last compile.
         self.defid_module_memo.clear();
         self.module_table.unmark_all_loading();
+        self.reset_module_frames();
     }
 
     /// Materialise a `CompileResult` by cloning, not taking, so the session can

@@ -933,7 +933,27 @@ impl InferEngine {
     // also lower every unbound var inside T to min(its_level, L). Otherwise an
     // inner var observable from an outer scope gets quantified at the wrong
     // level. Generic vars carry no level and are skipped.
-    fn occurs_and_adjust(&mut self, var_id: i32, var_level: i32, t: Ty) -> bool {
+    /// Undo the level lowering a failed unification performed. Left in place,
+    /// a lowered level makes a later `generalize` skip a variable it should
+    /// have quantified, turning one real type error into a cascade.
+    fn restore_levels(&mut self, lowered: &[(i32, i32)]) {
+        for &(id, old_level) in lowered.iter().rev() {
+            if let RootVarState::Unbound { constraint, .. } = self.root_var(id) {
+                self.vars[id as usize] = TyVarState::Unbound {
+                    level: old_level,
+                    constraint,
+                };
+            }
+        }
+    }
+
+    fn occurs_and_adjust_logged(
+        &mut self,
+        var_id: i32,
+        var_level: i32,
+        t: Ty,
+        lowered: &mut Vec<(i32, i32)>,
+    ) -> bool {
         let r = self.find(t);
         match self.node(r) {
             TypeNode::Var(id) => {
@@ -943,6 +963,7 @@ impl InferEngine {
                 if let RootVarState::Unbound { level, constraint } = self.root_var(id)
                     && level > var_level
                 {
+                    lowered.push((id, level));
                     self.vars[id as usize] = TyVarState::Unbound {
                         level: var_level,
                         constraint,
@@ -954,12 +975,12 @@ impl InferEngine {
                 debug_assert!(false, "Bound in live inference (occurs_and_adjust)");
                 false
             }
-            TypeNode::Con { args, .. } => self.occurs_slice(var_id, var_level, args),
+            TypeNode::Con { args, .. } => self.occurs_slice(var_id, var_level, args, lowered),
             TypeNode::Fun { params, ret } => {
-                self.occurs_slice(var_id, var_level, params)
-                    || self.occurs_and_adjust(var_id, var_level, ret)
+                self.occurs_slice(var_id, var_level, params, lowered)
+                    || self.occurs_and_adjust_logged(var_id, var_level, ret, lowered)
             }
-            TypeNode::Tuple { elems } => self.occurs_slice(var_id, var_level, elems),
+            TypeNode::Tuple { elems } => self.occurs_slice(var_id, var_level, elems, lowered),
         }
     }
 
@@ -968,10 +989,11 @@ impl InferEngine {
         var_id: i32,
         var_level: i32,
         sl: ArenaSlice<pool::Children>,
+        lowered: &mut Vec<(i32, i32)>,
     ) -> bool {
         for i in sl.range() {
             let kid = self.children[i];
-            if self.occurs_and_adjust(var_id, var_level, kid) {
+            if self.occurs_and_adjust_logged(var_id, var_level, kid, lowered) {
                 return true;
             }
         }
@@ -1112,11 +1134,20 @@ impl InferEngine {
                 Err(could_not_unify(var_ty, ty))
             }
             RootVarState::Unbound { level, constraint } => {
-                if self.occurs_and_adjust(var_id, level, ty) {
+                let mut lowered = Vec::new();
+                if self.occurs_and_adjust_logged(var_id, level, ty, &mut lowered) {
+                    self.restore_levels(&lowered);
                     return Err(UnifyError::RecursiveType);
                 }
                 if let Some(c) = constraint {
-                    return self.unify_constrained(var_id, var_ty, c, level, ty);
+                    let r = self.unify_constrained(var_id, var_ty, c, level, ty);
+                    if r.is_err() {
+                        // The failed unification must not leave levels
+                        // lowered: generalize would then under-quantify and
+                        // cascade one real error into several spurious ones.
+                        self.restore_levels(&lowered);
+                    }
+                    return r;
                 }
                 self.vars[var_id as usize] = TyVarState::Link { ty };
                 Ok(())
@@ -1606,6 +1637,20 @@ impl InferEngine {
         self.resolve_inner(ty, env, &mut path)
     }
 
+    /// As [`InferEngine::resolve`], but unrolls a self-recursive nominal type
+    /// up to `depth` times instead of once. Exhaustiveness checking needs the
+    /// variant tables as deep as the patterns actually inspect; with the
+    /// single unroll, the recursive occurrence inside `Cons(head, tail)`
+    /// resolves variant-less, reads as an infinite type, and a genuinely
+    /// exhaustive two-level match on a list or tree is rejected.
+    pub fn resolve_for_patterns(&mut self, ty: Ty, env: Option<&TypeEnv>, depth: usize) -> Type {
+        let mut path = ResolvePath {
+            stack: Vec::new(),
+            same_limit: depth.clamp(1, MAX_SAME_INSTANCE_UNROLL),
+        };
+        self.resolve_inner(ty, env, &mut path)
+    }
+
     fn resolve_inner(&mut self, ty: Ty, env: Option<&TypeEnv>, path: &mut ResolvePath) -> Type {
         let r = self.find(ty);
         match self.node(r) {
@@ -1782,28 +1827,51 @@ impl InferEngine {
 /// Cutting off only makes exhaustiveness stricter, never unsound.
 const MAX_NOMINAL_RECURRENCE: usize = 16;
 
+/// Hard cap on [`ResolvePath::same_limit`]: patterns deeper than this get a
+/// conservative (possibly false-negative-free but incomplete) unroll rather
+/// than an exponential resolution.
+const MAX_SAME_INSTANCE_UNROLL: usize = 32;
+
 /// The nominal-type instances being expanded on the active `resolve` path.
 /// Pairing the id with a key for its arguments is what tells a finite
 /// re-nesting apart from a true recursive occurrence.
-#[derive(Default)]
 struct ResolvePath {
     stack: Vec<(TypeId, String)>,
+    /// How many times one exact instance may sit on the path before the guard
+    /// cuts off: 1 for ordinary resolution, the pattern depth for
+    /// exhaustiveness.
+    same_limit: usize,
+}
+
+impl Default for ResolvePath {
+    fn default() -> Self {
+        ResolvePath {
+            stack: Vec::new(),
+            same_limit: 1,
+        }
+    }
 }
 
 impl ResolvePath {
     /// Whether that exact instance is already on the path, or this nominal type
     /// has recurred [`MAX_NOMINAL_RECURRENCE`] times without repeating.
     fn would_recurse(&self, id: TypeId, args_key: &str) -> bool {
-        let mut count = 0usize;
+        let mut exact = 0usize;
+        let mut distinct = 0usize;
         for (i, k) in &self.stack {
-            if *i == id {
-                if k == args_key {
+            if *i != id {
+                continue;
+            }
+            if k == args_key {
+                exact += 1;
+                if exact >= self.same_limit {
                     return true;
                 }
-                count += 1;
+            } else {
+                distinct += 1;
             }
         }
-        count >= MAX_NOMINAL_RECURRENCE
+        distinct >= MAX_NOMINAL_RECURRENCE
     }
 
     fn enter(&mut self, id: TypeId, args_key: String) {

@@ -238,7 +238,8 @@ impl Workspace {
             }
             // An importer that is also the current entry appears both here and
             // in the live edges above, hence the dedup.
-            for x in self.dependent_callers(&uri, defid) {
+            let stable = crate::lsp::xrefs::StableDefId::of(graph, &uri, def);
+            for x in stable.iter().flat_map(|s| self.dependent_callers(&uri, s)) {
                 push(x.uri.clone(), &x.span, &mut out);
             }
             if include_decl && let Some(u) = uri_for(graph, &uri, defid.module) {
@@ -274,7 +275,10 @@ impl Workspace {
                     // need no further checks. Appending breaks each file's
                     // positional edit order, so re-sort.
                     let mut added = false;
-                    for x in self.dependent_callers(&uri, defid) {
+                    let stable = graph
+                        .canonical_definition(defid)
+                        .and_then(|d| crate::lsp::xrefs::StableDefId::of(graph, &uri, d));
+                    for x in stable.iter().flat_map(|s| self.dependent_callers(&uri, s)) {
                         let edits = we.changes.entry(x.uri.clone()).or_default();
                         if !edits.iter().any(|e| e.span == x.span) {
                             edits.push(reference::rename::TextEdit {

@@ -2909,22 +2909,39 @@ impl<'a> BodyGen<'a> {
                         // `owned_word` fuse; leftovers are cleared and their
                         // drops emit as written.
                         if let Atom::PrimOp { op, args, .. } = rhs
-                            && matches!(*op, Op::MapSet | Op::MapDelete)
+                            && is_native_bridge_op(*op)
                         {
+                            // One exception to "a Drop marks the last use":
+                            // `drop x; tail self(..x..)` is legal IR — the
+                            // tail's operand copy runs first and the drop is
+                            // sunk past it (`release_self_tail_args`). A
+                            // local the terminal tail call still reads must
+                            // keep its slot reference.
                             let mut after = body.as_ref();
+                            let mut chain = Vec::new();
                             while let CoreExpr::Drop {
                                 local,
                                 shape: None,
                                 body: b,
                             } = after
                             {
-                                if args.iter().filter(|&&a| a == *local).count() == 1
-                                    && self.layout.slot(*local).is_some()
-                                    && self.plan.rc_gate(*local).is_some()
-                                {
-                                    self.move_args.push(*local);
-                                }
+                                chain.push(*local);
                                 after = b;
+                            }
+                            if let CoreExpr::Tail(Atom::Call {
+                                callee: Callee::Self_,
+                                args: targs,
+                            }) = after
+                            {
+                                chain.retain(|x| !targs.contains(x));
+                            }
+                            for local in chain {
+                                if args.iter().filter(|&&a| a == local).count() == 1
+                                    && self.layout.slot(local).is_some()
+                                    && self.plan.rc_gate(local).is_some()
+                                {
+                                    self.move_args.push(local);
+                                }
                             }
                         }
                         let v = self.eval_pure(rhs, want_word, want_int);
@@ -2967,7 +2984,13 @@ impl<'a> BodyGen<'a> {
                         && let Some((now, moved, args)) = split_self_tail(e)
                     {
                         for (x, reusable) in now {
-                            self.drop_local(x, reusable);
+                            // A drop already fused into an op's operand move
+                            // has nothing left to release; its slot is clear.
+                            if let Some(i) = self.consumed_drops.iter().position(|&c| c == x) {
+                                self.consumed_drops.swap_remove(i);
+                            } else {
+                                self.drop_local(x, reusable);
+                            }
                         }
                         self.self_tail(args, &moved);
                         return;

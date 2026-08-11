@@ -656,6 +656,14 @@ impl ReferenceGraph {
             .is_some_and(|h| matches!(h.kind, ReferenceKind::Import))
     }
 
+    /// The canonical definition a reference target resolves to, through any
+    /// import alias. The stable cross-file identity of a definition is its
+    /// (module, name, entity) triple, not its `DefId`: the span inside a
+    /// `DefId` moves with every edit to the defining file.
+    pub fn canonical_definition(&self, id: DefId) -> Option<&Definition> {
+        self.definition(self.canonical(id))
+    }
+
     /// The raw `DefId` a position resolves to, without crossing to the owning
     /// module's record.
     pub fn def_id_at(&self, module: ModuleId, line: i32, col: i32) -> Option<DefId> {

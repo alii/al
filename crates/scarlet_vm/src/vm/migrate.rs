@@ -93,21 +93,38 @@ impl VM {
     /// Listener ids need no guarding: the listener socket is shared
     /// program-wide, so the destination re-resolves the same fd.
     pub(super) fn can_donate_fds(&self, victim: &Process) -> bool {
+        // The id set must be exactly what `detach_fds` will sweep: fds
+        // reachable from the victim's stack and frames, plus connections it
+        // owns that nothing on its stack references any more. The accept-
+        // fan-out pattern produces the latter: the acceptor keeps ownership
+        // while a spawned handler still reads the socket, and a donation that
+        // guards only the reachable set would evict the handler's live
+        // connection out from under its parked read.
         let mut ids = Vec::new();
         for_each_process_socket(victim, &mut |s| {
             if !s.is_listener {
                 ids.push(s.id);
             }
         });
+        ids.extend(
+            self.tcp_connections
+                .iter()
+                .filter(|&(_, conn)| conn.owner == victim.pid)
+                .map(|(&id, _)| id),
+        );
         if ids.is_empty() {
             return true;
         }
+        ids.sort_unstable();
+        ids.dedup();
 
         if ids.iter().any(|id| self.pending_connects.contains_key(id)) {
             return false;
         }
         // The victim itself is runnable (in run_queue, not parked), so its own
-        // fds cannot appear here — any hit is a sibling's armed fd.
+        // fds cannot appear here — a hit is a sibling parked on a shared or
+        // owned-but-unreferenced connection, whose wake path resolves the id
+        // through this scheduler's tables and would break silently.
         !ids.iter().any(|id| self.io_waiters.contains_key(id))
     }
 

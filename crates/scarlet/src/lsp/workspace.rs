@@ -222,11 +222,11 @@ impl Workspace {
     /// Dependent-file callers of `def`, persisted across re-rooting because an
     /// importer is never inside its imports' closure. Only reference sites:
     /// real uses and selective-import `{item}` tokens, which rename rewrites.
-    pub(super) fn dependent_callers(
-        &self,
+    pub(super) fn dependent_callers<'a>(
+        &'a self,
         uri: &str,
-        def: reference::DefId,
-    ) -> impl Iterator<Item = &Xref> {
+        def: &'a super::xrefs::StableDefId,
+    ) -> impl Iterator<Item = &'a Xref> {
         uri_to_path(uri)
             .and_then(|p| self.roots.get(&owning_root(&self.workspace_roots, &p).0))
             .into_iter()
@@ -375,7 +375,15 @@ impl Workspace {
                             .iter()
                             .map(|o| o.reference)
                             .filter(|r| r.target.module != entry_id && r.kind.is_reference_site())
-                            .map(|r| (r.target, r.span, r.kind))
+                            .filter_map(|r| {
+                                // Stable key, not the DefId: the target file's
+                                // next edit shifts every span in it, and edges
+                                // filed under a span-carrying key would become
+                                // unreachable for rename and find-references.
+                                let d = g.canonical_definition(r.target)?;
+                                let key = super::xrefs::StableDefId::of(g, uri, d)?;
+                                Some((key, r.span, r.kind))
+                            })
                             .collect()
                     })
                 })
