@@ -59,8 +59,8 @@ pub struct PrecompiledBlob {
 /// errors themselves, not a rendering of them.
 #[derive(Debug, Clone)]
 pub struct PrecompileError {
-    pub label: String,
-    pub diagnostics: Vec<diagnostic::Diagnostic>,
+    label: String,
+    diagnostics: Vec<diagnostic::Diagnostic>,
 }
 
 impl std::fmt::Display for PrecompileError {

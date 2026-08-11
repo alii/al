@@ -110,16 +110,16 @@ pub enum AbiTy {
 /// coercion. A signature written anywhere else can drift from the Rust
 /// definition silently — a drifted C signature is ABI corruption, not an
 /// error.
-pub struct RtSig {
-    pub name: &'static str,
-    pub params: &'static [AbiTy],
-    pub rets: &'static [AbiTy],
+struct RtSig {
+    name: &'static str,
+    params: &'static [AbiTy],
+    rets: &'static [AbiTy],
 }
 
 /// Every runtime symbol compiled code can reference, 1:1 with
 /// [`runtime_symbols`] (the drift test enforces both directions).
 #[rustfmt::skip]
-pub const RT_SIGS: &[RtSig] = &{
+const RT_SIGS: &[RtSig] = &{
     use AbiTy::{I64, Ptr};
     [
         RtSig { name: NATIVE_RELEASE_AT_ZERO_SYMBOL, params: &[Ptr], rets: &[] },

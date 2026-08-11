@@ -348,14 +348,14 @@ impl NativeTable {
     /// Calls a body is interpreted for before it is worth compiling. Low
     /// enough that a hot loop is compiled almost at once, high enough that a
     /// body run a handful of times never is.
-    pub const WARM_CALLS: u32 = 8;
+    const WARM_CALLS: u32 = 8;
 
     /// Count one call of `fn_idx` made while it had no entry, and ask the
     /// installed compiler for it on the call that crosses [`Self::WARM_CALLS`].
     ///
     /// Exactly one call crosses the threshold, so the compile is requested
     /// once however many schedulers race here.
-    pub fn note_interpreted_call(&self, fn_idx: FuncIdx) {
+    pub(crate) fn note_interpreted_call(&self, fn_idx: FuncIdx) {
         let Some(compile) = self.compile.get() else {
             return;
         };

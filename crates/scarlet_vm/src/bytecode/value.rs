@@ -442,7 +442,7 @@ pub fn pack_variant(type_id: crate::TypeId, variant_idx: u16) -> i64 {
 
 /// The inverse of [`pack_variant`].
 #[inline]
-pub fn unpack_variant(packed: i64) -> (crate::TypeId, u16) {
+pub(crate) fn unpack_variant(packed: i64) -> (crate::TypeId, u16) {
     (crate::TypeId(packed as i32), (packed >> 32) as u16)
 }
 
