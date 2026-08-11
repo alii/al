@@ -28,4 +28,4 @@ strip = false
 debug = true
 
 [workspace.metadata.dylint]
-libraries = [{ path = "../mordant" }]
+libraries = [{ git = "https://github.com/scarletindustries/mordant" }]

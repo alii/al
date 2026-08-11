@@ -82,3 +82,35 @@ jobs:
 
       - name: Hawk
         run: cargo hawk check -D warnings
+
+  # Type-hardening gate: mordant's lints fire only on provable claims, and
+  # mordant-baseline.toml accepts the findings that predate the gate, so this
+  # fails only on new ones. To accept a finding deliberately, regenerate with
+  # MORDANT_BASELINE_WRITE=1 and commit the baseline. The lints build against
+  # their own pinned nightly, which dylint fetches; the workspace toolchain is
+  # untouched.
+  mordant:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache dylint drivers
+        uses: actions/cache@v4
+        with:
+          path: ~/.dylint_drivers
+          key: dylint-drivers-${{ runner.os }}
+
+      - name: Install dylint
+        run: cargo install cargo-dylint dylint-link --locked
+
+      - name: Mordant
+        run: cargo dylint --all
+        env:
+          DYLINT_RUSTFLAGS: -D warnings
