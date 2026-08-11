@@ -74,6 +74,12 @@ pub(super) enum Wait {
     /// A blocking-pool job. `Some` on the way into [`VM::park`], which hands
     /// the op to the pool keyed by the wait id and leaves `None` behind.
     Offload(Option<BlockingOp>),
+    /// An empty-mailbox receive: wake when a send targets the subject
+    /// (delivered through the slot's wake queue), or at the deadline.
+    Mailbox {
+        subject: u64,
+        deadline: Option<Instant>,
+    },
 }
 
 impl Wait {
@@ -131,11 +137,28 @@ impl Wait {
         Wait::Offload(Some(op))
     }
 
+    /// Park until a message lands on `subject`, then re-run the instruction.
+    pub(super) fn mailbox(subject: u64) -> Self {
+        Wait::Mailbox {
+            subject,
+            deadline: None,
+        }
+    }
+
+    /// Park until a message lands on `subject` or `deadline` passes, then
+    /// re-run the instruction, which re-derives which of the two happened.
+    pub(super) fn mailbox_until(subject: u64, deadline: Instant) -> Self {
+        Wait::Mailbox {
+            subject,
+            deadline: Some(deadline),
+        }
+    }
+
     /// The instant this wait must wake by. Timer-heap entries are validated
     /// against it to spot stale ones.
     fn deadline(&self) -> Option<Instant> {
         match self {
-            Wait::Io { deadline, .. } => *deadline,
+            Wait::Io { deadline, .. } | Wait::Mailbox { deadline, .. } => *deadline,
             Wait::Timer(d) => Some(*d),
             Wait::Offload(_) => None,
         }
@@ -297,6 +320,21 @@ impl VM {
                 }
             }
             Wait::Timer(d) => self.timer_heap.push(Reverse((*d, id))),
+            Wait::Mailbox { subject, deadline } => {
+                // Register the waiter under the registry lock, which re-checks
+                // the queue: a send that raced the park is seen there, and the
+                // process stays runnable instead of missing its wakeup.
+                if !self
+                    .runtime
+                    .subject_park_waiter(*subject, self.scheduler_index, id)
+                {
+                    self.run_queue.push_back(p);
+                    return id;
+                }
+                if let Some(d) = *deadline {
+                    self.timer_heap.push(Reverse((d, id)));
+                }
+            }
             Wait::Offload(op) => {
                 // `Wait::offloaded` is the only constructor and always yields
                 // `Some`. A `None` would dispatch no job and hang the process
@@ -372,6 +410,7 @@ impl VM {
         // A retire wake counts as a wake: it queued a runnable process, and
         // blocking below would strand it behind an idle poller.
         let mut woke = retired_woke | self.drain_completions()?;
+        woke |= self.drain_wakes();
         woke |= self.wake_due_timers();
 
         let waiting_on_io = !self.io_waiters.is_empty();
@@ -398,9 +437,30 @@ impl VM {
         let timeout = next_deadline.map(|d| d.saturating_duration_since(Instant::now()));
         self.drain_io_events(timeout)?;
         self.wake_due_timers();
-        // A completion notify may be what ended the wait above.
+        // A completion or send notify may be what ended the wait above.
         self.drain_completions()?;
+        self.drain_wakes();
         Ok(())
+    }
+
+    /// Wake the processes whose wait ids a `scheduler.send` queued on this
+    /// slot. A stale id — the wait already ended on its deadline — is skipped.
+    fn drain_wakes(&mut self) -> bool {
+        let drained: Vec<u64> = {
+            let mut q = lock(&self.runtime.slots[self.scheduler_index].wakes);
+            if q.is_empty() {
+                return false;
+            }
+            q.drain(..).collect()
+        };
+        let mut woke = false;
+        for id in drained {
+            if let Some((_wait, p)) = self.park_remove(id) {
+                self.run_queue.push_back(p);
+                woke = true;
+            }
+        }
+        woke
     }
 
     /// Deliver finished blocking-pool jobs, waking the process parked under
@@ -523,7 +583,8 @@ impl VM {
                         ..
                     }
                     | Wait::Timer(_)
-                    | Wait::Offload(_) => self.run_queue.push_back(p),
+                    | Wait::Offload(_)
+                    | Wait::Mailbox { .. } => self.run_queue.push_back(p),
                 }
                 // The fd stays registered: the registration belongs to the
                 // socket, which is still in the tables.

@@ -227,6 +227,9 @@ suite! {
         // The deterministic slice of the effectful stdlib. Everything is pinned
         // as a derived fact, never a clock reading or an env value.
         effects,
+        // Subjects: send/receive ordering, park/wake, timeouts, owner death.
+        // Cross-sender interleavings are asserted as aggregates only.
+        messages,
         // HTTP/1.1 surface. Locks the native scanners behind scarlet/http/h1 to the
         // sans-IO contract the Scarlet reference parser defined.
         http_parse,

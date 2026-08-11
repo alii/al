@@ -95,6 +95,42 @@ const BINDINGS: &[Binding] = &[
 ];
 
 impl Compiler {
+    /// The type constructors whose parameters must stay monomorphic when a
+    /// binding's type is generalized — the relaxed value restriction. A
+    /// `Subject`'s argument names what a live mailbox carries, so
+    /// quantifying it would let one queue be sent one type and received as
+    /// another. Resolved by module identity, never by name alone, so a user
+    /// type called `Subject` is unaffected. An unresolvable module yields an
+    /// empty set, which is sound: no value of the type can occur in a
+    /// program that never loaded it.
+    pub(crate) fn restricted_generalization_cons(
+        &mut self,
+    ) -> std::collections::HashSet<crate::type_def::TypeId> {
+        if let Some(memo) = &self.restricted_gen_cons {
+            return memo.clone();
+        }
+        let scheduler: Vec<String> = ["scarlet", "scheduler"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let key = ModuleKey::of(&scheduler);
+        let found = self
+            .module_table
+            .get_or_hydrate(&key)
+            .and_then(|iface| iface.types.get("Subject").map(|et| et.info.id));
+        match found {
+            Some(id) => {
+                let set = std::collections::HashSet::from([id]);
+                // Memoize only a hit: a module unresolvable now (a
+                // from-source compile that has not loaded scheduler yet) may
+                // load later in this session.
+                self.restricted_gen_cons = Some(set.clone());
+                set
+            }
+            None => std::collections::HashSet::new(),
+        }
+    }
+
     /// Fill `program.templates`/`program.abi` from the modules this compile
     /// loaded, then require a binding for every slot an emitted op constructs.
     /// Rebuilt from scratch each emit so a session's watermark rewind can

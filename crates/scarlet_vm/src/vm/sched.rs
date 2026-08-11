@@ -199,6 +199,10 @@ pub(super) struct SchedSlot {
     /// A blocking worker pushes a finished job here and notifies this
     /// scheduler's poller.
     pub(super) completions: Mutex<VecDeque<Completion>>,
+    /// Wait ids of processes parked here that a `scheduler.send` on some
+    /// scheduler woke ([`Runtime::deliver_wake`]). Drained by this slot's
+    /// owner; a stale id (the wait already ended on its deadline) is skipped.
+    pub(super) wakes: Mutex<Vec<u64>>,
 }
 
 impl SchedSlot {
@@ -214,6 +218,7 @@ impl SchedSlot {
             // Scheduler 0 is running the main process; workers start empty.
             run_len: AtomicUsize::new(usize::from(is_main)),
             completions: Mutex::new(VecDeque::new()),
+            wakes: Mutex::new(Vec::new()),
         }
     }
 }
@@ -247,6 +252,12 @@ pub(super) struct Runtime {
     /// `SO_REUSEPORT` does not balance at all: the last binder takes
     /// everything.
     pub shared_listeners: Mutex<HashMap<i32, Arc<TcpListener>>>,
+    /// Every live mailbox, program-wide: senders on any scheduler reach a
+    /// subject's queue through here. See [`super::mailbox`].
+    pub(super) mailboxes: Mutex<super::mailbox::Mailboxes>,
+    /// Live mailbox count, gating the per-process-death cleanup scan so
+    /// subject-free programs pay one relaxed load.
+    pub(super) live_subjects: AtomicUsize,
     next_pid: AtomicU64,
     /// Per-scheduler shared slots, indexed by scheduler id.
     pub(super) slots: Vec<SchedSlot>,
@@ -294,6 +305,8 @@ impl Runtime {
             globals: Mutex::new(Vec::new()),
             globals_version: AtomicU64::new(0),
             shared_listeners: Mutex::new(HashMap::new()),
+            mailboxes: Mutex::new(super::mailbox::Mailboxes::new()),
+            live_subjects: AtomicUsize::new(0),
             next_pid: AtomicU64::new(1),
             slots,
             injector: Mutex::new(VecDeque::new()),
@@ -369,7 +382,7 @@ impl Runtime {
 
     /// Notify scheduler `i`'s poller. An empty waker slot is a worker that
     /// never spawned, so there is no thread to wake and the notify is dropped.
-    fn notify(&self, i: usize) {
+    pub(super) fn notify(&self, i: usize) {
         if let Some(waker) = self.slots[i].waker.get() {
             let _ = waker.wake();
         }

@@ -557,8 +557,17 @@ impl Compiler {
             self.engine.leave_level();
 
             for (idx, ty) in inferred {
-                let mut scheme = self.engine.generalize_top(ty);
                 let p = &prepared[idx];
+                // A const's initializer already ran, so its type falls under
+                // the relaxed value restriction like any value binding.
+                // Function declarations are values; their vars all sit under
+                // the arrow, where the guard quantifies as before.
+                let mut scheme = if p.is_const() {
+                    let restricted = self.restricted_generalization_cons();
+                    self.engine.generalize_top_restricted(ty, &restricted)
+                } else {
+                    self.engine.generalize_top(ty)
+                };
                 scheme.def = Some(p.dl());
                 if p.is_const() {
                     scheme.kind = ValueKind::Local;

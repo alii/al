@@ -1,0 +1,15 @@
+PASS subject eq self
+PASS fifo first
+PASS fifo second
+PASS fifo third
+PASS structured payload
+PASS binary payload
+cross-process: from the child
+PASS receive_within times out
+PASS receive_within delivers
+add 5 -> 5
+add 37 -> 42
+stop -> served 42
+PASS every send arrives
+fresh subjects: 1 text
+send to a dead subject: ok

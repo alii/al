@@ -352,7 +352,7 @@ mod tests {
             .expect("scarlet/scheduler is precompiled");
         let doc =
             p.str_pool[sched.doc.expect("scarlet/scheduler has a module doc").0 as usize].as_str();
-        assert!(doc.contains("Lightweight processes."));
+        assert!(doc.contains("Lightweight processes and message passing."));
 
         assert_eq!(p.typeinfo_by_name.len(), out.blob.type_info.len());
 

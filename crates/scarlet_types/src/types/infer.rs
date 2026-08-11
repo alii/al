@@ -1220,20 +1220,52 @@ impl InferEngine {
     /// Flip every Unbound var at level > current to Generic and quantify over
     /// them. Display names are assigned here so they stay stable across every
     /// later printing of the scheme.
-    pub fn generalize(&mut self, ty: Ty) -> Scheme {
-        self.generalize_impl(ty, false, ValueKind::Local)
+    ///
+    /// Test-only: production callers generalize through
+    /// [`Self::generalize_top`] / [`Self::generalize_top_restricted`], which
+    /// build on the same walk.
+    #[cfg(test)]
+    fn generalize(&mut self, ty: Ty) -> Scheme {
+        self.generalize_impl(ty, false, ValueKind::Local, None)
     }
 
     /// Module-scope generalization: every remaining Unbound var becomes
     /// Generic regardless of level. Run once a top-level body is fully
     /// inferred, so its scheme is closed.
     pub fn generalize_top(&mut self, ty: Ty) -> Scheme {
-        self.generalize_impl(ty, true, ValueKind::ModuleFn)
+        self.generalize_impl(ty, true, ValueKind::ModuleFn, None)
     }
 
-    fn generalize_impl(&mut self, ty: Ty, ignore_level: bool, kind: ValueKind) -> Scheme {
+    /// [`generalize`](Self::generalize) under the relaxed value restriction:
+    /// a variable reachable under one of the `restricted` constructors stays
+    /// unquantified (weak), unless the constructor itself sits under a `Fun`
+    /// — a function has not built the value yet, so its type may stay
+    /// polymorphic. For a mutable-reference type like `Subject`, quantifying
+    /// the parameter would let one live value be written at one type and
+    /// read at another.
+    pub fn generalize_restricted(&mut self, ty: Ty, restricted: &HashSet<TypeId>) -> Scheme {
+        self.generalize_impl(ty, false, ValueKind::Local, Some(restricted))
+    }
+
+    /// [`generalize_top`](Self::generalize_top) under the relaxed value
+    /// restriction; see [`generalize_restricted`](Self::generalize_restricted).
+    pub fn generalize_top_restricted(&mut self, ty: Ty, restricted: &HashSet<TypeId>) -> Scheme {
+        self.generalize_impl(ty, true, ValueKind::ModuleFn, Some(restricted))
+    }
+
+    fn generalize_impl(
+        &mut self,
+        ty: Ty,
+        ignore_level: bool,
+        kind: ValueKind,
+        restricted: Option<&HashSet<TypeId>>,
+    ) -> Scheme {
+        let mut weak: HashSet<i32> = HashSet::new();
+        if let Some(cons) = restricted {
+            self.collect_weak_vars(ty, cons, false, &mut weak);
+        }
         let mut ids: IndexSet<i32> = IndexSet::new();
-        self.collect_generalizable(ty, ignore_level, &mut ids);
+        self.collect_generalizable(ty, ignore_level, &weak, &mut ids);
         self.assign_names(&ids);
         // Close the scheme: each generalized Var becomes a Bound index. After
         // this the type holds no engine-local reference, so the scheme can move
@@ -1373,28 +1405,29 @@ impl InferEngine {
         &mut self,
         ty: Ty,
         ignore_level: bool,
+        weak: &HashSet<i32>,
         quantified: &mut IndexSet<i32>,
     ) {
         let r = self.find(ty);
         match self.node(r) {
             TypeNode::Var(id) => match self.root_var(id) {
                 RootVarState::Unbound { level, constraint }
-                    if ignore_level || level > self.current_level =>
+                    if (ignore_level || level > self.current_level) && !weak.contains(&id) =>
                 {
                     self.vars[id as usize] = TyVarState::Generic { id, constraint };
                     quantified.insert(id);
                 }
-                RootVarState::Generic { id: gid, .. } => {
+                RootVarState::Generic { id: gid, .. } if !weak.contains(&gid) => {
                     quantified.insert(gid);
                 }
                 _ => {}
             },
-            TypeNode::Con { args, .. } => self.collect_slice(args, ignore_level, quantified),
+            TypeNode::Con { args, .. } => self.collect_slice(args, ignore_level, weak, quantified),
             TypeNode::Fun { params, ret } => {
-                self.collect_slice(params, ignore_level, quantified);
-                self.collect_generalizable(ret, ignore_level, quantified);
+                self.collect_slice(params, ignore_level, weak, quantified);
+                self.collect_generalizable(ret, ignore_level, weak, quantified);
             }
-            TypeNode::Tuple { elems } => self.collect_slice(elems, ignore_level, quantified),
+            TypeNode::Tuple { elems } => self.collect_slice(elems, ignore_level, weak, quantified),
             TypeNode::Bound(_) => {}
         }
     }
@@ -1403,11 +1436,62 @@ impl InferEngine {
         &mut self,
         sl: ArenaSlice<pool::Children>,
         ignore_level: bool,
+        weak: &HashSet<i32>,
         quantified: &mut IndexSet<i32>,
     ) {
         for i in sl.range() {
             let k = self.children[i];
-            self.collect_generalizable(k, ignore_level, quantified);
+            self.collect_generalizable(k, ignore_level, weak, quantified);
+        }
+    }
+
+    /// Mark every variable that must stay weak under the relaxed value
+    /// restriction: anything reachable through one of the `restricted`
+    /// constructors. Once inside, a `Fun` no longer shields — the whole
+    /// message type of a live `Subject(fn(a) a)` is pinned. Outside, a `Fun`
+    /// ends the walk: a function that will build the value has not built it
+    /// yet, so nothing below it is weak.
+    fn collect_weak_vars(
+        &mut self,
+        ty: Ty,
+        restricted: &HashSet<TypeId>,
+        inside: bool,
+        weak: &mut HashSet<i32>,
+    ) {
+        let r = self.find(ty);
+        match self.node(r) {
+            TypeNode::Var(id) => {
+                if inside {
+                    let root = match self.root_var(id) {
+                        RootVarState::Generic { id: gid, .. } => gid,
+                        RootVarState::Unbound { .. } => id,
+                    };
+                    weak.insert(root);
+                }
+            }
+            TypeNode::Con { id, args, .. } => {
+                let inside = inside || restricted.contains(&id);
+                for i in args.range() {
+                    let k = self.children[i];
+                    self.collect_weak_vars(k, restricted, inside, weak);
+                }
+            }
+            TypeNode::Fun { params, ret } => {
+                if inside {
+                    for i in params.range() {
+                        let k = self.children[i];
+                        self.collect_weak_vars(k, restricted, true, weak);
+                    }
+                    self.collect_weak_vars(ret, restricted, true, weak);
+                }
+            }
+            TypeNode::Tuple { elems } => {
+                for i in elems.range() {
+                    let k = self.children[i];
+                    self.collect_weak_vars(k, restricted, inside, weak);
+                }
+            }
+            TypeNode::Bound(_) => {}
         }
     }
 
