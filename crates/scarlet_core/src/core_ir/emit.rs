@@ -72,7 +72,7 @@ pub(crate) struct EmitOut {
 /// place and never fuses across a call, so these ips survive it.
 #[derive(Debug, Clone, Default)]
 pub struct FrameLayout {
-    slots: TiVec<LocalId, Option<i32>>,
+    pub(crate) slots: TiVec<LocalId, Option<i32>>,
     /// The header of each non-Bool constructor site, in emission order — the
     /// order a straight walk of the same Core meets the `Ctor` atoms.
     ///

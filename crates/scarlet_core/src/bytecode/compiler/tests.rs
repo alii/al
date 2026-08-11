@@ -499,6 +499,47 @@ mod stdlib_native_gate_probe {
         plan: clif::NativePlan,
     }
 
+    /// Every stdlib body must survive the Core IR byte codec exactly — the
+    /// static blob will ship these bytes, so a lossy encode here is a
+    /// miscompiled stdlib at every startup. Equality is the golden renderer's,
+    /// the same notion the `.core` snapshots pin.
+    #[test]
+    fn every_stdlib_body_round_trips_through_the_codec() {
+        type Captured = Vec<(FuncIdx, String, Vec<u8>)>;
+        let bodies: Rc<RefCell<Captured>> = Rc::default();
+        let sink = Rc::clone(&bodies);
+        let mut c = new_compiler(None, false);
+        c.native_hook = Some(Box::new(move |idx, f, _pool| {
+            sink.borrow_mut()
+                .push((idx, format!("{f}"), crate::core_ir::codec::encode_fn(f)));
+        }));
+        let at = crate::span::Span::DUMMY;
+        c.register_prelude();
+        for path in stdlib::all_modules() {
+            c.load_module(&crate::ast::ImportPath::canonical(path.clone()), at);
+        }
+        assert!(!crate::diagnostic::has_errors(c.diagnostics()));
+        let bodies = bodies.take();
+        assert!(bodies.len() > 200, "hook saw {} bodies", bodies.len());
+        let mut total = 0usize;
+        for (idx, rendered, bytes) in &bodies {
+            total += bytes.len();
+            let back = crate::core_ir::codec::decode_fn(bytes)
+                .unwrap_or_else(|e| panic!("fn#{} failed to decode: {e}", idx.index()));
+            assert_eq!(
+                *rendered,
+                format!("{back}"),
+                "fn#{} changed across the codec",
+                idx.index()
+            );
+        }
+        println!(
+            "codec round-tripped {} bodies, {} KiB total",
+            bodies.len(),
+            total / 1024
+        );
+    }
+
     /// Every stdlib body must reach native code. There is no admission gate
     /// any more — `plan` is infallible — so this asserts the *compile* step
     /// covers all of them, and prints the per-module breakdown.

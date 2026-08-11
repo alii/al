@@ -443,6 +443,10 @@ impl VM {
                     break;
                 };
                 match instr.op {
+                    // Not an opcode ([`Op::Count`]); no emitter produces it.
+                    Op::Count => {
+                        return Err(VmError::internal("Op::Count executed"));
+                    }
                     Op::PushLocal => {
                         ip += 1;
                         push_local!(instr);
@@ -540,6 +544,10 @@ impl VM {
             super::op_histogram::record(instr.op, func_idx);
 
             match instr.op {
+                // Not an opcode ([`Op::Count`]); no emitter produces it.
+                Op::Count => {
+                    return Err(VmError::internal("Op::Count executed"));
+                }
                 Op::PushConst => push_const!(instr),
                 Op::PushLocal => push_local!(instr),
                 Op::PushGlobal => {

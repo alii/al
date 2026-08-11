@@ -87,6 +87,9 @@ pub enum OpCoverage {
 /// The native lowering strategy for `op`. See [`OpCoverage`].
 fn op_coverage(op: Op) -> OpCoverage {
     match op {
+        // Not an opcode ([`Op::Count`]); `Op::from_u8` refuses it, and no
+        // program contains it.
+        Op::Count => OpCoverage::NotAPrimOp,
         Op::PushGlobal
         | Op::PushTrue
         | Op::PushFalse
@@ -567,6 +570,27 @@ pub unsafe extern "C" fn call_entry_preserving_pinned(
         "ldp x21, x30, [sp], #16",
         "ret",
     )
+}
+
+#[cfg(test)]
+mod op_bytes {
+    use super::super::Op;
+
+    /// Every real discriminant round-trips; the sentinel and everything past
+    /// it decode to `None`.
+    #[test]
+    fn from_u8_round_trips_every_real_op() {
+        for b in 0..Op::Count as u8 {
+            let op = Op::from_u8(b).expect("in-range discriminant");
+            assert_eq!(op as u8, b);
+            // Total over real ops; a panic here means a variant landed
+            // outside the classified range.
+            let _ = super::op_coverage(op);
+        }
+        for b in Op::Count as u8..=255 {
+            assert!(Op::from_u8(b).is_none());
+        }
+    }
 }
 
 #[cfg(test)]

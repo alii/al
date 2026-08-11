@@ -367,6 +367,27 @@ pub enum Op {
     /// `[map] -> Array((k, v))` — every entry as a `(key, value)` tuple.
     /// (scarlet/map.to_list)
     MapToList,
+
+    /// Not an opcode: one past the last real variant, so [`Op::from_u8`] can
+    /// bound its check without a hand-maintained count. Never emitted, never
+    /// executed; every consumer of real ops rejects it.
+    #[doc(hidden)]
+    Count,
+}
+
+impl Op {
+    /// The opcode with discriminant `b`, or `None` for a byte no variant
+    /// carries. The bound comes from the enum itself ([`Op::Count`]), so it
+    /// cannot drift when variants are added.
+    pub fn from_u8(b: u8) -> Option<Op> {
+        if b >= Op::Count as u8 {
+            return None;
+        }
+        // SAFETY: `Op` is `repr(u8)` with default discriminants `0..Count`,
+        // and `b < Count` was just checked.
+        #[allow(unsafe_code)]
+        Some(unsafe { std::mem::transmute::<u8, Op>(b) })
+    }
 }
 
 impl Op {
@@ -378,6 +399,8 @@ impl Op {
     /// silently survive relocation unshifted.
     pub const fn has_jump_target(self) -> bool {
         match self {
+            // Not an opcode ([`Op::Count`]); no program contains it.
+            Op::Count => false,
             // `SwitchTag`'s operand is the jump-table base; the table's own
             // entries are ordinary `Jump`s.
             Op::Jump | Op::JumpIfFalse | Op::JumpGeIntLC | Op::JumpNeIntLC | Op::SwitchTag => true,
@@ -546,6 +569,8 @@ impl Op {
     /// around hoisting and fusion.
     pub const fn pushes_extra(self) -> bool {
         match self {
+            // Not an opcode ([`Op::Count`]); no program contains it.
+            Op::Count => false,
             Op::Print | Op::BinReadUtf8 => true,
 
             Op::PushConst
