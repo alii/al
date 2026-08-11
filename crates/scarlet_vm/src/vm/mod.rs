@@ -788,7 +788,18 @@ impl VM {
                 return Ok(true);
             }
 
-            // 2. Remote seeds, then seeds sitting untaken in a peer's inbox:
+            // 2. Wakes already delivered to this scheduler. For a same-
+            //    scheduler send — the common case now that spawn places
+            //    request/reply partners together — the receiver's wake is
+            //    sitting in this slot's own queue, and draining it is one
+            //    uncontended lock. Probing the inbox, the injector, and every
+            //    peer's inbox first made that cheap handoff cost a full
+            //    idle-path walk per message.
+            if !self.parked.is_empty() && self.drain_wakes() {
+                continue;
+            }
+
+            // 3. Remote seeds, then seeds sitting untaken in a peer's inbox:
             //    stealing one starts it sooner than waiting for its assigned
             //    scheduler to wake.
             if self.take_inbound() {
@@ -803,7 +814,7 @@ impl VM {
             // published-load slot, and nothing else corrects it while we sleep.
             self.publish_load();
 
-            // 3. Local parked I/O and timers: wait, but stay wakeable by other
+            // 4. Local parked I/O and timers: wait, but stay wakeable by other
             //    schedulers.
             if !self.parked.is_empty() {
                 self.set_parked_flag(true);
@@ -819,7 +830,7 @@ impl VM {
                 continue;
             }
 
-            // 4. Nothing local at all.
+            // 5. Nothing local at all.
             if self.runtime_finished() {
                 return Ok(false);
             }
@@ -960,13 +971,22 @@ impl VM {
 
     /// `scheduler.spawn(f)`: start a new process running the closure `f`.
     ///
-    /// The first submit summons the runtime's worker threads, one scheduler per
-    /// core. With no scheduler idle the seed overflows to the shared injector,
-    /// and whichever frees up first picks it up.
+    /// Placement is local-first, the BEAM rule: with nothing else runnable
+    /// here, the child starts on this scheduler, so a request/reply pair
+    /// messages without ever crossing threads. A non-empty local queue means
+    /// real parallel work, so the seed is handed to an idle peer instead —
+    /// the first such submit summons the worker threads — and donation keeps
+    /// levelling from there. Ownership semantics do not depend on placement:
+    /// captured connections travel through the seed either way.
     fn spawn_process(&mut self, f: Value) -> VmResult<()> {
         self.check_spawnable(&f)?;
         let seed = self.build_seed(&f);
-        self.runtime.submit(seed);
+        if self.run_queue.is_empty() {
+            self.runtime.process_started();
+            self.hydrate_seed(seed);
+        } else {
+            self.runtime.submit(seed);
+        }
         Ok(())
     }
 

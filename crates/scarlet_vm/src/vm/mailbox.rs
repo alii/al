@@ -25,8 +25,8 @@
 //! fire-and-forget, the BEAM rule.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::bytecode::Value;
@@ -36,40 +36,87 @@ use super::poll::{EPOCH, Parked, Wait, monotonic_now_ms};
 use super::sched::Runtime;
 use super::{IO_REDUCTION_COST, VM, VmError, VmResult, lock};
 
-/// Shard count for the mailbox table. A power of two so the shard pick is a
-/// mask. Every send and receive locks exactly one shard, so this bounds how
-/// many schedulers can contend on any single lock — with one global lock,
-/// message throughput went *down* as schedulers were added.
-const SHARDS: usize = 64;
+/// Slots per lazily-allocated segment of the subject table.
+const SEGMENT_SLOTS: usize = 8192;
 
-/// Every live mailbox, keyed by subject id, sharded by id. Program-wide
-/// (like `Runtime::shared_listeners`) because a sender on any scheduler must
-/// reach the queue; the id in the `Subject` value is the key.
+/// Bits of a subject id that index a slot; the rest is the slot's serial.
+/// 28 bits is a capacity commitment: 2^28 subjects live at once, far past
+/// what memory can hold, and it keeps the segment-pointer table small enough
+/// to zero at startup without a measurable cost.
+const SLOT_BITS: u32 = 28;
+const NUM_SEGMENTS: usize = (1 << SLOT_BITS) / SEGMENT_SLOTS;
+
+/// The subject table: every live mailbox, reached directly from the id in
+/// the `Subject` value. Program-wide (like `Runtime::shared_listeners`)
+/// because a sender on any scheduler must reach the queue.
+///
+/// The id is a slot index plus a serial — the slotmap BEAM uses for pids —
+/// so the message path is an array index and one per-slot lock: no hash, no
+/// table-wide lock, and senders on different subjects never contend. The
+/// serial changes on every slot reuse, which is what keeps a send to a dead
+/// subject a silent drop instead of a delivery to the slot's next tenant.
 ///
 /// The park/wake protocol needs only per-subject serialization: a park and a
-/// send on the same id take the same shard lock, which is all the lost-wakeup
+/// send on the same id take the same slot lock, which is all the lost-wakeup
 /// re-check relies on.
 pub(super) struct Mailboxes {
-    /// Id 0 is never minted, so a zeroed subject word is always dead.
-    next_id: AtomicU64,
-    shards: [Mutex<HashMap<u64, Mailbox>>; SHARDS],
+    /// Segments, allocated on first touch and never moved, so a slot
+    /// reference stays valid without holding any table-wide lock.
+    segments: Vec<OnceLock<Segment>>,
+    /// High-water slot index; slots below it not on the free list are live.
+    next_slot: AtomicU64,
+    /// Retired slot indices awaiting reuse. FIFO, so reuse spreads across
+    /// slots and a serial needs its full 2^20 laps of one slot to alias.
+    /// Taken at create and death, never per message.
+    free: Mutex<VecDeque<u64>>,
     /// Subject ids by owning pid — the death path's index, so ending a
     /// process does not scan every mailbox in the program. Its own lock:
     /// taken at create and death, never per message.
     by_owner: Mutex<HashMap<u64, Vec<u64>>>,
 }
 
+/// One lazily-allocated block of slots, always `SEGMENT_SLOTS` long.
+type Segment = Vec<Mutex<Slot>>;
+
+/// One slot of the subject table: the serial of its current (or next) tenant
+/// and the mailbox itself. The mutex is the subject's own lock — everything
+/// on the message path serializes here and nowhere else.
+struct Slot {
+    /// Matches the id's serial bits while the tenant is live; bumped when the
+    /// tenant dies, so a stale id misses. Never zero, so id 0 (a zeroed
+    /// subject word) is always dead.
+    serial: u64,
+    mb: Option<Mailbox>,
+}
+
 impl Mailboxes {
     pub(super) fn new() -> Mailboxes {
+        let mut segments = Vec::with_capacity(NUM_SEGMENTS);
+        segments.resize_with(NUM_SEGMENTS, OnceLock::new);
         Mailboxes {
-            next_id: AtomicU64::new(1),
-            shards: std::array::from_fn(|_| Mutex::new(HashMap::new())),
+            segments,
+            next_slot: AtomicU64::new(0),
+            free: Mutex::new(VecDeque::new()),
             by_owner: Mutex::new(HashMap::new()),
         }
     }
 
-    fn shard(&self, id: u64) -> &Mutex<HashMap<u64, Mailbox>> {
-        &self.shards[(id as usize) & (SHARDS - 1)]
+    /// The slot at `index`, allocating its segment if this is the first
+    /// touch. The lock is NOT taken and the serial is NOT checked; every
+    /// caller does both.
+    fn slot(&self, index: u64) -> &Mutex<Slot> {
+        let index = index as usize;
+        let seg = self.segments[index / SEGMENT_SLOTS].get_or_init(|| {
+            let mut v = Vec::with_capacity(SEGMENT_SLOTS);
+            v.resize_with(SEGMENT_SLOTS, || {
+                Mutex::new(Slot {
+                    serial: 0,
+                    mb: None,
+                })
+            });
+            v
+        });
+        &seg[index % SEGMENT_SLOTS]
     }
 }
 
@@ -86,6 +133,23 @@ struct Mailbox {
     waiter: Option<(usize, u64)>,
 }
 
+/// The slot index half of a subject id.
+fn slot_index(id: u64) -> u64 {
+    id & ((1 << SLOT_BITS) - 1)
+}
+
+/// The serial half of a subject id.
+fn slot_serial(id: u64) -> u64 {
+    id >> SLOT_BITS
+}
+
+/// The serial after `serial`, wrapping within the id's serial bits and
+/// skipping 0 so a zeroed subject word can never match a live slot.
+fn next_serial(serial: u64) -> u64 {
+    let wrapped = (serial + 1) & ((1 << (48 - SLOT_BITS)) - 1);
+    if wrapped == 0 { 1 } else { wrapped }
+}
+
 /// The outcome of a receive probe.
 enum TryReceive {
     Msg(Value),
@@ -98,15 +162,30 @@ enum TryReceive {
 impl Runtime {
     /// Mint a mailbox owned by `owner` and return its subject id.
     fn subject_create(&self, owner: u64) -> u64 {
-        let id = self.mailboxes.next_id.fetch_add(1, Ordering::Relaxed);
-        lock(self.mailboxes.shard(id)).insert(
-            id,
-            Mailbox {
+        let index = match lock(&self.mailboxes.free).pop_front() {
+            Some(i) => i,
+            None => {
+                let i = self.mailboxes.next_slot.fetch_add(1, Ordering::Relaxed);
+                if i >= 1 << SLOT_BITS {
+                    // BEAM's system_limit: this many live subjects is far
+                    // past any real memory budget, so the program is broken.
+                    // Die loudly rather than corrupt the id space.
+                    eprintln!("scarlet: subject table exhausted (2^{SLOT_BITS} subjects live)");
+                    std::process::abort();
+                }
+                i
+            }
+        };
+        let id = {
+            let mut slot = lock(self.mailboxes.slot(index));
+            slot.serial = next_serial(slot.serial);
+            slot.mb = Some(Mailbox {
                 owner,
                 queue: VecDeque::new(),
                 waiter: None,
-            },
-        );
+            });
+            (slot.serial << SLOT_BITS) | index
+        };
         lock(&self.mailboxes.by_owner)
             .entry(owner)
             .or_default()
@@ -119,10 +198,11 @@ impl Runtime {
     /// parked receiver. A dead subject drops the message.
     fn subject_send(&self, id: u64, msg: Value) {
         let waiter = {
-            let mut shard = lock(self.mailboxes.shard(id));
-            let Some(mb) = shard.get_mut(&id) else {
+            let mut slot = lock(self.mailboxes.slot(slot_index(id)));
+            let live = slot.serial == slot_serial(id);
+            let Some(mb) = slot.mb.as_mut().filter(|_| live) else {
                 // Drop outside the lock: the graph can be arbitrarily large.
-                drop(shard);
+                drop(slot);
                 drop(msg);
                 return;
             };
@@ -138,8 +218,9 @@ impl Runtime {
     /// waiter registration first — this call IS the owner receiving, so no
     /// send may target the old wait id.
     fn subject_try_receive(&self, id: u64, pid: u64) -> TryReceive {
-        let mut shard = lock(self.mailboxes.shard(id));
-        let Some(mb) = shard.get_mut(&id) else {
+        let mut slot = lock(self.mailboxes.slot(slot_index(id)));
+        let live = slot.serial == slot_serial(id);
+        let Some(mb) = slot.mb.as_mut().filter(|_| live) else {
             return TryReceive::NotOwner;
         };
         if mb.owner != pid {
@@ -153,12 +234,13 @@ impl Runtime {
     }
 
     /// Register the owner as parked on subject `id`, re-checking the queue
-    /// under the shard lock. Returns false — park nothing, stay runnable —
+    /// under the slot lock. Returns false — park nothing, stay runnable —
     /// when a message is already queued (a send raced the park) or the
     /// subject is gone (the re-run surfaces that as an error).
     pub(super) fn subject_park_waiter(&self, id: u64, sched: usize, wait_id: u64) -> bool {
-        let mut shard = lock(self.mailboxes.shard(id));
-        let Some(mb) = shard.get_mut(&id) else {
+        let mut slot = lock(self.mailboxes.slot(slot_index(id)));
+        let live = slot.serial == slot_serial(id);
+        let Some(mb) = slot.mb.as_mut().filter(|_| live) else {
             return false;
         };
         if !mb.queue.is_empty() {
@@ -178,11 +260,23 @@ impl Runtime {
         let Some(ids) = lock(&self.mailboxes.by_owner).remove(&owner) else {
             return;
         };
+        // The serial stays until the slot's next tenant bumps it, so a
+        // straggler send between here and reuse misses on `mb` being gone.
+        let mut retired = Vec::with_capacity(ids.len());
         let dead: Vec<Mailbox> = ids
             .into_iter()
-            .filter_map(|id| lock(self.mailboxes.shard(id)).remove(&id))
+            .filter_map(|id| {
+                let mut slot = lock(self.mailboxes.slot(slot_index(id)));
+                let live = slot.serial == slot_serial(id);
+                let mb = if live { slot.mb.take() } else { None };
+                if mb.is_some() {
+                    retired.push(slot_index(id));
+                }
+                mb
+            })
             .collect();
         self.live_subjects.fetch_sub(dead.len(), Ordering::Relaxed);
+        lock(&self.mailboxes.free).extend(retired);
         // The queued graphs are freed here, outside the lock. The owner
         // cannot be parked on any of these (it just died), so no waiter is
         // stranded.
