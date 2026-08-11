@@ -2006,28 +2006,28 @@ impl Compiler {
         self.engine.nullary_con(slot, r.id, r.name)
     }
     fn ty_bool(&mut self) -> Ty {
-        self.ty_nullary(NullaryPrim::Bool, self.prelude.bool)
+        self.ty_nullary(NullaryPrim::Bool, self.prelude.bool())
     }
     fn ty_int(&mut self) -> Ty {
-        self.ty_nullary(NullaryPrim::Int, self.prelude.int)
+        self.ty_nullary(NullaryPrim::Int, self.prelude.int())
     }
     fn ty_string(&mut self) -> Ty {
-        self.ty_nullary(NullaryPrim::String, self.prelude.string)
+        self.ty_nullary(NullaryPrim::String, self.prelude.string())
     }
     fn ty_nil(&mut self) -> Ty {
-        self.ty_nullary(NullaryPrim::Nil, self.prelude.nil)
+        self.ty_nullary(NullaryPrim::Nil, self.prelude.nil())
     }
     fn ty_array(&mut self, elem: Ty) -> Ty {
-        self.ty_prelude(self.prelude.array, &[elem])
+        self.ty_prelude(self.prelude.array(), &[elem])
     }
     fn ty_binary(&mut self) -> Ty {
-        self.ty_nullary(NullaryPrim::Binary, self.prelude.binary)
+        self.ty_nullary(NullaryPrim::Binary, self.prelude.binary())
     }
     fn ty_option(&mut self, inner: Ty) -> Ty {
-        self.ty_prelude(self.prelude.option, &[inner])
+        self.ty_prelude(self.prelude.option(), &[inner])
     }
     fn ty_result(&mut self, ok: Ty, err: Ty) -> Ty {
-        self.ty_prelude(self.prelude.result, &[ok, err])
+        self.ty_prelude(self.prelude.result(), &[ok, err])
     }
 
     /// Hydrate a type annotation through `h`, recording any error and falling
@@ -3076,7 +3076,7 @@ impl Compiler {
                         let resolved = self.engine.find(ty);
                         let is_nil = matches!(
                             self.engine.node(resolved),
-                            TypeNode::Con { id, .. } if self.prelude.nil.is(id)
+                            TypeNode::Con { id, .. } if self.prelude.nil().is(id)
                         );
                         let is_var = matches!(self.engine.node(resolved), TypeNode::Var(_));
                         if !is_nil && !is_var {
@@ -3336,7 +3336,7 @@ impl Compiler {
         let checks = std::mem::take(&mut self.nil_discards);
         for (name, ty, sp) in checks {
             let rep = self.engine.find(ty);
-            if matches!(self.engine.node(rep), TypeNode::Con { id, .. } if self.prelude.nil.is(id))
+            if matches!(self.engine.node(rep), TypeNode::Con { id, .. } if self.prelude.nil().is(id))
             {
                 self.error(
                     format!(
@@ -4134,7 +4134,7 @@ impl Compiler {
 
         // Option and Result differ only in the expected ICon and whether the
         // failure case carries a bindable payload (`err_var`).
-        let err_var = if self.prelude.option.is(lhs_type_id) {
+        let err_var = if self.prelude.option().is(lhs_type_id) {
             if let Some(recv) = &expr.receiver {
                 self.error(
                     "'or' on an Option does not bind a value (the failure case carries nothing)"
@@ -4143,7 +4143,7 @@ impl Compiler {
                 );
             }
             None::<Ty>
-        } else if self.prelude.result.is(lhs_type_id) {
+        } else if self.prelude.result().is(lhs_type_id) {
             Some(self.engine.fresh_var())
         } else {
             let s = self.engine.type_to_str(left_ty);

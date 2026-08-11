@@ -254,12 +254,16 @@ impl VM {
         // instruction with the remaining bytes.
         let result = connection_mut(&mut self.tcp_connections, sv.id)
             .and_then(|conn| drain_write(conn, std::slice::from_ref(&bytes)));
-        if let Ok(Drain::Park { offset, .. }) = result {
-            self.stack.push(sock_val);
-            // The binary is byte-aligned; unaligned was rejected above.
-            let tail = self.tail_view(bin, offset);
-            self.stack.push(tail);
-            return Ok(Some(Parked::retry(Wait::writable(sv.id))));
+        match &result {
+            Ok(Drain::Park { offset, .. }) => {
+                self.stack.push(sock_val);
+                // The binary is byte-aligned; unaligned was rejected above.
+                let tail = self.tail_view(bin, *offset);
+                self.stack.push(tail);
+                return Ok(Some(Parked::retry(Wait::writable(sv.id))));
+            }
+            // Done and Err share the completion path below.
+            Ok(Drain::Done) | Err(_) => {}
         }
         let nil = self.make_nil()?;
         self.push_net(result.map(|_| nil))?;
@@ -309,21 +313,26 @@ impl VM {
 
         let result = connection_mut(&mut self.tcp_connections, sv.id)
             .and_then(|conn| drain_write(conn, &logical));
-        if let Ok(Drain::Park { idx, offset }) = result {
-            // Re-run with only the unwritten tail: zero-copy views over the
-            // same backings.
-            drop(logical);
-            let mut remaining: Vec<Value> = Vec::with_capacity(bins.len() - idx);
-            let head_view = self.tail_view(bin_ref(&bins[idx]), offset);
-            remaining.push(head_view);
-            for b in &bins[idx + 1..] {
-                let view = self.tail_view(bin_ref(b), 0);
-                remaining.push(view);
+        match &result {
+            Ok(Drain::Park { idx, offset }) => {
+                let (idx, offset) = (*idx, *offset);
+                // Re-run with only the unwritten tail: zero-copy views over
+                // the same backings.
+                drop(logical);
+                let mut remaining: Vec<Value> = Vec::with_capacity(bins.len() - idx);
+                let head_view = self.tail_view(bin_ref(&bins[idx]), offset);
+                remaining.push(head_view);
+                for b in &bins[idx + 1..] {
+                    let view = self.tail_view(bin_ref(b), 0);
+                    remaining.push(view);
+                }
+                self.stack.push(sock_val);
+                let arr = Value::array_in(&mut self.heap, &remaining);
+                self.stack.push(arr);
+                return Ok(Some(Parked::retry(Wait::writable(sv.id))));
             }
-            self.stack.push(sock_val);
-            let arr = Value::array_in(&mut self.heap, &remaining);
-            self.stack.push(arr);
-            return Ok(Some(Parked::retry(Wait::writable(sv.id))));
+            // Done and Err share the completion path below.
+            Ok(Drain::Done) | Err(_) => {}
         }
         let nil = self.make_nil()?;
         self.push_net(result.map(|_| nil))?;

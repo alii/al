@@ -38,17 +38,17 @@ impl crate::core_ir::emit::EmitCtx for Compiler {
         let n = self.env.lookup_type_info_by_id(tid)?.variants()?.len;
         // `Bool` is unboxed, so its scrutinee has no tag word; past 255
         // variants the `SwitchTag.a` byte overflows.
-        if self.prelude.bool.is(tid) || n > 255 {
+        if self.prelude.bool().is(tid) || n > 255 {
             None
         } else {
             Some(n as u8)
         }
     }
     fn bool_variant(&self, tid: TypeId, variant_idx: u16) -> Option<bool> {
-        if !self.prelude.bool.is(tid) {
+        if !self.prelude.bool().is(tid) {
             return None;
         }
-        Some(self.prelude.true_.is(tid, variant_idx))
+        Some(self.prelude.true_().is(tid, variant_idx))
     }
 }
 
@@ -235,15 +235,20 @@ impl ElabCtx for Compiler {
         let TypeNode::Con { id, .. } = self.engine.node(resolved) else {
             return None;
         };
-        let (tref, ok, fail, err_has_payload) = if self.prelude.option.is(id) {
+        let (tref, ok, fail, err_has_payload) = if self.prelude.option().is(id) {
             (
-                self.prelude.option,
-                self.prelude.some,
-                self.prelude.none,
+                self.prelude.option(),
+                self.prelude.some(),
+                self.prelude.none(),
                 false,
             )
-        } else if self.prelude.result.is(id) {
-            (self.prelude.result, self.prelude.ok, self.prelude.err, true)
+        } else if self.prelude.result().is(id) {
+            (
+                self.prelude.result(),
+                self.prelude.ok(),
+                self.prelude.err(),
+                true,
+            )
         } else {
             return None;
         };

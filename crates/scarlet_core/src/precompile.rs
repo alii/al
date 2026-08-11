@@ -324,20 +324,25 @@ mod tests {
         // The contract `PreludeBindings::capture` enforces, checked
         // end-to-end.
         let p = &out.prelude;
-        assert_eq!(p.int.name, "Int");
-        assert_eq!(p.option.name, "Option");
-        assert_eq!(p.result.name, "Result");
-        assert_ne!(p.option.id, p.result.id, "Option/Result share a type id");
-        assert_ne!(p.option.id, p.nil.id, "Option/Nil share a type id");
-        assert_eq!(p.some.arity, 1, "Some carries one payload");
-        assert_eq!(p.none.arity, 0, "None is nullary");
-        assert_eq!(p.ok.arity, 1);
-        assert_eq!(p.err.arity, 1);
-        assert_eq!(p.true_.arity, 0);
-        assert_eq!(p.some.type_id, p.option.id, "Some belongs to Option");
-        assert_eq!(p.ok.type_id, p.result.id, "Ok belongs to Result");
+        assert_eq!(p.int().name, "Int");
+        assert_eq!(p.option().name, "Option");
+        assert_eq!(p.result().name, "Result");
         assert_ne!(
-            p.some.variant_idx, p.none.variant_idx,
+            p.option().id,
+            p.result().id,
+            "Option/Result share a type id"
+        );
+        assert_ne!(p.option().id, p.nil().id, "Option/Nil share a type id");
+        assert_eq!(p.some().arity, 1, "Some carries one payload");
+        assert_eq!(p.none().arity, 0, "None is nullary");
+        assert_eq!(p.ok().arity, 1);
+        assert_eq!(p.err().arity, 1);
+        assert_eq!(p.true_().arity, 0);
+        assert_eq!(p.some().type_id, p.option().id, "Some belongs to Option");
+        assert_eq!(p.ok().type_id, p.result().id, "Ok belongs to Result");
+        assert_ne!(
+            p.some().variant_idx,
+            p.none().variant_idx,
             "Some/None are distinct variants"
         );
 

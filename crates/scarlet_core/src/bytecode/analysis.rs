@@ -984,8 +984,13 @@ impl Compiler {
                             a.span,
                         );
                     }
-                    if !matches!(on, AttrTarget::Fn) {
-                        self.error("'@vm' may only be used on functions".to_string(), a.span);
+                    match on {
+                        AttrTarget::Fn => {}
+                        // Named, not negated: a new attribute target must
+                        // decide whether '@vm' is legal on it.
+                        AttrTarget::Type => {
+                            self.error("'@vm' may only be used on functions".to_string(), a.span);
+                        }
                     }
                 }
                 other => {

@@ -210,8 +210,8 @@ struct ReprTys {
 impl ReprTys {
     fn of(prelude: &PreludeBindings) -> ReprTys {
         ReprTys {
-            bool: prelude.bool,
-            binary: prelude.binary,
+            bool: prelude.bool(),
+            binary: prelude.binary(),
         }
     }
 }
@@ -258,8 +258,8 @@ struct BoolCtors {
 impl BoolCtors {
     fn of(prelude: &PreludeBindings) -> BoolCtors {
         BoolCtors {
-            bool: prelude.bool,
-            true_: prelude.true_,
+            bool: prelude.bool(),
+            true_: prelude.true_(),
         }
     }
 
@@ -1404,6 +1404,14 @@ struct BodyGen<'a> {
     /// [`Self::next_ctor_site`]'s cursor.
     ctor_sites: Vec<EnumCtorSite>,
     ctor_cursor: usize,
+    /// Locals whose consuming read in the current bind's rhs is their last
+    /// use (the bind is followed by their `Drop`): `owned_word` moves the
+    /// slot's own reference out instead of dup-now-drop-later, which is what
+    /// lets a callee see refcount 1 and edit in place.
+    move_args: Vec<LocalId>,
+    /// Moves `owned_word` actually performed; the matching `Drop` nodes are
+    /// skipped, their release having happened as the consumer's.
+    consumed_drops: Vec<LocalId>,
 }
 
 impl<'a> BodyGen<'a> {
@@ -1469,6 +1477,8 @@ impl<'a> BodyGen<'a> {
             loop_head,
             ctor_sites,
             ctor_cursor: 0,
+            move_args: Vec::new(),
+            consumed_drops: Vec::new(),
         };
         g.init_params();
         g
@@ -1646,15 +1656,25 @@ impl<'a> BodyGen<'a> {
         unbox_int(&mut self.b, &self.facts, w)
     }
 
-    /// An owned word for a consuming use. A slotted local keeps its slot's
-    /// reference and hands out a retained copy; a slotless local is a
+    /// An owned word for a consuming use. A slotted local normally keeps its
+    /// slot's reference and hands out a retained copy — but when this read is
+    /// the local's last use (`move_args`), the slot's own reference transfers
+    /// to the consumer and the slot is cleared, so no count traffic happens
+    /// and the consumer can observe a unique value. A slotless local is a
     /// single-use temp whose one owned word transfers.
     fn owned_word(&mut self, id: LocalId) -> ir::Value {
         let w = self.word_of(id);
         if self.layout.slot(id).is_some()
             && let Some(gate) = self.plan.rc_gate(id)
         {
-            emit_dup(&mut self.b, w, gate);
+            if let Some(i) = self.move_args.iter().position(|&x| x == id) {
+                self.move_args.swap_remove(i);
+                self.consumed_drops.push(id);
+                let slot = self.slot_of(id);
+                self.store_slot_zero(slot);
+            } else {
+                emit_dup(&mut self.b, w, gate);
+            }
         }
         w
     }
@@ -2875,7 +2895,40 @@ impl<'a> BodyGen<'a> {
                             self.const_locals.resize_at_least(bind.id, None);
                             self.const_locals[bind.id] = Some((cv.bits, cv.int));
                         }
+                        // A rhs operand whose `Drop` directly follows this
+                        // bind is at its last use: mark it so `owned_word`
+                        // moves the slot reference instead of dup+drop —
+                        // which is what lets `map.set`/`map.delete` see a
+                        // unique map and edit it in place. Currently limited
+                        // to the map ops: they are pure, consume every
+                        // operand exactly once, and have the in-place
+                        // runtime path that pays for it. (Widening this to
+                        // every pure bridge op crashed the http goldens —
+                        // some op re-reads a vacated slot; find it before
+                        // generalizing.) Only reads that actually go through
+                        // `owned_word` fuse; leftovers are cleared and their
+                        // drops emit as written.
+                        if let Atom::PrimOp { op, args, .. } = rhs
+                            && matches!(*op, Op::MapSet | Op::MapDelete)
+                        {
+                            let mut after = body.as_ref();
+                            while let CoreExpr::Drop {
+                                local,
+                                shape: None,
+                                body: b,
+                            } = after
+                            {
+                                if args.iter().filter(|&&a| a == *local).count() == 1
+                                    && self.layout.slot(*local).is_some()
+                                    && self.plan.rc_gate(*local).is_some()
+                                {
+                                    self.move_args.push(*local);
+                                }
+                                after = b;
+                            }
+                        }
                         let v = self.eval_pure(rhs, want_word, want_int);
+                        self.move_args.clear();
                         self.def_local(bind.id, v);
                     }
                     e = body;
@@ -2922,7 +2975,14 @@ impl<'a> BodyGen<'a> {
                     let CoreExpr::Drop { local, shape, body } = e else {
                         unsupported_node("drop shape")
                     };
-                    self.drop_local(*local, shape.is_some());
+                    if let Some(i) = self.consumed_drops.iter().position(|&x| x == *local) {
+                        // The reference already moved into the op that read
+                        // it; the slot is cleared and there is nothing left
+                        // to release.
+                        self.consumed_drops.swap_remove(i);
+                    } else {
+                        self.drop_local(*local, shape.is_some());
+                    }
                     e = body;
                 }
                 CoreExpr::If {
@@ -3427,27 +3487,7 @@ mod tests {
     /// the real prelude's order; every other binding stays pending so nothing
     /// else falsely matches.
     fn test_prelude() -> PreludeBindings {
-        PreludeBindings {
-            bool: TypeRef {
-                id: BOOL_TID,
-                name: "Bool",
-            },
-            binary: TypeRef {
-                id: BIN_TID,
-                name: "Binary",
-            },
-            true_: CtorRef {
-                type_id: BOOL_TID,
-                variant_idx: 0,
-                arity: 0,
-            },
-            false_: CtorRef {
-                type_id: BOOL_TID,
-                variant_idx: 1,
-                arity: 0,
-            },
-            ..PreludeBindings::default()
-        }
+        PreludeBindings::test_bool_binary(BOOL_TID, BIN_TID)
     }
 
     fn local(i: u32) -> LocalId {
@@ -4476,7 +4516,7 @@ mod tests {
         });
         let pre = test_prelude();
         let tys = ReprTys::of(&pre);
-        let nil = pool.mk_con(pre.nil.id, StrId(0), &[]);
+        let nil = pool.mk_con(pre.nil().id, StrId(0), &[]);
         assert_eq!(classify(&pool, tys, nil), Repr::Dyn);
         let boolean = pool.mk_con(BOOL_TID, StrId(0), &[]);
         assert_eq!(classify(&pool, tys, boolean), Repr::Immediate);
@@ -4569,7 +4609,7 @@ mod tests {
     fn bin_byte_size_shim() {
         let (mut pool, int) = int_pool();
         let pre = test_prelude();
-        let bin = pool.mk_con(pre.binary.id, StrId(0), &[]);
+        let bin = pool.mk_con(pre.binary().id, StrId(0), &[]);
         let f = testkit::func(
             vec![testkit::bind(0, bin)],
             CoreExpr::Tail(Atom::PrimOp {

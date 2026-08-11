@@ -294,7 +294,10 @@ fn punctuation_rules() -> Vec<Value> {
                 "name": scope,
                 "match": regex_escape(&kind.to_string()),
             })),
-            _ => None,
+            // Routed by other sections: keywords by the keyword
+            // alternations, operators by `operator_rules`, `<<`/`>>` by the
+            // `#binary` region rule. A new class must pick its section.
+            TokenClass::Keyword | TokenClass::Operator(_) | TokenClass::BinaryDelimiter => None,
         })
         .collect()
 }

@@ -392,7 +392,7 @@ fn cmd_run(args: RunArgs) {
     let mut v = vm::new_vm_with_argv(emitted.program, argv).unwrap_or_else(|e| die(e));
     let run_result = v.run().unwrap_or_else(|e| die(e));
 
-    if !matches!(run_result.as_enum(), Some(e) if e.type_id() == scarlet::STDLIB.prelude.nil.id) {
+    if !matches!(run_result.as_enum(), Some(e) if e.type_id() == scarlet::STDLIB.prelude.nil().id) {
         println!("{}", vm::inspect(&run_result, v.program()));
     }
 }

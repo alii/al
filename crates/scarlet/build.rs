@@ -167,21 +167,23 @@ fn emit_strs<S: AsRef<str>>(out: &mut String, name: &str, items: &[S]) {
 }
 
 fn emit_prelude(out: &mut String, p: &PreludeBindings) {
+    // Positional: `baked`'s parameter order is field-declaration order, the
+    // same order these iterators walk.
     writeln!(
         out,
-        "pub const PRELUDE: PreludeBindings = PreludeBindings {{"
+        "pub const PRELUDE: PreludeBindings = PreludeBindings::baked("
     )
     .unwrap();
     for (n, r) in p.type_fields() {
         let v = lit!(TypeRef: id = tid(r.id), name = format_args!("{:?}", r.name));
-        writeln!(out, "    {n}: {v},").unwrap();
+        writeln!(out, "    /* {n} */ {v},").unwrap();
     }
     for (n, c) in p.ctor_fields() {
         let v =
             lit!(CtorRef: type_id = tid(c.type_id), variant_idx = c.variant_idx, arity = c.arity);
-        writeln!(out, "    {n}: {v},").unwrap();
+        writeln!(out, "    /* {n} */ {v},").unwrap();
     }
-    writeln!(out, "}};").unwrap();
+    writeln!(out, ");").unwrap();
 }
 
 fn opt_constraint(c: Option<scarlet_core::types::Constraint>) -> String {

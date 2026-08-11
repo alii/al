@@ -149,8 +149,8 @@ macro_rules! prelude_bindings {
     ) => {
         #[derive(Debug, Clone)]
         pub struct PreludeBindings {
-            $( pub $tf: TypeRef, )*
-            $( pub $cf: CtorRef, )*
+            $( $tf: TypeRef, )*
+            $( $cf: CtorRef, )*
         }
 
         impl Default for PreludeBindings {
@@ -229,6 +229,33 @@ macro_rules! prelude_bindings {
                 }
             }
 
+            $(
+                #[inline]
+                pub const fn $tf(&self) -> TypeRef {
+                    self.$tf
+                }
+            )*
+            $(
+                #[inline]
+                pub const fn $cf(&self) -> CtorRef {
+                    self.$cf
+                }
+            )*
+
+            /// Positional constructor for the build-script codegen, which
+            /// cannot name private fields from another crate. Parameter order
+            /// is declaration order, the same order `type_fields` and
+            /// `ctor_fields` iterate, so `emit_prelude` and this signature are
+            /// generated from the same list and cannot drift.
+            #[doc(hidden)]
+            #[allow(clippy::too_many_arguments)] // positional by design; see above
+            pub const fn baked($( $tf: TypeRef, )* $( $cf: CtorRef, )*) -> Self {
+                PreludeBindings {
+                    $( $tf, )*
+                    $( $cf, )*
+                }
+            }
+
             pub fn type_fields(&self) -> impl Iterator<Item = (&'static str, TypeRef)> {
                 [$( (stringify!($tf), self.$tf) ),*].into_iter()
             }
@@ -237,6 +264,36 @@ macro_rules! prelude_bindings {
             }
         }
     };
+}
+
+impl PreludeBindings {
+    /// Test-only stand-in: `bool`/`binary` bound to the given nominal ids,
+    /// `True` at variant 0 and `False` at 1 (the real prelude's order), and
+    /// every other binding left pending so nothing else falsely matches.
+    #[cfg(test)]
+    pub(crate) fn test_bool_binary(bool_id: TypeId, bin_id: TypeId) -> Self {
+        PreludeBindings {
+            bool: TypeRef {
+                id: bool_id,
+                name: "Bool",
+            },
+            binary: TypeRef {
+                id: bin_id,
+                name: "Binary",
+            },
+            true_: CtorRef {
+                type_id: bool_id,
+                variant_idx: 0,
+                arity: 0,
+            },
+            false_: CtorRef {
+                type_id: bool_id,
+                variant_idx: 1,
+                arity: 0,
+            },
+            ..PreludeBindings::default()
+        }
+    }
 }
 
 prelude_bindings! {
