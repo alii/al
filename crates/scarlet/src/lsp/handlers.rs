@@ -195,6 +195,18 @@ impl Workspace {
         let Some((uri, line, col)) = self.resolve_pos(params) else {
             return Json::Null;
         };
+        if let Some((graph, mid)) = self.graph_module(&uri) {
+            // The module name inside an `import` declaration resolves to a
+            // target that couples the imported module's id with a span in the
+            // *importing* file's coordinates. Looking that up in the imported
+            // module's definitions is a lookup with the wrong key: usually a
+            // miss, and on a span coincidence another module's data. A
+            // qualifier use (`b` of `b.add`) resolves through the importer's
+            // own alias definition and stays supported.
+            if graph.import_declaration_at(mid, line, col) {
+                return Json::Null;
+            }
+        }
         if let Some((graph, mid)) = self.graph_module(&uri)
             && let Some(def) = graph.definition_at(mid, line, col)
         {

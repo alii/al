@@ -26,8 +26,6 @@ use crate::bytecode::value::{
     NATIVE_HOLLOW_FOR_REUSE_SYMBOL, NATIVE_RELEASE_AT_ZERO_SYMBOL, native_hollow_for_reuse,
     native_release_at_zero,
 };
-#[cfg(test)]
-use cranelift_codegen::ir::Type;
 use cranelift_codegen::ir::{AbiParam, Signature, types};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
@@ -96,6 +94,95 @@ fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
     syms
 }
 
+/// The C-ABI vocabulary of the runtime seam: every parameter and return of
+/// every runtime symbol is one of these two machine types.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AbiTy {
+    Ptr,
+    I64,
+}
+
+/// One runtime symbol's canonical name and C signature.
+///
+/// This table is the single source both declaration sites build from: the
+/// backend's imports ([`declare_runtime_imports`]) and the drift test, which
+/// pins each entry to its `extern "C"` definition with a typed fn-pointer
+/// coercion. A signature written anywhere else can drift from the Rust
+/// definition silently — a drifted C signature is ABI corruption, not an
+/// error.
+pub struct RtSig {
+    pub name: &'static str,
+    pub params: &'static [AbiTy],
+    pub rets: &'static [AbiTy],
+}
+
+/// Every runtime symbol compiled code can reference, 1:1 with
+/// [`runtime_symbols`] (the drift test enforces both directions).
+#[rustfmt::skip]
+pub const RT_SIGS: &[RtSig] = &{
+    use AbiTy::{I64, Ptr};
+    [
+        RtSig { name: NATIVE_RELEASE_AT_ZERO_SYMBOL, params: &[Ptr], rets: &[] },
+        RtSig { name: NATIVE_HOLLOW_FOR_REUSE_SYMBOL, params: &[Ptr], rets: &[] },
+        RtSig { name: "al_shim_enum_alloc", params: &[Ptr, I64, I64, I64, I64, Ptr, I64], rets: &[I64] },
+        RtSig { name: "al_shim_make_array", params: &[Ptr, Ptr, I64], rets: &[I64] },
+        RtSig { name: "al_shim_make_tuple", params: &[Ptr, Ptr, I64], rets: &[I64] },
+        RtSig { name: "al_shim_seq_len", params: &[Ptr, I64], rets: &[I64] },
+        RtSig { name: "al_shim_seq_append", params: &[Ptr, Ptr, I64], rets: &[I64] },
+        RtSig { name: "al_shim_seq_prepend", params: &[Ptr, Ptr, I64], rets: &[I64] },
+        RtSig { name: "al_shim_bin_byte_size", params: &[Ptr, I64], rets: &[I64] },
+        RtSig { name: "al_shim_http_parse_head", params: &[Ptr, I64, I64], rets: &[I64] },
+        RtSig { name: "al_shim_http_headers_valid", params: &[I64], rets: &[I64] },
+        RtSig { name: "al_shim_http_header_has", params: &[I64, I64], rets: &[I64] },
+        RtSig { name: "al_shim_http_serialize_head", params: &[Ptr, I64, I64, I64], rets: &[I64] },
+        RtSig { name: "al_shim_http_framing", params: &[Ptr, I64], rets: &[I64] },
+        RtSig { name: "al_shim_push_global", params: &[Ptr, I64], rets: &[I64] },
+        RtSig { name: "al_shim_push_capture", params: &[Ptr, I64], rets: &[I64] },
+        RtSig { name: "al_shim_push_self", params: &[Ptr], rets: &[I64] },
+        RtSig { name: "al_shim_int_box", params: &[Ptr, I64], rets: &[I64] },
+        RtSig { name: "al_shim_div_int", params: &[I64, I64], rets: &[I64] },
+        RtSig { name: "al_shim_mod_int", params: &[I64, I64], rets: &[I64] },
+        RtSig { name: "al_shim_op", params: &[Ptr, I64, I64, Ptr, I64], rets: &[I64] },
+        RtSig { name: "al_shim_park_op", params: &[Ptr, I64, Ptr, I64, I64, I64], rets: &[I64] },
+        RtSig { name: "al_shim_try_op", params: &[Ptr, I64, I64, Ptr, I64], rets: &[I64] },
+        RtSig { name: "al_rt_prepare_call", params: &[Ptr, I64, I64, Ptr, I64], rets: &[Ptr, I64] },
+        RtSig { name: "al_rt_prepare_call_value", params: &[Ptr, I64, I64, Ptr, I64], rets: &[Ptr, I64] },
+        RtSig { name: "al_rt_prepare_tail", params: &[Ptr, I64, Ptr, I64], rets: &[Ptr, I64] },
+        RtSig { name: "al_rt_prepare_tail_value", params: &[Ptr, I64, Ptr, I64], rets: &[Ptr, I64] },
+        RtSig { name: "al_rt_ret_transfer", params: &[Ptr, I64], rets: &[Ptr, I64] },
+        RtSig { name: "al_rt_pop", params: &[Ptr], rets: &[I64] },
+        RtSig { name: "al_rt_make_closure", params: &[Ptr, I64, Ptr, I64], rets: &[I64] },
+        RtSig { name: "al_rt_checkpoint", params: &[Ptr], rets: &[I64] },
+        RtSig { name: "al_rt_frame_base", params: &[Ptr], rets: &[Ptr] },
+    ]
+};
+
+/// Declare every [`RT_SIGS`] symbol into `module` as an import, keyed by
+/// name. The backend resolves its `FuncRef`s from this map, so no caller
+/// ever writes a signature of its own.
+pub fn declare_runtime_imports<M: Module>(
+    module: &mut M,
+) -> Result<std::collections::HashMap<&'static str, FuncId>, Box<ModuleError>> {
+    let ptr = module.target_config().pointer_type();
+    let mut out = std::collections::HashMap::with_capacity(RT_SIGS.len());
+    for e in RT_SIGS {
+        let ty = |t: &AbiTy| match t {
+            AbiTy::Ptr => ptr,
+            AbiTy::I64 => types::I64,
+        };
+        let mut sig = module.make_signature();
+        sig.params
+            .extend(e.params.iter().map(|t| AbiParam::new(ty(t))));
+        sig.returns
+            .extend(e.rets.iter().map(|t| AbiParam::new(ty(t))));
+        out.insert(
+            e.name,
+            module.declare_function(e.name, Linkage::Import, &sig)?,
+        );
+    }
+    Ok(out)
+}
+
 /// Build the one JIT module compiled bodies are defined into, with every
 /// [`runtime_symbols`] pair pre-registered.
 ///
@@ -105,7 +192,13 @@ fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
 /// `cranelift_jit` directly.
 pub type JitModule = JITModule;
 
-pub fn jit_module() -> Result<JitModule, JitError> {
+/// A `JITBuilder` carrying every Cranelift flag compiled Scarlet requires —
+/// the one source of truth. Tests that substitute mock runtime symbols must
+/// still build on this: a hand-copied flag list drifts, and a missing flag is
+/// a miscompile that only surfaces on the other architecture (x64 refuses
+/// `return_call` without frame pointers; a missing probestack steps over the
+/// guard page silently).
+pub fn jit_builder() -> Result<JITBuilder, JitError> {
     let mut flags = settings::builder();
     // JIT'd code and the shims sit at arbitrary addresses in one process, so
     // calls need absolute addresses rather than colocated PLT-style stubs.
@@ -136,7 +229,11 @@ pub fn jit_module() -> Result<JitModule, JitError> {
         .map_err(|e| JitError::Host(e.to_string()))?
         .finish(settings::Flags::new(flags))
         .map_err(|e| JitError::Host(e.to_string()))?;
-    let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
+    Ok(JITBuilder::with_isa(isa, default_libcall_names()))
+}
+
+pub fn jit_module() -> Result<JitModule, JitError> {
+    let mut builder = jit_builder()?;
     for (name, addr) in runtime_symbols() {
         builder.symbol(name, addr);
     }
@@ -197,107 +294,6 @@ pub fn entry_trampoline(module: &mut JITModule) -> Result<FuncId, JitError> {
     module.define_function(id, &mut ctx)?;
     module.clear_context(&mut ctx);
     Ok(id)
-}
-
-/// The declared runtime imports, one `FuncId` per shim, ready for
-/// `declare_func_in_func` at CLIF-emission sites. Cranelift dedupes repeat
-/// declarations, so [`RuntimeFns::declare`] is idempotent per module.
-#[cfg(test)]
-struct RuntimeFns {
-    /// `al_native_release_at_zero(obj)` — the cold free-at-zero call the
-    /// inline drop gate branches to
-    /// ([`native_rc::emit_dynamic_drop`](crate::native_rc)).
-    release_at_zero: FuncId,
-    /// `al_shim_int_box(vmx, i) -> bits` — box a full-range `i64`, spilling
-    /// past the 47-bit immediate range.
-    int_box: FuncId,
-    /// `al_shim_int_unbox(bits) -> i` — decode an Int value that may be a
-    /// `BigInt` box.
-    int_unbox: FuncId,
-    /// `al_shim_add_int_val(vmx, a, b) -> bits` — whole-op fallback add.
-    add_int_val: FuncId,
-    /// `al_shim_sub_int_val(vmx, a, b) -> bits`.
-    sub_int_val: FuncId,
-    /// `al_shim_mul_int_val(vmx, a, b) -> bits`.
-    mul_int_val: FuncId,
-    /// `al_shim_div_int_val(vmx, a, b) -> bits`.
-    div_int_val: FuncId,
-    /// `al_shim_mod_int_val(vmx, a, b) -> bits`.
-    mod_int_val: FuncId,
-    /// `al_shim_neg_int_val(vmx, a) -> bits`.
-    neg_int_val: FuncId,
-    /// `al_shim_div_int(a, b) -> q` — unboxed division with interpreter
-    /// totality.
-    div_int: FuncId,
-    /// `al_shim_mod_int(a, b) -> r` — unboxed remainder with interpreter
-    /// totality.
-    mod_int: FuncId,
-    /// `al_rt_prepare_call(vmx, target, resume, args, argc) -> (entry, aux)`
-    /// — non-tail call as a transfer decision.
-    prepare_call: FuncId,
-    /// `al_rt_prepare_tail(vmx, target, args, argc) -> (entry, aux)`.
-    prepare_tail: FuncId,
-    /// `al_rt_ret_transfer(vmx, result) -> (entry, aux)` — the compiled
-    /// epilogue as a transfer decision.
-    ret_transfer: FuncId,
-    /// `al_rt_pop(vmx) -> bits` — the callee result at a continuation.
-    rt_pop: FuncId,
-    /// `al_rt_checkpoint(vmx) -> status` — the reds checkpoint at a
-    /// self-tail-call back-edge (`Done` = keep looping, `Yield` = unwind
-    /// with the frame resumable at ip 0).
-    rt_checkpoint: FuncId,
-    /// `al_rt_frame_base(vmx) -> ptr` — address of the top frame's slot 0;
-    /// re-fetched after any stack-growing seam.
-    rt_frame_base: FuncId,
-}
-
-#[cfg(test)]
-impl RuntimeFns {
-    fn declare(module: &mut JITModule) -> Result<RuntimeFns, JitError> {
-        let ptr = module.target_config().pointer_type();
-        let i64t = types::I64;
-        // A name declared here but missing from `runtime_symbols` would only
-        // surface as a crash inside Cranelift at finalize. Check membership at
-        // declare time instead, so drift is an error with the name in it.
-        let registered: std::collections::HashSet<&'static str> =
-            runtime_symbols().into_iter().map(|(n, _)| n).collect();
-        let mut import_rets =
-            |name: &'static str, params: &[Type], rets: &[Type]| -> Result<FuncId, JitError> {
-                if !registered.contains(name) {
-                    return Err(JitError::Host(format!(
-                        "runtime helper {name} is declared but not in the symbol table"
-                    )));
-                }
-                let mut sig = module.make_signature();
-                sig.params.extend(params.iter().map(|&t| AbiParam::new(t)));
-                sig.returns.extend(rets.iter().map(|&t| AbiParam::new(t)));
-                Ok(module.declare_function(name, Linkage::Import, &sig)?)
-            };
-
-        Ok(RuntimeFns {
-            release_at_zero: import_rets(NATIVE_RELEASE_AT_ZERO_SYMBOL, &[ptr], &[])?,
-            int_box: import_rets("al_shim_int_box", &[ptr, i64t], &[i64t])?,
-            int_unbox: import_rets("al_shim_int_unbox", &[i64t], &[i64t])?,
-            add_int_val: import_rets("al_shim_add_int_val", &[ptr, i64t, i64t], &[i64t])?,
-            sub_int_val: import_rets("al_shim_sub_int_val", &[ptr, i64t, i64t], &[i64t])?,
-            mul_int_val: import_rets("al_shim_mul_int_val", &[ptr, i64t, i64t], &[i64t])?,
-            div_int_val: import_rets("al_shim_div_int_val", &[ptr, i64t, i64t], &[i64t])?,
-            mod_int_val: import_rets("al_shim_mod_int_val", &[ptr, i64t, i64t], &[i64t])?,
-            neg_int_val: import_rets("al_shim_neg_int_val", &[ptr, i64t], &[i64t])?,
-            div_int: import_rets("al_shim_div_int", &[i64t, i64t], &[i64t])?,
-            mod_int: import_rets("al_shim_mod_int", &[i64t, i64t], &[i64t])?,
-            prepare_call: import_rets(
-                "al_rt_prepare_call",
-                &[ptr, i64t, i64t, ptr, i64t],
-                &[ptr, i64t],
-            )?,
-            prepare_tail: import_rets("al_rt_prepare_tail", &[ptr, i64t, ptr, i64t], &[ptr, i64t])?,
-            ret_transfer: import_rets("al_rt_ret_transfer", &[ptr, i64t], &[ptr, i64t])?,
-            rt_pop: import_rets("al_rt_pop", &[ptr], &[i64t])?,
-            rt_checkpoint: import_rets("al_rt_checkpoint", &[ptr], &[i64t])?,
-            rt_frame_base: import_rets("al_rt_frame_base", &[ptr], &[ptr])?,
-        })
-    }
 }
 
 /// One compiled body handed to [`finalize_into`].
@@ -402,7 +398,11 @@ mod tests {
     }
 
     #[test]
-    fn runtime_symbol_names_are_unique_and_all_declarable() {
+    fn runtime_table_matches_the_rust_definitions() {
+        use AbiTy::{I64, Ptr};
+        type P2 = crate::vm::native::PreparedCall;
+
+        // Uniqueness and non-null addresses.
         let syms = runtime_symbols();
         for (i, (name, addr)) in syms.iter().enumerate() {
             assert!(!addr.is_null(), "{name} has a null address");
@@ -411,181 +411,268 @@ mod tests {
                 "duplicate runtime symbol {name}"
             );
         }
-        // A declared name missing from `runtime_symbols` would only show up
-        // as a panic inside `finalize_definitions`, so pin the whole ABI
-        // chain here: the typed fn-pointer coercion turns a shim-signature
-        // edit into a compile error, the CLIF types are checked against the
-        // declaration, and the name must resolve to that exact address.
-        let mut module = jit_module().unwrap();
-        let fns = RuntimeFns::declare(&mut module).unwrap();
-        let ptr = module.target_config().pointer_type();
-        let i64t = types::I64;
-        type BinValShim = unsafe extern "C" fn(*mut VM, u64, u64) -> u64;
+
+        // Each pin coerces the shim to an explicit `extern "C"` type — a
+        // signature edit is a compile error here — and states the CLIF shape
+        // that type corresponds to. The asserts below tie pin ↔ table ↔
+        // registered address, so all four copies of the fact must agree.
+        struct Pin(&'static str, *const u8, &'static [AbiTy], &'static [AbiTy]);
         let release: unsafe extern "C" fn(*mut u64) = native_release_at_zero;
+        let hollow: unsafe extern "C" fn(*mut u64) = native_hollow_for_reuse;
+        let enum_alloc: unsafe extern "C" fn(*mut VM, u64, u64, u64, u64, *const u64, i64) -> u64 =
+            native_shims::al_shim_enum_alloc;
+        let make_array: unsafe extern "C" fn(*mut VM, *const u64, i64) -> u64 =
+            native_shims::al_shim_make_array;
+        let make_tuple: unsafe extern "C" fn(*mut VM, *const u64, i64) -> u64 =
+            native_shims::al_shim_make_tuple;
+        let seq_len: unsafe extern "C" fn(*mut VM, u64) -> u64 = native_shims::al_shim_seq_len;
+        let seq_append: unsafe extern "C" fn(*mut VM, *const u64, i64) -> u64 =
+            native_shims::al_shim_seq_append;
+        let seq_prepend: unsafe extern "C" fn(*mut VM, *const u64, i64) -> u64 =
+            native_shims::al_shim_seq_prepend;
+        let bin_byte_size: unsafe extern "C" fn(*mut VM, u64) -> u64 =
+            native_shims::al_shim_bin_byte_size;
+        let http_parse_head: unsafe extern "C" fn(*mut VM, u64, i64) -> u64 =
+            native_shims::al_shim_http_parse_head;
+        let http_headers_valid: unsafe extern "C" fn(u64) -> u64 =
+            native_shims::al_shim_http_headers_valid;
+        let http_header_has: unsafe extern "C" fn(u64, u64) -> u64 =
+            native_shims::al_shim_http_header_has;
+        let http_serialize_head: unsafe extern "C" fn(*mut VM, i64, u64, u64) -> u64 =
+            native_shims::al_shim_http_serialize_head;
+        let http_framing: unsafe extern "C" fn(*mut VM, u64) -> u64 =
+            native_shims::al_shim_http_framing;
+        let push_global: unsafe extern "C" fn(*mut VM, i64) -> u64 =
+            native_shims::al_shim_push_global;
+        let push_capture: unsafe extern "C" fn(*mut VM, i64) -> u64 =
+            native_shims::al_shim_push_capture;
+        let push_self: unsafe extern "C" fn(*mut VM) -> u64 = native_shims::al_shim_push_self;
         let int_box: unsafe extern "C" fn(*mut VM, i64) -> u64 = native_shims::al_shim_int_box;
-        let int_unbox: unsafe extern "C" fn(u64) -> i64 = native_shims::al_shim_int_unbox;
-        let add_int_val: BinValShim = native_shims::al_shim_add_int_val;
-        let sub_int_val: BinValShim = native_shims::al_shim_sub_int_val;
-        let mul_int_val: BinValShim = native_shims::al_shim_mul_int_val;
-        let div_int_val: BinValShim = native_shims::al_shim_div_int_val;
-        let mod_int_val: BinValShim = native_shims::al_shim_mod_int_val;
-        let neg_int_val: unsafe extern "C" fn(*mut VM, u64) -> u64 =
-            native_shims::al_shim_neg_int_val;
         let div_int: extern "C" fn(i64, i64) -> i64 = native_shims::al_shim_div_int;
         let mod_int: extern "C" fn(i64, i64) -> i64 = native_shims::al_shim_mod_int;
-        type Prepared2 = crate::vm::native::PreparedCall;
-        let prepare_call: unsafe extern "C" fn(*mut VM, i64, i64, *const u64, i64) -> Prepared2 =
+        let shim_op: unsafe extern "C" fn(*mut VM, i64, i64, *const u64, i64) -> u64 =
+            native_shims::al_shim_op;
+        let park_op: unsafe extern "C" fn(*mut VM, i64, *const u64, i64, i64, i64) -> u64 =
+            native_shims::al_shim_park_op;
+        let try_op: unsafe extern "C" fn(*mut VM, i64, i64, *const u64, i64) -> u64 =
+            native_shims::al_shim_try_op;
+        let prepare_call: unsafe extern "C" fn(*mut VM, i64, i64, *const u64, i64) -> P2 =
             native::al_rt_prepare_call;
-        let prepare_tail: unsafe extern "C" fn(*mut VM, i64, *const u64, i64) -> Prepared2 =
+        let prepare_call_value: unsafe extern "C" fn(*mut VM, u64, i64, *const u64, i64) -> P2 =
+            native::al_rt_prepare_call_value;
+        let prepare_tail: unsafe extern "C" fn(*mut VM, i64, *const u64, i64) -> P2 =
             native::al_rt_prepare_tail;
-        let ret_transfer: unsafe extern "C" fn(*mut VM, u64) -> Prepared2 =
-            native::al_rt_ret_transfer;
+        let prepare_tail_value: unsafe extern "C" fn(*mut VM, u64, *const u64, i64) -> P2 =
+            native::al_rt_prepare_tail_value;
+        let ret_transfer: unsafe extern "C" fn(*mut VM, u64) -> P2 = native::al_rt_ret_transfer;
         let rt_pop: unsafe extern "C" fn(*mut VM) -> u64 = native::al_rt_pop;
+        let make_closure: unsafe extern "C" fn(*mut VM, i64, *const u64, i64) -> u64 =
+            native::al_rt_make_closure;
         let rt_checkpoint: unsafe extern "C" fn(*mut VM) -> NativeStatus = native::al_rt_checkpoint;
         let rt_frame_base: unsafe extern "C" fn(*mut VM) -> *mut u64 = native::al_rt_frame_base;
-        let rows: [(FuncId, *const u8, Vec<Type>, Option<Type>); 14] = [
-            (fns.release_at_zero, release as *const u8, vec![ptr], None),
-            (
-                fns.int_box,
-                int_box as *const u8,
-                vec![ptr, i64t],
-                Some(i64t),
-            ),
-            (
-                fns.int_unbox,
-                int_unbox as *const u8,
-                vec![i64t],
-                Some(i64t),
-            ),
-            (
-                fns.add_int_val,
-                add_int_val as *const u8,
-                vec![ptr, i64t, i64t],
-                Some(i64t),
-            ),
-            (
-                fns.sub_int_val,
-                sub_int_val as *const u8,
-                vec![ptr, i64t, i64t],
-                Some(i64t),
-            ),
-            (
-                fns.mul_int_val,
-                mul_int_val as *const u8,
-                vec![ptr, i64t, i64t],
-                Some(i64t),
-            ),
-            (
-                fns.div_int_val,
-                div_int_val as *const u8,
-                vec![ptr, i64t, i64t],
-                Some(i64t),
-            ),
-            (
-                fns.mod_int_val,
-                mod_int_val as *const u8,
-                vec![ptr, i64t, i64t],
-                Some(i64t),
-            ),
-            (
-                fns.neg_int_val,
-                neg_int_val as *const u8,
-                vec![ptr, i64t],
-                Some(i64t),
-            ),
-            (
-                fns.div_int,
-                div_int as *const u8,
-                vec![i64t, i64t],
-                Some(i64t),
-            ),
-            (
-                fns.mod_int,
-                mod_int as *const u8,
-                vec![i64t, i64t],
-                Some(i64t),
-            ),
-            (fns.rt_pop, rt_pop as *const u8, vec![ptr], Some(i64t)),
-            (
-                fns.rt_checkpoint,
-                rt_checkpoint as *const u8,
-                vec![ptr],
-                Some(i64t),
-            ),
-            (
-                fns.rt_frame_base,
-                rt_frame_base as *const u8,
-                vec![ptr],
-                Some(ptr),
-            ),
-        ];
-        for (id, addr, params, ret) in rows {
-            let decl = module.declarations().get_function_decl(id);
-            let name = decl.name.as_deref().expect("imports are named");
-            let expected_params: Vec<AbiParam> = params.into_iter().map(AbiParam::new).collect();
-            assert_eq!(
-                decl.signature.params, expected_params,
-                "{name}: declared CLIF params drifted from the shim's extern \"C\" ABI"
-            );
-            let expected_ret: Vec<AbiParam> = ret.map(AbiParam::new).into_iter().collect();
-            assert_eq!(
-                decl.signature.returns, expected_ret,
-                "{name}: declared CLIF return drifted from the shim's extern \"C\" ABI"
-            );
-            let (_, registered) = syms
-                .iter()
-                .find(|(n, _)| *n == name)
-                .unwrap_or_else(|| panic!("declared import {name} is not in runtime_symbols()"));
-            assert_eq!(
-                *registered, addr,
-                "{name} resolves to a different function than the one whose ABI is pinned here"
-            );
-        }
 
-        // The `PreparedCall`-returning helpers: two return registers.
-        let rows2: [(FuncId, *const u8, Vec<Type>); 3] = [
-            (
-                fns.prepare_call,
+        let pins = [
+            Pin(
+                NATIVE_RELEASE_AT_ZERO_SYMBOL,
+                release as *const u8,
+                &[Ptr],
+                &[],
+            ),
+            Pin(
+                NATIVE_HOLLOW_FOR_REUSE_SYMBOL,
+                hollow as *const u8,
+                &[Ptr],
+                &[],
+            ),
+            Pin(
+                "al_shim_enum_alloc",
+                enum_alloc as *const u8,
+                &[Ptr, I64, I64, I64, I64, Ptr, I64],
+                &[I64],
+            ),
+            Pin(
+                "al_shim_make_array",
+                make_array as *const u8,
+                &[Ptr, Ptr, I64],
+                &[I64],
+            ),
+            Pin(
+                "al_shim_make_tuple",
+                make_tuple as *const u8,
+                &[Ptr, Ptr, I64],
+                &[I64],
+            ),
+            Pin("al_shim_seq_len", seq_len as *const u8, &[Ptr, I64], &[I64]),
+            Pin(
+                "al_shim_seq_append",
+                seq_append as *const u8,
+                &[Ptr, Ptr, I64],
+                &[I64],
+            ),
+            Pin(
+                "al_shim_seq_prepend",
+                seq_prepend as *const u8,
+                &[Ptr, Ptr, I64],
+                &[I64],
+            ),
+            Pin(
+                "al_shim_bin_byte_size",
+                bin_byte_size as *const u8,
+                &[Ptr, I64],
+                &[I64],
+            ),
+            Pin(
+                "al_shim_http_parse_head",
+                http_parse_head as *const u8,
+                &[Ptr, I64, I64],
+                &[I64],
+            ),
+            Pin(
+                "al_shim_http_headers_valid",
+                http_headers_valid as *const u8,
+                &[I64],
+                &[I64],
+            ),
+            Pin(
+                "al_shim_http_header_has",
+                http_header_has as *const u8,
+                &[I64, I64],
+                &[I64],
+            ),
+            Pin(
+                "al_shim_http_serialize_head",
+                http_serialize_head as *const u8,
+                &[Ptr, I64, I64, I64],
+                &[I64],
+            ),
+            Pin(
+                "al_shim_http_framing",
+                http_framing as *const u8,
+                &[Ptr, I64],
+                &[I64],
+            ),
+            Pin(
+                "al_shim_push_global",
+                push_global as *const u8,
+                &[Ptr, I64],
+                &[I64],
+            ),
+            Pin(
+                "al_shim_push_capture",
+                push_capture as *const u8,
+                &[Ptr, I64],
+                &[I64],
+            ),
+            Pin("al_shim_push_self", push_self as *const u8, &[Ptr], &[I64]),
+            Pin("al_shim_int_box", int_box as *const u8, &[Ptr, I64], &[I64]),
+            Pin("al_shim_div_int", div_int as *const u8, &[I64, I64], &[I64]),
+            Pin("al_shim_mod_int", mod_int as *const u8, &[I64, I64], &[I64]),
+            Pin(
+                "al_shim_op",
+                shim_op as *const u8,
+                &[Ptr, I64, I64, Ptr, I64],
+                &[I64],
+            ),
+            Pin(
+                "al_shim_park_op",
+                park_op as *const u8,
+                &[Ptr, I64, Ptr, I64, I64, I64],
+                &[I64],
+            ),
+            Pin(
+                "al_shim_try_op",
+                try_op as *const u8,
+                &[Ptr, I64, I64, Ptr, I64],
+                &[I64],
+            ),
+            Pin(
+                "al_rt_prepare_call",
                 prepare_call as *const u8,
-                vec![ptr, i64t, i64t, ptr, i64t],
+                &[Ptr, I64, I64, Ptr, I64],
+                &[Ptr, I64],
             ),
-            (
-                fns.prepare_tail,
+            Pin(
+                "al_rt_prepare_call_value",
+                prepare_call_value as *const u8,
+                &[Ptr, I64, I64, Ptr, I64],
+                &[Ptr, I64],
+            ),
+            Pin(
+                "al_rt_prepare_tail",
                 prepare_tail as *const u8,
-                vec![ptr, i64t, ptr, i64t],
+                &[Ptr, I64, Ptr, I64],
+                &[Ptr, I64],
             ),
-            (fns.ret_transfer, ret_transfer as *const u8, vec![ptr, i64t]),
+            Pin(
+                "al_rt_prepare_tail_value",
+                prepare_tail_value as *const u8,
+                &[Ptr, I64, Ptr, I64],
+                &[Ptr, I64],
+            ),
+            Pin(
+                "al_rt_ret_transfer",
+                ret_transfer as *const u8,
+                &[Ptr, I64],
+                &[Ptr, I64],
+            ),
+            Pin("al_rt_pop", rt_pop as *const u8, &[Ptr], &[I64]),
+            Pin(
+                "al_rt_make_closure",
+                make_closure as *const u8,
+                &[Ptr, I64, Ptr, I64],
+                &[I64],
+            ),
+            Pin(
+                "al_rt_checkpoint",
+                rt_checkpoint as *const u8,
+                &[Ptr],
+                &[I64],
+            ),
+            Pin(
+                "al_rt_frame_base",
+                rt_frame_base as *const u8,
+                &[Ptr],
+                &[Ptr],
+            ),
         ];
-        for (id, addr, params) in rows2 {
-            let decl = module.declarations().get_function_decl(id);
-            let name = decl.name.clone().unwrap_or_default();
-            let declared_params: Vec<Type> =
-                decl.signature.params.iter().map(|p| p.value_type).collect();
-            assert_eq!(
-                declared_params, params,
-                "{name}: declared CLIF params drifted"
-            );
-            let rets: Vec<Type> = decl
-                .signature
-                .returns
+
+        assert_eq!(pins.len(), RT_SIGS.len(), "every table entry needs a pin");
+        assert_eq!(
+            syms.len(),
+            RT_SIGS.len(),
+            "table and symbol registry must be 1:1"
+        );
+        for Pin(name, addr, params, rets) in &pins {
+            let e = RT_SIGS
                 .iter()
-                .map(|p| p.value_type)
-                .collect();
-            assert_eq!(rets, vec![ptr, i64t], "{name}: PreparedCall return drifted");
+                .find(|e| e.name == *name)
+                .unwrap_or_else(|| panic!("{name} pinned but not in RT_SIGS"));
+            assert_eq!(
+                e.params, *params,
+                "{name}: table params drifted from the pinned ABI"
+            );
+            assert_eq!(
+                e.rets, *rets,
+                "{name}: table rets drifted from the pinned ABI"
+            );
             let (_, registered) = syms
                 .iter()
-                .find(|(n, _)| *n == name)
-                .unwrap_or_else(|| panic!("declared import {name} is not in runtime_symbols()"));
-            assert_eq!(*registered, addr, "{name} address drifted");
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("{name} is not in runtime_symbols()"));
+            assert_eq!(
+                *registered, *addr,
+                "{name} resolves to a different function than the one whose ABI is pinned"
+            );
         }
-    }
 
-    /// CLIF calls `al_shim_int_box` by name, the registered symbol resolves
-    /// at finalize, and the executed code spills like the interpreter does.
+        // And every declaration a module would make must succeed.
+        let mut module = jit_module().unwrap();
+        declare_runtime_imports(&mut module).unwrap();
+    }
     #[test]
     fn by_name_import_resolves_to_the_registered_shim() {
         let mut module = jit_module().unwrap();
-        let fns = RuntimeFns::declare(&mut module).unwrap();
+        let ids = declare_runtime_imports(&mut module).unwrap();
         let ptr_ty = module.target_config().pointer_type();
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(ptr_ty));
@@ -595,7 +682,7 @@ mod tests {
             let entry = b.current_block().unwrap();
             let vmx = b.block_params(entry)[0];
             let i = b.block_params(entry)[1];
-            let int_box = module.declare_func_in_func(fns.int_box, b.func);
+            let int_box = module.declare_func_in_func(ids["al_shim_int_box"], b.func);
             let call = b.ins().call(int_box, &[vmx, i]);
             let bits = b.inst_results(call)[0];
             b.ins().return_(&[bits]);
@@ -623,13 +710,13 @@ mod tests {
     #[test]
     fn front_end_emitted_clif_resolves_through_this_registry() {
         let mut module = jit_module().unwrap();
-        let fns = RuntimeFns::declare(&mut module).unwrap();
+        let ids = declare_runtime_imports(&mut module).unwrap();
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         let code = define_and_finalize(&mut module, "drop_bits", sig, |module, b| {
             let entry = b.current_block().unwrap();
             let bits = b.block_params(entry)[0];
-            let release = module.declare_func_in_func(fns.release_at_zero, b.func);
+            let release = module.declare_func_in_func(ids[NATIVE_RELEASE_AT_ZERO_SYMBOL], b.func);
             emit_dynamic_drop(b, bits, release);
             b.ins().return_(&[]);
         });

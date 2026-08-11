@@ -23,6 +23,31 @@ pub fn disassemble_fn(program: &Program, needle: &str) -> String {
     render(program, Some(needle))
 }
 
+/// Why `disassemble_native` produced no listing.
+#[derive(Debug)]
+pub enum DisNativeError {
+    /// The host JIT module could not be created.
+    Jit(jit::JitError),
+    /// One matched function's native body failed to compile.
+    Compile {
+        function: String,
+        error: jit::JitError,
+    },
+}
+
+impl std::fmt::Display for DisNativeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DisNativeError::Jit(e) => write!(f, "{e}"),
+            DisNativeError::Compile { function, error } => {
+                write!(f, "native compile of {function} failed: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DisNativeError {}
+
 /// `--native <fn>`: the bytecode listing for functions matching `needle`, each
 /// compiled body followed by its CLIF and machine-code size.
 ///
@@ -37,9 +62,9 @@ pub fn disassemble_native(
         scarlet_vm::FuncIdx,
         scarlet_core::core_ir::emit::FrameLayout,
     >,
-) -> Result<String, String> {
+) -> Result<String, DisNativeError> {
     let mut out = render(program, Some(needle));
-    let mut module = jit::jit_module().map_err(|e| e.to_string())?;
+    let mut module = jit::jit_module().map_err(DisNativeError::Jit)?;
     let mut listed = false;
     for plan in plans {
         let idx = plan.func_idx.index();
@@ -64,7 +89,12 @@ pub fn disassemble_native(
                     let _ = writeln!(out);
                 }
             }
-            Err(e) => return Err(format!("native compile of {} failed: {e}", f.name)),
+            Err(e) => {
+                return Err(DisNativeError::Compile {
+                    function: f.name.to_string(),
+                    error: jit::JitError::Module(e),
+                });
+            }
         }
         listed = true;
     }

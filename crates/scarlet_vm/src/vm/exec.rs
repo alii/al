@@ -1024,8 +1024,7 @@ impl VM {
         let Some(packed) = type_id_val.as_int() else {
             return Err(VmError::internal("enum type id must be int"));
         };
-        let type_id = crate::TypeId(packed as i32);
-        let variant_idx = (packed >> 32) as u16;
+        let (type_id, variant_idx) = crate::bytecode::value::unpack_variant(packed);
 
         if enum_name_val.as_str().is_none() {
             return Err(VmError::internal("enum name must be string"));

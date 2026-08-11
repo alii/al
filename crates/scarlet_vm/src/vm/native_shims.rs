@@ -20,7 +20,6 @@
 // raw pointers and raw NaN-box bits.
 #![allow(unsafe_code)]
 
-use crate::TypeId;
 use crate::bytecode::value::{ReuseAddr, proof_violation, range_len};
 use crate::bytecode::{NativeStatus, Op, Value, ValueView, seq};
 
@@ -48,24 +47,6 @@ fn mod_int(a: i64, b: i64) -> i64 {
     if b == 0 { a } else { a.wrapping_rem(b) }
 }
 
-/// Shared body of the whole-op shims.
-///
-/// # Safety
-/// `vmx` must point at the running scheduler's live `VM`; `a` and `b` must
-/// each be the bits of an Int-typed `Value` whose reference the caller owns
-/// and transfers to this call.
-unsafe fn bin_int_val(vmx: *mut VM, a: u64, b: u64, op: impl FnOnce(i64, i64) -> i64) -> u64 {
-    // SAFETY: both operand references are transferred per the contract above;
-    // the drops below balance them exactly once.
-    let (a, b) = unsafe { (Value::from_bits(a), Value::from_bits(b)) };
-    let r = op(a.as_int_typed(), b.as_int_typed());
-    drop(a);
-    drop(b);
-    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
-    let vm = unsafe { &mut *vmx };
-    into_bits(vm.boxed_int(r))
-}
-
 /// Box a full-range `i64` as an Int value, spilling past the 47-bit immediate
 /// range to an arena `BigInt`. The returned bits carry one owned reference the
 /// caller must store or release exactly once.
@@ -77,89 +58,6 @@ pub(crate) unsafe extern "C" fn al_shim_int_box(vmx: *mut VM, i: i64) -> u64 {
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
     into_bits(vm.boxed_int(i))
-}
-
-/// Decode an Int-typed value's bits to the full `i64`. Borrow-only: the caller
-/// keeps its reference.
-///
-/// # Safety
-/// `bits` must be the bits of an Int-typed `Value`; a `BigInt` box must be
-/// live for the duration of the call.
-#[cold]
-pub(crate) unsafe extern "C" fn al_shim_int_unbox(bits: u64) -> i64 {
-    // SAFETY: borrowed read per the contract above; ManuallyDrop keeps the
-    // caller's reference count untouched.
-    let v = std::mem::ManuallyDrop::new(unsafe { Value::from_bits(bits) });
-    v.as_int_typed()
-}
-
-/// `Op::AddInt` over value bits. Consumes both operand references.
-///
-/// # Safety
-/// As [`bin_int_val`].
-#[cold]
-pub(crate) unsafe extern "C" fn al_shim_add_int_val(vmx: *mut VM, a: u64, b: u64) -> u64 {
-    // SAFETY: forwarded contract.
-    unsafe { bin_int_val(vmx, a, b, i64::wrapping_add) }
-}
-
-/// `Op::SubInt` over value bits. Consumes both operand references.
-///
-/// # Safety
-/// As [`bin_int_val`].
-#[cold]
-pub(crate) unsafe extern "C" fn al_shim_sub_int_val(vmx: *mut VM, a: u64, b: u64) -> u64 {
-    // SAFETY: forwarded contract.
-    unsafe { bin_int_val(vmx, a, b, i64::wrapping_sub) }
-}
-
-/// `Op::MulInt` over value bits. Consumes both operand references.
-///
-/// # Safety
-/// As [`bin_int_val`].
-#[cold]
-pub(crate) unsafe extern "C" fn al_shim_mul_int_val(vmx: *mut VM, a: u64, b: u64) -> u64 {
-    // SAFETY: forwarded contract.
-    unsafe { bin_int_val(vmx, a, b, i64::wrapping_mul) }
-}
-
-/// `Op::DivInt` over value bits. Consumes both operand references.
-///
-/// # Safety
-/// As [`bin_int_val`].
-#[cold]
-pub(crate) unsafe extern "C" fn al_shim_div_int_val(vmx: *mut VM, a: u64, b: u64) -> u64 {
-    // SAFETY: forwarded contract.
-    unsafe { bin_int_val(vmx, a, b, div_int) }
-}
-
-/// `Op::ModInt` over value bits. Consumes both operand references.
-///
-/// # Safety
-/// As [`bin_int_val`].
-#[cold]
-pub(crate) unsafe extern "C" fn al_shim_mod_int_val(vmx: *mut VM, a: u64, b: u64) -> u64 {
-    // SAFETY: forwarded contract.
-    unsafe { bin_int_val(vmx, a, b, mod_int) }
-}
-
-/// `Op::NegInt` over value bits: wrapping negation, so `MIN` stays `MIN` and
-/// `-SMALL_INT_MIN` spills (the immediate range is asymmetric). Consumes the
-/// operand reference.
-///
-/// # Safety
-/// `vmx` must point at the running scheduler's live `VM`; `a` must be the
-/// bits of an Int-typed `Value` whose reference the caller transfers.
-#[cold]
-pub(crate) unsafe extern "C" fn al_shim_neg_int_val(vmx: *mut VM, a: u64) -> u64 {
-    // SAFETY: the operand reference is transferred per the contract above; the
-    // drop balances it exactly once.
-    let a = unsafe { Value::from_bits(a) };
-    let r = a.as_int_typed().wrapping_neg();
-    drop(a);
-    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
-    let vm = unsafe { &mut *vmx };
-    into_bits(vm.boxed_int(r))
 }
 
 /// `Op::MakeEnumPayload`'s allocation path behind the C ABI. Must mirror
@@ -179,7 +77,7 @@ pub(crate) unsafe extern "C" fn al_shim_neg_int_val(vmx: *mut VM, a: u64) -> u64
 /// `payload` must point at `len` initialized value words whose references
 /// the caller owns and transfers to this call.
 #[cold]
-unsafe extern "C" fn al_shim_enum_alloc(
+pub(crate) unsafe extern "C" fn al_shim_enum_alloc(
     vmx: *mut VM,
     packed: u64,
     enum_name: u64,
@@ -188,8 +86,7 @@ unsafe extern "C" fn al_shim_enum_alloc(
     payload: *const u64,
     len: i64,
 ) -> u64 {
-    let type_id = TypeId(packed as i32);
-    let variant_idx = (packed >> 32) as u16;
+    let (type_id, variant_idx) = crate::bytecode::value::unpack_variant(packed as i64);
     let n = len as usize;
     // SAFETY: immortal frozen constants per the contract above. Treating the
     // bits as owned is sound because immortal clone/drop never touches memory.
@@ -237,7 +134,11 @@ unsafe extern "C" fn al_shim_enum_alloc(
 /// at `len` initialized value words whose references the caller owns and
 /// transfers to this call.
 #[cold]
-unsafe extern "C" fn al_shim_make_array(vmx: *mut VM, elems: *const u64, len: i64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_make_array(
+    vmx: *mut VM,
+    elems: *const u64,
+    len: i64,
+) -> u64 {
     let n = len as usize;
     // SAFETY: `elems` points at `n` initialized value words and `Value` is
     // repr(transparent) over u64. Borrowed: the array takes its own reference.
@@ -261,7 +162,11 @@ unsafe extern "C" fn al_shim_make_array(vmx: *mut VM, elems: *const u64, len: i6
 /// # Safety
 /// Same contract as [`al_shim_make_array`].
 #[cold]
-unsafe extern "C" fn al_shim_make_tuple(vmx: *mut VM, elems: *const u64, len: i64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_make_tuple(
+    vmx: *mut VM,
+    elems: *const u64,
+    len: i64,
+) -> u64 {
     let n = len as usize;
     // SAFETY: see `al_shim_make_array`; identical contract.
     let vals: &[Value] = if n == 0 {
@@ -297,7 +202,7 @@ fn seq_root_total(vm: &mut VM, v: Value) -> Value {
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `seq` must carry
 /// one owned reference the caller transfers.
-unsafe extern "C" fn al_shim_seq_len(vmx: *mut VM, seq: u64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_seq_len(vmx: *mut VM, seq: u64) -> u64 {
     // SAFETY: owned word per the contract above.
     let v = unsafe { Value::from_bits(seq) };
     let n = match v.kind() {
@@ -318,7 +223,7 @@ unsafe extern "C" fn al_shim_seq_len(vmx: *mut VM, seq: u64) -> u64 {
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `bin` must carry
 /// one owned reference the caller transfers.
-unsafe extern "C" fn al_shim_bin_byte_size(vmx: *mut VM, bin: u64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_bin_byte_size(vmx: *mut VM, bin: u64) -> u64 {
     // SAFETY: owned word per the contract above.
     let v = unsafe { Value::from_bits(bin) };
     let n = match v.kind() {
@@ -339,7 +244,7 @@ unsafe extern "C" fn al_shim_bin_byte_size(vmx: *mut VM, bin: u64) -> u64 {
 /// `vmx` must point at the running scheduler's live `VM`; `buf` must point
 /// at `len >= 1` initialized value words whose references the caller owns
 /// and transfers to this call.
-unsafe extern "C" fn al_shim_seq_append(vmx: *mut VM, buf: *const u64, len: i64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_seq_append(vmx: *mut VM, buf: *const u64, len: i64) -> u64 {
     let n = len as usize;
     // SAFETY: `buf` points at `n` initialized value words, borrowed here; the
     // tree takes its own reference per element.
@@ -363,7 +268,11 @@ unsafe extern "C" fn al_shim_seq_append(vmx: *mut VM, buf: *const u64, len: i64)
 ///
 /// # Safety
 /// Same contract as [`al_shim_seq_append`].
-unsafe extern "C" fn al_shim_seq_prepend(vmx: *mut VM, buf: *const u64, len: i64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_seq_prepend(
+    vmx: *mut VM,
+    buf: *const u64,
+    len: i64,
+) -> u64 {
     let n = len as usize;
     // SAFETY: see `al_shim_seq_append`; identical contract.
     let words: &[Value] = unsafe { std::slice::from_raw_parts(buf.cast::<Value>(), n) };
@@ -387,7 +296,7 @@ unsafe extern "C" fn al_shim_seq_prepend(vmx: *mut VM, buf: *const u64, len: i64
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `buf` must carry
 /// one owned reference the caller transfers.
-unsafe extern "C" fn al_shim_http_parse_head(vmx: *mut VM, buf: u64, off: i64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_http_parse_head(vmx: *mut VM, buf: u64, off: i64) -> u64 {
     // SAFETY: owned word per the contract above.
     let v = unsafe { Value::from_bits(buf) };
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
@@ -408,7 +317,7 @@ unsafe extern "C" fn al_shim_http_parse_head(vmx: *mut VM, buf: u64, off: i64) -
 ///
 /// # Safety
 /// `headers` must carry one owned reference the caller transfers.
-unsafe extern "C" fn al_shim_http_headers_valid(headers: u64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_http_headers_valid(headers: u64) -> u64 {
     // SAFETY: owned word per the contract above.
     let v = unsafe { Value::from_bits(headers) };
     let r = super::http::headers_valid(&v).unwrap_or_else(|_| {
@@ -424,7 +333,7 @@ unsafe extern "C" fn al_shim_http_headers_valid(headers: u64) -> u64 {
 /// # Safety
 /// `headers` and `name` must each carry one owned reference the caller
 /// transfers.
-unsafe extern "C" fn al_shim_http_header_has(headers: u64, name: u64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_http_header_has(headers: u64, name: u64) -> u64 {
     // SAFETY: owned words per the contract above.
     let (h, n) = unsafe { (Value::from_bits(headers), Value::from_bits(name)) };
     let r = super::http::header_has(&h, &super::bin_ref(&n)).unwrap_or_else(|_| {
@@ -442,7 +351,7 @@ unsafe extern "C" fn al_shim_http_header_has(headers: u64, name: u64) -> u64 {
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `reason` and
 /// `headers` must each carry one owned reference the caller transfers.
-unsafe extern "C" fn al_shim_http_serialize_head(
+pub(crate) unsafe extern "C" fn al_shim_http_serialize_head(
     vmx: *mut VM,
     code: i64,
     reason: u64,
@@ -468,7 +377,7 @@ unsafe extern "C" fn al_shim_http_serialize_head(
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `headers` must
 /// carry one owned reference the caller transfers.
-unsafe extern "C" fn al_shim_http_framing(vmx: *mut VM, headers: u64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_http_framing(vmx: *mut VM, headers: u64) -> u64 {
     // SAFETY: owned word per the contract above.
     let v = unsafe { Value::from_bits(headers) };
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
@@ -504,7 +413,7 @@ pub(crate) extern "C" fn al_shim_mod_int(a: i64, b: i64) -> i64 {
 /// `vmx` must point at the running scheduler's live `VM`, and `slot` must be
 /// in range for its global area; the emitter guarantees both. The returned
 /// word carries no reference the caller owns.
-unsafe extern "C" fn al_shim_push_global(vmx: *mut VM, slot: i64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_push_global(vmx: *mut VM, slot: i64) -> u64 {
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
     vm.globals[slot as usize].to_bits()
@@ -526,7 +435,7 @@ unsafe extern "C" fn al_shim_push_global(vmx: *mut VM, slot: i64) -> u64 {
 /// `argc` initialized value words whose references the caller owns and
 /// transfers; `op_code` must be `op as u8` for an op
 /// [`is_native_bridge_op`](crate::bytecode::is_native_bridge_op) admits.
-unsafe extern "C" fn al_shim_op(
+pub(crate) unsafe extern "C" fn al_shim_op(
     vmx: *mut VM,
     op_code: i64,
     operand: i64,
@@ -680,7 +589,7 @@ mod opc {
 /// # Safety
 /// As [`al_shim_op`], with `op_code` one
 /// [`is_native_try_op`](crate::bytecode::is_native_try_op) admits.
-unsafe extern "C" fn al_shim_try_op(
+pub(crate) unsafe extern "C" fn al_shim_try_op(
     vmx: *mut VM,
     op_code: i64,
     operand: i64,
@@ -732,7 +641,7 @@ impl VM {
 /// `argc` initialized value words whose references the caller transfers;
 /// `op_code` must be one [`is_native_park_op`](crate::bytecode::is_native_park_op)
 /// admits, and both ordinals must name resume points of the running body.
-unsafe extern "C" fn al_shim_park_op(
+pub(crate) unsafe extern "C" fn al_shim_park_op(
     vmx: *mut VM,
     op_code: i64,
     buf: *const u64,
@@ -922,7 +831,7 @@ impl VM {
 /// `vmx` must point at the running scheduler's live `VM`, and `idx` must be in
 /// range for the running closure; the emitter guarantees both. The returned
 /// word carries no reference the caller owns.
-unsafe extern "C" fn al_shim_push_capture(vmx: *mut VM, idx: i64) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_push_capture(vmx: *mut VM, idx: i64) -> u64 {
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
     match vm
@@ -943,7 +852,7 @@ unsafe extern "C" fn al_shim_push_capture(vmx: *mut VM, idx: i64) -> u64 {
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`. The returned word
 /// carries no reference the caller owns.
-unsafe extern "C" fn al_shim_push_self(vmx: *mut VM) -> u64 {
+pub(crate) unsafe extern "C" fn al_shim_push_self(vmx: *mut VM) -> u64 {
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
     vm.frame().captures.to_bits()
@@ -951,11 +860,10 @@ unsafe extern "C" fn al_shim_push_self(vmx: *mut VM) -> u64 {
 
 /// Every shim as `(symbol name, address)` for `JITBuilder::symbol`. These
 /// names are what the CLIF emitter's declared externals resolve against.
-pub(crate) fn shim_symbols() -> [(&'static str, *const u8); 28] {
+pub(crate) fn shim_symbols() -> [(&'static str, *const u8); 21] {
     [
         ("al_shim_push_global", al_shim_push_global as *const u8),
         ("al_shim_int_box", al_shim_int_box as *const u8),
-        ("al_shim_int_unbox", al_shim_int_unbox as *const u8),
         ("al_shim_enum_alloc", al_shim_enum_alloc as *const u8),
         ("al_shim_make_array", al_shim_make_array as *const u8),
         ("al_shim_make_tuple", al_shim_make_tuple as *const u8),
@@ -980,12 +888,6 @@ pub(crate) fn shim_symbols() -> [(&'static str, *const u8); 28] {
             al_shim_http_serialize_head as *const u8,
         ),
         ("al_shim_http_framing", al_shim_http_framing as *const u8),
-        ("al_shim_add_int_val", al_shim_add_int_val as *const u8),
-        ("al_shim_sub_int_val", al_shim_sub_int_val as *const u8),
-        ("al_shim_mul_int_val", al_shim_mul_int_val as *const u8),
-        ("al_shim_div_int_val", al_shim_div_int_val as *const u8),
-        ("al_shim_mod_int_val", al_shim_mod_int_val as *const u8),
-        ("al_shim_neg_int_val", al_shim_neg_int_val as *const u8),
         ("al_shim_div_int", al_shim_div_int as *const u8),
         ("al_shim_mod_int", al_shim_mod_int as *const u8),
         ("al_shim_op", al_shim_op as *const u8),
@@ -998,6 +900,7 @@ pub(crate) fn shim_symbols() -> [(&'static str, *const u8); 28] {
 
 #[cfg(test)]
 mod tests {
+    use crate::TypeId;
     use crate::bytecode::value::HeapTag;
 
     use super::super::halt_test_vm;
@@ -1042,111 +945,6 @@ mod tests {
         assert_eq!(al_shim_mod_int(5, 0), 5); // x % 0 == x, no error
         assert_eq!(al_shim_mod_int(-5, 0), -5);
         assert_eq!(al_shim_mod_int(i64::MIN, -1), 0); // wraps, no trap
-    }
-
-    #[test]
-    fn box_keeps_in_range_ints_immediate() {
-        let mut vm = halt_test_vm();
-        let vmp = &raw mut vm;
-        for i in [0, 1, -1, 42, SMALL_MIN, SMALL_MAX] {
-            let bits = unsafe { al_shim_int_box(vmp, i) };
-            assert_eq!(bits, Value::small_int(i).to_bits());
-            assert_eq!(unsafe { al_shim_int_unbox(bits) }, i);
-        }
-    }
-
-    #[test]
-    fn box_spills_past_the_small_int_range_and_unbox_round_trips() {
-        let mut vm = halt_test_vm();
-        let vmp = &raw mut vm;
-        for i in [SMALL_MAX + 1, SMALL_MIN - 1, i64::MAX, i64::MIN] {
-            let bits = unsafe { al_shim_int_box(vmp, i) };
-            assert!(is_bigint(bits));
-            assert_eq!(unsafe { al_shim_int_unbox(bits) }, i);
-            assert_eq!(unbox_and_release(bits), i);
-        }
-    }
-
-    #[test]
-    fn add_spills_at_the_small_boundary_and_wraps_at_i64() {
-        let mut vm = halt_test_vm();
-        let vmp = &raw mut vm;
-
-        // A sum that leaves the immediate range spills to BigInt.
-        let a = Value::small_int(SMALL_MAX).to_bits();
-        let b = Value::small_int(1).to_bits();
-        let r = unsafe { al_shim_add_int_val(vmp, a, b) };
-        assert!(is_bigint(r));
-        assert_eq!(unbox_and_release(r), SMALL_MAX + 1);
-
-        // A boxed operand at i64::MAX wraps to i64::MIN, staying a BigInt.
-        let a = into_bits(Value::int_in(&mut vm.heap, i64::MAX));
-        let b = Value::small_int(1).to_bits();
-        let r = unsafe { al_shim_add_int_val(vmp, a, b) };
-        assert_eq!(unbox_and_release(r), i64::MIN);
-    }
-
-    #[test]
-    fn sub_and_mul_wrap_like_the_interpreter() {
-        let mut vm = halt_test_vm();
-        let vmp = &raw mut vm;
-
-        let a = into_bits(Value::int_in(&mut vm.heap, i64::MIN));
-        let b = Value::small_int(1).to_bits();
-        let r = unsafe { al_shim_sub_int_val(vmp, a, b) };
-        assert_eq!(unbox_and_release(r), i64::MAX);
-
-        let a = Value::small_int(SMALL_MAX).to_bits();
-        let b = Value::small_int(SMALL_MAX).to_bits();
-        let r = unsafe { al_shim_mul_int_val(vmp, a, b) };
-        assert_eq!(unbox_and_release(r), SMALL_MAX.wrapping_mul(SMALL_MAX));
-    }
-
-    #[test]
-    fn div_and_mod_val_shims_cover_the_boxed_edges() {
-        let mut vm = halt_test_vm();
-        let vmp = &raw mut vm;
-
-        // MIN / -1 wraps to MIN (still a BigInt), MIN % -1 is 0 (small).
-        let a = into_bits(Value::int_in(&mut vm.heap, i64::MIN));
-        let b = Value::small_int(-1).to_bits();
-        let r = unsafe { al_shim_div_int_val(vmp, a, b) };
-        assert!(is_bigint(r));
-        assert_eq!(unbox_and_release(r), i64::MIN);
-
-        let a = into_bits(Value::int_in(&mut vm.heap, i64::MIN));
-        let b = Value::small_int(-1).to_bits();
-        let r = unsafe { al_shim_mod_int_val(vmp, a, b) };
-        assert_eq!(r, Value::small_int(0).to_bits());
-
-        // x / 0 == 0 and x % 0 == x even for a boxed x; the mod result is a
-        // fresh box.
-        let a = into_bits(Value::int_in(&mut vm.heap, i64::MAX));
-        let b = Value::small_int(0).to_bits();
-        let r = unsafe { al_shim_div_int_val(vmp, a, b) };
-        assert_eq!(r, Value::small_int(0).to_bits());
-
-        let a = into_bits(Value::int_in(&mut vm.heap, i64::MAX));
-        let b = Value::small_int(0).to_bits();
-        let r = unsafe { al_shim_mod_int_val(vmp, a, b) };
-        assert!(is_bigint(r));
-        assert_eq!(unbox_and_release(r), i64::MAX);
-    }
-
-    #[test]
-    fn neg_wraps_at_i64_min_and_spills_at_the_asymmetric_edge() {
-        let mut vm = halt_test_vm();
-        let vmp = &raw mut vm;
-
-        // -SMALL_MIN == 2^47 does not fit the immediate range: spill.
-        let a = Value::small_int(SMALL_MIN).to_bits();
-        let r = unsafe { al_shim_neg_int_val(vmp, a) };
-        assert!(is_bigint(r));
-        assert_eq!(unbox_and_release(r), -SMALL_MIN);
-
-        let a = into_bits(Value::int_in(&mut vm.heap, i64::MIN));
-        let r = unsafe { al_shim_neg_int_val(vmp, a) };
-        assert_eq!(unbox_and_release(r), i64::MIN);
     }
 
     #[test]
@@ -1206,6 +1004,23 @@ mod tests {
 
         drop(v);
         assert_eq!(take_freed_objects(), 2);
+    }
+
+    /// `al_shim_int_box` must keep in-range Ints immediate and spill past the
+    /// 47-bit payload to a BigInt, exactly like the interpreter's `boxed_int`.
+    #[test]
+    fn int_box_keeps_immediates_and_spills_the_boundary() {
+        let mut vm = halt_test_vm();
+        let vmp = &raw mut vm;
+        for i in [0, 1, -1, SMALL_MIN, SMALL_MAX] {
+            let bits = unsafe { al_shim_int_box(vmp, i) };
+            assert_eq!(bits, Value::small_int(i).to_bits());
+        }
+        for i in [SMALL_MAX + 1, SMALL_MIN - 1, i64::MAX, i64::MIN] {
+            let bits = unsafe { al_shim_int_box(vmp, i) };
+            assert!(is_bigint(bits), "{i} must spill");
+            assert_eq!(unbox_and_release(bits), i);
+        }
     }
 
     #[test]

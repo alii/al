@@ -65,8 +65,9 @@
 //! # Runtime symbols
 //!
 //! Generated code reaches the runtime by NAME (`Linkage::Import`). The names
-//! and signatures below must match the shim tables in `crates/al`
-//! (`vm::native::rt_symbols`, `vm::native_shims::shim_symbols`) and the
+//! Runtime symbols are declared from the runtime's own signature table
+//! (`scarlet_vm::vm::jit::RT_SIGS`), so no C signature is written in this
+//! crate.
 //! imports `vm::jit` declares.
 
 use std::collections::{HashMap, HashSet};
@@ -88,8 +89,8 @@ use super::{
     Atom, Callee, CoreBind, CoreExpr, CoreFn, CorePat, FuncIdx, Imm, JoinId, LocalId, VariantRef,
 };
 use crate::bytecode::value::{
-    NATIVE_HOLLOW_FOR_REUSE_SYMBOL, NATIVE_MORTAL_HEAP_BITS, NATIVE_PTR_MASK,
-    NATIVE_RC_BYTE_OFFSET, NATIVE_RELEASE_AT_ZERO_SYMBOL,
+    ENUM_FIELDS_WORD, NATIVE_HOLLOW_FOR_REUSE_SYMBOL, NATIVE_MORTAL_HEAP_BITS, NATIVE_PTR_MASK,
+    NATIVE_RC_BYTE_OFFSET, NATIVE_RELEASE_AT_ZERO_SYMBOL, TUPLE_ELEMS_WORD,
 };
 use crate::bytecode::{
     CtorRef, NativeCtx, NativeStatus, Op, PreludeBindings, TypeRef, Value, is_native_bridge_op,
@@ -718,7 +719,8 @@ fn enum_ctor_sites(
         let packed = at(site.packed)?.as_int()? as u64;
         // The packed word must name the atom's own variant, or the pairing
         // has drifted.
-        let expect = (variant.type_id.0 as u32 as u64) | ((variant.variant_idx as u64) << 32);
+        let expect =
+            crate::bytecode::value::pack_variant(variant.type_id, variant.variant_idx) as u64;
         if packed != expect {
             return None;
         }
@@ -1001,126 +1003,46 @@ fn declare_imports<M: Module>(
     module: &mut M,
     func: &mut ir::Function,
 ) -> Result<RtRefs, Box<ModuleError>> {
-    let ptr = module.target_config().pointer_type();
-    let i64t = types::I64;
-    let import = |module: &mut M,
-                  name: &str,
-                  params: &[ir::Type],
-                  ret: Option<ir::Type>|
-     -> Result<FuncId, Box<ModuleError>> {
-        let mut sig = module.make_signature();
-        sig.params.extend(params.iter().map(|&t| AbiParam::new(t)));
-        sig.returns.extend(ret.map(AbiParam::new));
-        Ok(module.declare_function(name, Linkage::Import, &sig)?)
-    };
-    let release = import(module, NATIVE_RELEASE_AT_ZERO_SYMBOL, &[ptr], None)?;
-    let hollow = import(module, NATIVE_HOLLOW_FOR_REUSE_SYMBOL, &[ptr], None)?;
-    let enum_alloc = import(
-        module,
-        SYM_ENUM_ALLOC,
-        &[ptr, i64t, i64t, i64t, i64t, ptr, i64t],
-        Some(i64t),
-    )?;
-    let make_array = import(module, SYM_MAKE_ARRAY, &[ptr, ptr, i64t], Some(i64t))?;
-    let make_tuple = import(module, SYM_MAKE_TUPLE, &[ptr, ptr, i64t], Some(i64t))?;
-    let seq_len = import(module, SYM_SEQ_LEN, &[ptr, i64t], Some(i64t))?;
-    let seq_append = import(module, SYM_SEQ_APPEND, &[ptr, ptr, i64t], Some(i64t))?;
-    let seq_prepend = import(module, SYM_SEQ_PREPEND, &[ptr, ptr, i64t], Some(i64t))?;
-    let bin_byte_size = import(module, SYM_BIN_BYTE_SIZE, &[ptr, i64t], Some(i64t))?;
-    let http_parse_head = import(module, SYM_HTTP_PARSE_HEAD, &[ptr, i64t, i64t], Some(i64t))?;
-    let http_headers_valid = import(module, SYM_HTTP_HEADERS_VALID, &[i64t], Some(i64t))?;
-    let http_header_has = import(module, SYM_HTTP_HEADER_HAS, &[i64t, i64t], Some(i64t))?;
-    let http_serialize_head = import(
-        module,
-        SYM_HTTP_SERIALIZE_HEAD,
-        &[ptr, i64t, i64t, i64t],
-        Some(i64t),
-    )?;
-    let http_framing = import(module, SYM_HTTP_FRAMING, &[ptr, i64t], Some(i64t))?;
-    let push_global = import(module, SYM_PUSH_GLOBAL, &[ptr, i64t], Some(i64t))?;
-    let push_capture = import(module, SYM_PUSH_CAPTURE, &[ptr, i64t], Some(i64t))?;
-    let push_self = import(module, SYM_PUSH_SELF, &[ptr], Some(i64t))?;
-    let int_box = import(module, NATIVE_INT_BOX_SYMBOL, &[ptr, i64t], Some(i64t))?;
-    let div_int = import(module, SYM_DIV_INT, &[i64t, i64t], Some(i64t))?;
-    let mod_int = import(module, SYM_MOD_INT, &[i64t, i64t], Some(i64t))?;
-    let shim_op = import(
-        module,
-        SYM_SHIM_OP,
-        &[ptr, i64t, i64t, ptr, i64t],
-        Some(i64t),
-    )?;
-    let park_op = import(
-        module,
-        SYM_PARK_OP,
-        &[ptr, i64t, ptr, i64t, i64t, i64t],
-        Some(i64t),
-    )?;
-    let try_op = import(
-        module,
-        SYM_TRY_OP,
-        &[ptr, i64t, i64t, ptr, i64t],
-        Some(i64t),
-    )?;
-    // The transfer helpers return a `PreparedCall`: two registers.
-    let import2 =
-        |module: &mut M, name: &str, params: &[ir::Type]| -> Result<FuncId, Box<ModuleError>> {
-            let mut sig = module.make_signature();
-            sig.params.extend(params.iter().map(|&t| AbiParam::new(t)));
-            sig.returns.push(AbiParam::new(ptr));
-            sig.returns.push(AbiParam::new(i64t));
-            Ok(module.declare_function(name, Linkage::Import, &sig)?)
-        };
-    let prepare_call = import2(module, SYM_RT_PREPARE_CALL, &[ptr, i64t, i64t, ptr, i64t])?;
-    let prepare_call_value = import2(
-        module,
-        SYM_RT_PREPARE_CALL_VALUE,
-        &[ptr, i64t, i64t, ptr, i64t],
-    )?;
-    let prepare_tail = import2(module, SYM_RT_PREPARE_TAIL, &[ptr, i64t, ptr, i64t])?;
-    let prepare_tail_value = import2(module, SYM_RT_PREPARE_TAIL_VALUE, &[ptr, i64t, ptr, i64t])?;
-    let ret_transfer = import2(module, SYM_RT_RET_TRANSFER, &[ptr, i64t])?;
-    let rt_pop = import(module, SYM_RT_POP, &[ptr], Some(i64t))?;
-    let make_closure = import(
-        module,
-        SYM_RT_MAKE_CLOSURE,
-        &[ptr, i64t, ptr, i64t],
-        Some(i64t),
-    )?;
-    let rt_checkpoint = import(module, SYM_RT_CHECKPOINT, &[ptr], Some(i64t))?;
-    let rt_frame_base = import(module, SYM_RT_FRAME_BASE, &[ptr], Some(ptr))?;
+    // Every import comes from the runtime's own signature table
+    // (`RT_SIGS`), so no signature is written on this side of the seam — a
+    // hand-copied one here could drift from the `extern "C"` definition
+    // silently, which is ABI corruption. A name missing from the table
+    // panics loudly at first compile.
+    let ids = scarlet_vm::vm::jit::declare_runtime_imports(module)?;
+    let mut r = |name: &str| module.declare_func_in_func(ids[name], func);
     Ok(RtRefs {
-        release: module.declare_func_in_func(release, func),
-        hollow: module.declare_func_in_func(hollow, func),
-        enum_alloc: module.declare_func_in_func(enum_alloc, func),
-        make_array: module.declare_func_in_func(make_array, func),
-        make_tuple: module.declare_func_in_func(make_tuple, func),
-        seq_len: module.declare_func_in_func(seq_len, func),
-        seq_append: module.declare_func_in_func(seq_append, func),
-        seq_prepend: module.declare_func_in_func(seq_prepend, func),
-        bin_byte_size: module.declare_func_in_func(bin_byte_size, func),
-        http_parse_head: module.declare_func_in_func(http_parse_head, func),
-        http_headers_valid: module.declare_func_in_func(http_headers_valid, func),
-        http_header_has: module.declare_func_in_func(http_header_has, func),
-        http_serialize_head: module.declare_func_in_func(http_serialize_head, func),
-        http_framing: module.declare_func_in_func(http_framing, func),
-        push_global: module.declare_func_in_func(push_global, func),
-        push_capture: module.declare_func_in_func(push_capture, func),
-        push_self: module.declare_func_in_func(push_self, func),
-        int_box: module.declare_func_in_func(int_box, func),
-        div_int: module.declare_func_in_func(div_int, func),
-        mod_int: module.declare_func_in_func(mod_int, func),
-        shim_op: module.declare_func_in_func(shim_op, func),
-        park_op: module.declare_func_in_func(park_op, func),
-        try_op: module.declare_func_in_func(try_op, func),
-        prepare_call: module.declare_func_in_func(prepare_call, func),
-        prepare_call_value: module.declare_func_in_func(prepare_call_value, func),
-        prepare_tail: module.declare_func_in_func(prepare_tail, func),
-        prepare_tail_value: module.declare_func_in_func(prepare_tail_value, func),
-        ret_transfer: module.declare_func_in_func(ret_transfer, func),
-        rt_pop: module.declare_func_in_func(rt_pop, func),
-        make_closure: module.declare_func_in_func(make_closure, func),
-        rt_checkpoint: module.declare_func_in_func(rt_checkpoint, func),
-        rt_frame_base: module.declare_func_in_func(rt_frame_base, func),
+        release: r(NATIVE_RELEASE_AT_ZERO_SYMBOL),
+        hollow: r(NATIVE_HOLLOW_FOR_REUSE_SYMBOL),
+        enum_alloc: r(SYM_ENUM_ALLOC),
+        make_array: r(SYM_MAKE_ARRAY),
+        make_tuple: r(SYM_MAKE_TUPLE),
+        seq_len: r(SYM_SEQ_LEN),
+        seq_append: r(SYM_SEQ_APPEND),
+        seq_prepend: r(SYM_SEQ_PREPEND),
+        bin_byte_size: r(SYM_BIN_BYTE_SIZE),
+        http_parse_head: r(SYM_HTTP_PARSE_HEAD),
+        http_headers_valid: r(SYM_HTTP_HEADERS_VALID),
+        http_header_has: r(SYM_HTTP_HEADER_HAS),
+        http_serialize_head: r(SYM_HTTP_SERIALIZE_HEAD),
+        http_framing: r(SYM_HTTP_FRAMING),
+        push_global: r(SYM_PUSH_GLOBAL),
+        push_capture: r(SYM_PUSH_CAPTURE),
+        push_self: r(SYM_PUSH_SELF),
+        int_box: r(NATIVE_INT_BOX_SYMBOL),
+        div_int: r(SYM_DIV_INT),
+        mod_int: r(SYM_MOD_INT),
+        shim_op: r(SYM_SHIM_OP),
+        park_op: r(SYM_PARK_OP),
+        try_op: r(SYM_TRY_OP),
+        prepare_call: r(SYM_RT_PREPARE_CALL),
+        prepare_call_value: r(SYM_RT_PREPARE_CALL_VALUE),
+        prepare_tail: r(SYM_RT_PREPARE_TAIL),
+        prepare_tail_value: r(SYM_RT_PREPARE_TAIL_VALUE),
+        ret_transfer: r(SYM_RT_RET_TRANSFER),
+        rt_pop: r(SYM_RT_POP),
+        make_closure: r(SYM_RT_MAKE_CLOSURE),
+        rt_checkpoint: r(SYM_RT_CHECKPOINT),
+        rt_frame_base: r(SYM_RT_FRAME_BASE),
     })
 }
 
@@ -1773,7 +1695,7 @@ impl<'a> BodyGen<'a> {
                 // unreachable under that proof.
                 let w = self.word_of(*recv);
                 let obj = self.b.ins().band_imm(w, NATIVE_PTR_MASK as i64);
-                let f = self.load_payload_word(obj, 1 + *i as usize);
+                let f = self.load_payload_word(obj, TUPLE_ELEMS_WORD + *i as usize);
                 self.field_result(f, want_word, want_int)
             }
             // The shim hands back the global area's word borrowed;
@@ -2019,7 +1941,7 @@ impl<'a> BodyGen<'a> {
                 self.b.seal_block(heap_b);
                 self.b.switch_to_block(heap_b);
                 let obj = self.b.ins().band_imm(w, NATIVE_PTR_MASK as i64);
-                let f = self.load_payload_word(obj, 6 + *i as usize);
+                let f = self.load_payload_word(obj, ENUM_FIELDS_WORD + *i as usize);
                 self.b.ins().jump(merge, &[f.into()]);
                 self.b.seal_block(merge);
                 self.b.switch_to_block(merge);
@@ -3095,7 +3017,7 @@ impl<'a> BodyGen<'a> {
     /// bind's gate strength and the bind's slot takes the reference.
     fn bind_payload(&mut self, obj: ir::Value, fields: &[CoreBind]) {
         for (i, bind) in fields.iter().enumerate() {
-            let f = self.load_payload_word(obj, 6 + i);
+            let f = self.load_payload_word(obj, ENUM_FIELDS_WORD + i);
             if let Some(gate) = self.plan.rc_gate(bind.id) {
                 emit_dup(&mut self.b, f, gate);
             }
@@ -3358,9 +3280,7 @@ mod tests {
     use crate::core_ir::emit::{self, EmitCtx};
     use crate::types::StrId;
 
-    use cranelift_codegen::settings::{self, Configurable};
-    use cranelift_jit::{JITBuilder, JITModule};
-    use cranelift_module::default_libcall_names;
+    use cranelift_jit::JITModule;
 
     use super::super::ConstId;
     use super::super::testkit;
@@ -3961,18 +3881,9 @@ mod tests {
         program: crate::bytecode::Program,
         layouts: &LayoutMap,
     ) -> Jit {
-        let mut flags = settings::builder();
-        flags.set("use_colocated_libcalls", "false").unwrap();
-        flags.set("enable_pinned_reg", "true").unwrap();
-        // x64 return_call requires frame pointers; mirror the real module.
-        flags.set("preserve_frame_pointers", "true").unwrap();
-        flags.set("is_pic", "false").unwrap();
-        flags.set("opt_level", "speed").unwrap();
-        let isa = cranelift_native::builder()
-            .unwrap()
-            .finish(settings::Flags::new(flags))
-            .unwrap();
-        let mut jb = JITBuilder::with_isa(isa, default_libcall_names());
+        // The production flag set, so these tests compile exactly what the
+        // real module would; only the runtime symbols are substituted.
+        let mut jb = scarlet_vm::vm::jit::jit_builder().unwrap();
         jb.symbol(
             NATIVE_RELEASE_AT_ZERO_SYMBOL,
             native_release_at_zero as *const u8,
@@ -4412,19 +4323,10 @@ mod tests {
         emit::emit(f, &mut ctx).layout
     }
 
-    /// A bare JIT module for the compile-level tests.
+    /// A bare JIT module for the compile-level tests: production flags, no
+    /// runtime symbols (nothing here is ever run).
     fn test_module() -> JITModule {
-        let mut flags = settings::builder();
-        flags.set("use_colocated_libcalls", "false").unwrap();
-        flags.set("enable_pinned_reg", "true").unwrap();
-        // x64 return_call requires frame pointers; mirror the real module.
-        flags.set("preserve_frame_pointers", "true").unwrap();
-        flags.set("is_pic", "false").unwrap();
-        let isa = cranelift_native::builder()
-            .unwrap()
-            .finish(settings::Flags::new(flags))
-            .unwrap();
-        JITModule::new(JITBuilder::with_isa(isa, default_libcall_names()))
+        JITModule::new(scarlet_vm::vm::jit::jit_builder().unwrap())
     }
 
     #[test]

@@ -384,8 +384,22 @@ impl Scanner {
             b'|' => self.punc2(b'|', Kind::LogicalOr, Kind::BitwiseOr),
             b'=' => self.punc2(b'=', Kind::PuncEqualsComparator, Kind::PuncEquals),
             _ => {
-                self.add_error(format!("Unexpected character '{}'", ch as char));
-                self.new_token(Kind::Error((ch as char).to_string().into()))
+                // `ch` is a raw byte; `as char` would reinterpret it as
+                // Latin-1. A byte >= 0x80 starts a UTF-8 sequence, so consume
+                // the whole sequence and decode it, or every byte of one
+                // character produces its own garbage-glyph error.
+                if ch >= 0x80 {
+                    let start = self.pos - 1;
+                    while (0x80..=0xBF).contains(&self.peek_char()) {
+                        self.incr_pos();
+                    }
+                    let text = self.slice(start, self.pos);
+                    self.add_error(format!("Unexpected character '{text}'"));
+                    self.new_token(Kind::Error(text.into()))
+                } else {
+                    self.add_error(format!("Unexpected character '{}'", ch as char));
+                    self.new_token(Kind::Error((ch as char).to_string().into()))
+                }
             }
         }
     }
@@ -499,7 +513,23 @@ impl Scanner {
         Some(match ESCAPES.iter().find(|(source, _)| *source == peeked) {
             Some(&(_, denoted)) => denoted,
             None => {
-                self.add_error(format!("Unknown escape sequence '\\{}'", peeked as char));
+                if peeked >= 0x80 {
+                    // Decode the full UTF-8 sequence for the message. Only the
+                    // lead byte is consumed here; the continuation bytes flow
+                    // into the string as ordinary content behind it, so the
+                    // buffer stays valid UTF-8.
+                    let start = self.pos - 1;
+                    let mut end = self.pos;
+                    while (0x80..=0xBF).contains(&self.byte_at(end)) {
+                        end += 1;
+                    }
+                    self.add_error(format!(
+                        "Unknown escape sequence '\\{}'",
+                        self.slice(start, end)
+                    ));
+                } else {
+                    self.add_error(format!("Unknown escape sequence '\\{}'", peeked as char));
+                }
                 peeked
             }
         })

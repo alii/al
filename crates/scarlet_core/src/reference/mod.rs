@@ -644,6 +644,18 @@ impl ReferenceGraph {
         }
     }
 
+    /// True when the position is the module name of an `import` declaration
+    /// itself, as opposed to a qualifier use like the `q` of `q.member`. The
+    /// import segment's target couples the imported module's id with a span in
+    /// the importing file's coordinates, so it must not be used as a lookup
+    /// key into the imported module's definitions.
+    pub fn import_declaration_at(&self, module: ModuleId, line: i32, col: i32) -> bool {
+        self.modules
+            .get(&module)
+            .and_then(|m| m.cursor_hit(line, col))
+            .is_some_and(|h| matches!(h.kind, ReferenceKind::Import))
+    }
+
     /// The raw `DefId` a position resolves to, without crossing to the owning
     /// module's record.
     pub fn def_id_at(&self, module: ModuleId, line: i32, col: i32) -> Option<DefId> {

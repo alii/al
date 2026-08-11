@@ -286,9 +286,9 @@ pub struct NativeCtx {
 }
 
 impl NativeCtx {
-    /// Load offset baked into generated code (`core_ir::clif`). Reordering
-    /// the fields without updating this is silent memory corruption.
-    pub const VM_OFFSET: i32 = 8;
+    /// Load offset baked into generated code (`core_ir::clif`). Computed from
+    /// the struct itself, so reordering the fields cannot desynchronize it.
+    pub const VM_OFFSET: i32 = core::mem::offset_of!(NativeCtx, vm) as i32;
 
     pub fn new() -> NativeCtx {
         NativeCtx {

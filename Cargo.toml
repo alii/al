@@ -26,3 +26,6 @@ codegen-units = 1
 inherits = "release"
 strip = false
 debug = true
+
+[workspace.metadata.dylint]
+libraries = [{ path = "../mordant" }]

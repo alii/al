@@ -431,6 +431,29 @@ pub(crate) fn view_mismatch(kind: &'static str) -> ! {
 /// substituting a wrong value: the program answer would be garbage either way,
 /// and the abort names the bug. Cold by construction — the check guarding each
 /// call is on the proven-correct path.
+/// Pack a variant identity into the one word enum cells, bytecode constants
+/// and compiled code all carry: `type_id | variant_idx << 32`. The encode and
+/// decode live here, next to the cell layout, so no site hand-writes the
+/// shifts.
+#[inline]
+pub fn pack_variant(type_id: crate::TypeId, variant_idx: u16) -> i64 {
+    (type_id.0 as u32 as i64) | ((variant_idx as i64) << 32)
+}
+
+/// The inverse of [`pack_variant`].
+#[inline]
+pub fn unpack_variant(packed: i64) -> (crate::TypeId, u16) {
+    (crate::TypeId(packed as i32), (packed >> 32) as u16)
+}
+
+/// Payload word of an enum cell where its fields begin (after tag, hash,
+/// names and labels). Codegen bakes this into field loads, so it lives here,
+/// next to the layout it describes.
+pub const ENUM_FIELDS_WORD: usize = 6;
+
+/// Payload word of a tuple cell where its elements begin (after the count).
+pub const TUPLE_ELEMS_WORD: usize = 1;
+
 #[cold]
 #[inline(never)]
 pub(crate) fn proof_violation(what: &str) -> ! {
@@ -1299,7 +1322,7 @@ impl Value {
             move_child(p.add(4), labels);
             p.add(5).write(payload.len() as u64);
             for (i, v) in payload.iter().enumerate() {
-                store_child(p.add(6 + i), v);
+                store_child(p.add(ENUM_FIELDS_WORD + i), v);
             }
             Value::from_object_ptr(obj)
         }
@@ -1567,7 +1590,7 @@ impl Value {
             Some(e) if idx < e.payload().len() => {
                 // SAFETY: tag-checked Enum with `idx` bounded by the payload
                 // count; payload fields start at word 6 (see `EnumRef::payload`).
-                unsafe { payload_value(self.heap_obj(), 6 + idx) }
+                unsafe { payload_value(self.heap_obj(), ENUM_FIELDS_WORD + idx) }
             }
             _ => proof_violation("GetFieldUnchecked outside its proof"),
         }

@@ -1174,9 +1174,10 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         let type_name = self.ctx.resolve_str(v.type_name).to_owned();
         let variant_name = self.ctx.resolve_str(v.variant_name).to_owned();
 
-        let id_c = self
-            .ctx
-            .intern_int((v.type_id.0 as u32 as i64) | ((v.variant_idx as i64) << 32));
+        let id_c = self.ctx.intern_int(crate::bytecode::value::pack_variant(
+            v.type_id,
+            v.variant_idx,
+        ));
         self.push(op_arg(Op::PushConst, id_c));
         let en_c = self.ctx.intern_str(&type_name);
         self.push(op_arg(Op::PushConst, en_c));

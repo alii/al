@@ -54,10 +54,38 @@ pub struct PrecompiledBlob {
     pub(crate) local_count: i32,
 }
 
+/// A stdlib compile stage that raised error diagnostics. `label` names the
+/// stage — `"prelude"` or a stdlib module key — and `diagnostics` carries the
+/// errors themselves, not a rendering of them.
+#[derive(Debug, Clone)]
+pub struct PrecompileError {
+    pub label: String,
+    pub diagnostics: Vec<diagnostic::Diagnostic>,
+}
+
+impl std::fmt::Display for PrecompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stdlib compile failed in '{}':", self.label)?;
+        for d in &self.diagnostics {
+            write!(
+                f,
+                "\n  {}:{}:{}: {}",
+                self.label,
+                d.span.start_line + 1,
+                d.span.start_column + 1,
+                d.message
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for PrecompileError {}
+
 /// Compile the whole embedded stdlib and snapshot the result. The
 /// `InferEngine` comes back too: every `Ty` in the output indexes its arenas,
 /// which `flatten` copies wholesale.
-pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), String> {
+pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), PrecompileError> {
     let mut c = new_compiler(None, false);
 
     c.register_prelude();
@@ -145,26 +173,17 @@ fn close_type_info(engine: &mut InferEngine, ti: &mut TypeInfo) {
     }
 }
 
-fn bail_on_errors(c: &Compiler, label: &str) -> Result<(), String> {
+fn bail_on_errors(c: &Compiler, label: &str) -> Result<(), PrecompileError> {
     let diags = c.diagnostics();
     if has_errors(diags) {
-        let rendered: Vec<String> = diags
-            .iter()
-            .filter(|d| d.severity == diagnostic::Severity::Error)
-            .map(|d| {
-                format!(
-                    "{}:{}:{}: {}",
-                    label,
-                    d.span.start_line + 1,
-                    d.span.start_column + 1,
-                    d.message
-                )
-            })
-            .collect();
-        return Err(format!(
-            "stdlib compile failed in '{label}':\n  {}",
-            rendered.join("\n  ")
-        ));
+        return Err(PrecompileError {
+            label: label.to_string(),
+            diagnostics: diags
+                .iter()
+                .filter(|d| d.severity == diagnostic::Severity::Error)
+                .cloned()
+                .collect(),
+        });
     }
     Ok(())
 }

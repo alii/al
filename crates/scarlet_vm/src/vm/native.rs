@@ -368,7 +368,7 @@ unsafe fn push_args(vm: &mut VM, args: *const u64, argc: i64) {
 /// valid for `count` reads of owned value words (it may be dangling when
 /// `count == 0`).
 #[allow(unsafe_code)] // the closure-allocation seam; contract above
-unsafe extern "C" fn al_rt_make_closure(
+pub(crate) unsafe extern "C" fn al_rt_make_closure(
     vmx: *mut VM,
     func_idx: i64,
     caps: *const u64,
@@ -500,7 +500,7 @@ pub(crate) unsafe extern "C" fn al_rt_prepare_call(
 /// As [`al_rt_prepare_call`], plus: `callee` must be the bits of a `Value`
 /// whose reference the caller owns and transfers.
 #[allow(unsafe_code)] // the dynamic-call seam; contracts above
-unsafe extern "C" fn al_rt_prepare_call_value(
+pub(crate) unsafe extern "C" fn al_rt_prepare_call_value(
     vmx: *mut VM,
     callee: u64,
     resume: i64,
@@ -545,7 +545,7 @@ pub(crate) unsafe extern "C" fn al_rt_prepare_tail(
 /// # Safety
 /// As [`al_rt_prepare_call_value`].
 #[allow(unsafe_code)] // the dynamic tail-call seam; contracts above
-unsafe extern "C" fn al_rt_prepare_tail_value(
+pub(crate) unsafe extern "C" fn al_rt_prepare_tail_value(
     vmx: *mut VM,
     callee: u64,
     args: *const u64,
