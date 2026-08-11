@@ -246,18 +246,18 @@ pub(crate) unsafe extern "C" fn al_shim_bin_byte_size(vmx: *mut VM, bin: u64) ->
 /// and transfers to this call.
 pub(crate) unsafe extern "C" fn al_shim_seq_append(vmx: *mut VM, buf: *const u64, len: i64) -> u64 {
     let n = len as usize;
-    // SAFETY: `buf` points at `n` initialized value words, borrowed here; the
-    // tree takes its own reference per element.
-    let words: &[Value] = unsafe { std::slice::from_raw_parts(buf.cast::<Value>(), n) };
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
-    let mut root = seq_root_total(vm, words[0].clone());
-    for e in &words[1..] {
-        root = seq::push_back(&mut vm.heap, &root, e.clone());
-    }
-    for i in 0..n {
-        // SAFETY: each word carries one owned reference, released once here.
-        drop(unsafe { Value::from_bits(buf.add(i).read()) });
+    // Each word carries one owned reference; taking it as a move (rather
+    // than clone-then-release) keeps a sole reference unique, so the pushes
+    // can edit the tree in place.
+    // SAFETY: `buf` holds `n` initialized owned words, each read exactly once.
+    let seq_word = unsafe { Value::from_bits(buf.read()) };
+    let mut root = seq_root_total(vm, seq_word);
+    for i in 1..n {
+        // SAFETY: as above; word `i` is read exactly once.
+        let e = unsafe { Value::from_bits(buf.add(i).read()) };
+        root = seq::push_back(&mut vm.heap, root, e);
     }
     into_bits(root)
 }
@@ -274,17 +274,16 @@ pub(crate) unsafe extern "C" fn al_shim_seq_prepend(
     len: i64,
 ) -> u64 {
     let n = len as usize;
-    // SAFETY: see `al_shim_seq_append`; identical contract.
-    let words: &[Value] = unsafe { std::slice::from_raw_parts(buf.cast::<Value>(), n) };
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
-    let mut root = seq_root_total(vm, words[n - 1].clone());
-    for e in words[..n - 1].iter().rev() {
-        root = seq::push_front(&mut vm.heap, &root, e.clone());
-    }
-    for i in 0..n {
-        // SAFETY: each word carries one owned reference, released once here.
-        drop(unsafe { Value::from_bits(buf.add(i).read()) });
+    // Moves, not clone-then-release: see `al_shim_seq_append`.
+    // SAFETY: `buf` holds `n` initialized owned words, each read exactly once.
+    let seq_word = unsafe { Value::from_bits(buf.add(n - 1).read()) };
+    let mut root = seq_root_total(vm, seq_word);
+    for i in (0..n - 1).rev() {
+        // SAFETY: as above; word `i` is read exactly once.
+        let e = unsafe { Value::from_bits(buf.add(i).read()) };
+        root = seq::push_front(&mut vm.heap, root, e);
     }
     into_bits(root)
 }

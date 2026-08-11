@@ -163,7 +163,7 @@ impl VM {
             ValueView::Array(arr) => {
                 check_slice_bounds(start, end, arr.len() as i64)?;
                 let prefix = seq::take(&mut self.heap, &arr_val, end as usize);
-                let sliced = seq::skip(&mut self.heap, &prefix, start as usize);
+                let sliced = seq::skip(&mut self.heap, prefix, start as usize);
                 self.stack.push(sliced);
                 Ok(())
             }
@@ -195,7 +195,7 @@ impl VM {
         // reversed and push_front puts them back in source order.
         for _ in 0..k {
             let e = self.pop()?;
-            root = seq::push_front(&mut self.heap, &root, e);
+            root = seq::push_front(&mut self.heap, root, e);
         }
         self.stack.push(root);
         Ok(())
@@ -219,7 +219,7 @@ impl VM {
         }
         let root = self.seq_root(seq_val)?;
         let n = (n as usize).min(seq::len(&root));
-        let v = seq::skip(&mut self.heap, &root, n);
+        let v = seq::skip(&mut self.heap, root, n);
         self.stack.push(v);
         Ok(())
     }
@@ -228,10 +228,14 @@ impl VM {
         let m = operand as usize;
         // The sequence word sits just below the m pushed elements.
         let base = self.operand_base(m + 1)?;
-        let seq_val = self.stack[base].clone();
+        // Move the operands out of their stack slots (Nil takes their
+        // place until the truncate) so a sole stack reference stays unique
+        // and the pushes can edit in place.
+        let seq_val = std::mem::replace(&mut self.stack[base], Value::nil());
         let mut root = self.seq_root(seq_val)?;
         for i in base + 1..base + 1 + m {
-            root = seq::push_back(&mut self.heap, &root, self.stack[i].clone());
+            let e = std::mem::replace(&mut self.stack[i], Value::nil());
+            root = seq::push_back(&mut self.heap, root, e);
         }
         self.stack.truncate(base);
         self.stack.push(root);

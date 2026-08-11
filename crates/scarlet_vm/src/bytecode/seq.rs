@@ -278,13 +278,139 @@ pub(crate) fn from_int_range<A: Arena + ?Sized>(a: &mut A, start: i64, end: i64)
 
 /// Append one element. Amortized O(1): the tail buffer absorbs pushes and
 /// spills into the tree as a full leaf every 32nd call.
-pub fn push_back<A: Arena + ?Sized>(a: &mut A, root: &Value, x: Value) -> Value {
-    push_end::<A, false>(a, root, x)
+///
+/// Consumes the caller's reference: a uniquely-owned array is edited in
+/// place — buffer leaves move their elements to the resized leaf raw and the
+/// root keeps its allocation — and a shared one gets the classic path copy.
+pub fn push_back<A: Arena + ?Sized>(a: &mut A, root: Value, x: Value) -> Value {
+    if root.is_unique() {
+        return push_end_unique::<A, false>(a, root, x);
+    }
+    push_end::<A, false>(a, &root, x)
 }
 
 /// Prepend one element — the mirror of [`push_back`] via the head buffer.
-pub fn push_front<A: Arena + ?Sized>(a: &mut A, root: &Value, x: Value) -> Value {
-    push_end::<A, true>(a, root, x)
+pub fn push_front<A: Arena + ?Sized>(a: &mut A, root: Value, x: Value) -> Value {
+    if root.is_unique() {
+        return push_end_unique::<A, true>(a, root, x);
+    }
+    push_end::<A, true>(a, &root, x)
+}
+
+/// [`push_end`] when the caller owns the only reference to `root`: the root
+/// object is updated in place, a uniquely-owned buffer leaf moves its
+/// elements to its resized successor with no count traffic, and a full
+/// buffer spills into the tree through the owned path.
+fn push_end_unique<A: Arena + ?Sized, const FRONT: bool>(
+    a: &mut A,
+    root: Value,
+    x: Value,
+) -> Value {
+    let (len, mut shift, head, mut tree, tail) = seq_root_take_parts(&root);
+    let (this, other) = if FRONT { (head, tail) } else { (tail, head) };
+    let new = if this.is_nil() {
+        leaf_from(a, &[x])
+    } else {
+        let n = leaf_elems(&this).len();
+        if n < B {
+            if this.is_unique() {
+                seq_leaf_realloc_push::<A, FRONT>(a, this, x)
+            } else {
+                let elems = leaf_elems(&this);
+                let mut buf = Buf::new();
+                if FRONT {
+                    buf.push(x);
+                    buf.extend(elems);
+                } else {
+                    buf.extend(elems);
+                    buf.push(x);
+                }
+                leaf_from(a, &buf)
+            }
+        } else {
+            (tree, shift) = tree_push_leaf_owned::<A, FRONT>(a, tree, shift, this);
+            leaf_from(a, &[x])
+        }
+    };
+    let (head, tail) = if FRONT { (new, other) } else { (other, new) };
+    seq_root_put_parts(&root, len + 1, shift, head, tree, tail);
+    root
+}
+
+/// [`tree_push_leaf`] over owned nodes: unique spine nodes are edited in
+/// place (size table bumped raw), shared ones fall back to the path copy.
+fn tree_push_leaf_owned<A: Arena + ?Sized, const FRONT: bool>(
+    a: &mut A,
+    tree: Value,
+    shift: usize,
+    leaf: Value,
+) -> (Value, usize) {
+    if tree.is_nil() {
+        return (leaf, 0);
+    }
+    match try_push_owned::<A, FRONT>(a, tree, shift, leaf) {
+        Ok(n) => (n, shift),
+        Err((tree, leaf)) => {
+            let spine = make_spine_owned(a, leaf, shift);
+            let pair = if FRONT { [spine, tree] } else { [tree, spine] };
+            (seq_branch_in_moving(a, shift + BITS, pair), shift + BITS)
+        }
+    }
+}
+
+/// A chain of single-child branches lifting an owned `leaf` to height
+/// `shift`, each level taking the reference below it.
+fn make_spine_owned<A: Arena + ?Sized>(a: &mut A, leaf: Value, shift: usize) -> Value {
+    let mut node = leaf;
+    let mut s = BITS;
+    while s <= shift {
+        node = seq_branch_in_moving(a, s, [node]);
+        s += BITS;
+    }
+    node
+}
+
+/// [`try_push`] over owned nodes. `Ok` is the (possibly in-place) updated
+/// node; `Err` hands both references back untouched so the caller can grow
+/// the root instead.
+fn try_push_owned<A: Arena + ?Sized, const FRONT: bool>(
+    a: &mut A,
+    node: Value,
+    shift: usize,
+    leaf: Value,
+) -> Result<Value, (Value, Value)> {
+    if shift == 0 {
+        return Err((node, leaf));
+    }
+    if !node.is_unique() {
+        return match try_push::<A, FRONT>(a, &node, shift, &leaf) {
+            // The copy path retained what it kept; both owned refs drop.
+            Some(n) => Ok(n),
+            None => Err((node, leaf)),
+        };
+    }
+    let (n_children, leaf_total) = {
+        let (_, children) = branch_parts(&node);
+        (children.len(), node_len(&leaf) as i64)
+    };
+    let edge = if FRONT { 0 } else { n_children - 1 };
+    let child = seq_branch_take_child(&node, edge);
+    match try_push_owned::<A, FRONT>(a, child, shift - BITS, leaf) {
+        Ok(sub) => {
+            seq_branch_put_child(&node, edge, sub, leaf_total);
+            Ok(node)
+        }
+        Err((child, leaf)) => {
+            seq_branch_put_child(&node, edge, child, 0);
+            if n_children < B {
+                let total = node_len(&leaf) as u64;
+                let spine = make_spine_owned(a, leaf, shift - BITS);
+                Ok(seq_branch_realloc_push::<A, FRONT>(a, node, spine, total))
+            } else {
+                Err((node, leaf))
+            }
+        }
+    }
 }
 
 /// Push into the head (`FRONT`) or tail buffer, spilling a full buffer into
@@ -432,8 +558,140 @@ pub(crate) fn take<A: Arena + ?Sized>(a: &mut A, root: &Value, n: usize) -> Valu
     root_in(a, n, shift, head, tree, new_tail)
 }
 
-/// All but the first `n` elements. O(log32 n) path copy.
-pub(crate) fn skip<A: Arena + ?Sized>(a: &mut A, root: &Value, n: usize) -> Value {
+/// All but the first `n` elements. Consumes the caller's reference: a
+/// uniquely-owned array is edited in place — the fold idiom `[h, ..t]` skips
+/// one element per step, and the in-place path amortizes that to O(1) by
+/// pulling the tree's leftmost leaf into the head buffer once per leaf and
+/// shrinking the buffer in place after. A shared array path-copies.
+pub(crate) fn skip<A: Arena + ?Sized>(a: &mut A, root: Value, n: usize) -> Value {
+    if root.is_unique() && n > 0 {
+        return skip_unique(a, root, n);
+    }
+    skip_copy(a, &root, n)
+}
+
+/// The in-place [`skip`]: shrink the head buffer through the owned path,
+/// refilling it from the tree's left edge as it empties.
+fn skip_unique<A: Arena + ?Sized>(a: &mut A, root: Value, n: usize) -> Value {
+    let (len, mut shift, mut head, mut tree, mut tail) = seq_root_take_parts(&root);
+    if n >= len {
+        drop(head);
+        drop(tree);
+        drop(tail);
+        seq_root_put_parts(&root, 0, 0, Value::nil(), Value::nil(), Value::nil());
+        return root;
+    }
+    let mut left = n;
+    while left > 0 {
+        if !head.is_nil() {
+            let hl = leaf_elems(&head).len();
+            if left < hl {
+                head = leaf_shrink_front(a, head, left);
+                left = 0;
+            } else {
+                left -= hl;
+                head = Value::nil();
+            }
+            continue;
+        }
+        if !tree.is_nil() {
+            let (leaf, rest, rest_shift) = tree_pop_front_leaf(a, tree, shift);
+            tree = rest;
+            shift = rest_shift;
+            head = leaf;
+            continue;
+        }
+        // Only the tail remains, and `left < len` guarantees it survives.
+        tail = leaf_shrink_front(a, tail, left);
+        left = 0;
+    }
+    seq_root_put_parts(&root, len - n, shift, head, tree, tail);
+    root
+}
+
+/// Remove the first `k` elements of an owned leaf (`k < len`), in place when
+/// unique.
+fn leaf_shrink_front<A: Arena + ?Sized>(a: &mut A, leaf: Value, k: usize) -> Value {
+    if leaf.is_unique() {
+        seq_leaf_realloc_shrink_front(a, leaf, k)
+    } else {
+        leaf_from(a, &leaf_elems(&leaf)[k..])
+    }
+}
+
+/// Detach the leftmost leaf of an owned tree, returning it with the
+/// remaining tree (nil when the leaf was the whole tree) collapsed. Unique
+/// spine nodes shed the leaf in place; shared ones path-copy via
+/// [`tree_drop`].
+fn tree_pop_front_leaf<A: Arena + ?Sized>(
+    a: &mut A,
+    tree: Value,
+    shift: usize,
+) -> (Value, Value, usize) {
+    let (leaf, rest) = pop_front_rec(a, tree, shift);
+    match rest {
+        None => (leaf, Value::nil(), 0),
+        Some(t) => {
+            let (t, s) = collapse(t, shift);
+            (leaf, t, s)
+        }
+    }
+}
+
+/// The recursive half of [`tree_pop_front_leaf`]. Returns the popped leaf
+/// and the remaining node still AT ITS ORIGINAL HEIGHT (`None` when the
+/// popped leaf was everything under it) — collapsing mid-spine would hand a
+/// parent a child at the wrong shift, so only the top level collapses.
+#[allow(clippy::only_used_in_recursion)] // the height rides along as documentation
+fn pop_front_rec<A: Arena + ?Sized>(
+    a: &mut A,
+    node: Value,
+    shift: usize,
+) -> (Value, Option<Value>) {
+    if node_is_leaf(&node) {
+        return (node, None);
+    }
+    if !node.is_unique() {
+        // Copy path: read the leftmost leaf, then drop its span structurally
+        // (`tree_drop` preserves node heights).
+        let mut leaf = node.clone();
+        loop {
+            let next = match SeqNodeRef::of(&leaf) {
+                SeqNodeRef::Leaf(_) => break,
+                SeqNodeRef::Branch { children, .. } => children[0].clone(),
+            };
+            leaf = next;
+        }
+        let m = leaf_elems(&leaf).len();
+        if m == node_len(&node) {
+            // The whole subtree was a spine over this one leaf.
+            return (leaf, None);
+        }
+        let rest = tree_drop(a, &node, m);
+        return (leaf, Some(rest));
+    }
+    let n_children = branch_parts(&node).1.len();
+    let child = seq_branch_take_child(&node, 0);
+    let (leaf, sub) = pop_front_rec(a, child, shift - BITS);
+    match sub {
+        None => {
+            if n_children == 1 {
+                free_node_shell(node);
+                (leaf, None)
+            } else {
+                (leaf, Some(seq_branch_realloc_pop_front(a, node)))
+            }
+        }
+        Some(sub) => {
+            let delta = node_len(&leaf) as i64;
+            seq_branch_put_child(&node, 0, sub, -delta);
+            (leaf, Some(node))
+        }
+    }
+}
+
+/// The copy-path [`skip`]. O(log32 n) path copy.
+fn skip_copy<A: Arena + ?Sized>(a: &mut A, root: &Value, n: usize) -> Value {
     let (len, shift, head, tree, tail) = root_parts(root);
     if n == 0 {
         return root.clone();

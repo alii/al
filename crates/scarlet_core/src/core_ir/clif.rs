@@ -2933,7 +2933,13 @@ impl<'a> BodyGen<'a> {
                         // `owned_word` fuse; leftovers are cleared and their
                         // drops emit as written.
                         if let Atom::PrimOp { op, args, .. } = rhs
-                            && is_native_bridge_op(*op)
+                            && (is_native_bridge_op(*op)
+                                // Inline-lowered, but they consume every
+                                // operand through the same owned-word spill
+                                // the bridge shims use — and moving the
+                                // sequence in is what lets a sole owner's
+                                // array push edit the tree in place.
+                                || matches!(*op, Op::Append | Op::Prepend))
                         {
                             // One exception to "a Drop marks the last use":
                             // `drop x; tail self(..x..)` is legal IR — the
@@ -3969,7 +3975,7 @@ mod tests {
             let words: &[Value] = std::slice::from_raw_parts(buf.cast::<Value>(), n);
             let mut root = words[0].clone();
             for e in &words[1..] {
-                root = seq::push_back(&mut vm.heap, &root, e.clone());
+                root = seq::push_back(&mut vm.heap, root, e.clone());
             }
             for i in 0..n {
                 drop(Value::from_bits(buf.add(i).read()));
@@ -3992,7 +3998,7 @@ mod tests {
             let words: &[Value] = std::slice::from_raw_parts(buf.cast::<Value>(), n);
             let mut root = words[n - 1].clone();
             for e in words[..n - 1].iter().rev() {
-                root = seq::push_front(&mut vm.heap, &root, e.clone());
+                root = seq::push_front(&mut vm.heap, root, e.clone());
             }
             for i in 0..n {
                 drop(Value::from_bits(buf.add(i).read()));

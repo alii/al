@@ -557,6 +557,239 @@ impl<'a> SeqNodeRef<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// In-place edits of uniquely-owned seq structure (functional-but-in-place).
+// The same discipline as the HAMT primitives above: every function requires
+// unique ownership, "take" raw-moves a slot out (stale alias until "put"),
+// and new values are stored before old bits are released.
+// ---------------------------------------------------------------------------
+
+/// MOVE a uniquely-owned root's five fields out. The value slots become
+/// stale aliases; the caller must [`seq_root_put_parts`].
+pub(crate) fn seq_root_take_parts(root: &Value) -> (usize, usize, Value, Value, Value) {
+    debug_assert!(root.is_unique());
+    let obj = root.heap_obj();
+    // SAFETY: unique live Seq root; layout [len, shift, head, tree, tail].
+    unsafe {
+        debug_assert_eq!(header_tag(*obj), HeapTag::Seq);
+        (
+            payload_word(obj, 0) as usize,
+            payload_word(obj, 1) as usize,
+            Value(payload_word(obj, 2)),
+            Value(payload_word(obj, 3)),
+            Value(payload_word(obj, 4)),
+        )
+    }
+}
+
+/// MOVE five fields back into a uniquely-owned root whose value slots hold
+/// stale aliases from [`seq_root_take_parts`].
+pub(crate) fn seq_root_put_parts(
+    root: &Value,
+    len: usize,
+    shift: usize,
+    head: Value,
+    tree: Value,
+    tail: Value,
+) {
+    debug_assert!(root.is_unique());
+    let obj = root.heap_obj() as *mut u64;
+    // SAFETY: unique live Seq root; slots hold stale aliases by contract.
+    unsafe {
+        let p = obj.add(1);
+        p.write(len as u64);
+        p.add(1).write(shift as u64);
+        move_child(p.add(2), head);
+        move_child(p.add(3), tree);
+        move_child(p.add(4), tail);
+    }
+}
+
+/// Rebuild a uniquely-owned `SeqLeaf` with `x` appended (or prepended when
+/// `FRONT`). The elements MOVE as raw words — no count traffic — and the old
+/// shell is freed without touching them.
+pub(crate) fn seq_leaf_realloc_push<A: Arena + ?Sized, const FRONT: bool>(
+    a: &mut A,
+    leaf: Value,
+    x: Value,
+) -> Value {
+    debug_assert!(leaf.is_unique() && !a.marks_immortal());
+    let old = leaf.heap_obj() as *mut u64;
+    // SAFETY: unique live leaf; the new node takes over every element ref.
+    unsafe {
+        debug_assert_eq!(header_tag(*old), HeapTag::SeqLeaf);
+        let n = payload_word(old, 0) as usize;
+        let obj = alloc_obj(a, HeapTag::SeqLeaf, 1 + n + 1, false);
+        let dst = obj.as_ptr().add(1);
+        let src = old.add(2);
+        dst.write((n + 1) as u64);
+        if FRONT {
+            move_child(dst.add(1), x);
+            std::ptr::copy_nonoverlapping(src, dst.add(2), n);
+        } else {
+            std::ptr::copy_nonoverlapping(src, dst.add(1), n);
+            move_child(dst.add(1 + n), x);
+        }
+        free_node_shell(leaf);
+        Value::from_object_ptr(obj)
+    }
+}
+
+/// MOVE child `k` out of a uniquely-owned `SeqBranch`; the slot becomes a
+/// stale alias for [`seq_branch_put_child`].
+pub(crate) fn seq_branch_take_child(branch: &Value, k: usize) -> Value {
+    debug_assert!(branch.is_unique());
+    let obj = branch.heap_obj();
+    // SAFETY: unique live branch; children start at payload word 2 + n.
+    unsafe {
+        debug_assert_eq!(header_tag(*obj), HeapTag::SeqBranch);
+        let n = payload_word(obj, 0) as usize;
+        debug_assert!(k < n);
+        Value(payload_word(obj, 2 + n + k))
+    }
+}
+
+/// MOVE `child` into slot `k` of a uniquely-owned `SeqBranch` (no release of
+/// the stale word), and add `delta` to every cumulative size entry from `k`
+/// on — the whole-table bump a front-edge insert needs, one entry for a
+/// back-edge one.
+pub(crate) fn seq_branch_put_child(branch: &Value, k: usize, child: Value, delta: i64) {
+    debug_assert!(branch.is_unique());
+    let obj = branch.heap_obj() as *mut u64;
+    // SAFETY: unique live branch; sizes at words 2.., children at 2 + n ..
+    unsafe {
+        debug_assert_eq!(header_tag(*obj), HeapTag::SeqBranch);
+        let n = payload_word(obj, 0) as usize;
+        let p = obj.add(1);
+        move_child(p.add(2 + n + k), child);
+        if delta != 0 {
+            for i in k..n {
+                let sp = p.add(2 + i);
+                sp.write(sp.read().wrapping_add_signed(delta));
+            }
+        }
+    }
+}
+
+/// Rebuild a uniquely-owned `SeqBranch` with `child` (subtree total
+/// `child_total`) inserted at the front or back edge: children and sizes MOVE
+/// raw and the old shell is freed.
+pub(crate) fn seq_branch_realloc_push<A: Arena + ?Sized, const FRONT: bool>(
+    a: &mut A,
+    branch: Value,
+    child: Value,
+    child_total: u64,
+) -> Value {
+    debug_assert!(branch.is_unique() && !a.marks_immortal());
+    let old = branch.heap_obj() as *mut u64;
+    // SAFETY: unique live branch; the new node takes over every child ref.
+    unsafe {
+        debug_assert_eq!(header_tag(*old), HeapTag::SeqBranch);
+        let n = payload_word(old, 0) as usize;
+        let shift = payload_word(old, 1);
+        let obj = alloc_obj(a, HeapTag::SeqBranch, 2 + 2 * (n + 1), false);
+        let dst = obj.as_ptr().add(1);
+        let src = old.add(1);
+        dst.write((n + 1) as u64);
+        dst.add(1).write(shift);
+        if FRONT {
+            dst.add(2).write(child_total);
+            for i in 0..n {
+                dst.add(3 + i).write(src.add(2 + i).read() + child_total);
+            }
+            move_child(dst.add(2 + (n + 1)), child);
+            std::ptr::copy_nonoverlapping(src.add(2 + n), dst.add(2 + (n + 1) + 1), n);
+        } else {
+            std::ptr::copy_nonoverlapping(src.add(2), dst.add(2), n);
+            let last = src.add(2 + n - 1).read();
+            dst.add(2 + n).write(last + child_total);
+            std::ptr::copy_nonoverlapping(src.add(2 + n), dst.add(2 + (n + 1)), n);
+            move_child(dst.add(2 + (n + 1) + n), child);
+        }
+        free_node_shell(branch);
+        Value::from_object_ptr(obj)
+    }
+}
+
+/// Rebuild a uniquely-owned `SeqLeaf` without its first `k` elements: the
+/// survivors MOVE raw, the removed elements are RELEASED, and the old shell
+/// is freed. `k` must leave at least one element.
+pub(crate) fn seq_leaf_realloc_shrink_front<A: Arena + ?Sized>(
+    a: &mut A,
+    leaf: Value,
+    k: usize,
+) -> Value {
+    debug_assert!(leaf.is_unique() && !a.marks_immortal());
+    let old = leaf.heap_obj() as *mut u64;
+    // SAFETY: unique live leaf; survivors transfer, removed refs release.
+    unsafe {
+        debug_assert_eq!(header_tag(*old), HeapTag::SeqLeaf);
+        let n = payload_word(old, 0) as usize;
+        debug_assert!(k > 0 && k < n);
+        let obj = alloc_obj(a, HeapTag::SeqLeaf, 1 + n - k, false);
+        let dst = obj.as_ptr().add(1);
+        let src = old.add(2);
+        dst.write((n - k) as u64);
+        std::ptr::copy_nonoverlapping(src.add(k), dst.add(1), n - k);
+        for i in 0..k {
+            release_bits(src.add(i).read());
+        }
+        free_node_shell(leaf);
+        Value::from_object_ptr(obj)
+    }
+}
+
+/// Rebuild a uniquely-owned `SeqBranch` without its first child (already
+/// consumed by the caller; its slot is a stale alias). Survivor children and
+/// sizes MOVE raw, rebased by the removed subtree's total.
+pub(crate) fn seq_branch_realloc_pop_front<A: Arena + ?Sized>(a: &mut A, branch: Value) -> Value {
+    debug_assert!(branch.is_unique() && !a.marks_immortal());
+    let old = branch.heap_obj() as *mut u64;
+    // SAFETY: unique live branch with >= 2 children; slot 0 is stale.
+    unsafe {
+        debug_assert_eq!(header_tag(*old), HeapTag::SeqBranch);
+        let n = payload_word(old, 0) as usize;
+        debug_assert!(n >= 2);
+        let shift = payload_word(old, 1);
+        let first = payload_word(old, 2);
+        let obj = alloc_obj(a, HeapTag::SeqBranch, 2 + 2 * (n - 1), false);
+        let dst = obj.as_ptr().add(1);
+        let src = old.add(1);
+        dst.write((n - 1) as u64);
+        dst.add(1).write(shift);
+        for i in 0..n - 1 {
+            dst.add(2 + i).write(src.add(2 + i + 1).read() - first);
+        }
+        std::ptr::copy_nonoverlapping(src.add(2 + n + 1), dst.add(2 + (n - 1)), n - 1);
+        free_node_shell(branch);
+        Value::from_object_ptr(obj)
+    }
+}
+
+/// Allocate a `SeqBranch` over OWNED children: references transfer, no count
+/// traffic. The move-in twin of [`seq_branch_in`].
+pub(crate) fn seq_branch_in_moving<A: Arena + ?Sized, const N: usize>(
+    a: &mut A,
+    shift: usize,
+    children: [Value; N],
+) -> Value {
+    debug_assert!(!a.marks_immortal());
+    let obj = alloc_obj(a, HeapTag::SeqBranch, 2 + 2 * N, false);
+    // SAFETY: freshly allocated payload of exactly 2 + 2N words.
+    unsafe {
+        let p = obj.as_ptr().add(1);
+        p.write(N as u64);
+        p.add(1).write(shift as u64);
+        let mut total = 0u64;
+        for (i, c) in children.into_iter().enumerate() {
+            total += seq_node_total(&c);
+            p.add(2 + i).write(total);
+            move_child(p.add(2 + N + i), c);
+        }
+        Value::from_object_ptr(obj)
+    }
+}
+
 /// Allocate a `Seq` root over the given parts.
 #[inline]
 pub(crate) fn seq_root_in<A: Arena + ?Sized>(
@@ -889,7 +1122,7 @@ pub(crate) fn hamt_branch_grow<A: Arena + ?Sized>(
         std::ptr::copy_nonoverlapping(src, dst.add(1), at);
         move_child(dst.add(1 + at), child);
         std::ptr::copy_nonoverlapping(src.add(at), dst.add(1 + at + 1), n - at);
-        hamt_free_shell(branch);
+        free_node_shell(branch);
         Value::from_object_ptr(obj)
     }
 }
@@ -915,15 +1148,16 @@ pub(crate) fn hamt_branch_shrink<A: Arena + ?Sized>(
         dst.write(new_bitmap as u64);
         std::ptr::copy_nonoverlapping(src, dst.add(1), at);
         std::ptr::copy_nonoverlapping(src.add(at + 1), dst.add(1 + at), n - at - 1);
-        hamt_free_shell(branch);
+        free_node_shell(branch);
         Value::from_object_ptr(obj)
     }
 }
 
 /// Free a uniquely-owned node's allocation WITHOUT releasing its child
 /// slots — every live child reference has already moved elsewhere and the
-/// remaining words are stale aliases.
-pub(crate) fn hamt_free_shell(node: Value) {
+/// remaining words are stale aliases. Tag-agnostic: serves the HAMT and the
+/// seq tree alike (neither carries an off-heap backing).
+pub(crate) fn free_node_shell(node: Value) {
     debug_assert!(node.is_unique());
     let obj = node.heap_obj() as *mut u64;
     std::mem::forget(node);
@@ -3473,6 +3707,59 @@ mod tests {
         (0..n as i64).map(Value::small_int).collect()
     }
 
+    #[test]
+    fn unique_array_is_edited_in_place() {
+        let mut h = ProcHeap::new();
+        // Push enough through the sole reference to cross several leaf
+        // spills; the root object must keep its address the whole way.
+        let mut root = seq::empty_in(&mut h);
+        let mut root_addr = None;
+        for i in 0..200i64 {
+            root = seq::push_back(&mut h, root, Value::small_int(i));
+            match root_addr {
+                None => root_addr = Some(root.heap_obj()),
+                Some(addr) => {
+                    assert_eq!(root.heap_obj(), addr, "unique push must reuse the root");
+                }
+            }
+        }
+        seq::check_invariants(&root);
+        for i in 0..200i64 {
+            assert_eq!(seq::get(&root, i as usize).unwrap().as_int(), Some(i));
+        }
+        // The front side too, through the same sole reference.
+        for i in 0..100i64 {
+            root = seq::push_front(&mut h, root, Value::small_int(-1 - i));
+            assert_eq!(root.heap_obj(), root_addr.unwrap());
+        }
+        seq::check_invariants(&root);
+        assert_eq!(seq::get(&root, 0).unwrap().as_int(), Some(-100));
+        assert_eq!(seq::get(&root, 100).unwrap().as_int(), Some(0));
+    }
+
+    #[test]
+    fn shared_array_is_never_edited_in_place() {
+        let mut h = ProcHeap::new();
+        let mut root = seq::empty_in(&mut h);
+        for i in 0..100i64 {
+            root = seq::push_back(&mut h, root, Value::small_int(i));
+        }
+        // Two references alive: the push must path-copy, leaving the
+        // original untouched at its old length.
+        let grown = seq::push_back(&mut h, root.clone(), Value::small_int(999));
+        assert_eq!(seq::len(&root), 100, "shared original must be untouched");
+        assert_eq!(seq::len(&grown), 101);
+        assert_eq!(seq::get(&grown, 100).unwrap().as_int(), Some(999));
+        assert_eq!(seq::get(&root, 99).unwrap().as_int(), Some(99));
+        seq::check_invariants(&root);
+        seq::check_invariants(&grown);
+
+        let fronted = seq::push_front(&mut h, root.clone(), Value::small_int(-1));
+        assert_eq!(seq::len(&root), 100, "shared original must be untouched");
+        assert_eq!(seq::get(&fronted, 0).unwrap().as_int(), Some(-1));
+        seq::check_invariants(&fronted);
+    }
+
     fn assert_matches_model(root: &Value, model: &[Value]) {
         seq::check_invariants(root);
         let r = root.as_array().unwrap();
@@ -3507,13 +3794,13 @@ mod tests {
         let mut root = seq::empty_in(&mut h);
         let mut model: Vec<Value> = Vec::new();
         for i in 0..1200i64 {
-            root = seq::push_back(&mut h, &root, Value::small_int(i));
+            root = seq::push_back(&mut h, root, Value::small_int(i));
             model.push(Value::small_int(i));
         }
         assert_matches_model(&root, &model);
 
         for i in 0..300i64 {
-            root = seq::push_front(&mut h, &root, Value::small_int(-i));
+            root = seq::push_front(&mut h, root, Value::small_int(-i));
             model.insert(0, Value::small_int(-i));
         }
         assert_matches_model(&root, &model);
@@ -3526,20 +3813,20 @@ mod tests {
         let root = seq::from_slice(&mut h, &items);
         for n in [0usize, 1, 15, 32, 33, 64, 500, 1063, 1064, 1099, 1100, 2000] {
             let t = seq::take(&mut h, &root, n);
-            let s = seq::skip(&mut h, &root, n);
+            let s = seq::skip(&mut h, root.clone(), n);
             let cut = n.min(items.len());
             assert_matches_model(&t, &items[..cut]);
             assert_matches_model(&s, &items[cut..]);
         }
         let mut pushed = root;
         for i in 0..40i64 {
-            pushed = seq::push_front(&mut h, &pushed, Value::small_int(-1 - i));
+            pushed = seq::push_front(&mut h, pushed, Value::small_int(-1 - i));
         }
         let mut model: Vec<Value> = (0..40i64).map(|i| Value::small_int(-40 + i)).collect();
         model.extend_from_slice(&items);
         for n in [5usize, 39, 40, 41, 600] {
             assert_matches_model(&seq::take(&mut h, &pushed, n), &model[..n]);
-            assert_matches_model(&seq::skip(&mut h, &pushed, n), &model[n..]);
+            assert_matches_model(&seq::skip(&mut h, pushed.clone(), n), &model[n..]);
         }
     }
 
@@ -3614,12 +3901,12 @@ mod tests {
             match rng() % 6 {
                 0 | 1 => {
                     let x = Value::small_int(step as i64);
-                    root = seq::push_back(&mut h, &root, x.clone());
+                    root = seq::push_back(&mut h, root, x.clone());
                     model.push(x);
                 }
                 2 => {
                     let x = Value::small_int(-(step as i64));
-                    root = seq::push_front(&mut h, &root, x.clone());
+                    root = seq::push_front(&mut h, root, x.clone());
                     model.insert(0, x);
                 }
                 3 => {
@@ -3629,7 +3916,7 @@ mod tests {
                 }
                 4 => {
                     let n = rng() % (model.len() + 2);
-                    root = seq::skip(&mut h, &root, n);
+                    root = seq::skip(&mut h, root, n);
                     let cut = n.min(model.len());
                     model.drain(..cut);
                 }
@@ -3663,7 +3950,7 @@ mod tests {
         let mut h = ProcHeap::new();
         let items = ints(100_000);
         let root = seq::from_slice(&mut h, &items);
-        let v2 = seq::push_back(&mut h, &root, Value::small_int(-1));
+        let v2 = seq::push_back(&mut h, root.clone(), Value::small_int(-1));
         assert_eq!(seq::len(&root), 100_000, "original version unchanged");
         assert_eq!(seq::len(&v2), 100_001);
     }

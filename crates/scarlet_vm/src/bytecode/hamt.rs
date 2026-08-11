@@ -22,9 +22,9 @@
 //! path and share every untouched subtree, so earlier versions stay valid.
 
 use super::value::{
-    Arena, EqPending, HamtMapRef, HamtNodeRef, MapRef, Value, eq_defer, hamt_branch_grow,
-    hamt_branch_in, hamt_branch_put_child, hamt_branch_shrink, hamt_branch_take_child,
-    hamt_collision_in, hamt_entry_in, hamt_entry_overwrite, hamt_free_shell, hamt_map_in,
+    Arena, EqPending, HamtMapRef, HamtNodeRef, MapRef, Value, eq_defer, free_node_shell,
+    hamt_branch_grow, hamt_branch_in, hamt_branch_put_child, hamt_branch_shrink,
+    hamt_branch_take_child, hamt_collision_in, hamt_entry_in, hamt_entry_overwrite, hamt_map_in,
     hamt_map_put_root, hamt_map_take_root, hash_value, map_entry_hash, values_equal,
 };
 
@@ -444,7 +444,7 @@ fn node_remove_owned<A: Arena + ?Sized>(
                     // Collapse as the copy path does, so equal maps keep
                     // identical shapes regardless of which path built them.
                     if n == 1 && is_leaf(&child) {
-                        hamt_free_shell(node);
+                        free_node_shell(node);
                         return RemovedOwned::Node(child);
                     }
                     hamt_branch_put_child(&node, i, child);
@@ -455,13 +455,13 @@ fn node_remove_owned<A: Arena + ?Sized>(
                     if nbitmap == 0 {
                         // Slot `i` is a stale alias of the consumed child;
                         // the shell held nothing else.
-                        hamt_free_shell(node);
+                        free_node_shell(node);
                         return RemovedOwned::Empty;
                     }
                     if n == 2 {
                         let survivor = hamt_branch_take_child(&node, 1 - i);
                         if is_leaf(&survivor) {
-                            hamt_free_shell(node);
+                            free_node_shell(node);
                             return RemovedOwned::Node(survivor);
                         }
                         hamt_branch_put_child(&node, 1 - i, survivor);
