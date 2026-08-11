@@ -4,7 +4,7 @@
 
 A statically-typed and expression-oriented programming language for developer productivity.
 
-[Documentation](https://scarlet.industries)
+[Documentation](https://scarlet.industries/docs/language)
 
 ---
 
