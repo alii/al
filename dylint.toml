@@ -3,3 +3,16 @@ nonidentity-key-types = ["scarlet_syntax::span::Span"]
 nonidentity-key-forms = ["ptr-cast"]
 nonidentity-key-methods = ["scarlet_vm::bytecode::value::Value::to_bits"]
 baseline = "mordant-baseline.toml"
+
+# The language server must never kill its own process from a handler: a
+# malformed request or bad file state answers with an error response, not an
+# exit. Holds today; a violation prints the chain that reaches exit.
+[[mordant.forbidden-reach]]
+from = "LspServer::handle_message"
+never = ["std::process::exit", "std::process::abort"]
+
+# The scanner recovers from every malformed input with an Error token and a
+# diagnostic; no byte sequence may reach an explicit panic.
+[[mordant.forbidden-reach]]
+from = "Scanner::scan_all"
+never = ["core::panicking::panic_fmt", "core::panicking::panic", "core::panicking::panic_explicit", "Option::unwrap", "Option::expect", "Result::unwrap", "Result::expect"]
