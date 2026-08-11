@@ -172,12 +172,9 @@ println(string.length('hello'))
         assert_eq!(*idx as usize, i, "bundle index must be dense and sorted");
         let bytes = &scarlet::STDLIB_CORE_BYTES[*start as usize..(*start + *len) as usize];
         let fi = <scarlet_vm::FuncIdx as scarlet_core::tivec::Idx>::from_usize(i);
-        let (plan, _layout) = scarlet::core_ir::clif::decode_plan_bundle(
-            fi,
-            bytes,
-            scarlet::STDLIB.prelude,
-        )
-        .unwrap_or_else(|e| panic!("bundle for fn#{i} failed to decode: {e}"));
+        let (plan, _layout) =
+            scarlet::core_ir::clif::decode_plan_bundle(fi, bytes, scarlet::STDLIB.prelude)
+                .unwrap_or_else(|e| panic!("bundle for fn#{i} failed to decode: {e}"));
         assert_eq!(plan.func_idx, fi);
     }
     // And the seeded program is what actually ran above.

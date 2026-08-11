@@ -563,19 +563,27 @@ pub(crate) unsafe extern "C" fn al_rt_prepare_tail_value(
     }
 }
 
-/// Pop the value-stack top into a compiled continuation: the call result the
-/// callee's return transfer pushed. Ownership moves with the bits.
-///
+#[repr(C)]
+pub(crate) struct ContEntry {
+    pub base: *mut u64,
+    pub result: u64,
+}
+
 /// # Safety
-/// `vmx` must point at the running scheduler's live `VM` whose stack top is
-/// the callee's result.
-#[allow(unsafe_code)] // the continuation result seam; contract above
-pub(crate) unsafe extern "C" fn al_rt_pop(vmx: *mut VM) -> u64 {
+/// `vmx` must point at the running scheduler's live `VM`, with the caller's
+/// frame on top and the callee's result on the value stack.
+#[allow(unsafe_code)] // the continuation seam; contract above
+pub(crate) unsafe extern "C" fn al_rt_cont(vmx: *mut VM) -> ContEntry {
     // SAFETY: `vmx` is the running scheduler's live VM per the contract.
     let vm = unsafe { &mut *vmx };
-    match vm.stack.pop() {
-        Some(v) => std::mem::ManuallyDrop::new(v).to_bits(),
-        None => crate::bytecode::value::proof_violation("continuation with an empty stack"),
+    let Some(v) = vm.stack.pop() else {
+        crate::bytecode::value::proof_violation("continuation with an empty stack")
+    };
+    let result = std::mem::ManuallyDrop::new(v).to_bits();
+    let base_slot = vm.frame().base_slot;
+    ContEntry {
+        base: vm.stack.as_mut_ptr().wrapping_add(base_slot).cast(),
+        result,
     }
 }
 
@@ -596,7 +604,7 @@ pub(crate) fn rt_symbols() -> [(&'static str, *const u8); 9] {
             al_rt_prepare_tail_value as *const u8,
         ),
         ("al_rt_ret_transfer", al_rt_ret_transfer as *const u8),
-        ("al_rt_pop", al_rt_pop as *const u8),
+        ("al_rt_cont", al_rt_cont as *const u8),
         ("al_rt_checkpoint", al_rt_checkpoint as *const u8),
     ]
 }
@@ -823,7 +831,7 @@ mod tests {
         assert!(p.entry.is_null());
         assert_eq!(p.aux, NativeStatus::Done as u64);
         assert_eq!(vm.frames.len(), 1);
-        assert_eq!(small(unsafe { al_rt_pop(&raw mut vm) }), 9);
+        assert_eq!(small(unsafe { al_rt_cont(&raw mut vm) }.result), 9);
 
         // Native parent: its entry plus its stored resume ordinal.
         vm.program
@@ -847,7 +855,7 @@ mod tests {
         let p = unsafe { al_rt_ret_transfer(&raw mut vm, Value::small_int(8).to_bits()) };
         assert!(std::ptr::eq(p.entry, yield_entry as *const u8));
         assert_eq!(p.aux, 5, "parent resumes at its stored continuation");
-        assert_eq!(small(unsafe { al_rt_pop(&raw mut vm) }), 8);
+        assert_eq!(small(unsafe { al_rt_cont(&raw mut vm) }.result), 8);
     }
 
     /// `prepare_tail` collapses in place: same frame count, new function,

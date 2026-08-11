@@ -16,16 +16,17 @@
 //! Blocking follows the socket pattern: an empty-queue receive parks the
 //! process under [`Wait::Mailbox`](super::poll::Wait). The lost-wakeup race is
 //! closed by `VM::park` re-checking the queue when it registers the waiter
-//! under the registry lock; a send that lands in between is seen by that
-//! re-check, and a send that lands after finds the waiter and delivers a wake
-//! through the owner scheduler's wake queue ([`Runtime::deliver_wake`]).
+//! under the subject's shard lock; a send that lands in between is seen by
+//! that re-check, and a send that lands after finds the waiter and delivers a
+//! wake through the owner scheduler's wake queue ([`Runtime::deliver_wake`]).
 //!
 //! A subject dies with its owner: process death drops its mailboxes and every
 //! queued message. Sending to a dead subject silently drops the message —
 //! fire-and-forget, the BEAM rule.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::Ordering;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::bytecode::Value;
@@ -35,25 +36,40 @@ use super::poll::{EPOCH, Parked, Wait, monotonic_now_ms};
 use super::sched::Runtime;
 use super::{IO_REDUCTION_COST, VM, VmError, VmResult, lock};
 
-/// Every live mailbox, keyed by subject id. One program-wide table (like
-/// `Runtime::shared_listeners`) because a sender on any scheduler must reach
-/// the queue; the id in the `Subject` value is the key.
+/// Shard count for the mailbox table. A power of two so the shard pick is a
+/// mask. Every send and receive locks exactly one shard, so this bounds how
+/// many schedulers can contend on any single lock — with one global lock,
+/// message throughput went *down* as schedulers were added.
+const SHARDS: usize = 64;
+
+/// Every live mailbox, keyed by subject id, sharded by id. Program-wide
+/// (like `Runtime::shared_listeners`) because a sender on any scheduler must
+/// reach the queue; the id in the `Subject` value is the key.
+///
+/// The park/wake protocol needs only per-subject serialization: a park and a
+/// send on the same id take the same shard lock, which is all the lost-wakeup
+/// re-check relies on.
 pub(super) struct Mailboxes {
-    next_id: u64,
-    by_id: HashMap<u64, Mailbox>,
+    /// Id 0 is never minted, so a zeroed subject word is always dead.
+    next_id: AtomicU64,
+    shards: [Mutex<HashMap<u64, Mailbox>>; SHARDS],
     /// Subject ids by owning pid — the death path's index, so ending a
-    /// process does not scan every mailbox in the program.
-    by_owner: HashMap<u64, Vec<u64>>,
+    /// process does not scan every mailbox in the program. Its own lock:
+    /// taken at create and death, never per message.
+    by_owner: Mutex<HashMap<u64, Vec<u64>>>,
 }
 
 impl Mailboxes {
     pub(super) fn new() -> Mailboxes {
         Mailboxes {
-            // Id 0 is never minted, so a zeroed subject word is always dead.
-            next_id: 1,
-            by_id: HashMap::new(),
-            by_owner: HashMap::new(),
+            next_id: AtomicU64::new(1),
+            shards: std::array::from_fn(|_| Mutex::new(HashMap::new())),
+            by_owner: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn shard(&self, id: u64) -> &Mutex<HashMap<u64, Mailbox>> {
+        &self.shards[(id as usize) & (SHARDS - 1)]
     }
 }
 
@@ -63,7 +79,7 @@ struct Mailbox {
     owner: u64,
     queue: VecDeque<Value>,
     /// The owner parked in a receive, as `(scheduler index, wait id)`.
-    /// Registered by `VM::park` under the registry lock, taken by the first
+    /// Registered by `VM::park` under the shard lock, taken by the first
     /// send. A registration left behind by a deadline wake is stale; the
     /// owner's next receive clears it, and a wake delivered against it is
     /// skipped by `drain_wakes`.
@@ -82,10 +98,8 @@ enum TryReceive {
 impl Runtime {
     /// Mint a mailbox owned by `owner` and return its subject id.
     fn subject_create(&self, owner: u64) -> u64 {
-        let mut reg = lock(&self.mailboxes);
-        let id = reg.next_id;
-        reg.next_id += 1;
-        reg.by_id.insert(
+        let id = self.mailboxes.next_id.fetch_add(1, Ordering::Relaxed);
+        lock(self.mailboxes.shard(id)).insert(
             id,
             Mailbox {
                 owner,
@@ -93,7 +107,10 @@ impl Runtime {
                 waiter: None,
             },
         );
-        reg.by_owner.entry(owner).or_default().push(id);
+        lock(&self.mailboxes.by_owner)
+            .entry(owner)
+            .or_default()
+            .push(id);
         self.live_subjects.fetch_add(1, Ordering::Relaxed);
         id
     }
@@ -102,10 +119,10 @@ impl Runtime {
     /// parked receiver. A dead subject drops the message.
     fn subject_send(&self, id: u64, msg: Value) {
         let waiter = {
-            let mut reg = lock(&self.mailboxes);
-            let Some(mb) = reg.by_id.get_mut(&id) else {
+            let mut shard = lock(self.mailboxes.shard(id));
+            let Some(mb) = shard.get_mut(&id) else {
                 // Drop outside the lock: the graph can be arbitrarily large.
-                drop(reg);
+                drop(shard);
                 drop(msg);
                 return;
             };
@@ -121,8 +138,8 @@ impl Runtime {
     /// waiter registration first — this call IS the owner receiving, so no
     /// send may target the old wait id.
     fn subject_try_receive(&self, id: u64, pid: u64) -> TryReceive {
-        let mut reg = lock(&self.mailboxes);
-        let Some(mb) = reg.by_id.get_mut(&id) else {
+        let mut shard = lock(self.mailboxes.shard(id));
+        let Some(mb) = shard.get_mut(&id) else {
             return TryReceive::NotOwner;
         };
         if mb.owner != pid {
@@ -136,12 +153,12 @@ impl Runtime {
     }
 
     /// Register the owner as parked on subject `id`, re-checking the queue
-    /// under the registry lock. Returns false — park nothing, stay runnable —
+    /// under the shard lock. Returns false — park nothing, stay runnable —
     /// when a message is already queued (a send raced the park) or the
     /// subject is gone (the re-run surfaces that as an error).
     pub(super) fn subject_park_waiter(&self, id: u64, sched: usize, wait_id: u64) -> bool {
-        let mut reg = lock(&self.mailboxes);
-        let Some(mb) = reg.by_id.get_mut(&id) else {
+        let mut shard = lock(self.mailboxes.shard(id));
+        let Some(mb) = shard.get_mut(&id) else {
             return false;
         };
         if !mb.queue.is_empty() {
@@ -158,15 +175,13 @@ impl Runtime {
         if self.live_subjects.load(Ordering::Relaxed) == 0 {
             return;
         }
-        let dead: Vec<Mailbox> = {
-            let mut reg = lock(&self.mailboxes);
-            let Some(ids) = reg.by_owner.remove(&owner) else {
-                return;
-            };
-            ids.into_iter()
-                .filter_map(|id| reg.by_id.remove(&id))
-                .collect()
+        let Some(ids) = lock(&self.mailboxes.by_owner).remove(&owner) else {
+            return;
         };
+        let dead: Vec<Mailbox> = ids
+            .into_iter()
+            .filter_map(|id| lock(self.mailboxes.shard(id)).remove(&id))
+            .collect();
         self.live_subjects.fetch_sub(dead.len(), Ordering::Relaxed);
         // The queued graphs are freed here, outside the lock. The owner
         // cannot be parked on any of these (it just died), so no waiter is
@@ -176,9 +191,17 @@ impl Runtime {
 
     /// Queue a wait id on scheduler `sched`'s wake list and interrupt its
     /// poller. The cross-thread half of waking a parked receiver.
+    ///
+    /// The poller interrupt (a syscall) is skipped when the target scheduler
+    /// is running: it drains its wake queue at every yield. This cannot lose
+    /// a wake — the target raises its parked flag *before* draining the queue
+    /// one last time, and both sides cross the queue's mutex, so either the
+    /// drain sees this push or this thread sees the raised flag and notifies.
     fn deliver_wake(&self, sched: usize, wait_id: u64) {
         lock(&self.slots[sched].wakes).push(wait_id);
-        self.notify(sched);
+        if self.is_parked(sched) {
+            self.notify(sched);
+        }
     }
 }
 

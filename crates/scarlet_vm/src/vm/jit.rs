@@ -150,7 +150,7 @@ const RT_SIGS: &[RtSig] = &{
         RtSig { name: "al_rt_prepare_tail", params: &[Ptr, I64, Ptr, I64], rets: &[Ptr, I64] },
         RtSig { name: "al_rt_prepare_tail_value", params: &[Ptr, I64, Ptr, I64], rets: &[Ptr, I64] },
         RtSig { name: "al_rt_ret_transfer", params: &[Ptr, I64], rets: &[Ptr, I64] },
-        RtSig { name: "al_rt_pop", params: &[Ptr], rets: &[I64] },
+        RtSig { name: "al_rt_cont", params: &[Ptr], rets: &[Ptr, I64] },
         RtSig { name: "al_rt_make_closure", params: &[Ptr, I64, Ptr, I64], rets: &[I64] },
         RtSig { name: "al_rt_checkpoint", params: &[Ptr], rets: &[I64] },
         RtSig { name: "al_rt_frame_base", params: &[Ptr], rets: &[Ptr] },
@@ -206,10 +206,11 @@ pub fn jit_builder() -> Result<JITBuilder, JitError> {
         ("use_colocated_libcalls", "false"),
         ("is_pic", "false"),
         ("opt_level", "speed"),
-        // Compiled frames live on 256K per-process stacks with one guard
-        // page ([`super::stack`]). Without probing, a frame bigger than a
-        // page does one `sub rsp, N` that steps clean over the guard and
-        // writes into the next process's stack: silent corruption, no fault.
+        // Compiled frames run on the scheduler thread's OS stack (the
+        // one-native-frame invariant: calls are tail-transfers, so at most
+        // one native frame is live). Without probing, a frame bigger than a
+        // page does one `sub rsp, N` that can step clean over the guard
+        // page and fault confusingly instead of cleanly.
         ("enable_probestack", "true"),
         ("probestack_strategy", "inline"),
         // The context argument stays in the pinned register (r15/x21) and is
@@ -465,7 +466,8 @@ mod tests {
         let prepare_tail_value: unsafe extern "C" fn(*mut VM, u64, *const u64, i64) -> P2 =
             native::al_rt_prepare_tail_value;
         let ret_transfer: unsafe extern "C" fn(*mut VM, u64) -> P2 = native::al_rt_ret_transfer;
-        let rt_pop: unsafe extern "C" fn(*mut VM) -> u64 = native::al_rt_pop;
+        let rt_cont: unsafe extern "C" fn(*mut VM) -> crate::vm::native::ContEntry =
+            native::al_rt_cont;
         let make_closure: unsafe extern "C" fn(*mut VM, i64, *const u64, i64) -> u64 =
             native::al_rt_make_closure;
         let rt_checkpoint: unsafe extern "C" fn(*mut VM) -> NativeStatus = native::al_rt_checkpoint;
@@ -615,7 +617,7 @@ mod tests {
                 &[Ptr, I64],
                 &[Ptr, I64],
             ),
-            Pin("al_rt_pop", rt_pop as *const u8, &[Ptr], &[I64]),
+            Pin("al_rt_cont", rt_cont as *const u8, &[Ptr], &[Ptr, I64]),
             Pin(
                 "al_rt_make_closure",
                 make_closure as *const u8,

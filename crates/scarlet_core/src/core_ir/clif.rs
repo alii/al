@@ -106,7 +106,6 @@ const SYM_RT_PREPARE_CALL_VALUE: &str = "al_rt_prepare_call_value";
 const SYM_RT_PREPARE_TAIL: &str = "al_rt_prepare_tail";
 const SYM_RT_PREPARE_TAIL_VALUE: &str = "al_rt_prepare_tail_value";
 const SYM_RT_RET_TRANSFER: &str = "al_rt_ret_transfer";
-const SYM_RT_POP: &str = "al_rt_pop";
 const SYM_RT_CHECKPOINT: &str = "al_rt_checkpoint";
 const SYM_RT_FRAME_BASE: &str = "al_rt_frame_base";
 const SYM_RT_MAKE_CLOSURE: &str = "al_rt_make_closure";
@@ -993,7 +992,7 @@ struct RtRefs {
     prepare_tail: ir::FuncRef,
     prepare_tail_value: ir::FuncRef,
     ret_transfer: ir::FuncRef,
-    rt_pop: ir::FuncRef,
+    rt_cont: ir::FuncRef,
     make_closure: ir::FuncRef,
     rt_checkpoint: ir::FuncRef,
     rt_frame_base: ir::FuncRef,
@@ -1039,7 +1038,7 @@ fn declare_imports<M: Module>(
         prepare_tail: r(SYM_RT_PREPARE_TAIL),
         prepare_tail_value: r(SYM_RT_PREPARE_TAIL_VALUE),
         ret_transfer: r(SYM_RT_RET_TRANSFER),
-        rt_pop: r(SYM_RT_POP),
+        rt_cont: r("al_rt_cont"),
         make_closure: r(SYM_RT_MAKE_CLOSURE),
         rt_checkpoint: r(SYM_RT_CHECKPOINT),
         rt_frame_base: r(SYM_RT_FRAME_BASE),
@@ -2092,8 +2091,8 @@ impl<'a> BodyGen<'a> {
                 self.b.ins().return_(&[status]);
                 self.b.switch_to_block(ok);
                 let vmx = self.vmx();
-                let pop = self.b.ins().call(self.fns.rt_pop, &[vmx]);
-                let w = self.b.inst_results(pop)[0];
+                let entry = self.b.ins().call(self.fns.rt_cont, &[vmx]);
+                let w = self.b.inst_results(entry)[1];
                 let int = want_int.then(|| unbox_int(&mut self.b, &self.facts, w));
                 AtomVal { word: Some(w), int }
             }
@@ -2150,13 +2149,13 @@ impl<'a> BodyGen<'a> {
                 attempt(self, empty, 0);
 
                 self.b.switch_to_block(cont_blk);
-                let nb = self.frame_base_now();
+                let vmx = self.vmx();
+                let entry = self.b.ins().call(self.fns.rt_cont, &[vmx]);
+                let nb = self.b.inst_results(entry)[0];
+                let w = self.b.inst_results(entry)[1];
                 self.b.def_var(self.base, nb);
                 let live = self.cont_live[(cont_ord - 1) as usize].clone();
                 self.reload_cached_views(&live);
-                let vmx = self.vmx();
-                let pop = self.b.ins().call(self.fns.rt_pop, &[vmx]);
-                let w = self.b.inst_results(pop)[0];
                 let int = want_int.then(|| unbox_int(&mut self.b, &self.facts, w));
                 AtomVal { word: Some(w), int }
             }
@@ -2583,8 +2582,10 @@ impl<'a> BodyGen<'a> {
         // here by construction and their cache entries drop.
         self.b.switch_to_block(cont);
         let vmx = self.vmx();
-        let refetch = self.b.ins().call(self.fns.rt_frame_base, &[vmx]);
-        let nb = self.b.inst_results(refetch)[0];
+        // One crossing for the whole prologue: refetched base + the result.
+        let entry = self.b.ins().call(self.fns.rt_cont, &[vmx]);
+        let nb = self.b.inst_results(entry)[0];
+        let result = self.b.inst_results(entry)[1];
         self.b.def_var(self.base, nb);
         // A continuation is a fresh machine entry: nothing computed before the
         // transfer survives in a register. Redefine the live cached views HERE,
@@ -2594,9 +2595,7 @@ impl<'a> BodyGen<'a> {
         // reloaded, so a dead local's freed slot is never dereferenced.
         let live = self.cont_live[(resume - 1) as usize].clone();
         self.reload_cached_views(&live);
-        let vmx = self.vmx();
-        let pop = self.b.ins().call(self.fns.rt_pop, &[vmx]);
-        self.b.inst_results(pop)[0]
+        result
     }
 
     /// Reload each live cached local from its frame slot (or constant) into its
@@ -3709,9 +3708,20 @@ mod tests {
         }
     }
 
-    extern "C" fn t_pop(vmx: *mut core::ffi::c_void) -> u64 {
+    /// [`t_frame_base`] + [`t_pop`] in one crossing, mirroring `al_rt_cont`.
+    #[repr(C)]
+    struct TCont {
+        base: *mut u64,
+        result: u64,
+    }
+    extern "C" fn t_cont(vmx: *mut core::ffi::c_void) -> TCont {
         let vm = vm_of(vmx);
-        ManuallyDrop::new(vm.stack.pop().expect("continuation result")).to_bits()
+        let result = ManuallyDrop::new(vm.stack.pop().expect("continuation result")).to_bits();
+        let base = vm.frames.last().unwrap().base;
+        // SAFETY: `Value` is repr(transparent) over u64 and
+        // `base < stack.len()` for a live frame.
+        let base = unsafe { vm.stack.as_mut_ptr().add(base).cast::<u64>() };
+        TCont { base, result }
     }
 
     unsafe extern "C" fn t_make_closure(
@@ -4024,7 +4034,7 @@ mod tests {
         jb.symbol(SYM_RT_PREPARE_CALL_VALUE, t_prepare_call_value as *const u8);
         jb.symbol(SYM_RT_PREPARE_TAIL, t_prepare_tail as *const u8);
         jb.symbol(SYM_RT_PREPARE_TAIL_VALUE, t_prepare_tail_value as *const u8);
-        jb.symbol(SYM_RT_POP, t_pop as *const u8);
+        jb.symbol("al_rt_cont", t_cont as *const u8);
         jb.symbol(SYM_RT_MAKE_CLOSURE, t_make_closure as *const u8);
         jb.symbol(SYM_RT_CHECKPOINT, t_rt_checkpoint as *const u8);
         jb.symbol(SYM_RT_FRAME_BASE, t_frame_base as *const u8);

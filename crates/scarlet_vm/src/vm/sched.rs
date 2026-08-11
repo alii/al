@@ -254,7 +254,7 @@ pub(super) struct Runtime {
     pub shared_listeners: Mutex<HashMap<i32, Arc<TcpListener>>>,
     /// Every live mailbox, program-wide: senders on any scheduler reach a
     /// subject's queue through here. See [`super::mailbox`].
-    pub(super) mailboxes: Mutex<super::mailbox::Mailboxes>,
+    pub(super) mailboxes: super::mailbox::Mailboxes,
     /// Live mailbox count, gating the per-process-death cleanup scan so
     /// subject-free programs pay one relaxed load.
     pub(super) live_subjects: AtomicUsize,
@@ -305,7 +305,7 @@ impl Runtime {
             globals: Mutex::new(Vec::new()),
             globals_version: AtomicU64::new(0),
             shared_listeners: Mutex::new(HashMap::new()),
-            mailboxes: Mutex::new(super::mailbox::Mailboxes::new()),
+            mailboxes: super::mailbox::Mailboxes::new(),
             live_subjects: AtomicUsize::new(0),
             next_pid: AtomicU64::new(1),
             slots,
@@ -511,6 +511,11 @@ impl Runtime {
     /// [`SchedSlot::parked`].
     pub fn set_parked(&self, me: usize, parked: bool) {
         self.slots[me].parked.store(parked, Ordering::Release);
+    }
+
+    /// Whether scheduler `i` is blocked in its poller (a wake needs a notify).
+    pub(super) fn is_parked(&self, i: usize) -> bool {
+        self.slots[i].parked.load(Ordering::Acquire)
     }
 
     /// Find the least-loaded peer worth donating to when no scheduler is idle.
