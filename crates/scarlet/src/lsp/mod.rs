@@ -13,7 +13,7 @@ mod xrefs;
 
 pub use workspace::Workspace;
 
-use wire::{FileChangeType, doc_uri, folder_paths, rename_error_code, uri_to_path};
+use wire::{WatchedChange, doc_uri, folder_paths, rename_error_code, uri_to_path};
 
 /// Outcome of one framed stdin read: a message body, or the client closed the
 /// pipe.
@@ -299,7 +299,7 @@ impl LspServer {
                 continue;
             };
             let ty =
-                FileChangeType::from_wire(change.get("type").and_then(|v| v.as_i64()).unwrap_or(2));
+                WatchedChange::from_wire(change.get("type").and_then(|v| v.as_i64()).unwrap_or(2));
             self.ws.invalidate_watched(uri, ty);
         }
         // Only the client-open documents. Driving this off the full `documents`

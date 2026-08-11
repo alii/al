@@ -9,22 +9,20 @@ use crate::module::{self, ModulePath};
 use crate::reference;
 use crate::span::Span;
 
-/// LSP `FileChangeType` (didChangeWatchedFiles), sent on the wire as an int.
-#[repr(i64)]
+/// LSP `FileChangeType` (didChangeWatchedFiles, wire ints 1 = Created,
+/// 2 = Changed, 3 = Deleted), collapsed to the one distinction the server
+/// acts on. Clients are inconsistent about Created vs Changed (renames
+/// arrive as Delete+Create, some editors report creates as changes), so
+/// both mean "drop the cached state and re-read from disk".
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum FileChangeType {
-    Created = 1,
-    Changed = 2,
-    Deleted = 3,
+pub(super) enum WatchedChange {
+    Touched,
+    Deleted,
 }
 
-impl FileChangeType {
+impl WatchedChange {
     pub(super) fn from_wire(n: i64) -> Self {
-        match n {
-            1 => Self::Created,
-            3 => Self::Deleted,
-            _ => Self::Changed,
-        }
+        if n == 3 { Self::Deleted } else { Self::Touched }
     }
 }
 

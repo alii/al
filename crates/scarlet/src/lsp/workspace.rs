@@ -17,8 +17,7 @@ use crate::reference;
 use crate::scanner;
 
 use super::wire::{
-    FileChangeType, diagnostic_to_json, extract_position_params, query_module, root_for,
-    uri_to_path,
+    WatchedChange, diagnostic_to_json, extract_position_params, query_module, root_for, uri_to_path,
 };
 use super::xrefs::{RootState, Xref};
 
@@ -110,7 +109,7 @@ impl Workspace {
     /// Apply one `workspace/didChangeWatchedFiles` change: invalidate the
     /// owning session's cache, and on deletion drop the file's reverse edges so
     /// find-references stops reporting occurrences in a file that is gone.
-    pub(super) fn invalidate_watched(&mut self, uri: &str, ty: FileChangeType) {
+    pub(super) fn invalidate_watched(&mut self, uri: &str, ty: WatchedChange) {
         let Some(path) = uri_to_path(uri) else {
             return;
         };
@@ -127,11 +126,11 @@ impl Workspace {
         }
         if let Some(r) = self.roots.get_mut(&root) {
             r.session.invalidate_path(&path);
-            if ty == FileChangeType::Deleted {
+            if ty == WatchedChange::Deleted {
                 r.xrefs.refresh(uri, Vec::new());
             }
         }
-        if ty == FileChangeType::Deleted {
+        if ty == WatchedChange::Deleted {
             self.documents.remove(uri);
         }
     }
