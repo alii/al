@@ -230,6 +230,10 @@ suite! {
         // Subjects: a worker pool stopped and restarted; pins the native
         // park/resume + frame-slot contract (each local owns its slot).
         subject_pool_restart,
+        // Subjects: rounds of spawned callers through the pool; pins the
+        // native bridge-shim contract (the frame base survives a value-stack
+        // growth mid-body: the shim returns the moved base with its result).
+        subject_pool_rounds,
         // Subjects: send/receive ordering, park/wake, timeouts, owner death.
         // Cross-sender interleavings are asserted as aggregates only.
         messages,

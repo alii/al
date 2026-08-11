@@ -1687,6 +1687,46 @@ impl<'a> BodyGen<'a> {
         AtomVal { word: Some(r), int }
     }
 
+    /// Call the generic bridge shim and return its owned result word.
+    ///
+    /// The shim pushes its operands onto the value stack, and a push can grow
+    /// the `Vec` — which moves it, leaving every cached frame-base pointer
+    /// dangling. The shim therefore returns `(base, result)`, and this is the
+    /// only place that may call it: the fresh base is re-established here
+    /// before any caller can touch a slot again.
+    fn shim_op_call(
+        &mut self,
+        opc: ir::Value,
+        opv: ir::Value,
+        buf: ir::Value,
+        n: ir::Value,
+    ) -> ir::Value {
+        let vmx = self.vmx();
+        let call = self
+            .b
+            .ins()
+            .call(self.fns.shim_op, &[vmx, opc, opv, buf, n]);
+        let nb = self.b.inst_results(call)[0];
+        let r = self.b.inst_results(call)[1];
+        self.b.def_var(self.base, nb);
+        r
+    }
+
+    /// [`Self::shim_op_call`] wrapped as an [`AtomVal`], the shim-op analogue
+    /// of [`Self::opaque_result`].
+    fn shim_op_result(
+        &mut self,
+        opc: ir::Value,
+        opv: ir::Value,
+        buf: ir::Value,
+        n: ir::Value,
+        want_int: bool,
+    ) -> AtomVal {
+        let r = self.shim_op_call(opc, opv, buf, n);
+        let int = want_int.then(|| unbox_int(&mut self.b, &self.facts, r));
+        AtomVal { word: Some(r), int }
+    }
+
     /// Record a binding's produced value: write it to its frame slot, which
     /// takes the owned reference, and define the register views uses demand.
     fn def_local(&mut self, id: LocalId, val: AtomVal) {
@@ -1758,12 +1798,7 @@ impl<'a> BodyGen<'a> {
         let opc = self.b.ins().iconst(types::I64, i64::from(Op::Eq as u8));
         let zero = self.b.ins().iconst(types::I64, 0);
         let n = self.b.ins().iconst(types::I64, 2);
-        let vmx = self.vmx();
-        let call = self
-            .b
-            .ins()
-            .call(self.fns.shim_op, &[vmx, opc, zero, buf, n]);
-        self.b.inst_results(call)[0]
+        self.shim_op_call(opc, zero, buf, n)
     }
 
     /// Lower `a` through the generic bridge, which re-checks its operands.
@@ -1775,12 +1810,7 @@ impl<'a> BodyGen<'a> {
         let opc = self.b.ins().iconst(types::I64, i64::from(op as u8));
         let opv = self.b.ins().iconst(types::I64, i64::from(operand));
         let n = self.b.ins().iconst(types::I64, args.len() as i64);
-        let vmx = self.vmx();
-        let call = self
-            .b
-            .ins()
-            .call(self.fns.shim_op, &[vmx, opc, opv, buf, n]);
-        self.opaque_result(call, want_int)
+        self.shim_op_result(opc, opv, buf, n, want_int)
     }
 
     fn eval_pure(&mut self, a: &Atom, want_word: bool, want_int: bool) -> AtomVal {
@@ -2112,7 +2142,11 @@ impl<'a> BodyGen<'a> {
                 self.b.switch_to_block(ok);
                 let vmx = self.vmx();
                 let entry = self.b.ins().call(self.fns.rt_cont, &[vmx]);
+                // The shim's operand pushes can have grown (moved) the value
+                // stack; adopt the base `rt_cont` fetched after them.
+                let nb = self.b.inst_results(entry)[0];
                 let w = self.b.inst_results(entry)[1];
+                self.b.def_var(self.base, nb);
                 let int = want_int.then(|| unbox_int(&mut self.b, &self.facts, w));
                 AtomVal { word: Some(w), int }
             }
@@ -2185,12 +2219,7 @@ impl<'a> BodyGen<'a> {
                 let opc = self.b.ins().iconst(types::I64, i64::from(*op as u8));
                 let opv = self.b.ins().iconst(types::I64, i64::from(operand));
                 let n = self.b.ins().iconst(types::I64, args.len() as i64);
-                let vmx = self.vmx();
-                let call = self
-                    .b
-                    .ins()
-                    .call(self.fns.shim_op, &[vmx, opc, opv, buf, n]);
-                self.opaque_result(call, want_int)
+                self.shim_op_result(opc, opv, buf, n, want_int)
             }
             // A polymorphic compare whose operands are not both proven Int
             // cannot use the Int fast path; run the interpreter's own
@@ -2204,12 +2233,7 @@ impl<'a> BodyGen<'a> {
                 let opc = self.b.ins().iconst(types::I64, i64::from(*op as u8));
                 let opv = self.b.ins().iconst(types::I64, i64::from(operand));
                 let n = self.b.ins().iconst(types::I64, args.len() as i64);
-                let vmx = self.vmx();
-                let call = self
-                    .b
-                    .ins()
-                    .call(self.fns.shim_op, &[vmx, opc, opv, buf, n]);
-                self.opaque_result(call, want_int)
+                self.shim_op_result(opc, opv, buf, n, want_int)
             }
             Atom::PrimOp { op, args, .. } => {
                 let Some((nop, _)) = nop_of(*op) else {

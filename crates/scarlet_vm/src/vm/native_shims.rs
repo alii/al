@@ -424,7 +424,13 @@ pub(crate) unsafe extern "C" fn al_shim_push_global(vmx: *mut VM, slot: i64) -> 
 /// (`buf[0]` deepest, `buf[argc-1]` on top); each reference is transferred to
 /// this call. The shim pushes them onto the value stack, runs the interpreter's
 /// own op method (which pops them and pushes one result), and returns the owned
-/// result bits.
+/// result bits paired with the caller's frame base.
+///
+/// The base rides back in the return pair because the operand pushes can grow
+/// the value stack, and a growth moves it: any frame-base pointer the compiled
+/// caller cached before this call is stale the moment the Vec reallocates.
+/// Returning the fresh base costs nothing (it comes back in a register) and
+/// lets the caller re-establish its view without a second runtime call.
 ///
 /// The op methods' only `Err` arms are typed-pop mismatches the type checker
 /// already excludes for well-typed bytecode, so a failure here is a proof
@@ -441,7 +447,7 @@ pub(crate) unsafe extern "C" fn al_shim_op(
     operand: i64,
     buf: *const u64,
     argc: i64,
-) -> u64 {
+) -> super::native::ContEntry {
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
     for i in 0..argc as usize {
@@ -455,13 +461,18 @@ pub(crate) unsafe extern "C" fn al_shim_op(
     let mut reds = vm.native_reds;
     let out = vm.run_bridge_op(op_code as u8, operand as i32, &mut reds);
     vm.native_reds = reds;
-    match out {
+    let result = match out {
         Ok(()) => match vm.stack.pop() {
             Some(v) => into_bits(v),
             None => proof_violation("bridge op produced no result"),
         },
         // The type checker excludes every reachable error arm of these ops.
         Err(_) => proof_violation("bridge op hit a type-proof-excluded error"),
+    };
+    let base_slot = vm.frame().base_slot;
+    super::native::ContEntry {
+        base: vm.stack.as_mut_ptr().wrapping_add(base_slot).cast(),
+        result,
     }
 }
 

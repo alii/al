@@ -1,0 +1,229 @@
+// Rounds of spawned callers asking a worker pool to run closures that
+// capture freshly allocated strings. Regression for a native-backend
+// use-after-free: the generic bridge shim pushes its operands onto the
+// value stack, a push can grow (move) the stack Vec, and compiled code
+// cached the frame-base pointer across the call — so the first natively
+// warmed run of a function in a fresh process (whose stack sits exactly
+// at capacity) read its locals through a dangling pointer. The shim now
+// returns the fresh base alongside its result (`al_shim_op`), and try-op
+// continuations adopt the base `al_rt_cont` already returns.
+
+import scarlet/int
+import scarlet/scheduler
+import scarlet/scheduler.{Subject}
+
+type Health {
+	Healthy
+	Broken
+}
+
+type Job {
+	run fn(Result(Int, String)) Health
+}
+
+type Task {
+	Work(job Job)
+	Quit
+}
+
+type Request {
+	Run(job Job)
+	Ready(worker Subject(Task))
+	Stop(done Subject(Nil))
+}
+
+fn ask(gateway Subject(Request), next fn(Int) Result(a, String)) Result(a, String) {
+	reply = scheduler.subject()
+	scheduler.send(
+		gateway,
+		Run(
+			job: Job(run: fn(lease) {
+				outcome = bind(lease, next)
+				scheduler.send(reply, outcome)
+				health(outcome)
+			}),
+		),
+	)
+	scheduler.receive(reply)
+}
+
+fn bind(r Result(Int, String), f fn(Int) Result(a, String)) Result(a, String) {
+	match r {
+		Ok(v) -> f(v)
+		Err(e) -> Err(e)
+	}
+}
+
+fn health(outcome Result(a, String)) Health {
+	match outcome {
+		Ok(_) -> Healthy
+		Err(_) -> Broken
+	}
+}
+
+fn labour(gateway Subject(Request), inbox Subject(Task), held Option(Int), seed Int) Nil {
+	match scheduler.receive(inbox) {
+		Quit -> Nil
+		Work(job) -> {
+			lease = match held {
+				Some(v) -> Ok(v)
+				None -> Ok(seed + 1)
+			}
+			kept = retain(lease, run(job, lease))
+			scheduler.send(gateway, Ready(inbox))
+			labour(gateway, inbox, kept, seed + 1)
+		}
+	}
+}
+
+fn run(job Job, lease Result(Int, String)) Health {
+	match job {
+		Job(f) -> f(lease)
+	}
+}
+
+fn retain(lease Result(Int, String), verdict Health) Option(Int) {
+	match (lease, verdict) {
+		(Ok(v), Healthy) -> Some(v)
+		(Ok(_), Broken) -> None
+		(Err(_), _) -> None
+	}
+}
+
+fn serve(
+	gateway Subject(Request),
+	idle Array(Subject(Task)),
+	queued Array(Job),
+	live Int,
+	closing Array(Subject(Nil)),
+) Nil {
+	if live == 0 {
+		each_send(closing)
+	} else {
+		match scheduler.receive(gateway) {
+			Run(job) -> match idle {
+				[worker, ..rest] -> {
+					scheduler.send(worker, Work(job))
+					serve(gateway, rest, queued, live, closing)
+				}
+				[] -> serve(gateway, idle, [job, ..queued], live, closing)
+			}
+			Ready(worker) -> match queued {
+				[job, ..rest] -> {
+					scheduler.send(worker, Work(job))
+					serve(gateway, idle, rest, live, closing)
+				}
+				[] -> match closing {
+					[] -> serve(gateway, [worker, ..idle], queued, live, closing)
+					_ -> {
+						scheduler.send(worker, Quit)
+						serve(gateway, idle, queued, live - 1, closing)
+					}
+				}
+			}
+			Stop(done) -> {
+				quit_all(idle)
+				serve(gateway, [], queued, live - length_of(idle), [done, ..closing])
+			}
+		}
+	}
+}
+
+fn quit_all(ws Array(Subject(Task))) Nil {
+	match ws {
+		[] -> Nil
+		[w, ..rest] -> {
+			scheduler.send(w, Quit)
+			quit_all(rest)
+		}
+	}
+}
+
+fn each_send(ds Array(Subject(Nil))) Nil {
+	match ds {
+		[] -> Nil
+		[d, ..rest] -> {
+			scheduler.send(d, Nil)
+			each_send(rest)
+		}
+	}
+}
+
+fn length_of(xs Array(a)) Int {
+	match xs {
+		[] -> 0
+		[_, ..rest] -> 1 + length_of(rest)
+	}
+}
+
+fn start() Subject(Request) {
+	boot = scheduler.subject()
+	scheduler.spawn(fn() {
+		gateway = scheduler.subject()
+		scheduler.spawn(fn() {
+			inbox = scheduler.subject()
+			scheduler.send(gateway, Ready(inbox))
+			labour(gateway, inbox, None, 0)
+		})
+		scheduler.send(boot, gateway)
+		serve(gateway, [], [], 1, [])
+	})
+	scheduler.receive(boot)
+}
+
+fn stop(gateway Subject(Request)) Nil {
+	done = scheduler.subject()
+	scheduler.send(gateway, Stop(done))
+	scheduler.receive(done)
+}
+
+fn beat(gateway Subject(Request), left Int, ok Int) Int {
+	if left == 0 {
+		ok
+	} else {
+		outcome = if left == 7 {
+			ask(gateway, fn(_) Err('broken'))
+		} else {
+			ask(gateway, fn(v) Ok(v))
+		}
+		match outcome {
+			Ok(_) -> beat(gateway, left - 1, ok + 1)
+			Err(_) -> beat(gateway, left - 1, ok)
+		}
+	}
+}
+
+
+fn call_one(gateway Subject(Request), ack Subject(Nil), i Int) Nil {
+	tag = 'job-${int.to_string(i)}'
+	_ = ask(gateway, fn(v) Ok('${tag}:${int.to_string(v)}'))
+	scheduler.send(ack, Nil)
+}
+
+fn collect(ack Subject(Nil), left Int) Nil {
+	if left == 0 {
+		Nil
+	} else {
+		Nil = scheduler.receive(ack)
+		collect(ack, left - 1)
+	}
+}
+
+fn rounds(gateway Subject(Request), ack Subject(Nil), r Int, n Int) Nil {
+	if r > n {
+		Nil
+	} else {
+		scheduler.spawn(fn() call_one(gateway, ack, r))
+		scheduler.spawn(fn() call_one(gateway, ack, r))
+		scheduler.spawn(fn() call_one(gateway, ack, r))
+		collect(ack, 3)
+		println('round ok, 3 back')
+		rounds(gateway, ack, r + 1, n)
+	}
+}
+
+a = start()
+ack = scheduler.subject()
+rounds(a, ack, 1, 10)
+stop(a)
+println('survived every round')

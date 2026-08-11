@@ -142,7 +142,7 @@ const RT_SIGS: &[RtSig] = &{
         RtSig { name: "al_shim_int_box", params: &[Ptr, I64], rets: &[I64] },
         RtSig { name: "al_shim_div_int", params: &[I64, I64], rets: &[I64] },
         RtSig { name: "al_shim_mod_int", params: &[I64, I64], rets: &[I64] },
-        RtSig { name: "al_shim_op", params: &[Ptr, I64, I64, Ptr, I64], rets: &[I64] },
+        RtSig { name: "al_shim_op", params: &[Ptr, I64, I64, Ptr, I64], rets: &[Ptr, I64] },
         RtSig { name: "al_shim_park_op", params: &[Ptr, I64, Ptr, I64, I64, I64], rets: &[I64] },
         RtSig { name: "al_shim_try_op", params: &[Ptr, I64, I64, Ptr, I64], rets: &[I64] },
         RtSig { name: "al_rt_prepare_call", params: &[Ptr, I64, I64, Ptr, I64], rets: &[Ptr, I64] },
@@ -451,8 +451,13 @@ mod tests {
         let int_box: unsafe extern "C" fn(*mut VM, i64) -> u64 = native_shims::al_shim_int_box;
         let div_int: extern "C" fn(i64, i64) -> i64 = native_shims::al_shim_div_int;
         let mod_int: extern "C" fn(i64, i64) -> i64 = native_shims::al_shim_mod_int;
-        let shim_op: unsafe extern "C" fn(*mut VM, i64, i64, *const u64, i64) -> u64 =
-            native_shims::al_shim_op;
+        let shim_op: unsafe extern "C" fn(
+            *mut VM,
+            i64,
+            i64,
+            *const u64,
+            i64,
+        ) -> crate::vm::native::ContEntry = native_shims::al_shim_op;
         let park_op: unsafe extern "C" fn(*mut VM, i64, *const u64, i64, i64, i64) -> u64 =
             native_shims::al_shim_park_op;
         let try_op: unsafe extern "C" fn(*mut VM, i64, i64, *const u64, i64) -> u64 =
@@ -573,7 +578,7 @@ mod tests {
                 "al_shim_op",
                 shim_op as *const u8,
                 &[Ptr, I64, I64, Ptr, I64],
-                &[I64],
+                &[Ptr, I64],
             ),
             Pin(
                 "al_shim_park_op",
