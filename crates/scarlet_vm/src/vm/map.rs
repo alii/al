@@ -156,7 +156,7 @@ impl VM {
             MapBacking::Hamt => map,
             MapBacking::Env => self.build_env_hamt(&env_entries()),
         };
-        let next = hamt::insert(&mut self.heap, &base, key, value, hash);
+        let next = hamt::insert(&mut self.heap, base, key, value, hash);
         self.stack.push(next);
         Ok(())
     }
@@ -172,7 +172,7 @@ impl VM {
             MapBacking::Hamt => map,
             MapBacking::Env => self.build_env_hamt(&env_entries()),
         };
-        let next = hamt::remove(&mut self.heap, &base, &key, hash);
+        let next = hamt::remove(&mut self.heap, base, &key, hash);
         self.stack.push(next);
         Ok(())
     }
@@ -184,7 +184,7 @@ impl VM {
             let kv = Value::str_in(&mut self.heap, k);
             let vv = Value::str_in(&mut self.heap, v);
             let hash = hash_value(&kv);
-            map = hamt::insert(&mut self.heap, &map, kv, vv, hash);
+            map = hamt::insert(&mut self.heap, map, kv, vv, hash);
         }
         map
     }

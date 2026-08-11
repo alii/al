@@ -783,6 +783,155 @@ pub(crate) fn hamt_branch_in<A: Arena + ?Sized>(
     }
 }
 
+// ---------------------------------------------------------------------------
+// In-place edits of uniquely-owned HAMT structure (functional-but-in-place).
+//
+// Every function here requires the edited value to be uniquely owned
+// (`Value::is_unique`), which is what makes overwriting it invisible: no
+// other reference exists to observe the old version. The refcounts the VM
+// already maintains are the proof of safety; a shared node takes the
+// path-copy route in `hamt.rs` instead.
+//
+// Ownership discipline: "take" reads a child slot as a raw move (the slot
+// becomes a stale alias the caller MUST overwrite via "put" or abandon to
+// `hamt_free_shell`), and "put" moves a value in without releasing the stale
+// word. New values are stored before old bits are released, so an argument
+// aliasing the old child can never be freed and then read.
+// ---------------------------------------------------------------------------
+
+/// Read `map`'s size and MOVE its root out, leaving `Nil` in the root slot.
+/// Requires a uniquely-owned Hamt-backed `Map`.
+pub(crate) fn hamt_map_take_root(map: &Value) -> (usize, Value) {
+    debug_assert!(map.is_unique());
+    let obj = map.heap_obj();
+    // SAFETY: unique live Map object; layout [backing, size, root].
+    unsafe {
+        debug_assert_eq!(header_tag(*obj), HeapTag::Map);
+        debug_assert_eq!(map_backing(payload_word(obj, 0)), MapBacking::Hamt);
+        let size = payload_word(obj, 1) as usize;
+        let root = Value(payload_word(obj, 2));
+        (obj as *mut u64).add(1 + 2).write(Value::nil().0);
+        (size, root)
+    }
+}
+
+/// Write `size` and MOVE `root` into a uniquely-owned Hamt-backed `Map`.
+/// The root slot's current word is overwritten without a release (it is the
+/// `Nil` left by [`hamt_map_take_root`]).
+pub(crate) fn hamt_map_put_root(map: &Value, size: usize, root: Value) {
+    debug_assert!(map.is_unique());
+    let obj = map.heap_obj() as *mut u64;
+    // SAFETY: unique live Map object; layout [backing, size, root].
+    unsafe {
+        obj.add(1 + 1).write(size as u64);
+        move_child(obj.add(1 + 2), root);
+    }
+}
+
+/// Overwrite both words of a uniquely-owned `HamtEntry` in place.
+pub(crate) fn hamt_entry_overwrite(entry: &Value, key: Value, value: Value) {
+    debug_assert!(entry.is_unique());
+    let obj = entry.heap_obj() as *mut u64;
+    // SAFETY: unique live 2-word entry; new values stored before old bits
+    // are released, so an argument aliasing an old child stays live.
+    unsafe {
+        debug_assert_eq!(header_tag(*obj), HeapTag::HamtEntry);
+        let p = obj.add(1);
+        let (ok, ov) = (*p, *p.add(1));
+        move_child(p, key);
+        move_child(p.add(1), value);
+        release_bits(ok);
+        release_bits(ov);
+    }
+}
+
+/// MOVE child `i` out of a uniquely-owned `HamtBranch`. The slot becomes a
+/// stale alias; the caller must `hamt_branch_put_child` or free the shell.
+pub(crate) fn hamt_branch_take_child(branch: &Value, i: usize) -> Value {
+    debug_assert!(branch.is_unique());
+    let obj = branch.heap_obj();
+    // SAFETY: unique live branch; child `i` is at payload word 1 + i.
+    unsafe {
+        debug_assert_eq!(header_tag(*obj), HeapTag::HamtBranch);
+        Value(payload_word(obj, 1 + i))
+    }
+}
+
+/// MOVE `child` into slot `i` of a uniquely-owned `HamtBranch`, overwriting
+/// the stale word a take left behind (no release).
+pub(crate) fn hamt_branch_put_child(branch: &Value, i: usize, child: Value) {
+    debug_assert!(branch.is_unique());
+    let obj = branch.heap_obj() as *mut u64;
+    // SAFETY: unique live branch; slot holds a stale alias by contract.
+    unsafe { move_child(obj.add(1 + 1 + i), child) }
+}
+
+/// Rebuild a uniquely-owned `HamtBranch` with `child` inserted at compact
+/// index `at`: the children MOVE to the new node as raw words (no count
+/// traffic) and the old shell is freed without touching them.
+pub(crate) fn hamt_branch_grow<A: Arena + ?Sized>(
+    a: &mut A,
+    branch: Value,
+    new_bitmap: u32,
+    at: usize,
+    child: Value,
+) -> Value {
+    debug_assert!(branch.is_unique() && !a.marks_immortal());
+    let old = branch.heap_obj() as *mut u64;
+    // SAFETY: unique live branch; the new node takes over every child ref.
+    unsafe {
+        debug_assert_eq!(header_tag(*old), HeapTag::HamtBranch);
+        let n = header_payload_words(*old) - 1;
+        let obj = alloc_obj(a, HeapTag::HamtBranch, 1 + n + 1, false);
+        let dst = obj.as_ptr().add(1);
+        let src = old.add(2);
+        dst.write(new_bitmap as u64);
+        std::ptr::copy_nonoverlapping(src, dst.add(1), at);
+        move_child(dst.add(1 + at), child);
+        std::ptr::copy_nonoverlapping(src.add(at), dst.add(1 + at + 1), n - at);
+        hamt_free_shell(branch);
+        Value::from_object_ptr(obj)
+    }
+}
+
+/// Rebuild a uniquely-owned `HamtBranch` without the (already-consumed)
+/// child at compact index `at`. As [`hamt_branch_grow`], children move raw.
+pub(crate) fn hamt_branch_shrink<A: Arena + ?Sized>(
+    a: &mut A,
+    branch: Value,
+    new_bitmap: u32,
+    at: usize,
+) -> Value {
+    debug_assert!(branch.is_unique() && !a.marks_immortal());
+    let old = branch.heap_obj() as *mut u64;
+    // SAFETY: unique live branch; slot `at` is a stale alias by contract and
+    // every other child ref moves to the new node.
+    unsafe {
+        debug_assert_eq!(header_tag(*old), HeapTag::HamtBranch);
+        let n = header_payload_words(*old) - 1;
+        let obj = alloc_obj(a, HeapTag::HamtBranch, 1 + n - 1, false);
+        let dst = obj.as_ptr().add(1);
+        let src = old.add(2);
+        dst.write(new_bitmap as u64);
+        std::ptr::copy_nonoverlapping(src, dst.add(1), at);
+        std::ptr::copy_nonoverlapping(src.add(at + 1), dst.add(1 + at), n - at - 1);
+        hamt_free_shell(branch);
+        Value::from_object_ptr(obj)
+    }
+}
+
+/// Free a uniquely-owned node's allocation WITHOUT releasing its child
+/// slots — every live child reference has already moved elsewhere and the
+/// remaining words are stale aliases.
+pub(crate) fn hamt_free_shell(node: Value) {
+    debug_assert!(node.is_unique());
+    let obj = node.heap_obj() as *mut u64;
+    std::mem::forget(node);
+    // SAFETY: the forgotten value held the only reference, so the object is
+    // unreferenced; HAMT nodes carry no off-heap backing.
+    unsafe { free_object(obj) }
+}
+
 /// Decoded `Map` root with the `Hamt` backing: `[backing, size, root]`.
 pub(crate) struct HamtMapRef {
     pub(crate) size: usize,
@@ -3154,7 +3303,7 @@ mod tests {
             let kv = Value::str_in(&mut h, &k);
             let vv = Value::str_in(&mut h, &v);
             let hash = hash_value(&kv);
-            m = hamt::insert(&mut h, &m, kv, vv, hash);
+            m = hamt::insert(&mut h, m, kv, vv, hash);
         }
         assert!(values_equal(&env, &m), "env view == same-entry HAMT");
         assert!(values_equal(&m, &env), "and symmetrically");
@@ -3167,7 +3316,7 @@ mod tests {
         let kv = Value::str_in(&mut h, "__al_env_eq_test_key__");
         let vv = Value::str_in(&mut h, "x");
         let hash = hash_value(&kv);
-        let m2 = hamt::insert(&mut h, &m, kv, vv, hash);
+        let m2 = hamt::insert(&mut h, m.clone(), kv, vv, hash);
         assert!(!values_equal(&env, &m2));
         assert!(!values_equal(&m2, &env));
     }
@@ -3214,7 +3363,7 @@ mod tests {
                 let k = Value::str_in(h, "k");
                 let kh = hash_value(&k);
                 let empty = hamt::empty(h);
-                v = hamt::insert(h, &empty, k, v, kh);
+                v = hamt::insert(h, empty, k, v, kh);
             }
             v
         };

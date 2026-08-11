@@ -22,8 +22,10 @@
 //! path and share every untouched subtree, so earlier versions stay valid.
 
 use super::value::{
-    Arena, EqPending, HamtMapRef, HamtNodeRef, MapRef, Value, eq_defer, hamt_branch_in,
-    hamt_collision_in, hamt_entry_in, hamt_map_in, hash_value, map_entry_hash, values_equal,
+    Arena, EqPending, HamtMapRef, HamtNodeRef, MapRef, Value, eq_defer, hamt_branch_grow,
+    hamt_branch_in, hamt_branch_put_child, hamt_branch_shrink, hamt_branch_take_child,
+    hamt_collision_in, hamt_entry_in, hamt_entry_overwrite, hamt_free_shell, hamt_map_in,
+    hamt_map_put_root, hamt_map_take_root, hash_value, map_entry_hash, values_equal,
 };
 
 /// Hash bits consumed per trie level (32-way branching).
@@ -152,22 +154,81 @@ pub(crate) fn collect_entries(map: &Value) -> Vec<(Value, Value)> {
     out
 }
 
-/// `map` with `key` bound to `value` — a new map sharing all untouched
-/// subtrees. Overwrites an existing binding (size unchanged) or adds a new one.
+/// `map` with `key` bound to `value`. Consumes the caller's reference: a
+/// uniquely-owned map is edited in place — no other reference exists to
+/// observe the old version, so path-copying it would only build garbage — and
+/// a shared map gets the classic path copy, sharing all untouched subtrees.
+/// Overwrites an existing binding (size unchanged) or adds a new one.
 pub(crate) fn insert<A: Arena + ?Sized>(
     a: &mut A,
-    map: &Value,
+    map: Value,
     key: Value,
     value: Value,
     hash: u64,
 ) -> Value {
-    let m = HamtMapRef::of(map);
+    if map.is_unique() {
+        let (size, root) = hamt_map_take_root(&map);
+        let (root, added) = if root.is_nil() {
+            (hamt_entry_in(a, key, value), true)
+        } else {
+            node_insert_owned(a, root, key, value, hash, 0)
+        };
+        hamt_map_put_root(&map, size + usize::from(added), root);
+        return map;
+    }
+    let m = HamtMapRef::of(&map);
     let (root, added) = if m.root.is_nil() {
         (hamt_entry_in(a, key, value), true)
     } else {
         node_insert(a, &m.root, key, value, hash, 0)
     };
     hamt_map_in(a, m.size + usize::from(added), root)
+}
+
+/// [`node_insert`] for a subtree reference the caller OWNS. A uniquely-owned
+/// entry is overwritten and a uniquely-owned branch keeps its allocation (or
+/// moves its children raw when the arity changes); anything shared — plus the
+/// rare collision bucket — falls back to the copy path, dropping the owned
+/// reference as the old parent's release.
+fn node_insert_owned<A: Arena + ?Sized>(
+    a: &mut A,
+    node: Value,
+    key: Value,
+    value: Value,
+    hash: u64,
+    shift: u32,
+) -> (Value, bool) {
+    if !node.is_unique() {
+        return node_insert(a, &node, key, value, hash, shift);
+    }
+    match HamtNodeRef::of(&node) {
+        HamtNodeRef::Entry { key: ek, value: _ } => {
+            if values_equal(&ek, &key) {
+                drop(ek);
+                hamt_entry_overwrite(&node, key, value);
+                (node, false)
+            } else {
+                let lhash = hash_value(&ek);
+                drop(ek);
+                (split(a, node, lhash, key, value, hash, shift), true)
+            }
+        }
+        // Collision buckets are rare enough that stealing them buys nothing.
+        HamtNodeRef::Collision { .. } => node_insert(a, &node, key, value, hash, shift),
+        HamtNodeRef::Branch { bitmap, .. } => {
+            let b = bit(hash, shift);
+            let i = compact(bitmap, b);
+            if bitmap & b == 0 {
+                let entry = hamt_entry_in(a, key, value);
+                (hamt_branch_grow(a, node, bitmap | b, i, entry), true)
+            } else {
+                let child = hamt_branch_take_child(&node, i);
+                let (child, added) = node_insert_owned(a, child, key, value, hash, shift + BITS);
+                hamt_branch_put_child(&node, i, child);
+                (node, added)
+            }
+        }
+    }
 }
 
 /// Returns the rebuilt node and whether a *new* key was added (vs. overwritten).
@@ -187,7 +248,7 @@ fn node_insert<A: Arena + ?Sized>(
                 // Two distinct keys at this slot: grow a subtree that separates
                 // them by their differing hash bits.
                 (
-                    split(a, node, hash_value(&ek), key, value, hash, shift),
+                    split(a, node.clone(), hash_value(&ek), key, value, hash, shift),
                     true,
                 )
             }
@@ -209,7 +270,7 @@ fn node_insert<A: Arena + ?Sized>(
                 }
             } else {
                 // Same branch path, different hash: separate them deeper.
-                (split(a, node, chash, key, value, hash, shift), true)
+                (split(a, node.clone(), chash, key, value, hash, shift), true)
             }
         }
         HamtNodeRef::Branch { bitmap, children } => {
@@ -238,7 +299,7 @@ fn node_insert<A: Arena + ?Sized>(
 /// are fully equal, `left` is an entry and the two merge into a collision.
 fn split<A: Arena + ?Sized>(
     a: &mut A,
-    left: &Value,
+    left: Value,
     lhash: u64,
     rkey: Value,
     rvalue: Value,
@@ -248,7 +309,7 @@ fn split<A: Arena + ?Sized>(
     if shift as usize >= MAX_DEPTH * BITS as usize {
         // Hashes fully consumed and equal. `left` is an entry: a collision
         // would have absorbed the new key upstream, where its hash matched.
-        return merge_into_collision(a, left, lhash, rkey, rvalue);
+        return merge_into_collision(a, &left, lhash, rkey, rvalue);
     }
     let li = slot(lhash, shift);
     let ri = slot(rhash, shift);
@@ -258,9 +319,9 @@ fn split<A: Arena + ?Sized>(
     } else {
         let right = hamt_entry_in(a, rkey, rvalue);
         if li < ri {
-            hamt_branch_in(a, (1 << li) | (1 << ri), &[left.clone(), right])
+            hamt_branch_in(a, (1 << li) | (1 << ri), &[left, right])
         } else {
-            hamt_branch_in(a, (1 << li) | (1 << ri), &[right, left.clone()])
+            hamt_branch_in(a, (1 << li) | (1 << ri), &[right, left])
         }
     }
 }
@@ -297,10 +358,24 @@ enum Removed {
     Node(Value),
 }
 
-/// `map` without `key`. Returns `map` unchanged (same value) if the key is
-/// absent, so the caller can skip rebuilding the root.
-pub(crate) fn remove<A: Arena + ?Sized>(a: &mut A, map: &Value, key: &Value, hash: u64) -> Value {
-    let m = HamtMapRef::of(map);
+/// `map` without `key`. Consumes the caller's reference: as with [`insert`],
+/// a uniquely-owned map is edited in place, a shared one is path-copied.
+/// Returns `map` unchanged (same value) if the key is absent.
+pub(crate) fn remove<A: Arena + ?Sized>(a: &mut A, map: Value, key: &Value, hash: u64) -> Value {
+    if map.is_unique() {
+        let (size, root) = hamt_map_take_root(&map);
+        if root.is_nil() {
+            hamt_map_put_root(&map, size, root);
+            return map;
+        }
+        match node_remove_owned(a, root, key, hash, 0) {
+            RemovedOwned::Absent(root) => hamt_map_put_root(&map, size, root),
+            RemovedOwned::Empty => hamt_map_put_root(&map, size - 1, Value::nil()),
+            RemovedOwned::Node(root) => hamt_map_put_root(&map, size - 1, root),
+        }
+        return map;
+    }
+    let m = HamtMapRef::of(&map);
     if m.root.is_nil() {
         return map.clone();
     }
@@ -308,6 +383,93 @@ pub(crate) fn remove<A: Arena + ?Sized>(a: &mut A, map: &Value, key: &Value, has
         Removed::Absent => map.clone(),
         Removed::Empty => hamt_map_in(a, m.size - 1, Value::nil()),
         Removed::Node(root) => hamt_map_in(a, m.size - 1, root),
+    }
+}
+
+/// [`Removed`] when the caller owned the subtree reference: `Absent` hands
+/// the unchanged reference back so the parent can restore its slot.
+enum RemovedOwned {
+    Absent(Value),
+    Empty,
+    Node(Value),
+}
+
+/// [`node_remove`] for a subtree reference the caller OWNS; the in-place
+/// mirror of [`node_insert_owned`].
+fn node_remove_owned<A: Arena + ?Sized>(
+    a: &mut A,
+    node: Value,
+    key: &Value,
+    hash: u64,
+    shift: u32,
+) -> RemovedOwned {
+    if !node.is_unique() {
+        return match node_remove(a, &node, key, hash, shift) {
+            Removed::Absent => RemovedOwned::Absent(node),
+            Removed::Empty => RemovedOwned::Empty,
+            Removed::Node(n) => RemovedOwned::Node(n),
+        };
+    }
+    match HamtNodeRef::of(&node) {
+        HamtNodeRef::Entry { key: k, .. } => {
+            let hit = values_equal(&k, key);
+            drop(k);
+            if hit {
+                // Dropping the unique entry releases its key and value.
+                RemovedOwned::Empty
+            } else {
+                RemovedOwned::Absent(node)
+            }
+        }
+        // Rare; the copy path handles bucket surgery.
+        HamtNodeRef::Collision { .. } => match node_remove(a, &node, key, hash, shift) {
+            Removed::Absent => RemovedOwned::Absent(node),
+            Removed::Empty => RemovedOwned::Empty,
+            Removed::Node(n) => RemovedOwned::Node(n),
+        },
+        HamtNodeRef::Branch { bitmap, children } => {
+            let n = children.len();
+            let b = bit(hash, shift);
+            if bitmap & b == 0 {
+                return RemovedOwned::Absent(node);
+            }
+            let i = compact(bitmap, b);
+            let child = hamt_branch_take_child(&node, i);
+            match node_remove_owned(a, child, key, hash, shift + BITS) {
+                RemovedOwned::Absent(child) => {
+                    hamt_branch_put_child(&node, i, child);
+                    RemovedOwned::Absent(node)
+                }
+                RemovedOwned::Node(child) => {
+                    // Collapse as the copy path does, so equal maps keep
+                    // identical shapes regardless of which path built them.
+                    if n == 1 && is_leaf(&child) {
+                        hamt_free_shell(node);
+                        return RemovedOwned::Node(child);
+                    }
+                    hamt_branch_put_child(&node, i, child);
+                    RemovedOwned::Node(node)
+                }
+                RemovedOwned::Empty => {
+                    let nbitmap = bitmap & !b;
+                    if nbitmap == 0 {
+                        // Slot `i` is a stale alias of the consumed child;
+                        // the shell held nothing else.
+                        hamt_free_shell(node);
+                        return RemovedOwned::Empty;
+                    }
+                    if n == 2 {
+                        let survivor = hamt_branch_take_child(&node, 1 - i);
+                        if is_leaf(&survivor) {
+                            hamt_free_shell(node);
+                            return RemovedOwned::Node(survivor);
+                        }
+                        hamt_branch_put_child(&node, 1 - i, survivor);
+                    }
+                    RemovedOwned::Node(hamt_branch_shrink(a, node, nbitmap, i))
+                }
+            }
+        }
     }
 }
 
@@ -457,7 +619,7 @@ mod tests {
     fn set(h: &mut ProcHeap, m: &Value, k: i64, v: i64) -> Value {
         let kv = key(k);
         let hash = hash_value(&kv);
-        insert(h, m, kv, key(v), hash)
+        insert(h, m.clone(), kv, key(v), hash)
     }
 
     fn lookup(m: &Value, k: i64) -> Option<i64> {
@@ -524,13 +686,13 @@ mod tests {
             m = set(&mut h, &m, i, i);
         }
         // Removing an absent key returns the same map value unchanged.
-        let same = remove(&mut h, &m, &key(1000), hash_value(&key(1000)));
+        let same = remove(&mut h, m.clone(), &key(1000), hash_value(&key(1000)));
         assert_eq!(size(&same), 100);
 
         // Remove the even keys; odds survive, evens are gone, size halves.
         let mut r = m.clone();
         for i in (0..100).step_by(2) {
-            r = remove(&mut h, &r, &key(i), hash_value(&key(i)));
+            r = remove(&mut h, r, &key(i), hash_value(&key(i)));
         }
         assert_eq!(size(&r), 50);
         for i in 0..100 {
@@ -553,7 +715,7 @@ mod tests {
         let m0 = empty(&mut h);
         let m_a = set(&mut h, &m0, a, 1);
         let m_ab = set(&mut h, &m_a, b, 2);
-        let m_back = remove(&mut h, &m_ab, &key(b), hash_value(&key(b)));
+        let m_back = remove(&mut h, m_ab.clone(), &key(b), hash_value(&key(b)));
 
         // After removing `b` the trie must collapse to the same shape as a
         // fresh single insert of `a`: a leaf at the root, no branch chain.
@@ -567,7 +729,7 @@ mod tests {
         let mut h = heap();
         let m0 = empty(&mut h);
         let m = set(&mut h, &m0, 42, 1);
-        let m = remove(&mut h, &m, &key(42), hash_value(&key(42)));
+        let m = remove(&mut h, m, &key(42), hash_value(&key(42)));
         assert_eq!(size(&m), 0);
         assert_eq!(lookup(&m, 42), None);
     }
@@ -595,7 +757,7 @@ mod tests {
 
     /// `set`, but with an injected hash instead of `hash_value(k)`.
     fn set_h(h: &mut ProcHeap, m: &Value, k: i64, v: i64, hash: u64) -> Value {
-        insert(h, m, key(k), key(v), hash)
+        insert(h, m.clone(), key(k), key(v), hash)
     }
 
     /// `lookup`, but with an injected hash instead of `hash_value(k)`.
@@ -610,6 +772,76 @@ mod tests {
         let m = set_h(h, &m, 1, 10, hash);
         let m = set_h(h, &m, 2, 20, hash);
         (m, hash)
+    }
+
+    #[test]
+    fn unique_map_is_edited_in_place() {
+        let mut h = heap();
+        let mut m = empty(&mut h);
+        for i in 0..500 {
+            m = set(&mut h, &m, i, i);
+        }
+        // `set` clones (shared path); consume the only reference directly to
+        // take the in-place path, and the map object must keep its address.
+        let addr = m.heap_obj();
+        let kv = key(3);
+        let hash = hash_value(&kv);
+        let m = insert(&mut h, m, kv, key(999), hash);
+        assert_eq!(m.heap_obj(), addr, "unique overwrite must reuse the map");
+        assert_eq!(lookup(&m, 3), Some(999));
+        assert_eq!(size(&m), 500);
+
+        // Growing and shrinking through the unique path keeps the contents.
+        let kv = key(500);
+        let hash = hash_value(&kv);
+        let m = insert(&mut h, m, kv, key(1000), hash);
+        assert_eq!(m.heap_obj(), addr);
+        assert_eq!(size(&m), 501);
+        let m = remove(&mut h, m, &key(500), hash_value(&key(500)));
+        assert_eq!(m.heap_obj(), addr);
+        assert_eq!(size(&m), 500);
+        for i in 0..500 {
+            assert_eq!(lookup(&m, i), Some(if i == 3 { 999 } else { i }), "key {i}");
+        }
+    }
+
+    #[test]
+    fn shared_map_is_never_edited_in_place() {
+        let mut h = heap();
+        let mut m = empty(&mut h);
+        for i in 0..100 {
+            m = set(&mut h, &m, i, i);
+        }
+        // Two references alive: the edit must path-copy and leave `m` intact.
+        let edited = insert(&mut h, m.clone(), key(0), key(42), hash_value(&key(0)));
+        assert_eq!(lookup(&edited, 0), Some(42));
+        assert_eq!(lookup(&m, 0), Some(0), "shared original must be untouched");
+        let shrunk = remove(&mut h, m.clone(), &key(1), hash_value(&key(1)));
+        assert_eq!(size(&shrunk), 99);
+        assert_eq!(lookup(&m, 1), Some(1), "shared original must be untouched");
+    }
+
+    #[test]
+    fn unique_churn_grow_and_shrink_round_trips() {
+        let mut h = heap();
+        let mut m = empty(&mut h);
+        for i in 0..64 {
+            let kv = key(i);
+            let hash = hash_value(&kv);
+            m = insert(&mut h, m, kv, key(i * 2), hash);
+        }
+        // bench_map's churn shape: add key i, delete key i-1, all unique.
+        for i in 64..2064 {
+            let kv = key(i);
+            let hash = hash_value(&kv);
+            m = insert(&mut h, m, kv, key(i), hash);
+            m = remove(&mut h, m, &key(i - 64), hash_value(&key(i - 64)));
+        }
+        assert_eq!(size(&m), 64);
+        for i in 2000..2064 {
+            assert_eq!(lookup(&m, i), Some(i), "key {i}");
+        }
+        assert_eq!(lookup(&m, 1999), None);
     }
 
     #[test]
@@ -647,7 +879,7 @@ mod tests {
     fn removing_to_one_entry_collapses_the_bucket() {
         let mut h = heap();
         let (m, hash) = collision_pair(&mut h);
-        let m = remove(&mut h, &m, &key(1), hash);
+        let m = remove(&mut h, m, &key(1), hash);
         assert_eq!(size(&m), 1);
         assert_eq!(lookup_h(&m, 1, hash), None);
         assert_eq!(lookup_h(&m, 2, hash), Some(20));
