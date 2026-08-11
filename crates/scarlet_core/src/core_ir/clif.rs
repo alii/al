@@ -1046,6 +1046,119 @@ fn declare_imports<M: Module>(
     })
 }
 
+/// Encode everything the backend needs to compile one body after the
+/// `ResolvedPool` is gone: the lowered `CoreFn`, the plan's pool-derived
+/// facts, and the frame layout emit fixed. One blob per body; the static
+/// stdlib ships these so startup never re-lowers the stdlib.
+pub(crate) fn encode_plan_bundle(plan: &NativePlan, layout: &FrameLayout) -> Vec<u8> {
+    use super::codec::Enc;
+    let mut e = Enc::new();
+    let fn_bytes = super::codec::encode_fn(&plan.fun);
+    e.usize(fn_bytes.len());
+    e.buf.extend_from_slice(&fn_bytes);
+    e.usize(plan.reprs.len());
+    for i in 0..plan.reprs.len() {
+        let r = plan
+            .reprs
+            .get(LocalId::from_usize(i))
+            .copied()
+            .unwrap_or_default();
+        e.u8(match r {
+            Repr::Int => 0,
+            Repr::Immediate => 1,
+            Repr::Heap => 2,
+            Repr::Dyn => 3,
+        });
+    }
+    e.usize(plan.proofs.len());
+    for i in 0..plan.proofs.len() {
+        match plan
+            .proofs
+            .get(LocalId::from_usize(i))
+            .copied()
+            .unwrap_or_default()
+        {
+            TyProof::None => e.u8(0),
+            TyProof::Array => e.u8(1),
+            TyProof::Binary => e.u8(2),
+            TyProof::Tuple(n) => {
+                e.u8(3);
+                e.u32(u32::from(n));
+            }
+        }
+    }
+    // Sorted, so the blob is deterministic run to run.
+    let mut counts: Vec<(TypeId, u8)> = plan.switch_counts.iter().map(|(t, c)| (*t, *c)).collect();
+    counts.sort_by_key(|(t, _)| t.0);
+    e.usize(counts.len());
+    for (tid, count) in counts {
+        e.i32(tid.0);
+        e.u8(count);
+    }
+    let layout_bytes = super::codec::encode_layout(layout);
+    e.usize(layout_bytes.len());
+    e.buf.extend_from_slice(&layout_bytes);
+    e.buf
+}
+
+/// Decode one [`encode_plan_bundle`] image back into the plan and layout for
+/// `func_idx`. `prelude` supplies what was never encoded because the runtime
+/// already has it.
+pub fn decode_plan_bundle(
+    func_idx: FuncIdx,
+    bytes: &[u8],
+    prelude: &PreludeBindings,
+) -> Result<(NativePlan, FrameLayout), super::codec::DecodeError> {
+    use super::codec::{Dec, DecodeError};
+    let mut d = Dec::new(bytes);
+    let n = d.usize()?;
+    let at = bytes.len() - d.remaining();
+    let fun = super::codec::decode_fn(bytes.get(at..at + n).ok_or(DecodeError::Truncated)?)?;
+    d.skip(n)?;
+    let n = d.usize()?;
+    let mut reprs = TiVec::new();
+    for _ in 0..n {
+        reprs.push(match d.u8()? {
+            0 => Repr::Int,
+            1 => Repr::Immediate,
+            2 => Repr::Heap,
+            3 => Repr::Dyn,
+            b => return Err(DecodeError::BadTag("Repr", b)),
+        });
+    }
+    let n = d.usize()?;
+    let mut proofs = TiVec::new();
+    for _ in 0..n {
+        proofs.push(match d.u8()? {
+            0 => TyProof::None,
+            1 => TyProof::Array,
+            2 => TyProof::Binary,
+            3 => TyProof::Tuple(d.u32()? as u16),
+            b => return Err(DecodeError::BadTag("TyProof", b)),
+        });
+    }
+    let n = d.usize()?;
+    let mut switch_counts = HashMap::with_capacity(n);
+    for _ in 0..n {
+        let tid = TypeId(d.i32()?);
+        switch_counts.insert(tid, d.u8()?);
+    }
+    let n = d.usize()?;
+    let at = bytes.len() - d.remaining();
+    let layout = super::codec::decode_layout(bytes.get(at..at + n).ok_or(DecodeError::Truncated)?)?;
+    d.skip(n)?;
+    d.finish()?;
+    let plan = NativePlan {
+        func_idx,
+        fun,
+        bools: BoolCtors::of(prelude),
+        reprs,
+        proofs,
+        switch_counts,
+    };
+    Ok((plan, layout))
+}
+
 /// The `FuncIdx`s whose [`compile`] will actually define a body: plans that
 /// also pass the compile-time-only gates. Direct native→native call sites
 /// must consult this. Naming a body outside it as a peer leaves its

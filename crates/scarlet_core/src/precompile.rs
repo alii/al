@@ -33,11 +33,19 @@ use crate::bytecode::{
 use crate::diagnostic::{self, has_errors};
 use crate::module::{ModuleInterface, ModuleKey, stdlib};
 use crate::span::Span;
+use crate::tivec::Idx as _;
 use crate::types::{InferEngine, TypeBody, TypeInfo};
 
 /// Everything `precompile_stdlib` extracts. Consumed only by build.rs.
 #[derive(Debug, Clone)]
 pub struct PrecompileOutput {
+    /// One encoded [`core_ir::clif::encode_plan_bundle`] image per stdlib
+    /// body, sorted by `FuncIdx`. `build.rs` ships these; the runtime
+    /// hydrates one when the body warms, instead of re-lowering the stdlib
+    /// at startup.
+    ///
+    /// [`core_ir::clif::encode_plan_bundle`]: crate::core_ir::clif::encode_plan_bundle
+    pub core_bundles: Vec<(u32, Vec<u8>)>,
     pub(crate) blob: PrecompiledBlob,
     pub(crate) prelude: PreludeBindings,
     /// `BTreeSet` so `flatten` copies it out sorted; `is_reserved` binary-searches.
@@ -86,7 +94,27 @@ impl std::error::Error for PrecompileError {}
 /// `InferEngine` comes back too: every `Ty` in the output indexes its arenas,
 /// which `flatten` copies wholesale.
 pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), PrecompileError> {
+    // The native hook needs the prelude bindings while the prelude itself is
+    // still being lowered, so harvest them from a throwaway compile first —
+    // the pipeline is deterministic (pinned below), so both runs agree.
+    let prelude_for_hook = {
+        let mut c = new_compiler(None, false);
+        c.register_prelude();
+        bail_on_errors(&c, "prelude")?;
+        c.prelude_bindings()
+    };
+
     let mut c = new_compiler(None, false);
+    // Capture every lowered body's plan while its `ResolvedPool` is alive;
+    // paired with the frame layouts below, these become the per-body blobs
+    // the runtime hydrates instead of re-lowering the stdlib at startup.
+    let plans: std::rc::Rc<std::cell::RefCell<Vec<crate::core_ir::clif::NativePlan>>> =
+        std::rc::Rc::default();
+    let sink = std::rc::Rc::clone(&plans);
+    c.set_native_hook(Box::new(move |idx, f, pool| {
+        sink.borrow_mut()
+            .push(crate::core_ir::clif::plan(idx, f, pool, &prelude_for_hook));
+    }));
 
     c.register_prelude();
     bail_on_errors(&c, "prelude")?;
@@ -111,6 +139,24 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), Precompile
     // Custom bodies are shared through `engine.variant_fields`, but an Alias
     // target lives on the `TypeInfo` itself, so each interface copy needs its
     // own pass.
+    // Pair each captured plan with the layout emit fixed for it, and encode
+    // the per-body blobs the static stdlib ships.
+    let layouts = c.take_frame_layouts();
+    let mut core_bundles: Vec<(u32, Vec<u8>)> = Vec::new();
+    for plan in plans.take() {
+        let Some(layout) = layouts.get(&plan.func_idx) else {
+            return Err(PrecompileError {
+                label: format!("core bundle for fn#{}", plan.func_idx.index()),
+                diagnostics: Vec::new(),
+            });
+        };
+        core_bundles.push((
+            plan.func_idx.index() as u32,
+            crate::core_ir::clif::encode_plan_bundle(&plan, layout),
+        ));
+    }
+    core_bundles.sort_by_key(|(idx, _)| *idx);
+
     let (parts, mut engine) = c.into_parts();
     for ti in type_info.values_mut() {
         close_type_info(&mut engine, ti);
@@ -131,6 +177,7 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), Precompile
         local_count,
     } = parts;
     let out = PrecompileOutput {
+        core_bundles,
         prelude,
         reserved,
         next_type_id,
@@ -365,6 +412,7 @@ mod tests {
 
         let PrecompileOutput {
             blob,
+            core_bundles: _,
             prelude: _,
             reserved: _,
             next_type_id: _,

@@ -409,7 +409,9 @@ fn publish_native(
     program: &bytecode::Program,
     layouts: std::collections::HashMap<scarlet_vm::FuncIdx, scarlet::core_ir::emit::FrameLayout>,
 ) {
-    if plans.is_empty() {
+    // Even with no live plans (a program whose bodies all come from the
+    // seeded stdlib), the static bundles still need a compiler installed.
+    if plans.is_empty() && scarlet::STDLIB_CORE_INDEX.is_empty() {
         return;
     }
     let module = match vm::jit::jit_module() {
@@ -457,11 +459,32 @@ fn install_lazy_compiler(
             return;
         };
         // Another scheduler may have won the race and already published it.
-        let Some(plan) = st.plans.remove(&idx) else {
+        if prog.native.get(idx).is_some() {
             return;
-        };
+        }
         let t0 = std::time::Instant::now();
         let st = &mut *st;
+        // A live plan (the user's own file) or a static bundle (a stdlib
+        // body, hydrated from the blob only now that it proved hot).
+        let (plan, static_layout) = match st.plans.remove(&idx) {
+            Some(plan) => (plan, None),
+            None => {
+                let Ok(at) = scarlet::STDLIB_CORE_INDEX
+                    .binary_search_by_key(&(idx.index() as u32), |(i, _, _)| *i)
+                else {
+                    return;
+                };
+                let (_, start, len) = scarlet::STDLIB_CORE_INDEX[at];
+                let bytes = &scarlet::STDLIB_CORE_BYTES[start as usize..(start + len) as usize];
+                match clif::decode_plan_bundle(idx, bytes, STDLIB.prelude) {
+                    Ok((plan, layout)) => (plan, Some(layout)),
+                    Err(e) => die(format!("stdlib core bundle for fn#{}: {e}", idx.index())),
+                }
+            }
+        };
+        if let Some(layout) = static_layout {
+            st.layouts.insert(idx, layout);
+        }
         let def = compile_one(&mut st.module, &plan, &prog, &st.layouts);
         if let Err(e) = vm::jit::finalize_into(&mut st.module, &[def], &table) {
             die(format!("native finalize failed: {e}"));

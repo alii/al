@@ -25,4 +25,4 @@ mod generated {
     include!(concat!(env!("OUT_DIR"), "/stdlib_generated.rs"));
 }
 /// The build-time precompiled stdlib, zero-cost `static` data.
-pub use generated::STDLIB;
+pub use generated::{STDLIB, STDLIB_CORE_BYTES, STDLIB_CORE_INDEX};

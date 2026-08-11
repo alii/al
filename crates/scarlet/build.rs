@@ -28,6 +28,19 @@ fn main() {
         Ok(p) => p,
         Err(e) => panic!("\n\n{e}\n"),
     };
+    // The per-body Core IR bundles: one concatenated byte file plus an
+    // index of `(fn_idx, start, len)`, so the runtime hydrates a body's plan
+    // on warm instead of re-lowering the stdlib at startup.
+    let mut core_bytes: Vec<u8> = Vec::new();
+    let mut core_index: Vec<(u32, u32, u32)> = Vec::new();
+    for (idx, bytes) in &pre.core_bundles {
+        let start = core_bytes.len() as u32;
+        core_bytes.extend_from_slice(bytes);
+        core_index.push((*idx, start, bytes.len() as u32));
+    }
+    std::fs::write(out_dir.join("core_bundles.bin"), &core_bytes)
+        .unwrap_or_else(|e| panic!("write core_bundles.bin failed: {e}"));
+
     let pools = flatten(&pre, &engine);
 
     let mut src = String::with_capacity(256 * 1024);
@@ -56,6 +69,20 @@ fn main() {
          }};"
     )
     .unwrap();
+
+    writeln!(
+        src,
+        "\n/// Concatenated per-body Core IR bundles; see `STDLIB_CORE_INDEX`.\n\
+         pub static STDLIB_CORE_BYTES: &[u8] =\n    \
+         include_bytes!(concat!(env!(\"OUT_DIR\"), \"/core_bundles.bin\"));\n\
+         /// `(fn_idx, start, len)` into `STDLIB_CORE_BYTES`, sorted by fn_idx.\n\
+         pub static STDLIB_CORE_INDEX: &[(u32, u32, u32)] = &["
+    )
+    .unwrap();
+    for (idx, start, len) in &core_index {
+        writeln!(src, "    ({idx}, {start}, {len}),").unwrap();
+    }
+    writeln!(src, "];").unwrap();
 
     std::fs::write(out_dir.join("stdlib_generated.rs"), &src)
         .unwrap_or_else(|e| panic!("write stdlib_generated.rs failed: {e}"));

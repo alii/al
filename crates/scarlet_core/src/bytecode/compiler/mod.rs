@@ -1105,45 +1105,12 @@ fn compile_impl(
     let is_prelude_self = as_module.as_deref() == Some(module::scarlet_prelude().as_slice());
     if !is_prelude_self {
         match pre {
-            Some(s) if c.native_hook.is_none() => c.seed_static(s),
-            // A native hook is installed (and the mode is not `off`): the
-            // backend needs to see stdlib bodies, and a body is only visible
-            // at its own `lower` — the blob ships post-emit bytecode with no
-            // `CoreFn`/`ResolvedPool` to hand the hook. So re-lower the whole
-            // stdlib from source instead of seeding. Eager (every module, not
-            // just the entry's imports) so the function table matches the
-            // seeded one entry for entry: the pipeline is deterministic
-            // (pinned by `precompile_stdlib_is_deterministic`, and by
-            // `relowered_stdlib_reproduces_the_seeded_program` from the
-            // driver's side), so this produces the blob's program prefix,
-            // numbering included. Startup pays the stdlib compile; `off`
-            // dropped the hook above and keeps the seeded fast path.
-            Some(_) => {
-                c.register_prelude();
-                let at = Span::DUMMY;
-                // Retained for the same reason `precompile_stdlib` retains:
-                // this relower must reproduce the seeded state, ambient
-                // by-name stdlib namespace included.
-                c.with_retained_namespaces(|c| {
-                    for path in module::stdlib::all_modules() {
-                        if has_errors(&c.engine.diagnostics) {
-                            break;
-                        }
-                        c.load_module(&ast::ImportPath::canonical(path), at);
-                    }
-                });
-                // Reset the memos that would otherwise leak across the
-                // stdlib/user boundary: a seeded compile starts with both
-                // empty, so leaving them populated would let user code dedup
-                // constants against stdlib pool entries and resolve stdlib
-                // callees to `CallKnown` where the seeded program reads the
-                // module-init global slot — same semantics, different
-                // bytecode. The relowered program must *be* the seeded one
-                // (`relowered_stdlib_reproduces_the_seeded_program`), so the
-                // native/off split stays a NativeTable, not a program.
-                c.const_dedup.clear();
-                c.global_to_func.clear();
-            }
+            // Seeding is unconditional: the static blob now ships each
+            // stdlib body's Core IR bundle (`STDLIB_CORE_*`), so the backend
+            // no longer needs the hook to see stdlib bodies — a warm stdlib
+            // body hydrates its plan from the blob instead. Re-lowering the
+            // whole stdlib here once cost ~9ms of every startup.
+            Some(s) => c.seed_static(s),
             None => c.register_prelude(),
         }
         if has_errors(&c.engine.diagnostics) {
@@ -1322,6 +1289,25 @@ impl Compiler {
     pub(crate) fn diagnostics(&self) -> &[Diagnostic] {
         &self.engine.diagnostics
     }
+    /// Install the native-backend hook. `precompile_stdlib` uses this to
+    /// capture every lowered stdlib body for the static blob; the runtime
+    /// installs its hook through [`compile_with_native`] instead.
+    pub(crate) fn set_native_hook(&mut self, hook: NativeHook) {
+        self.native_hook = Some(hook);
+    }
+
+    /// The prelude bindings `register_prelude` established.
+    pub(crate) fn prelude_bindings(&self) -> PreludeBindings {
+        self.prelude.clone()
+    }
+
+    /// Drain the per-body frame layouts this compile recorded.
+    pub(crate) fn take_frame_layouts(
+        &mut self,
+    ) -> std::collections::HashMap<crate::core_ir::FuncIdx, crate::core_ir::emit::FrameLayout> {
+        std::mem::take(&mut self.frame_layouts)
+    }
+
     pub(crate) fn take_module_table(&mut self) -> IndexMap<String, ModuleInterface> {
         std::mem::take(&mut self.module_table).into_loaded()
     }

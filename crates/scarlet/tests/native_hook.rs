@@ -130,13 +130,12 @@ fn toplevel_glue_is_never_hooked() {
     );
 }
 
-/// Installing a hook makes `compile_impl` recompile the whole stdlib from
-/// source instead of seeding the precompiled blob. That recompile must
-/// reproduce the seeded program exactly, or the native path runs a different
-/// program than `off` does.
+/// Seeding is unconditional now: a hooked compile of a user program must show
+/// the hook only the user's own bodies (the stdlib arrives pre-lowered in the
+/// static blob), and every blob bundle must hydrate against the seeded
+/// program — one decodable bundle per stdlib function, none past the table.
 #[test]
-fn relowered_stdlib_reproduces_the_seeded_program() {
-    // Real imports, so the comparison covers module init glue too.
+fn seeded_compile_hooks_only_user_bodies_and_every_bundle_hydrates() {
     let src = r#"
 import scarlet/array
 import scarlet/string
@@ -146,48 +145,41 @@ fn double(x Int) Int { x * 2 }
 println(array.length(array.map([1, 2, 3], double)))
 println(string.length('hello'))
 "#;
-    let (relowered, seen) = compile_recording(src);
+    let (program, seen) = compile_recording(src);
+    // The user file lowers `double`, the toplevel, and nothing of the stdlib.
     assert!(
-        seen.len() > 100,
-        "expected the hook to see the whole stdlib (got {} bodies)",
+        seen.len() < 10,
+        "the hook saw {} bodies; the stdlib must come from the seed, not a relower",
         seen.len()
     );
+    let stdlib_fn_count = scarlet::STDLIB.functions.len();
+    for s in &seen {
+        assert!(
+            s.idx >= stdlib_fn_count,
+            "hooked body fn#{} is inside the seeded stdlib prefix",
+            s.idx
+        );
+    }
 
-    let plain = scarlet::bytecode::compile(&parse(src), None, Some(&scarlet::STDLIB));
-    assert!(plain.success(), "compile failed: {:#?}", plain.diagnostics);
-    let seeded = plain.emitted.expect("compile emits").program;
-
-    let fns = |p: &scarlet::bytecode::Program| -> Vec<(String, i32, i32, i32, i32, i32)> {
-        p.functions
-            .iter()
-            .map(|f| {
-                (
-                    f.name.to_string(),
-                    f.arity,
-                    f.locals,
-                    f.capture_count,
-                    f.code_start,
-                    f.code_len,
-                )
-            })
-            .collect()
-    };
-    assert_eq!(fns(&relowered), fns(&seeded), "function tables diverge");
-    assert_eq!(relowered.entry, seeded.entry);
-
-    let code = |p: &scarlet::bytecode::Program| -> Vec<(scarlet::bytecode::Op, u8, u16, i32)> {
-        p.code.iter().map(|i| (i.op, i.a, i.b, i.operand)).collect()
-    };
-    assert_eq!(code(&relowered), code(&seeded), "bytecode diverges");
-
-    // `Value`'s Debug renders logically, with no addresses, so runtime-built
-    // frozen constants compare equal to the blob's.
-    let consts = |p: &scarlet::bytecode::Program| -> Vec<String> {
-        p.constants.iter().map(|v| format!("{v:?}")).collect()
-    };
+    // Every stdlib body the seed ships has exactly one bundle, and each
+    // decodes into a plan whose function renders non-trivially.
     assert_eq!(
-        consts(&relowered),
-        consts(&seeded),
-        "constant pools diverge"
+        scarlet::STDLIB_CORE_INDEX.len(),
+        stdlib_fn_count,
+        "bundle count must match the seeded function table"
     );
+    for (i, (idx, start, len)) in scarlet::STDLIB_CORE_INDEX.iter().enumerate() {
+        assert_eq!(*idx as usize, i, "bundle index must be dense and sorted");
+        let bytes = &scarlet::STDLIB_CORE_BYTES[*start as usize..(*start + *len) as usize];
+        let fi = <scarlet_vm::FuncIdx as scarlet_core::tivec::Idx>::from_usize(i);
+        let (plan, _layout) = scarlet::core_ir::clif::decode_plan_bundle(
+            fi,
+            bytes,
+            scarlet::STDLIB.prelude,
+        )
+        .unwrap_or_else(|e| panic!("bundle for fn#{i} failed to decode: {e}"));
+        assert_eq!(plan.func_idx, fi);
+    }
+    // And the seeded program is what actually ran above.
+    assert!(program.functions.len() >= stdlib_fn_count);
 }

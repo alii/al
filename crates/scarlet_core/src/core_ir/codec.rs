@@ -65,16 +65,16 @@ type Result<T> = std::result::Result<T, DecodeError>;
 
 // --- primitives -----------------------------------------------------------
 
-struct Enc {
-    buf: Vec<u8>,
+pub(crate) struct Enc {
+    pub(crate) buf: Vec<u8>,
 }
 
 impl Enc {
-    fn new() -> Enc {
+    pub(crate) fn new() -> Enc {
         Enc { buf: Vec::new() }
     }
 
-    fn u8(&mut self, b: u8) {
+    pub(crate) fn u8(&mut self, b: u8) {
         self.buf.push(b);
     }
 
@@ -91,11 +91,11 @@ impl Enc {
         }
     }
 
-    fn u32(&mut self, v: u32) {
+    pub(crate) fn u32(&mut self, v: u32) {
         self.u64(u64::from(v));
     }
 
-    fn usize(&mut self, v: usize) {
+    pub(crate) fn usize(&mut self, v: usize) {
         self.u64(v as u64);
     }
 
@@ -104,7 +104,7 @@ impl Enc {
         self.u64(((v << 1) ^ (v >> 63)) as u64);
     }
 
-    fn i32(&mut self, v: i32) {
+    pub(crate) fn i32(&mut self, v: i32) {
         self.i64(i64::from(v));
     }
 
@@ -113,17 +113,17 @@ impl Enc {
     }
 }
 
-struct Dec<'a> {
+pub(crate) struct Dec<'a> {
     buf: &'a [u8],
     at: usize,
 }
 
 impl<'a> Dec<'a> {
-    fn new(buf: &'a [u8]) -> Dec<'a> {
+    pub(crate) fn new(buf: &'a [u8]) -> Dec<'a> {
         Dec { buf, at: 0 }
     }
 
-    fn u8(&mut self) -> Result<u8> {
+    pub(crate) fn u8(&mut self) -> Result<u8> {
         let b = *self.buf.get(self.at).ok_or(DecodeError::Truncated)?;
         self.at += 1;
         Ok(b)
@@ -145,11 +145,11 @@ impl<'a> Dec<'a> {
         }
     }
 
-    fn u32(&mut self) -> Result<u32> {
+    pub(crate) fn u32(&mut self) -> Result<u32> {
         u32::try_from(self.u64()?).map_err(|_| DecodeError::Overlong)
     }
 
-    fn usize(&mut self) -> Result<usize> {
+    pub(crate) fn usize(&mut self) -> Result<usize> {
         usize::try_from(self.u64()?).map_err(|_| DecodeError::Overlong)
     }
 
@@ -158,7 +158,7 @@ impl<'a> Dec<'a> {
         Ok(((z >> 1) as i64) ^ -((z & 1) as i64))
     }
 
-    fn i32(&mut self) -> Result<i32> {
+    pub(crate) fn i32(&mut self) -> Result<i32> {
         i32::try_from(self.i64()?).map_err(|_| DecodeError::Overlong)
     }
 
@@ -170,7 +170,19 @@ impl<'a> Dec<'a> {
         }
     }
 
-    fn finish(self) -> Result<()> {
+    pub(crate) fn remaining(&self) -> usize {
+        self.buf.len() - self.at
+    }
+
+    pub(crate) fn skip(&mut self, n: usize) -> Result<()> {
+        if self.remaining() < n {
+            return Err(DecodeError::Truncated);
+        }
+        self.at += n;
+        Ok(())
+    }
+
+    pub(crate) fn finish(self) -> Result<()> {
         if self.at == self.buf.len() {
             Ok(())
         } else {
@@ -582,7 +594,7 @@ pub(crate) fn decode_fn(buf: &[u8]) -> Result<CoreFn> {
 }
 
 /// Encode the frame layout `emit` fixed for a body.
-fn encode_layout(l: &FrameLayout) -> Vec<u8> {
+pub(crate) fn encode_layout(l: &FrameLayout) -> Vec<u8> {
     let mut e = Enc::new();
     e.usize(l.slots.len());
     for i in 0..l.slots.len() {
@@ -607,7 +619,7 @@ fn encode_layout(l: &FrameLayout) -> Vec<u8> {
 
 /// Decode a [`FrameLayout`]. The blob must be exactly one [`encode_layout`]
 /// image.
-fn decode_layout(buf: &[u8]) -> Result<FrameLayout> {
+pub(crate) fn decode_layout(buf: &[u8]) -> Result<FrameLayout> {
     let mut d = Dec::new(buf);
     let n = d.usize()?;
     let mut slots = crate::tivec::TiVec::new();
