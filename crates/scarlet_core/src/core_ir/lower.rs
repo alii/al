@@ -540,6 +540,9 @@ impl Lower {
             return self.local(*b);
         }
         let (a, ty) = self.atom(e);
+        // Forwarding by design: any non-Local atom, current or future, gets
+        // let-bound; only an existing local skips the binding.
+        #[allow(unknown_lints, wildcard_local_enum)]
         match a {
             Atom::Local(id) => id,
             other => self.let_(ty, other),
@@ -1030,8 +1033,9 @@ impl Lower {
                     }
                     wrap = Some((j, cont));
                 }
-                // No failure edge could fire: flat.
-                _ => entry_arms.push_front((pat, body)),
+                // No failure edge could fire: flat. `Join` lands here too
+                // when nothing consulted its join.
+                ArmFall::Join(_) | ArmFall::Unreachable => entry_arms.push_front((pat, body)),
             }
         }
         assemble(entry_arms, wrap)
@@ -1063,6 +1067,9 @@ impl Lower {
                 let mut binds = Vec::with_capacity(fields.len());
                 for fp in fields {
                     let id = self.fresh(fp.ty());
+                    // Forwarding by design: every compound pattern kind,
+                    // current or future, goes to the nested queue.
+                    #[allow(unknown_lints, wildcard_local_enum)]
                     match fp {
                         TypedPat::Wild { .. } => {}
                         TypedPat::Bind(b) => self.bind(b.id, id),
@@ -1557,6 +1564,9 @@ fn arm_fallible(arm: &TypedArm) -> bool {
 /// `Match` ladder itself, so its miss touches no failure continuation. Only
 /// compound `Ctor` fields survive into the nested queue.
 fn head_fallible(p: &TypedPat) -> bool {
+    // Forwarding by design: anything that is not a bare head defers to the
+    // general nested check, new pattern kinds included.
+    #[allow(unknown_lints, wildcard_local_enum)]
     match p {
         TypedPat::Wild { .. } | TypedPat::Bind(_) | TypedPat::Lit { .. } => false,
         TypedPat::Ctor { fields, .. } => fields.iter().any(nested_fallible),

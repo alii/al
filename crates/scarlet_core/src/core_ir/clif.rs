@@ -226,7 +226,10 @@ fn prove(pool: &ResolvedPool, tys: ReprTys, t: RTy) -> TyProof {
             let n = pool.tuple_elems(t).len();
             u16::try_from(n).map_or(TyProof::None, TyProof::Tuple)
         }
-        _ => TyProof::None,
+        // Named, not wildcarded: a new node kind must decide what it proves.
+        ResolvedNode::Con { .. } | ResolvedNode::Bound(_) | ResolvedNode::Fun { .. } => {
+            TyProof::None
+        }
     }
 }
 
@@ -2301,6 +2304,10 @@ impl<'a> BodyGen<'a> {
                                 let call = self.b.ins().call(self.fns.mod_int, &[a, bv]);
                                 self.b.inst_results(call)[0]
                             }
+                            // A deliberate assertion: only arithmetic ops
+                            // reach this table, and a new NOp that does is a
+                            // routing bug this panic names.
+                            #[allow(unknown_lints, wildcard_local_enum)]
                             _ => unsupported_node("arithmetic op"),
                         };
                         self.int_result(r, want_word)

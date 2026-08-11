@@ -317,7 +317,7 @@ impl PatternMatrix {
                         go(a, rest, f);
                     }
                 }
-                _ => f(p, rest),
+                Pat::Wildcard | Pat::Ctor { .. } => f(p, rest),
             }
         }
         for row in &self.rows {
@@ -339,7 +339,7 @@ impl PatternMatrix {
             Pat::Ctor { id, args } if *id == ctor.id => {
                 result.rows.push(PatStack::prepend(args, rest))
             }
-            _ => {}
+            Pat::Ctor { .. } | Pat::Or { .. } => {}
         });
         result
     }
@@ -506,7 +506,7 @@ fn pat_to_string(p: &Pat, t: &RcType, interner: &Interner) -> String {
             if *id == CONS_ID {
                 let elem_t: &RcType = match t {
                     RcType::Array(arr) => &arr.element,
-                    _ => &RcType::Infinite,
+                    RcType::Infinite | RcType::Named(..) | RcType::Tuple(..) => &RcType::Infinite,
                 };
                 let mut heads = Vec::new();
                 let mut tail = p;
@@ -519,6 +519,9 @@ fn pat_to_string(p: &Pat, t: &RcType, interner: &Interner) -> String {
                         Pat::Ctor { id, .. } if *id == EMPTY_LIST_ID => {
                             return format!("[{}]", heads.join(", "));
                         }
+                        // Guard fall-through: any non-list pattern renders
+                        // as the open tail, whatever kind it is.
+                        #[allow(unknown_lints, wildcard_local_enum)]
                         _ => {
                             heads.push("..".to_string());
                             return format!("[{}]", heads.join(", "));

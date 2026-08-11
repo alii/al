@@ -382,7 +382,7 @@ fn unify_enclosed(err: UnifyError, expected: Ty, given: Ty) -> UnifyError {
             given,
             situation,
         },
-        other => other,
+        other @ UnifyError::RecursiveType => other,
     }
 }
 
@@ -1201,7 +1201,9 @@ impl InferEngine {
                 Some(p) if constraint.allowed_types().contains(&p) => {}
                 _ => return Err(could_not_unify(var_ty, resolved)),
             },
-            _ => return Err(could_not_unify(var_ty, resolved)),
+            TypeNode::Bound(..) | TypeNode::Fun { .. } | TypeNode::Tuple { .. } => {
+                return Err(could_not_unify(var_ty, resolved));
+            }
         }
         self.vars[var_id as usize] = TyVarState::Link { ty: resolved };
         Ok(())
@@ -1451,6 +1453,9 @@ impl InferEngine {
                 RootVarState::Generic { id: gid, .. } if !weak.contains(&gid) => {
                     quantified.insert(gid);
                 }
+                // Guard fall-through: weak or level-bound variables of either
+                // state stay unquantified.
+                #[allow(unknown_lints, wildcard_local_enum)]
                 _ => {}
             },
             TypeNode::Con { args, .. } => self.collect_slice(args, ignore_level, weak, quantified),

@@ -291,7 +291,14 @@ impl Definition {
     fn decl_span(&self) -> Span {
         match self.kind {
             DefinitionKind::ModuleAlias { decl_span, .. } => decl_span,
-            _ => self.defid.span,
+            // Named, not wildcarded: a new kind with its own declaration
+            // extent must say so, as ModuleAlias did.
+            DefinitionKind::Value { .. }
+            | DefinitionKind::Function { .. }
+            | DefinitionKind::Constant
+            | DefinitionKind::Constructor { .. }
+            | DefinitionKind::Type
+            | DefinitionKind::Field => self.defid.span,
         }
     }
 

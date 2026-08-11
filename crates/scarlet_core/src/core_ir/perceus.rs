@@ -529,6 +529,9 @@ impl ReuseWalk {
                         } => {
                             self.self_tails.push(avail.clone());
                         }
+                        // A self-tail filter: every other atom, current or
+                        // future, is by definition not a self tail call.
+                        #[allow(unknown_lints, wildcard_local_enum)]
                         _ => {}
                     }
                     return;

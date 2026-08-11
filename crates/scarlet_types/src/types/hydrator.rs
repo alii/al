@@ -254,7 +254,9 @@ impl Hydrator {
                     // nominal application carrying the registered id, which is
                     // the identity unification uses. The display name is the
                     // canonical `ti.name`, not the local import alias.
-                    _ => Ok(engine.mk_con_id(ti.id, ti.name, &arg_tys)),
+                    TypeBody::Unresolved | TypeBody::Custom { .. } | TypeBody::External => {
+                        Ok(engine.mk_con_id(ti.id, ti.name, &arg_tys))
+                    }
                 }
             }
             None => Err(err(
