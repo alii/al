@@ -276,7 +276,7 @@ fn merge_into_collision<A: Arena + ?Sized>(
 ) -> Value {
     let (lk, lv) = match HamtNodeRef::of(left) {
         HamtNodeRef::Entry { key, value } => (key, value),
-        _ => unreachable_collision(),
+        HamtNodeRef::Collision { .. } | HamtNodeRef::Branch { .. } => unreachable_collision(),
     };
     hamt_collision_in(a, hash, &[lk, lv, rkey, rvalue])
 }

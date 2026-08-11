@@ -46,7 +46,28 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(check: bool) -> Result<(), String> {
+enum GenError {
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Stale(Vec<String>),
+}
+
+impl std::fmt::Display for GenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GenError::Io { path, source } => write!(f, "{}: {source}", path.display()),
+            GenError::Stale(paths) => write!(
+                f,
+                "stale generated files (run `cargo xtask gen-editor-syntax`):\n  {}",
+                paths.join("\n  ")
+            ),
+        }
+    }
+}
+
+fn run(check: bool) -> Result<(), GenError> {
     let mut stale = Vec::new();
     for (path, contents) in outputs() {
         if check {
@@ -56,20 +77,22 @@ fn run(check: bool) -> Result<(), String> {
             }
         } else {
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("{}: {e}", parent.display()))?;
+                std::fs::create_dir_all(parent).map_err(|e| GenError::Io {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
             }
-            std::fs::write(&path, contents).map_err(|e| format!("{}: {e}", path.display()))?;
+            std::fs::write(&path, contents).map_err(|e| GenError::Io {
+                path: path.clone(),
+                source: e,
+            })?;
             println!("wrote {}", path.display());
         }
     }
     if stale.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "stale generated files (run `cargo xtask gen-editor-syntax`):\n  {}",
-            stale.join("\n  ")
-        ))
+        Err(GenError::Stale(stale))
     }
 }
 
@@ -937,3 +960,4 @@ mod tests {
         }
     }
 }
+

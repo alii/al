@@ -25,6 +25,8 @@ fn is_backpass(node: &Node) -> bool {
     matches!(node, Node::Statement(s) if matches!(s.as_ref(), Statement::Backpass(_)))
 }
 
+// The Statement catch-all below moves the non-backpass node back; a new statement kind belongs there.
+#[allow(unknown_lints, wildcard_local_enum)]
 fn desugar_body(body: &mut Vec<Node>) {
     // Rewrite the first backpass; everything after it moves into the lambda,
     // so the generic walk below reaches any later ones inside that new node.
@@ -260,7 +262,7 @@ fn desugar_bin_spec(spec: &mut BinSpec) {
     match spec {
         BinSpec::Int { bits: Some(e) } => desugar_expr(e),
         BinSpec::Binary { bytes: Some(e) } => desugar_expr(e),
-        _ => {}
+        BinSpec::Int { bits: None } | BinSpec::Binary { bytes: None } | BinSpec::Utf8 => {}
     }
 }
 

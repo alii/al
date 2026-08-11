@@ -528,7 +528,9 @@ impl Formatter {
         };
         let prefix = match &s.body {
             ast::TypeBody::Variants { opaque: true, .. } => text("opaque "),
-            _ => nil(),
+            ast::TypeBody::Variants { opaque: false, .. }
+            | ast::TypeBody::Alias(_)
+            | ast::TypeBody::External => nil(),
         };
         let head = d![
             prefix,
@@ -737,7 +739,9 @@ impl Formatter {
                     .map_or(nil(), |&p| self.comments_before_at(p));
                 d![before_dotdot, self.comments_before_at(start)]
             }
-            _ => self.comments_before(a.span()),
+            ast::CallArg::Positional(_) | ast::CallArg::Labeled { .. } => {
+                self.comments_before(a.span())
+            }
         };
         let arg = match a {
             ast::CallArg::Positional(e) => self.expr(e),

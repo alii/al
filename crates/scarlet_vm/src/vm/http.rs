@@ -372,7 +372,7 @@ pub(super) fn framing(t: &H1, a: &mut ProcHeap, headers_val: &Value) -> VmResult
         fn record(&mut self, v: &Value) {
             *self = match std::mem::replace(self, Seen::Zero) {
                 Seen::Zero => Seen::Once(v.clone()),
-                _ => Seen::Many,
+                Seen::Once(_) | Seen::Many => Seen::Many,
             };
         }
     }

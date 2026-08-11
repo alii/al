@@ -1366,6 +1366,8 @@ impl Parser {
 
     /// Range pattern bounds must be number literals; anything else errors and
     /// becomes a `0` placeholder for recovery.
+    // Every non-number pattern, current or future, is the same recovery error.
+    #[allow(unknown_lints, wildcard_local_enum)]
     fn require_number_bound(&mut self, p: ast::Pattern) -> ast::NumberLiteral {
         match p {
             ast::Pattern::Literal(ast::PatternLiteral::Number(n)) => n,

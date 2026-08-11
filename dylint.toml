@@ -2,3 +2,4 @@
 nonidentity-key-types = ["scarlet_syntax::span::Span"]
 nonidentity-key-forms = ["ptr-cast"]
 nonidentity-key-methods = ["scarlet_vm::bytecode::value::Value::to_bits"]
+baseline = "mordant-baseline.toml"

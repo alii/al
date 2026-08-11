@@ -628,9 +628,42 @@ fn cmd_fmt(args: FmtArgs) {
     }
 }
 
-fn cmd_upgrade(version: Option<String>) -> Result<(), String> {
-    let current_exe =
-        std::env::current_exe().map_err(|e| format!("cannot locate current executable: {e}"))?;
+/// Why `al upgrade` failed. Rendered once, by `die`.
+enum UpgradeError {
+    UnsupportedOs,
+    LocateExe(std::io::Error),
+    Download {
+        url: String,
+        source: Box<ureq::Error>,
+    },
+    Read(std::io::Error),
+    Io {
+        action: &'static str,
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+}
+
+impl std::fmt::Display for UpgradeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpgradeError::UnsupportedOs => write!(f, "unsupported OS"),
+            UpgradeError::LocateExe(e) => write!(f, "cannot locate current executable: {e}"),
+            UpgradeError::Download { url, source } => {
+                write!(f, "download of {url} failed: {source}")
+            }
+            UpgradeError::Read(e) => write!(f, "read error: {e}"),
+            UpgradeError::Io {
+                action,
+                path,
+                source,
+            } => write!(f, "{action} {}: {source}", path.display()),
+        }
+    }
+}
+
+fn cmd_upgrade(version: Option<String>) -> Result<(), UpgradeError> {
+    let current_exe = std::env::current_exe().map_err(UpgradeError::LocateExe)?;
 
     let tag = match version.as_deref() {
         None => "canary".to_string(),
@@ -649,7 +682,7 @@ fn cmd_upgrade(version: Option<String>) -> Result<(), String> {
     } else if cfg!(target_os = "linux") {
         "linux"
     } else {
-        return Err("unsupported OS".to_string());
+        return Err(UpgradeError::UnsupportedOs);
     };
 
     let asset_name = format!("scarlet-{os_name}-{arch}");
@@ -664,26 +697,33 @@ fn cmd_upgrade(version: Option<String>) -> Result<(), String> {
 
     let resp = ureq::get(&download_url)
         .call()
-        .map_err(|e| format!("download failed: {e}"))?;
+        .map_err(|e| UpgradeError::Download {
+            url: download_url.clone(),
+            source: Box::new(e),
+        })?;
     let len: u64 = resp
         .header("Content-Length")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
     let mut reader = resp.into_reader();
-    let mut out = fs::File::create(&tmp_path)
-        .map_err(|e| format!("cannot create {}: {e}", tmp_path.display()))?;
+    let mut out = fs::File::create(&tmp_path).map_err(|e| UpgradeError::Io {
+        action: "cannot create",
+        path: tmp_path.clone(),
+        source: e,
+    })?;
     let mut buf = [0u8; 64 * 1024];
     let mut written: u64 = 0;
     loop {
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| format!("read error: {e}"))?;
+        let n = reader.read(&mut buf).map_err(UpgradeError::Read)?;
         if n == 0 {
             break;
         }
-        out.write_all(&buf[..n])
-            .map_err(|e| format!("write error: {e}"))?;
+        out.write_all(&buf[..n]).map_err(|e| UpgradeError::Io {
+            action: "cannot write",
+            path: tmp_path.clone(),
+            source: e,
+        })?;
         written += n as u64;
         if len > 0 {
             eprint!("\r  {:>6.1} / {:.1} MB", mb(written), mb(len));
@@ -697,13 +737,22 @@ fn cmd_upgrade(version: Option<String>) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("chmod failed: {e}"))?;
+        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o755)).map_err(|e| {
+            UpgradeError::Io {
+                action: "cannot set permissions on",
+                path: tmp_path.clone(),
+                source: e,
+            }
+        })?;
     }
 
     if let Err(e) = fs::rename(&tmp_path, &current_exe) {
         let _ = fs::remove_file(&tmp_path);
-        return Err(format!("cannot replace {}: {e}", current_exe.display()));
+        return Err(UpgradeError::Io {
+            action: "cannot replace",
+            path: current_exe.clone(),
+            source: e,
+        });
     }
 
     match process::Command::new(&current_exe)
