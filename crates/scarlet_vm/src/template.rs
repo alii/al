@@ -371,6 +371,15 @@ pub(crate) mod test_fixture {
             NONE_,
         ),
         (S::H1ChunkedBad, 3076, 2, "ChunkBody", "ChunkedBad", STATUS),
+        (S::JsonDoc, 7168, 0, "Doc", "Doc", &["arena", "tape", "idx"]),
+        (
+            S::JsonParseError,
+            7169,
+            0,
+            "ParseError",
+            "ParseError",
+            &["offset", "message"],
+        ),
     ];
 
     /// Intern every fixture constructor into `fb` and bind its slot.

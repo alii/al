@@ -76,6 +76,7 @@ mod inspect;
 mod io;
 /// JIT module construction and the runtime-symbol resolution seam.
 pub mod jit;
+mod json;
 mod mailbox;
 mod map;
 mod migrate;

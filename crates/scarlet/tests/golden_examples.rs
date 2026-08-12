@@ -255,6 +255,12 @@ suite! {
         http_parse,
         // Backpassing: `x <- f(args)` desugars to a trailing callback.
         backpassing,
+        // JSON: the SIMD parse, on-demand reads off the tape, typed decoding
+        // with accumulated paths, and the three presence states — absent, null
+        // and present — that a partial update turns on. Also pins the
+        // adversarial answers: 1e400, a lone surrogate, invalid UTF-8, the
+        // 64-bit boundary, duplicate keys and deep nesting.
+        json,
     ],
 
     // No golden, because there is no fixed output: `http_server` ends in an

@@ -1,0 +1,469 @@
+import scarlet/binary
+import scarlet/json
+// Aliased because `field` is also a combinator below, and a local binding
+// shadows an imported module of the same name. Callers of this module are
+// unaffected: they import `scarlet/json/field` and write `field.update`.
+import scarlet/json/field as presence
+
+// Turning a parsed document into your own types.
+//
+// A `Decoder(a)` reads a `Doc` and produces an `a` or a list of failures.
+// Failures accumulate rather than stopping at the first one, and each carries
+// the path it happened at, so a bad field in a two-hundred-field payload names
+// itself instead of reporting "decode failed".
+//
+// Decoders read straight off the `Doc`. Nothing materialises a tree on the
+// way, so a decoder that reads six fields costs six fields.
+//
+// ## Optional members
+//
+// `optional_field` returns `Field(a)`, not `Option(a)`. Absent, null and
+// present are three states and collapsing the first two corrupts partial
+// updates — see `scarlet/json/field`, which is where the reasoning and the
+// eliminators live.
+
+// One step of the path to a value inside a document.
+pub type Segment {
+	Key(name String)
+	At(index Int)
+}
+
+// One thing that was wrong, and where.
+pub type Failure {
+	path Array(Segment)
+	expected String
+	found String
+}
+
+// Reads a `Doc`, or says what was wrong with it. Opaque so the path-threading
+// argument stays an implementation detail: build decoders with the
+// combinators here and run them with `run`.
+pub opaque type Decoder(a) {
+	step fn(Array(Segment), json.Doc) Result(a, Array(Failure))
+}
+
+// Decode a document.
+pub fn run(dec Decoder(a), doc json.Doc) Result(a, Array(Failure)) {
+	Decoder(step) = dec
+	step([], doc)
+}
+
+// Render a path as `.field.list[3].name`, or `<root>` for the top level.
+pub fn path_to_string(path Array(Segment)) String {
+	match path {
+		[] -> '<root>'
+		[head, ..tail] -> '${segment_to_string(head)}${path_to_string_rest(tail)}'
+	}
+}
+
+fn path_to_string_rest(path Array(Segment)) String {
+	match path {
+		[] -> ''
+		[head, ..tail] -> '${segment_to_string(head)}${path_to_string_rest(tail)}'
+	}
+}
+
+fn segment_to_string(s Segment) String {
+	match s {
+		Key(k) -> '.${k}'
+		At(i) -> '[${i}]'
+	}
+}
+
+// One line per failure: where, what was wanted, what was there.
+pub fn failure_to_string(f Failure) String {
+	Failure(path, expected, found) = f
+	'${path_to_string(path)}: expected ${expected}, found ${found}'
+}
+
+// Every failure, one per line.
+pub fn failures_to_string(fs Array(Failure)) String {
+	match fs {
+		[] -> ''
+		[head, ..tail] -> match tail {
+			[] -> failure_to_string(head)
+			_ -> '${failure_to_string(head)}\n${failures_to_string(tail)}'
+		}
+	}
+}
+
+// The name of what a `Doc` actually holds, for the `found` half of a failure.
+fn describe(d json.Doc) String {
+	match json.kind(d) {
+		json.NullKind -> 'null'
+		json.BoolKind -> 'a boolean'
+		json.IntKind -> 'an integer'
+		json.FloatKind -> 'a float'
+		json.StringKind -> 'a string'
+		json.ArrayKind -> 'an array'
+		json.ObjectKind -> 'an object'
+	}
+}
+
+fn one_failure(path Array(Segment), expected String, d json.Doc) Array(Failure) {
+	[Failure(path, expected, describe(d))]
+}
+
+// A decoder that ignores the document and succeeds.
+pub fn succeed(value a) Decoder(a) {
+	Decoder(fn(_path, _doc) Ok(value))
+}
+
+// A decoder that always fails, naming what it wanted.
+pub fn fail(expected String) Decoder(a) {
+	Decoder(fn(path, doc) Err(one_failure(path, expected, doc)))
+}
+
+// The `read` argument is passed as an explicit lambda at every call site
+// below rather than as the bare builtin. That is a workaround for T-135:
+// a `@vm` builtin used as a first-class value eta-expands into a wrapper
+// whose deferral-region jump-over is patched to the wrong target, which
+// `check_parity`'s `jump_overs_skip_every_body_parked_beside_them` catches.
+// The extra closure is built once per decoder, not once per field.
+fn scalar(expected String, read fn(json.Doc) Option(a)) Decoder(a) {
+	Decoder(fn(path, doc) match read(doc) {
+		Some(v) -> Ok(v)
+		None -> Err(one_failure(path, expected, doc))
+	})
+}
+
+pub fn string_value() Decoder(String) {
+	scalar('a string', fn(d) json.string(d))
+}
+
+// A JSON integer. A number too large for an `Int` fails here rather than
+// arriving truncated — see `scarlet/json`.
+pub fn int() Decoder(Int) {
+	scalar('an integer', fn(d) json.int(d))
+}
+
+pub fn float() Decoder(Float) {
+	scalar('a number', fn(d) json.float(d))
+}
+
+pub fn bool() Decoder(Bool) {
+	scalar('a boolean', fn(d) json.bool(d))
+}
+
+// A 64-bit integer that arrived as a JSON *string*.
+//
+// JSON numbers cannot hold a full 64-bit identifier without losing precision
+// in implementations that read every number as a double, so protocols that
+// use them — Discord snowflakes among them — send them quoted. This decodes
+// the quoted form; `int` decodes a genuine JSON number.
+//
+// A leading `-` is accepted, so the range is the whole of `Int` and not only
+// its positive half. `+` is not: JSON has no leading plus on a number and a
+// quoted integer is the same integer in quotes.
+pub fn int_string() Decoder(Int) {
+	Decoder(fn(path, doc) match json.string(doc) {
+		None -> Err(one_failure(path, 'a quoted integer', doc))
+		Some(s) -> match parse_signed(s) {
+			Ok(n) -> Ok(n)
+			Err(Nil) -> Err([Failure(path, 'a quoted integer', 'the string "${s}"')])
+		}
+	})
+}
+
+// `binary.parse_int` reads unsigned digits and treats `-` as a non-digit, so
+// the sign is peeled off before it. `byte_at` is -1 past the end, which is
+// what makes an empty string safe here: it takes the unsigned branch and
+// fails there.
+//
+// `-9223372036854775808` is the one `Int` this cannot read — its magnitude is
+// one past the positive range `parse_int` accepts — and it fails rather than
+// wrapping to a positive number.
+fn parse_signed(s String) Result(Int, Nil) {
+	b = binary.from_string(s)
+	// 45 is `-`.
+	if binary.byte_at(b, 0) == 45 {
+		match binary.parse_int(binary.slice_bytes(b, 1, binary.byte_size(b) - 1), binary.Dec) {
+			Ok(n) -> Ok(0 - n)
+			Err(Nil) -> Err(Nil)
+		}
+	} else {
+		binary.parse_int(b, binary.Dec)
+	}
+}
+
+// `null`, decoded as a value of your choosing.
+pub fn null_as(value a) Decoder(a) {
+	Decoder(fn(path, doc) if json.is_null(doc) {
+		Ok(value)
+	} else {
+		Err(one_failure(path, 'null', doc))
+	})
+}
+
+// Transform a decoder's result.
+pub fn map(dec Decoder(a), f fn(a) b) Decoder(b) {
+	Decoder(step) = dec
+	Decoder(fn(path, doc) match step(path, doc) {
+		Ok(v) -> Ok(f(v))
+		Err(e) -> Err(e)
+	})
+}
+
+// Choose the next decoder from what the last one produced. Sequential, so a
+// failure here stops rather than accumulating — use `map2` and friends for
+// independent fields, which is where accumulation matters.
+pub fn then(dec Decoder(a), f fn(a) Decoder(b)) Decoder(b) {
+	Decoder(step) = dec
+	Decoder(fn(path, doc) match step(path, doc) {
+		Err(e) -> Err(e)
+		Ok(v) -> {
+			Decoder(next) = f(v)
+			next(path, doc)
+		}
+	})
+}
+
+// Combine two decoders, keeping BOTH sets of failures. This is what makes a
+// malformed payload report every bad field at once instead of one per attempt.
+pub fn map2(d1 Decoder(a), d2 Decoder(b), f fn(a, b) c) Decoder(c) {
+	Decoder(s1) = d1
+	Decoder(s2) = d2
+	Decoder(fn(path, doc) match (s1(path, doc), s2(path, doc)) {
+		(Ok(a), Ok(b)) -> Ok(f(a, b))
+		(Err(e1), Err(e2)) -> Err([..e1, ..e2])
+		(Err(e1), Ok(_)) -> Err(e1)
+		(Ok(_), Err(e2)) -> Err(e2)
+	})
+}
+
+pub fn map3(d1 Decoder(a), d2 Decoder(b), d3 Decoder(c), f fn(a, b, c) d) Decoder(d) {
+	map2(map2(d1, d2, fn(x, y) (x, y)), d3, fn(xy, z) {
+		(x, y) = xy
+		f(x, y, z)
+	})
+}
+
+pub fn map4(
+	d1 Decoder(a),
+	d2 Decoder(b),
+	d3 Decoder(c),
+	d4 Decoder(d),
+	f fn(a, b, c, d) e,
+) Decoder(e) {
+	map2(map3(d1, d2, d3, fn(x, y, z) (x, y, z)), d4, fn(xyz, w) {
+		(x, y, z) = xyz
+		f(x, y, z, w)
+	})
+}
+
+pub fn map5(
+	d1 Decoder(a),
+	d2 Decoder(b),
+	d3 Decoder(c),
+	d4 Decoder(d),
+	d5 Decoder(e),
+	f fn(a, b, c, d, e) g,
+) Decoder(g) {
+	map2(map4(d1, d2, d3, d4, fn(x, y, z, w) (x, y, z, w)), d5, fn(xyzw, v) {
+		(x, y, z, w) = xyzw
+		f(x, y, z, w, v)
+	})
+}
+
+// A required member, decoded with `inner`. A member that is missing is a
+// failure; a member that is `null` is passed to `inner`, which will fail
+// unless it is a decoder that accepts null.
+pub fn field(name String, inner Decoder(a)) Decoder(a) {
+	Decoder(step) = inner
+	Decoder(fn(path, doc) {
+		here = [..path, Key(name)]
+		match member(here, doc, name) {
+			Err(e) -> Err(e)
+			Ok(Some(child)) -> step(here, child)
+			Ok(None) -> Err([Failure(here, 'a member named "${name}"', 'no such member')])
+		}
+	})
+}
+
+// The member `name` of `doc`, or the failure that `doc` is not an object at
+// all. `Ok(None)` is the one case left: an object with no such member.
+//
+// `json.field` answers `None` to both questions, and every combinator that
+// reads a member has to separate them. `field` did it and `optional_field`
+// did not, so a decoder built only from optional fields succeeded against an
+// array, a string or a bare number — every field reported absent, which for a
+// partial update reads as "change nothing" and for `with_default` overwrites
+// held state. An instrument whose job is to report every failure was reporting
+// success for input of entirely the wrong shape. Both go through here now, so
+// the two combinators cannot drift apart again.
+fn member(
+	path Array(Segment),
+	doc json.Doc,
+	name String,
+) Result(Option(json.Doc), Array(Failure)) {
+	match json.field(doc, name) {
+		Some(child) -> Ok(Some(child))
+		None -> match json.kind(doc) {
+			json.ObjectKind -> Ok(None)
+			_ -> Err([Failure(path, 'a member named "${name}"', describe(doc))])
+		}
+	}
+}
+
+// A member that may be absent, may be null, or may hold a value.
+//
+// The result is `Field(a)`, not `Option(a)`, and that is the point: absent
+// means "unchanged" and null means "cleared", and a decoder that returns
+// `Option` has thrown that difference away before the caller ever sees it.
+// Consume the result with `field.update` or `field.fold`.
+//
+// Optional is about the member, not about the document. A `doc` that is not
+// an object is a failure here exactly as it is in `field` — otherwise a
+// decoder with no required fields accepts anything at all.
+pub fn optional_field(name String, inner Decoder(a)) Decoder(presence.Field(a)) {
+	Decoder(step) = inner
+	Decoder(fn(path, doc) {
+		here = [..path, Key(name)]
+		match member(here, doc, name) {
+			Err(e) -> Err(e)
+			Ok(None) -> Ok(presence.absent())
+			Ok(Some(child)) -> if json.is_null(child) {
+				Ok(presence.null())
+			} else {
+				match step(here, child) {
+					Ok(v) -> Ok(presence.present(v))
+					Err(e) -> Err(e)
+				}
+			}
+		}
+	})
+}
+
+// Every element of an array, each decoded with `inner`. Element failures
+// accumulate and carry their index.
+pub fn list(inner Decoder(a)) Decoder(Array(a)) {
+	Decoder(fn(path, doc) match json.kind(doc) {
+		json.ArrayKind -> collect_list(inner, path, json.elements(doc), 0, [], [])
+		_ -> Err(one_failure(path, 'an array', doc))
+	})
+}
+
+fn collect_list(
+	inner Decoder(a),
+	path Array(Segment),
+	items Array(json.Doc),
+	i Int,
+	oks Array(a),
+	errs Array(Failure),
+) Result(Array(a), Array(Failure)) {
+	match items {
+		[] -> match errs {
+			[] -> Ok(oks)
+			_ -> Err(errs)
+		}
+		[head, ..tail] -> {
+			Decoder(step) = inner
+			match step([..path, At(i)], head) {
+				Ok(v) -> collect_list(inner, path, tail, i + 1, [..oks, v], errs)
+				Err(e) -> collect_list(inner, path, tail, i + 1, oks, [..errs, ..e])
+			}
+		}
+	}
+}
+
+// Every member of an object, each value decoded with `inner`. An association
+// list rather than a `Map`, because JSON preserves member order and duplicate
+// keys and a map does not.
+pub fn dict(inner Decoder(a)) Decoder(Array((String, a))) {
+	Decoder(fn(path, doc) match json.kind(doc) {
+		json.ObjectKind -> collect_dict(inner, path, json.entries(doc), [], [])
+		_ -> Err(one_failure(path, 'an object', doc))
+	})
+}
+
+fn collect_dict(
+	inner Decoder(a),
+	path Array(Segment),
+	items Array((String, json.Doc)),
+	oks Array((String, a)),
+	errs Array(Failure),
+) Result(Array((String, a)), Array(Failure)) {
+	match items {
+		[] -> match errs {
+			[] -> Ok(oks)
+			_ -> Err(errs)
+		}
+		[(k, v), ..tail] -> {
+			Decoder(step) = inner
+			match step([..path, Key(k)], v) {
+				Ok(decoded) -> collect_dict(inner, path, tail, [..oks, (k, decoded)], errs)
+				Err(e) -> collect_dict(inner, path, tail, oks, [..errs, ..e])
+			}
+		}
+	}
+}
+
+// The first decoder that succeeds. If all of them fail, every failure is
+// reported — a union that matched nothing should say what each arm wanted.
+pub fn one_of(decoders Array(Decoder(a))) Decoder(a) {
+	Decoder(fn(path, doc) try_each(decoders, path, doc, []))
+}
+
+fn try_each(
+	decoders Array(Decoder(a)),
+	path Array(Segment),
+	doc json.Doc,
+	errs Array(Failure),
+) Result(a, Array(Failure)) {
+	match decoders {
+		[] -> match errs {
+			[] -> Err([Failure(path, 'any of no decoders', 'nothing to try')])
+			_ -> Err(errs)
+		}
+		[head, ..tail] -> {
+			Decoder(step) = head
+			match step(path, doc) {
+				Ok(v) -> Ok(v)
+				Err(e) -> try_each(tail, path, doc, [..errs, ..e])
+			}
+		}
+	}
+}
+
+// A union discriminated by a string member. `pick` chooses the decoder for the
+// tag it is given, or `Err(Nil)` for a tag it does not know.
+pub fn tagged(tag String, pick fn(String) Result(Decoder(a), Nil)) Decoder(a) {
+	then(field(tag, string_value()), fn(t) match pick(t) {
+		Ok(dec) -> dec
+		Err(Nil) ->
+			Decoder(
+				fn(path, _doc) Err([Failure([..path, Key(tag)], 'a known tag', 'the tag "${t}"')]),
+			)
+	})
+}
+
+// A union discriminated by an integer member, as most binary-ish protocols do.
+pub fn tagged_int(tag String, pick fn(Int) Result(Decoder(a), Nil)) Decoder(a) {
+	then(field(tag, int()), fn(t) match pick(t) {
+		Ok(dec) -> dec
+		Err(Nil) ->
+			Decoder(
+				fn(path, _doc) Err([Failure([..path, Key(tag)], 'a known tag', 'the tag ${t}')]),
+			)
+	})
+}
+
+// Decode at a path of member names, for reaching one value out of a nested
+// document without spelling out a decoder per level.
+pub fn at(path_names Array(String), inner Decoder(a)) Decoder(a) {
+	match path_names {
+		[] -> inner
+		[head, ..tail] -> field(head, at(tail, inner))
+	}
+}
+
+// Succeed with `default` when the member is absent OR null.
+//
+// This is the collapse, and it is spelled out on purpose: it takes the value
+// to use, so nothing is silently dropped, and its name says what it does. Use
+// it for a field with a genuine default. Do NOT use it to apply a partial
+// update — `field.update` is that, and it keeps the current value where this
+// one would overwrite it with `default`.
+pub fn with_default(name String, inner Decoder(a), default a) Decoder(a) {
+	map(optional_field(name, inner), fn(f) presence.fold(f, fn() default, fn() default, fn(x) x))
+}

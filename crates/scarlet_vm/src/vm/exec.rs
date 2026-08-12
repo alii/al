@@ -756,6 +756,19 @@ impl VM {
                 Op::MapSet => self.map_set()?,
                 Op::MapDelete => self.map_delete()?,
                 Op::MapToList => self.map_to_list()?,
+                Op::JsonParse => self.json_parse()?,
+                Op::JsonKind => self.json_kind()?,
+                Op::JsonLen => self.json_len()?,
+                Op::JsonField => self.json_field()?,
+                Op::JsonIndex => self.json_index()?,
+                Op::JsonEntries => self.json_entries()?,
+                Op::JsonElements => self.json_elements()?,
+                Op::JsonString => self.json_string()?,
+                Op::JsonInt => self.json_int()?,
+                Op::JsonIntText => self.json_int_text()?,
+                Op::JsonFloat => self.json_float()?,
+                Op::JsonBool => self.json_bool()?,
+                Op::JsonEncode => self.json_encode()?,
                 Op::MakeEnumPayload => {
                     self.make_enum_payload(instr.operand, instr.b as usize, instr.a != 0)?
                 }

@@ -416,6 +416,37 @@ pub enum Op {
     /// `[x, n] -> Int` — *arithmetic* shift right: the sign bit propagates,
     /// so a negative `x` stays negative. (scarlet/int.bitwise_shift_right)
     BitShr,
+    /// `[src Binary] -> Result(Doc, ParseError)` — SIMD parse to a compact
+    /// tape. (scarlet/json.parse_binary)
+    JsonParse,
+    /// `[d Doc] -> Int` — the `Kind` ordinal, -1 for an undecodable tape.
+    JsonKind,
+    /// `[d Doc] -> Int` — array/object element count, -1 for a scalar.
+    JsonLen,
+    /// `[d Doc, name String] -> Option(Doc)` — the first member so named.
+    JsonField,
+    /// `[d Doc, i Int] -> Option(Doc)` — the `i`th array element.
+    JsonIndex,
+    /// `[d Doc] -> Array((String, Doc))` — an object's members in order.
+    JsonEntries,
+    /// `[d Doc] -> Array(Doc)` — an array's elements in order, in one walk.
+    /// `JsonIndex` per element is O(n²) and the length is the sender's to
+    /// choose.
+    JsonElements,
+    /// `[d Doc] -> Option(String)`
+    JsonString,
+    /// `[d Doc] -> Option(Int)` — `None` for a float or an out-of-range
+    /// integer, never a truncation.
+    JsonInt,
+    /// `[d Doc] -> Option(String)` — the integer at `d` in decimal, including
+    /// the ones `JsonInt` refuses because they do not fit an `Int`.
+    JsonIntText,
+    /// `[d Doc] -> Option(Float)`
+    JsonFloat,
+    /// `[d Doc] -> Option(Bool)`
+    JsonBool,
+    /// `[j Json] -> String` — encode the constructible tree.
+    JsonEncode,
 
     /// Not an opcode: one past the last real variant, so [`Op::from_u8`] can
     /// bound its check without a hand-maintained count. Never emitted, never
@@ -619,7 +650,20 @@ impl Op {
             | Op::BitXor
             | Op::BitNot
             | Op::BitShl
-            | Op::BitShr => false,
+            | Op::BitShr
+            | Op::JsonParse
+            | Op::JsonKind
+            | Op::JsonLen
+            | Op::JsonField
+            | Op::JsonIndex
+            | Op::JsonEntries
+            | Op::JsonElements
+            | Op::JsonString
+            | Op::JsonInt
+            | Op::JsonIntText
+            | Op::JsonFloat
+            | Op::JsonBool
+            | Op::JsonEncode => false,
         }
     }
 
@@ -803,7 +847,20 @@ impl Op {
             | Op::BitXor
             | Op::BitNot
             | Op::BitShl
-            | Op::BitShr => false,
+            | Op::BitShr
+            | Op::JsonParse
+            | Op::JsonKind
+            | Op::JsonLen
+            | Op::JsonField
+            | Op::JsonIndex
+            | Op::JsonEntries
+            | Op::JsonElements
+            | Op::JsonString
+            | Op::JsonInt
+            | Op::JsonIntText
+            | Op::JsonFloat
+            | Op::JsonBool
+            | Op::JsonEncode => false,
         }
     }
 }
