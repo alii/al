@@ -308,7 +308,7 @@ pub enum Op {
     /// `IpAddress`. (scarlet/net/address.parse)
     IpParse,
 
-    // Concurrency (scarlet/scheduler)
+    // Concurrency (scarlet/process)
     /// `[closure] -> Pid` — spawn a lightweight process running the closure
     /// and push the child's pid. (scarlet/process.spawn)
     ProcessSpawn,
@@ -322,19 +322,19 @@ pub enum Op {
     /// Park the current process for `ms` milliseconds.
     Sleep,
     /// Push a fresh `Subject` owned by the current process.
-    /// (scarlet/scheduler.subject)
+    /// (scarlet/process.subject)
     SubjectNew,
     /// `[subject, msg] -> Nil` — deep-copy `msg` into the subject's mailbox
     /// and wake a parked receiver. Never blocks; a dead subject drops the
-    /// message. (scarlet/scheduler.send)
+    /// message. (scarlet/process.send)
     SubjectSend,
     /// `[subject] -> msg` — pop the mailbox's oldest message, parking until
     /// one arrives. Only the owning process may receive.
-    /// (scarlet/scheduler.receive)
+    /// (scarlet/process.receive)
     SubjectReceive,
     /// `[subject, deadline_ms] -> Result(msg, Nil)` — as `SubjectReceive`,
     /// but `Err(Nil)` once the absolute monotonic-ms deadline passes.
-    /// (scarlet/scheduler.receive_until)
+    /// (scarlet/process.receive_until)
     SubjectReceiveUntil,
     /// Push milliseconds elapsed since a process-global monotonic epoch (Int).
     Monotonic,
