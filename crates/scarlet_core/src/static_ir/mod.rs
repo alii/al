@@ -92,6 +92,18 @@ pub struct STypeExport {
     pub doc: Option<StrIdx>,
 }
 
+/// One name a precompiled module exports, as a name list wants it. Borrows
+/// the static pools, so listing a module allocates nothing but the `Vec`.
+#[derive(Debug, Clone)]
+pub struct StaticExport {
+    pub name: &'static str,
+    /// Whether the name is a type (and so a constructor / annotation), rather
+    /// than a value.
+    pub is_type: bool,
+    /// A function's parameter names, in order; empty for a non-function.
+    pub params: Vec<&'static str>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SModule {
     pub types: Slice<STypeExport>,
@@ -202,6 +214,78 @@ impl StaticStdlib {
         }
         iface.doc = m.doc.map(|i| self.s(i));
         iface
+    }
+
+    /// Every precompiled module's key (`scarlet`, `scarlet/string`, ...), in
+    /// key order.
+    pub fn module_keys(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.modules.iter().map(|(k, _)| *k)
+    }
+
+    /// What `key`'s module exports, types first. For name lists (REPL
+    /// completion, `--list`): reading the pools directly costs nothing,
+    /// where [`lookup_module`](Self::lookup_module) rebuilds the whole
+    /// interface. Empty for an unknown key.
+    pub fn exports(&self, key: &str) -> Vec<StaticExport> {
+        let Ok(i) = self.modules.binary_search_by_key(&key, |(k, _)| k) else {
+            return Vec::new();
+        };
+        let m = &self.modules[i].1;
+        let mut out: Vec<StaticExport> = Vec::new();
+        for te in &self.stypeexport_pool[m.types.range()] {
+            out.push(StaticExport {
+                name: self.str_pool[te.name.0 as usize],
+                is_type: true,
+                params: Vec::new(),
+            });
+            // A constructor is written `module.Ctor` exactly like a value
+            // export, so a name list that omitted them would be lying about
+            // what the module offers.
+            out.extend(self.constructors(te.info));
+        }
+        out.extend(self.sexport_pool[m.values.range()].iter().map(|e| {
+            StaticExport {
+                name: self.str_pool[e.name.0 as usize],
+                is_type: false,
+                params: self.str_slice_pool[e.param_names.range()]
+                    .iter()
+                    .map(|&i| self.str_pool[i.0 as usize])
+                    .collect(),
+            }
+        }));
+        // One name, one entry: a record type names its single constructor
+        // after itself, and a type re-exported beside its own declaration
+        // reaches here twice.
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|e| seen.insert(e.name));
+        out
+    }
+
+    /// The constructors of an exported type, with their field labels.
+    fn constructors(&self, info: TypeInfoIdx) -> Vec<StaticExport> {
+        let Some(variants) = self
+            .typeinfos
+            .get(info.0 as usize)
+            .and_then(TypeInfo::variants)
+        else {
+            return Vec::new();
+        };
+        let start = variants.start as usize;
+        self.variants[start..start + variants.len as usize]
+            .iter()
+            .filter_map(|v| {
+                let fields = v.fields;
+                let from = fields.start as usize;
+                Some(StaticExport {
+                    name: self.str_pool.get(v.name.idx()).copied()?,
+                    is_type: false,
+                    params: self.variant_fields[from..from + fields.len as usize]
+                        .iter()
+                        .filter_map(|f| self.str_pool.get(f.label.idx()).copied())
+                        .collect(),
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn lookup_module(&self, key: &str) -> Option<ModuleInterface> {

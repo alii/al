@@ -20,6 +20,9 @@ pub struct Palette {
     pub bold: &'static str,
     pub dim: &'static str,
     pub(crate) red: &'static str,
+    pub(crate) green: &'static str,
+    pub(crate) yellow: &'static str,
+    pub(crate) magenta: &'static str,
     pub(crate) cyan: &'static str,
     pub(crate) blue: &'static str,
     pub error: &'static str,
@@ -35,6 +38,9 @@ const ON: Palette = Palette {
     bold: "\x1b[1m",
     dim: "\x1b[2m",
     red: "\x1b[31m",
+    green: "\x1b[32m",
+    yellow: "\x1b[33m",
+    magenta: "\x1b[35m",
     cyan: "\x1b[36m",
     blue: "\x1b[34m",
     error: "\x1b[1;31m",
@@ -49,6 +55,9 @@ const OFF: Palette = Palette {
     bold: "",
     dim: "",
     red: "",
+    green: "",
+    yellow: "",
+    magenta: "",
     cyan: "",
     blue: "",
     error: "",
@@ -74,8 +83,20 @@ impl Palette {
         Self::for_stream(&std::io::stderr())
     }
 
-    pub(crate) fn enabled(&self) -> bool {
+    pub fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// The two resolved palettes, for tests that must not depend on whether
+    /// the test binary's stdout happens to be a terminal.
+    #[cfg(test)]
+    pub(crate) const fn ansi_for_test() -> Self {
+        ON
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn plain_for_test() -> Self {
+        OFF
     }
 
     /// Render `text` as an OSC 8 terminal hyperlink to `url`. Returns `text`

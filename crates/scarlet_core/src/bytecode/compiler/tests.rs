@@ -610,3 +610,55 @@ mod stdlib_native_gate_probe {
         );
     }
 }
+
+mod repl_entries {
+    //! A REPL entry is a fragment of a session, not a whole program: the line
+    //! that uses a binding is typed next. Reporting it as unused does not just
+    //! print a message — the error makes the module dirty, and a dirty module
+    //! emits no toplevel at all, so the entry silently does not run.
+
+    use super::parse_ok;
+    use crate::ast;
+    use crate::bytecode::{CompileOptions, Op, UnusedBindings, compile, compile_with};
+
+    fn entry(src: &str) -> ast::Expression {
+        ast::Expression::BlockExpression(parse_ok(src))
+    }
+
+    #[test]
+    fn an_unused_binding_is_reported_in_a_file() {
+        let result = compile(&entry("x = 5\n42\n"), None, None);
+        assert!(
+            !result.success(),
+            "a file's unused binding must be an error"
+        );
+    }
+
+    #[test]
+    fn a_repl_entry_with_an_unused_binding_still_runs() {
+        let result = compile_with(
+            &entry("x = 5\n42\n"),
+            CompileOptions {
+                unused_bindings: UnusedBindings::Ignore,
+                ..CompileOptions::default()
+            },
+        );
+        assert!(result.success(), "{:?}", result.diagnostics);
+        let emitted = result.emitted.expect("a successful compile emits");
+        // The entry's value is its tail expression, left on the stack for the
+        // `Halt` the REPL reads. A skipped toplevel ends `PushNil, Pop, Halt`.
+        let ops: Vec<Op> = emitted
+            .program
+            .code
+            .iter()
+            .rev()
+            .take(3)
+            .map(|i| i.op)
+            .collect();
+        assert_eq!(
+            ops,
+            vec![Op::Halt, Op::PushConst, Op::StoreLocal],
+            "the toplevel was not emitted: {ops:?}"
+        );
+    }
+}

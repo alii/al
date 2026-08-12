@@ -23,7 +23,9 @@ pub mod typed_ir;
 
 // Re-exported at their historical paths so `scarlet_core::parser`,
 // `scarlet_core::types`, `scarlet_core::heap` etc. keep naming one definition.
-pub use scarlet_syntax::{ast, desugar, diagnostic, formatter, parser, scanner, span, term, token};
+pub use scarlet_syntax::{
+    ast, desugar, diagnostic, formatter, highlight, parser, scanner, span, term, token,
+};
 pub use scarlet_types::{type_def, types};
 pub use scarlet_vm::{assert_send, assert_send_sync, frozen, heap, tivec};
 

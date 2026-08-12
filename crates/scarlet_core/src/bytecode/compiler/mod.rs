@@ -142,6 +142,21 @@ mod clean {
 }
 use clean::CleanModule;
 
+/// Proof that the entry frame's toplevel was spliced into the code: the
+/// user's program is actually in the `Program`, not just the stdlib init that
+/// precedes it.
+///
+/// Minted only by [`Compiler::append_toplevel_init`] on its `Entry` path, and
+/// the only way to reach [`CompileResult::into_runnable`]. Without it, a
+/// compile that rejected the module still hands back a `Program` whose entry
+/// frame runs the stdlib and halts — which does not fail, it silently
+/// evaluates to whatever the entry frame's locals were pre-filled with. A
+/// caller cannot tell that apart from a real result, and one did not.
+#[must_use]
+struct EntryToplevel {
+    _priv: (),
+}
+
 /// Why a nominal `.field` lookup failed. Carries enough of the offending
 /// variant for the typecheck path to render its diagnostics; lower just
 /// discards it.
@@ -184,14 +199,31 @@ pub struct Emitted {
 }
 
 #[derive(Debug)]
+/// Whether a compilation unit reports the bindings it never uses.
+///
+/// A file is a whole program, so a binding nothing reads is a mistake worth
+/// reporting. A REPL entry is a fragment of a session — the line that uses the
+/// name has not been typed yet — so the same check would reject exactly the
+/// entries the user meant.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnusedBindings {
+    #[default]
+    Report,
+    Ignore,
+}
+
 pub struct CompileResult {
-    /// What the compile built, when it built anything. `None` means no
-    /// program exists at all: the incremental (LSP) session's check path,
-    /// which analyses without materialising a result, and a compile whose
-    /// stdlib seed failed before the program was touched. Consumers that run
-    /// or disassemble must unwrap the absence explicitly — handing a real
-    /// `entry` index over empty code is unrepresentable.
-    pub emitted: Option<Emitted>,
+    /// What the compile built, when it built anything. `None` means nothing
+    /// was materialised at all: the incremental (LSP) session's check path,
+    /// and a compile whose stdlib seed failed before the program was touched.
+    ///
+    /// Private, and reachable only through [`into_runnable`](Self::into_runnable)
+    /// or [`into_artifacts`](Self::into_artifacts): "there is an `Emitted`"
+    /// and "there is a program worth running" are different facts, and the
+    /// field alone cannot tell them apart.
+    emitted: Option<Emitted>,
+    /// Set iff the entry toplevel was spliced. See [`EntryToplevel`].
+    entry: Option<EntryToplevel>,
     pub diagnostics: Vec<Diagnostic>,
     /// Workspace reference graph (the single source of truth for goto-def /
     /// find-refs / rename / symbols / dead-code). An owned `Rc` handle so the
@@ -206,6 +238,26 @@ impl CompileResult {
     /// can disagree with the diagnostics it hands back.
     pub fn success(&self) -> bool {
         !has_errors(&self.diagnostics)
+    }
+
+    /// The program to run, and the only way to reach one.
+    ///
+    /// `None` unless the compiler spliced the user's toplevel into the entry
+    /// frame — which a check-only compile and a rejected module both skip,
+    /// while still leaving an `Emitted` behind for analysis. The answer comes
+    /// from the splice itself ([`EntryToplevel`]), not from re-reading
+    /// `diagnostics`, so a caller that filters a diagnostic away cannot turn
+    /// a compile that never emitted into a run.
+    pub fn into_runnable(self) -> Option<Emitted> {
+        self.entry?;
+        self.emitted
+    }
+
+    /// What analysis built, runnable or not: the function table, the Core IR,
+    /// the frame layouts. For inspecting a compile rather than running it —
+    /// `check` populates this and nothing else.
+    pub fn into_artifacts(self) -> Option<Emitted> {
+        self.emitted
     }
 }
 
@@ -465,6 +517,9 @@ pub struct Compiler {
     /// graph (goto-def/find-refs/dead-code) is built independently via
     /// `module_refs` and is unaffected.
     pub(super) collect_hover_facts: bool,
+    /// Whether `pop_unused_scope` reports what it finds. See
+    /// [`UnusedBindings`].
+    pub(super) unused_bindings: UnusedBindings,
     /// Memo for [`Compiler::restricted_generalization_cons`]: the TypeIds
     /// whose parameters must not generalize at a value binding. Stdlib type
     /// ids are stable across `reset_to` (the watermark sits past the static
@@ -960,12 +1015,47 @@ struct CompiledBody {
     refs: ModuleReferences,
 }
 
+/// Everything one compile can be asked to do differently. Combinations are
+/// named by the entry points below rather than spelled at call sites, so a
+/// new knob does not mean a new argument on five functions.
+#[derive(Default)]
+pub struct CompileOptions<'a> {
+    /// Directory relative imports resolve against. `None` rejects them.
+    pub base_dir: Option<&'a Path>,
+    /// The precompiled stdlib to seed from, if any.
+    pub stdlib: Option<&'static crate::static_ir::StaticStdlib>,
+    /// Analyse without emitting a program.
+    pub check_only: bool,
+    /// Analyse the buffer *as* this module rather than as `main`.
+    pub as_module: Option<ModulePath>,
+    /// Called once per lowered function body; see [`NativeHook`].
+    pub native_hook: Option<NativeHook>,
+    /// Whether bindings nothing reads are reported. See [`UnusedBindings`].
+    pub unused_bindings: UnusedBindings,
+}
+
+impl<'a> CompileOptions<'a> {
+    /// Emit a program from `base_dir`, seeded from `stdlib`: what a file
+    /// compile is. Every other entry point below is this with one field
+    /// changed.
+    pub fn new(
+        base_dir: Option<&'a Path>,
+        stdlib: Option<&'static crate::static_ir::StaticStdlib>,
+    ) -> Self {
+        CompileOptions {
+            base_dir,
+            stdlib,
+            ..Self::default()
+        }
+    }
+}
+
 pub fn compile(
     expr: &ast::Expression,
     base_dir: Option<&Path>,
     pre: Option<&'static crate::static_ir::StaticStdlib>,
 ) -> CompileResult {
-    compile_impl(expr, base_dir, false, None, pre, None)
+    compile_with(expr, CompileOptions::new(base_dir, pre))
 }
 
 /// [`compile`], with a [`NativeHook`] installed for the duration: the hook is
@@ -980,7 +1070,13 @@ pub fn compile_with_native(
     pre: Option<&'static crate::static_ir::StaticStdlib>,
     native_hook: NativeHook,
 ) -> CompileResult {
-    compile_impl(expr, base_dir, false, None, pre, Some(native_hook))
+    compile_with(
+        expr,
+        CompileOptions {
+            native_hook: Some(native_hook),
+            ..CompileOptions::new(base_dir, pre)
+        },
+    )
 }
 
 pub fn check(
@@ -988,7 +1084,13 @@ pub fn check(
     base_dir: Option<&Path>,
     pre: Option<&'static crate::static_ir::StaticStdlib>,
 ) -> CompileResult {
-    compile_impl(expr, base_dir, true, None, pre, None)
+    compile_with(
+        expr,
+        CompileOptions {
+            check_only: true,
+            ..CompileOptions::new(base_dir, pre)
+        },
+    )
 }
 
 /// Analyse a file *as* a specific stdlib module (used when editing
@@ -1000,7 +1102,14 @@ pub fn check_as_module(
     base_dir: Option<&Path>,
     module: ModulePath,
 ) -> CompileResult {
-    compile_impl(expr, base_dir, true, Some(module), None, None)
+    compile_with(
+        expr,
+        CompileOptions {
+            check_only: true,
+            as_module: Some(module),
+            ..CompileOptions::new(base_dir, None)
+        },
+    )
 }
 
 pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compiler {
@@ -1041,6 +1150,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         module_refs: main_refs,
         check_only,
         collect_hover_facts: false,
+        unused_bindings: UnusedBindings::Report,
         restricted_gen_cons: None,
         module_table: ModuleTable::new(),
         module_display: HashMap::new(),
@@ -1108,14 +1218,17 @@ struct CtorHead<'a> {
     name: &'a ast::Identifier,
 }
 
-fn compile_impl(
-    expr: &ast::Expression,
-    base_dir: Option<&Path>,
-    check_only: bool,
-    as_module: Option<ModulePath>,
-    pre: Option<&'static crate::static_ir::StaticStdlib>,
-    native_hook: Option<NativeHook>,
-) -> CompileResult {
+/// The one compile. Every entry point above is a named [`CompileOptions`].
+pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> CompileResult {
+    let CompileOptions {
+        base_dir,
+        stdlib: pre,
+        check_only,
+        as_module,
+        native_hook,
+        unused_bindings,
+    } = options;
+
     // Backpass sugar is rewritten away here, before any typing pass, so
     // inference and lowering never see a `Statement::Backpass`.
     let mut expr = expr.clone();
@@ -1124,6 +1237,7 @@ fn compile_impl(
 
     let mut c = new_compiler(base_dir, check_only);
     c.native_hook = native_hook;
+    c.unused_bindings = unused_bindings;
     if let Some(m) = as_module.clone() {
         // `as_module` is always a stdlib path (see `check_as_module`), whose
         // written form is its canonical identity.
@@ -1835,6 +1949,9 @@ impl Compiler {
     }
 
     fn unused_binding(&mut self, name: &str, sp: Span) {
+        if self.unused_bindings == UnusedBindings::Ignore {
+            return;
+        }
         self.engine.diagnostics.push(Diagnostic::error(
             sp,
             DiagnosticCode::UnusedBinding,
@@ -2921,13 +3038,16 @@ impl Compiler {
     ///
     /// See [`TopKind`] for how the two callers differ in their handling of the
     /// toplevel's tail value.
+    /// Splice a lowered toplevel into the code. Returns the [`EntryToplevel`]
+    /// witness for `TopKind::Entry` — the one place it is minted, so it
+    /// cannot outrun the splice it stands for.
     fn append_toplevel_init(
         &mut self,
         lowered: LoweredBody,
         code_mark: usize,
         slot_base: i32,
         kind: TopKind,
-    ) {
+    ) -> Option<EntryToplevel> {
         use crate::core_ir::{emit, perceus};
         // The elaboration that produced `lowered` drained the queue the check
         // walk filled. A leftover means the two walks disagreed about which
@@ -2961,8 +3081,14 @@ impl Compiler {
         }
         self.program.code.extend(out.code);
         match kind {
-            TopKind::Module => self.program.code.push(op(Op::Pop)),
-            TopKind::Entry => self.core.toplevel = top.body,
+            TopKind::Module => {
+                self.program.code.push(op(Op::Pop));
+                None
+            }
+            TopKind::Entry => {
+                self.core.toplevel = top.body;
+                Some(EntryToplevel { _priv: () })
+            }
         }
     }
 

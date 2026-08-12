@@ -529,6 +529,13 @@ impl IncrementalSession {
         }
     }
 
+    /// Check entries the way a REPL submits them: one fragment at a time, so
+    /// a binding whose use has not been typed yet is not an error. See
+    /// [`UnusedBindings`](crate::bytecode::UnusedBindings).
+    pub fn ignore_unused_bindings(&mut self) {
+        self.c.unused_bindings = crate::bytecode::UnusedBindings::Ignore;
+    }
+
     pub fn compile_count(&self) -> u32 {
         self.c.module_table.compile_count()
     }

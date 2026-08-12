@@ -23,6 +23,7 @@ pub mod ast;
 pub mod desugar;
 pub mod diagnostic;
 pub mod formatter;
+pub mod highlight;
 pub mod module_path;
 pub mod parser;
 pub mod scanner;

@@ -1,43 +1,60 @@
-use rustyline::DefaultEditor;
+//! The interactive REPL.
+//!
+//! A session is a growing piece of *source text*: every entry that defined
+//! something is replayed verbatim ahead of the current one (see
+//! [`Session::eval`]). The line editor's coloring, completion and
+//! multi-line behaviour all come from the same scanner/parser the evaluator
+//! uses, via [`helper::ScarletHelper`].
+
+mod command;
+mod entry;
+mod helper;
+mod names;
+
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
 use rustyline::error::ReadlineError;
+use rustyline::history::FileHistory;
+use rustyline::{Cmd, Config, Editor, EventHandler, KeyCode, KeyEvent, Modifiers};
 
 use crate::ast;
 use crate::bytecode;
-use crate::diagnostic::{self, DiagnosticCode};
-use crate::parser;
-use crate::scanner;
+use crate::bytecode::{CompileOptions, IncrementalSession, UnusedBindings, ValueView};
+use crate::diagnostic;
+use crate::term::Palette;
 use crate::vm;
+use command::Flow;
+use entry::Entry;
+use names::Names;
+
+/// Where an entry's diagnostics say they come from. Not a real path: the
+/// session's replayed source has no file.
+const ORIGIN: &str = "<repl>";
 
 pub fn run(version: &str) {
-    println!("scarlet {} REPL", version);
-    println!("Type expressions to evaluate. Use 'exit' or Ctrl+D to quit.");
-    println!();
-
-    let mut input_buffer = String::new();
-    let mut continuation = false;
-    // Source of every entry that defined something, replayed verbatim ahead
-    // of the current one. Source, not AST: see `eval_input`.
-    let mut prelude = String::new();
-    let mut rl = match DefaultEditor::new() {
-        Ok(e) => e,
+    let palette = Palette::for_stdout();
+    let names = Rc::new(RefCell::new(Names::default()));
+    let mut editor = match new_editor(palette, Rc::clone(&names)) {
+        Ok(editor) => editor,
         Err(e) => {
-            eprintln!("Failed to initialize readline: {}", e);
+            eprintln!("Failed to initialize readline: {e}");
             return;
         }
     };
+    let history = history_path();
+    if let Some(path) = &history {
+        let _ = editor.load_history(path);
+    }
+    banner(version, &palette);
 
+    let mut session = Session::new(palette, names);
     loop {
-        let prompt = if continuation { "... " } else { ">>> " };
-
-        let line = match rl.readline(prompt) {
-            Ok(l) => l,
-            Err(ReadlineError::Interrupted) => {
-                // Ctrl-C abandons the current entry without exiting.
-                println!("^C");
-                input_buffer.clear();
-                continuation = false;
-                continue;
-            }
+        let line = match editor.readline(">>> ") {
+            Ok(line) => line,
+            // Ctrl-C abandons the entry being typed without ending the session.
+            Err(ReadlineError::Interrupted) => continue,
             Err(ReadlineError::Eof) => {
                 println!();
                 break;
@@ -47,135 +64,318 @@ pub fn run(version: &str) {
                 break;
             }
         };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let _ = editor.add_history_entry(line.as_str());
 
-        let line_trimmed = line.trim_end_matches(['\r', '\n']);
-
-        if !continuation && line_trimmed == "exit" {
+        // `exit` predates the `:` commands and stays: it is what a REPL
+        // reaches for first.
+        if matches!(line.trim(), "exit" | "quit") {
             break;
         }
-
-        if !line_trimmed.is_empty() {
-            let _ = rl.add_history_entry(line_trimmed);
-        } else if !continuation {
-            continue;
-        }
-
-        if continuation {
-            input_buffer.push('\n');
-            input_buffer.push_str(line_trimmed);
-        } else {
-            input_buffer = line_trimmed.to_string();
-        }
-
-        if input_buffer.trim().is_empty() {
-            input_buffer.clear();
-            continuation = false;
-            continue;
-        }
-
-        match eval_input(&input_buffer, &prelude) {
-            EvalOutcome::Incomplete => {
-                continuation = true;
-            }
-            EvalOutcome::Failed => {
-                input_buffer.clear();
-                continuation = false;
-            }
-            EvalOutcome::Ok(replay) => {
-                if let Some(src) = replay {
-                    prelude.push_str(&src);
+        match command::parse(&line) {
+            Some(cmd) => match command::execute(cmd, &mut session) {
+                Flow::Continue => {}
+                Flow::Clear => {
+                    if let Err(e) = editor.clear_screen() {
+                        eprintln!("cannot clear the screen: {e}");
+                    }
                 }
-                input_buffer.clear();
-                continuation = false;
+                Flow::Quit => break,
+            },
+            None => session.eval(&line),
+        }
+    }
+
+    if let Some(path) = &history {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = editor.save_history(path);
+    }
+}
+
+fn new_editor(
+    palette: Palette,
+    names: Rc<RefCell<Names>>,
+) -> rustyline::Result<Editor<helper::ScarletHelper, FileHistory>> {
+    let config = Config::builder()
+        .max_history_size(10_000)?
+        .history_ignore_dups(true)?
+        .history_ignore_space(true)
+        .completion_type(rustyline::CompletionType::List)
+        .bell_style(rustyline::config::BellStyle::None)
+        .indent_size(4)
+        .build();
+    let mut editor = Editor::with_config(config)?;
+    editor.set_helper(Some(helper::ScarletHelper::new(palette, names)));
+    // Enter submits when the entry parses and opens a line when it does not
+    // (see the `Validator`). These open one unconditionally, for adding to an
+    // entry that is already complete.
+    //
+    // Shift-Enter is deliberately absent: a terminal sends it as a plain
+    // carriage return, indistinguishable from Enter, unless the user maps it.
+    // `:help` says how. Ctrl-J is the spelling that works everywhere, since it
+    // is a control character in its own right.
+    for key in [
+        KeyEvent(KeyCode::Enter, Modifiers::ALT),
+        KeyEvent(KeyCode::Char('J'), Modifiers::CTRL),
+    ] {
+        editor.bind_sequence(key, EventHandler::Simple(Cmd::Newline));
+    }
+    Ok(editor)
+}
+
+fn banner(version: &str, p: &Palette) {
+    println!("{}scarlet{} {version} REPL", p.scarlet, p.reset);
+    println!(
+        "{}:help for commands and keys, Ctrl-D to quit{}",
+        p.dim, p.reset
+    );
+    println!();
+}
+
+/// `$SCARLET_HISTORY`, else an XDG-ish state file. `None` when there is no
+/// home directory to put it in, in which case history lives only as long as
+/// the session.
+fn history_path() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("SCARLET_HISTORY") {
+        return Some(PathBuf::from(explicit));
+    }
+    if let Some(state) = std::env::var_os("XDG_STATE_HOME") {
+        return Some(PathBuf::from(state).join("scarlet").join("history"));
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(
+        PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("scarlet")
+            .join("history"),
+    )
+}
+
+/// Whether the entry evaluated to nothing worth showing: a declaration, or a
+/// call that ran for its output alone. `Nil` is a prelude type the compiler
+/// refuses to let a program redefine, so its name identifies it.
+fn is_unit(value: &crate::bytecode::Value) -> bool {
+    match value.kind() {
+        ValueView::Nil => true,
+        ValueView::Enum(e) => e.enum_name() == "Nil",
+        _ => false,
+    }
+}
+
+/// The live session: the source it replays, and the names that source bound.
+pub(crate) struct Session {
+    /// Every import the session has seen, and every declaration it has
+    /// accepted, replayed verbatim ahead of the current entry — imports
+    /// first, as the language requires.
+    ///
+    /// Source, not retained AST: each turn is scanned on its own, so retained
+    /// nodes would all restart their spans at line 1 and two same-shaped
+    /// entries would share a `Span` — which the compiler keys expression
+    /// types on. Replaying text keeps every span unique.
+    imports: String,
+    definitions: String,
+    names: Rc<RefCell<Names>>,
+    palette: Palette,
+    /// Relative imports resolve against the directory the REPL was started
+    /// in, which is the only directory a session can be said to be "in".
+    base_dir: Option<PathBuf>,
+}
+
+impl Session {
+    fn new(palette: Palette, names: Rc<RefCell<Names>>) -> Self {
+        Session {
+            imports: String::new(),
+            definitions: String::new(),
+            names,
+            palette,
+            base_dir: std::env::current_dir().ok(),
+        }
+    }
+
+    fn palette(&self) -> &Palette {
+        &self.palette
+    }
+
+    /// How a session compiles an entry: against the directory the REPL was
+    /// started in, and without the unused-binding check, which no fragment of
+    /// a session can pass (see [`UnusedBindings`]).
+    fn compile_options(&self) -> CompileOptions<'_> {
+        CompileOptions {
+            unused_bindings: UnusedBindings::Ignore,
+            ..CompileOptions::new(self.base_dir.as_deref(), Some(&crate::STDLIB))
+        }
+    }
+
+    /// The session's own source: everything it replays ahead of an entry.
+    fn replay(&self) -> String {
+        format!("{}{}", self.imports, self.definitions)
+    }
+
+    /// Compile the session's source plus `input` as one program and run it,
+    /// printing the value unless it is `Nil` (a definition, or a call that ran
+    /// only for its output).
+    fn eval(&mut self, input: &str) {
+        let program = match entry::parse(input) {
+            Entry::Accepted(program) => program,
+            Entry::Incomplete(diagnostics) | Entry::Rejected(diagnostics) => {
+                diagnostic::print_diagnostics(&diagnostics, input, ORIGIN, &|_| None);
+                return;
+            }
+        };
+        // The entry's own imports join the session's ahead of every
+        // definition, so `import` works at any point in a session and not
+        // only in its first entry.
+        let parts = entry::split(input, &program);
+        let combined_src = format!(
+            "{}{}{}{}{}",
+            self.imports, parts.imports, self.definitions, parts.definitions, parts.expressions
+        );
+        let mut scanner = crate::scanner::new_scanner(combined_src.clone());
+        let combined = crate::parser::new_parser(&mut scanner).parse_program();
+        if diagnostic::has_errors(&combined.diagnostics) {
+            self.report(&combined.diagnostics, &combined_src);
+            return;
+        }
+        let combined_ast = ast::Expression::BlockExpression(combined.ast);
+
+        let result = bytecode::compile_with(&combined_ast, self.compile_options());
+        if !result.diagnostics.is_empty() {
+            self.report(&result.diagnostics, &combined_src);
+            if !result.success() {
+                return;
             }
         }
-    }
-}
+        let Some(emitted) = result.emitted else {
+            // A successful non-check compile always emits, so reaching here
+            // means the stdlib seed failed and was already reported.
+            return;
+        };
 
-enum EvalOutcome {
-    Incomplete,
-    Failed,
-    /// The entry's source, iff it defined something worth replaying.
-    Ok(Option<String>),
-}
-
-/// Compile `prelude ++ input` as one source text and run it.
-///
-/// The prelude must stay *source*, not retained AST: each turn is scanned on
-/// its own, so retained nodes would all restart their spans at line 1 and two
-/// same-shaped lines would share a `Span` — which the compiler keys
-/// expression types on. Replaying text makes every span unique.
-fn eval_input(input: &str, prelude: &str) -> EvalOutcome {
-    // Parse the entry alone first: only its diagnostics belong to the user,
-    // and an unterminated form must ask for another line rather than replay.
-    let mut probe_scanner = scanner::new_scanner(input.to_string());
-    let probe_parser = parser::new_parser(&mut probe_scanner);
-    let probe = probe_parser.parse_program();
-
-    if diagnostic::has_errors(&probe.diagnostics) {
-        if probe
-            .diagnostics
-            .iter()
-            .any(|d| d.code == DiagnosticCode::UnexpectedEof)
-        {
-            return EvalOutcome::Incomplete;
+        let mut vm = match vm::new_vm(emitted.program) {
+            Ok(vm) => vm,
+            Err(err) => return eprintln!("Runtime error: {err}"),
+        };
+        let value = match vm.run() {
+            Ok(value) => value,
+            Err(err) => {
+                // Per `VM::run`'s contract an errored run leaks its scheduler
+                // threads. The REPL accepts one leak per errored evaluation to
+                // keep the session alive.
+                return eprintln!("Runtime error: {err}");
+            }
+        };
+        // Only an entry that ends in an expression has a value the user wrote.
+        // What a definition leaves on the stack is a compiler artifact, and
+        // printing it says nothing about the entry.
+        if !parts.expressions.trim().is_empty() && !is_unit(&value) {
+            println!("{}", vm::inspect(&value, vm.program()));
         }
-        diagnostic::print_diagnostics(&probe.diagnostics, input, "<repl>", &|_| None);
-        return EvalOutcome::Failed;
+
+        self.names.borrow_mut().observe(&program);
+        self.imports.push_str(&parts.imports);
+        self.definitions.push_str(&parts.definitions);
     }
 
-    let combined_src = format!("{prelude}{input}\n");
-    let mut combined_scanner = scanner::new_scanner(combined_src.clone());
-    let combined_parser = parser::new_parser(&mut combined_scanner);
-    let combined = combined_parser.parse_program();
-    if diagnostic::has_errors(&combined.diagnostics) {
-        diagnostic::print_diagnostics(&combined.diagnostics, &combined_src, "<repl>", &|_| None);
-        return EvalOutcome::Failed;
-    }
-    let combined_ast = ast::Expression::BlockExpression(combined.ast);
+    /// The inferred type of `expr`, from a throwaway checking session. Bound
+    /// to a name because types are recorded at names: `_`-prefixed so the
+    /// binding is not reported as unused.
+    fn print_type(&mut self, expr: &str) {
+        const BINDING: &str = "const _repl_type = ";
 
-    let result = bytecode::compile(&combined_ast, None, Some(&crate::STDLIB));
+        let replay = self.replay();
+        let probe_src = format!("{replay}{BINDING}{expr}\n");
+        let mut scanner = crate::scanner::new_scanner(probe_src.clone());
+        let probe = crate::parser::new_parser(&mut scanner).parse_program();
+        if diagnostic::has_errors(&probe.diagnostics) {
+            self.report(&probe.diagnostics, &probe_src);
+            return;
+        }
 
-    if !result.diagnostics.is_empty() {
-        diagnostic::print_diagnostics(&result.diagnostics, &combined_src, "<repl>", &|_| None);
+        let mut session = IncrementalSession::new(&crate::STDLIB);
+        session.ignore_unused_bindings();
+        let result = session.check(
+            &ast::Expression::BlockExpression(probe.ast),
+            self.base_dir.as_deref(),
+        );
         if !result.success() {
-            return EvalOutcome::Failed;
+            self.report(&result.diagnostics, &probe_src);
+            return;
+        }
+        // The binding is the last line of the probe source, and its name
+        // starts one column past `const `.
+        let line = i32::try_from(replay.lines().count()).unwrap_or(0);
+        let column = i32::try_from("const ".len()).unwrap_or(0);
+        match session.hover(None, line, column) {
+            Some((_, ty, _)) => println!("{expr}  {}{ty}{}", self.palette.bold, self.palette.reset),
+            None => eprintln!("no type was inferred for that expression"),
         }
     }
 
-    let Some(emitted) = result.emitted else {
-        // A successful non-check compile always emits, so reaching here
-        // means the stdlib seed failed and was already reported.
-        return EvalOutcome::Failed;
-    };
-    let program = emitted.program;
-
-    let mut v = match vm::new_vm(program) {
-        Ok(vm) => vm,
-        Err(err) => {
-            eprintln!("Runtime error: {}", err);
-            return EvalOutcome::Failed;
+    /// The bytecode of the session's functions whose name contains `needle`.
+    /// Filtered, never whole: the emitted program carries the entire stdlib.
+    fn disassemble(&mut self, needle: &str) {
+        let replay = self.replay();
+        let mut scanner = crate::scanner::new_scanner(replay.clone());
+        let parsed = crate::parser::new_parser(&mut scanner).parse_program();
+        let result = bytecode::compile_with(
+            &ast::Expression::BlockExpression(parsed.ast),
+            self.compile_options(),
+        );
+        if !result.success() {
+            self.report(&result.diagnostics, &replay);
+            return;
         }
-    };
-    let run_result = match v.run() {
-        Ok(val) => val,
-        Err(err) => {
-            // Per `VM::run`'s contract an errored run leaks its scheduler
-            // threads. The REPL accepts one leak per errored evaluation to
-            // keep the session alive.
-            eprintln!("Runtime error: {}", err);
-            return EvalOutcome::Failed;
+        let Some(emitted) = result.emitted else {
+            return;
+        };
+        // Asked here rather than by looking at the listing, which carries a
+        // program header whether or not anything matched.
+        if !emitted
+            .program
+            .functions
+            .iter()
+            .any(|f| f.name.contains(needle))
+        {
+            eprintln!("no function matching '{needle}'");
+            return;
         }
-    };
+        print!("{}", crate::dis::disassemble_fn(&emitted.program, needle));
+    }
 
-    println!("{}", vm::inspect(&run_result, v.program()));
+    /// Evaluate a file as one entry, so its definitions join the session.
+    fn load(&mut self, path: &Path) {
+        match std::fs::read_to_string(path) {
+            Ok(source) => self.eval(source.trim_end()),
+            Err(e) => eprintln!("cannot read {}: {e}", path.display()),
+        }
+    }
 
-    // Replay only entries that bound or declared something: re-running a
-    // bare expression every turn would repeat its effects.
-    let defines = probe
-        .ast
-        .body
-        .iter()
-        .any(|n| matches!(n, ast::Node::Statement(_)));
-    EvalOutcome::Ok(defines.then(|| format!("{input}\n")))
+    /// Write the session's replayed source — every entry that defined
+    /// something — to a file that `scarlet run` can take.
+    fn save(&self, path: &Path) {
+        let replay = self.replay();
+        if replay.is_empty() {
+            eprintln!("nothing defined yet");
+            return;
+        }
+        match std::fs::write(path, &replay) {
+            Ok(()) => println!("wrote {}", path.display()),
+            Err(e) => eprintln!("cannot write {}: {e}", path.display()),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.imports.clear();
+        self.definitions.clear();
+        self.names.borrow_mut().reset();
+    }
+
+    fn report(&self, diagnostics: &[diagnostic::Diagnostic], source: &str) {
+        diagnostic::print_diagnostics(diagnostics, source, ORIGIN, &|_| None);
+    }
 }
