@@ -696,11 +696,7 @@ impl VM {
     /// If `bits` is not byte-aligned, the error to push, built from the
     /// caller's unaligned-binary slot.
     #[inline]
-    pub(super) fn reject_unaligned(
-        &mut self,
-        bits: u64,
-        unaligned: AbiSlot,
-    ) -> VmResult<Option<Value>> {
+    fn reject_unaligned(&mut self, bits: u64, unaligned: AbiSlot) -> VmResult<Option<Value>> {
         if bits.is_multiple_of(8) {
             return Ok(None);
         }

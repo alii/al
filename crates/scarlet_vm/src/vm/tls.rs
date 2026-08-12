@@ -122,7 +122,7 @@ impl TlsIo {
         self.tcp.as_raw_fd()
     }
 
-    pub(super) fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
+    fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
         self.tcp.peer_addr()
     }
 
@@ -595,7 +595,7 @@ impl VM {
     }
 
     /// Build the Scarlet `TlsError` for a failure.
-    pub(super) fn tls_error_value(&mut self, fail: TlsFail) -> VmResult<Value> {
+    fn tls_error_value(&mut self, fail: TlsFail) -> VmResult<Value> {
         match fail {
             TlsFail::InvalidServerName => self.abi_nullary(AbiSlot::TlsInvalidServerName),
             TlsFail::Io(e) => {
