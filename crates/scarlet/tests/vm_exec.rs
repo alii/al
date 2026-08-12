@@ -1067,4 +1067,36 @@ run_case! {
          each([1, 2], println)\n",
         "1\n2\n",
     ),
+    // The three above name the value at the *toplevel*; these two name it inside
+    // a function body, where the wrapper is written into the deferral region
+    // instead. That is new coverage of the shape — eta-expanding a builtin and a
+    // constructor reached through a body, and calling the result.
+    //
+    // It is not a witness for the jump-over mispatch `tests/check_parity.rs`
+    // pins: both cases pass against the unfixed compiler, because the mispatched
+    // jump is never executed. Only the layout assertion catches that.
+    builtin_as_a_value_inside_a_function_body: (
+        "import scarlet/array\n\
+         import scarlet/string\n\
+         fn lens(xs Array(String)) Array(Int) {\n\
+         \tarray.map(xs, string.length)\n\
+         }\n\
+         println(lens(['a', 'bb', 'ccc']))\n",
+        "[1, 2, 3]\n",
+    ),
+    ctor_as_a_value_inside_a_function_body: (
+        "import scarlet/array\n\
+         type W { W(v Int) }\n\
+         fn wrap(xs Array(Int)) Array(W) {\n\
+         \tarray.map(xs, W)\n\
+         }\n\
+         fn total(ws Array(W)) Int {\n\
+         \tarray.fold(ws, 0, fn(a, w) match w {\n\
+         \t\tW(v) -> a + v\n\
+         \t})\n\
+         }\n\
+         println(array.length(wrap([1, 2, 3])))\n\
+         println(total(wrap([4, 5, 6])))\n",
+        "3\n15\n",
+    ),
 }
