@@ -1088,9 +1088,7 @@ impl VM {
     /// Block until another scheduler notifies this one (seed submitted or
     /// program finished).
     fn wait_for_notify(&mut self) -> VmResult<()> {
-        self.poll
-            .poll(&mut self.poll_events, None)
-            .map_err(VmError::Io)?;
+        poll::poll_wait(&mut self.poll, &mut self.poll_events, None)?;
         // A retire notify wakes an idle scheduler with no seed to run. Its
         // registration and Arc clone must still be dropped here, or the shared
         // fd never closes.
@@ -1232,12 +1230,7 @@ impl VM {
     /// nothing: a notice must outlive whatever exit it is reporting. `f`'s
     /// arity is `args.len()` by the caller's check; `args` point into `heap`
     /// or are immediates, like `f` itself.
-    pub(super) fn spawn_process_with_heap_args(
-        &mut self,
-        heap: ProcHeap,
-        f: Value,
-        args: &[Value],
-    ) {
+    fn spawn_process_with_heap_args(&mut self, heap: ProcHeap, f: Value, args: &[Value]) {
         let pid = self.alloc_pid(Link::None);
         self.start_process(pid, heap, f, args);
     }

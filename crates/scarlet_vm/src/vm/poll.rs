@@ -229,6 +229,23 @@ pub(super) fn monotonic_now_ms() -> i64 {
     ms.min(i64::MAX as u128) as i64
 }
 
+/// One wait on a scheduler's poller. mio hands `EINTR` to its caller, and a
+/// signal landing on this thread (a child of a port ending, say) is nothing
+/// to the scheduler: every wait here is one interruptible sleep whose caller
+/// re-checks its sources on return, so an interrupted wait is a wake with
+/// nothing ready. Anything else the poller reports is an OS failure.
+pub(super) fn poll_wait(
+    poll: &mut mio::Poll,
+    events: &mut mio::Events,
+    timeout: Option<Duration>,
+) -> VmResult<()> {
+    match poll.poll(events, timeout) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::Interrupted => Ok(()),
+        Err(e) => Err(VmError::Io(e)),
+    }
+}
+
 impl VM {
     /// Register `fd` under socket `id` with every interest it can ever park on.
     /// An fd number still registered from a stale entry (a close that skipped
@@ -563,9 +580,9 @@ impl VM {
         // Take the reusable buffer out because the wake paths below need
         // `&mut self`. The capacity-0 placeholder allocates nothing.
         let mut events = std::mem::replace(&mut self.poll_events, mio::Events::with_capacity(0));
-        if let Err(e) = self.poll.poll(&mut events, timeout) {
+        if let Err(e) = poll_wait(&mut self.poll, &mut events, timeout) {
             self.poll_events = events;
-            return Err(VmError::Io(e));
+            return Err(e);
         }
         for ev in events.iter() {
             if ev.token() == WAKER_TOKEN {

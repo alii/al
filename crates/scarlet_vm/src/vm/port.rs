@@ -183,11 +183,11 @@ pub(super) fn reap(mut child: Child) -> io::Result<ChildExit> {
 /// The `PortIo` half that outlives the table entry: everything but the
 /// child is dropped here, closing the pipes, and the child goes to `reap`.
 impl PortIo {
-    pub(super) fn into_child(self) -> Child {
+    fn into_child(self) -> Child {
         self.child
     }
 
-    pub(super) fn os_pid(&self) -> u32 {
+    fn os_pid(&self) -> u32 {
         self.child.id()
     }
 }

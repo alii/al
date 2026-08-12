@@ -269,7 +269,7 @@ impl Runtime {
     /// the kill stick whatever the process is doing — then pokes the
     /// scheduler last known to hold it. A pid that has already ended is a
     /// no-op. Returns whether the process was alive.
-    pub(super) fn kill(&self, pid: u64) -> bool {
+    fn kill(&self, pid: u64) -> bool {
         let sched = {
             let mut shard = lock(self.processes.shard(pid));
             let Some(r) = shard.get_mut(&pid) else {
@@ -298,7 +298,7 @@ impl Runtime {
         };
         let exit = match exit {
             Exit::Normal if record.killed => Exit::Killed,
-            other => other,
+            Exit::Normal | Exit::Killed | Exit::Crashed(_) => exit,
         };
         let spread = exit.spreads_over_links();
         let mut aftermath = Aftermath::empty();
@@ -391,7 +391,7 @@ impl Runtime {
     }
 
     #[cfg(test)]
-    pub(super) fn is_live_process(&self, pid: u64) -> bool {
+    fn is_live_process(&self, pid: u64) -> bool {
         lock(self.processes.shard(pid)).contains_key(&pid)
     }
 }

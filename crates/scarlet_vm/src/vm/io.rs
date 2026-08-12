@@ -910,7 +910,7 @@ fn connection_mut(conns: &mut HashMap<i32, super::Conn>, id: i32) -> std::io::Re
 }
 
 #[cold]
-pub(super) fn stale_socket() -> std::io::Error {
+fn stale_socket() -> std::io::Error {
     // A raw errno, because the NetError mapping routes on `raw_os_error`: an
     // errno-less error would map use-after-close to `Errno(0)`.
     std::io::Error::from_raw_os_error(libc::ENOTCONN)
