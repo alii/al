@@ -141,7 +141,7 @@ impl Validator for ScarletHelper {
         }
         Ok(match entry::parse(input) {
             Entry::Incomplete(_) => ValidationResult::Incomplete,
-            _ => ValidationResult::Valid(None),
+            Entry::Rejected(_) | Entry::Accepted(_) => ValidationResult::Valid(None),
         })
     }
 }

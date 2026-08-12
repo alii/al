@@ -13,14 +13,9 @@ use crate::token::{Kind, Token, is_type_name};
 
 /// `source` colored for a terminal, or `source` unchanged when the palette is
 /// off. Partial input is fine: the scanner's error recovery is what decides
-/// how a half-typed line is colored.
-pub fn highlight(source: &str, p: &Palette) -> String {
-    highlight_at(source, p, None)
-}
-
-/// [`highlight`], additionally bolding the bracket pair that the cursor at
-/// byte offset `cursor` sits on (either side of it), the way an editor shows
-/// which `}` closes the `{` under the caret.
+/// how a half-typed line is colored. Additionally bolds the bracket pair that
+/// the cursor at byte offset `cursor` sits on (either side of it), the way an
+/// editor shows which `}` closes the `{` under the caret.
 pub fn highlight_at(source: &str, p: &Palette, cursor: Option<usize>) -> String {
     if !p.enabled() || source.is_empty() {
         return source.to_string();
@@ -283,7 +278,11 @@ mod tests {
 
     #[track_caller]
     fn assert_transparent(src: &str) {
-        assert_eq!(strip(&highlight(src, &P)), src, "source text changed");
+        assert_eq!(
+            strip(&highlight_at(src, &P, None)),
+            src,
+            "source text changed"
+        );
     }
 
     #[test]
@@ -307,28 +306,31 @@ mod tests {
 
     #[test]
     fn keywords_strings_and_numbers_get_distinct_colors() {
-        let out = highlight("const x = 'hi'", &P);
+        let out = highlight_at("const x = 'hi'", &P, None);
         assert!(
             out.contains("\x1b[35mconst"),
             "keyword not magenta: {out:?}"
         );
         assert!(out.contains("\x1b[32m'hi'"), "string not green: {out:?}");
-        let out = highlight("const x = 42", &P);
+        let out = highlight_at("const x = 42", &P, None);
         assert!(out.contains("\x1b[33m42"), "number not yellow: {out:?}");
     }
 
     #[test]
     fn a_comment_between_tokens_is_dimmed() {
-        let out = highlight("const x = 1 // note\n", &P);
+        let out = highlight_at("const x = 1 // note\n", &P, None);
         assert!(out.contains("\x1b[2m// note"), "comment not dim: {out:?}");
     }
 
     #[test]
     fn a_type_name_and_a_callee_differ_from_a_binding() {
-        let out = highlight("println(Int)", &P);
+        let out = highlight_at("println(Int)", &P, None);
         assert!(out.contains("\x1b[34mprintln"), "callee not blue: {out:?}");
         assert!(out.contains("\x1b[36mInt"), "type not cyan: {out:?}");
-        assert!(!highlight("x", &P).contains('\x1b'), "plain name colored");
+        assert!(
+            !highlight_at("x", &P, None).contains('\x1b'),
+            "plain name colored"
+        );
     }
 
     #[test]
@@ -349,7 +351,7 @@ mod tests {
 
     #[test]
     fn an_interpolation_hole_is_not_string_colored() {
-        let out = highlight("'a ${b} c'", &P);
+        let out = highlight_at("'a ${b} c'", &P, None);
         // The name inside the hole keeps its own (absent) color, so the green
         // run must be broken by the reset that ends the `${`.
         assert!(strip(&out) == "'a ${b} c'");
@@ -362,7 +364,7 @@ mod tests {
 
     #[test]
     fn a_qualified_member_being_typed_is_colored() {
-        let out = highlight("http.Del", &P);
+        let out = highlight_at("http.Del", &P, None);
         assert!(
             out.contains("\x1b[36mDel"),
             "type-cased member not cyan: {out:?}"
@@ -372,6 +374,9 @@ mod tests {
     #[test]
     fn a_disabled_palette_adds_nothing() {
         let plain = crate::term::Palette::plain_for_test();
-        assert_eq!(highlight("const x = 'hi'", &plain), "const x = 'hi'");
+        assert_eq!(
+            highlight_at("const x = 'hi'", &plain, None),
+            "const x = 'hi'"
+        );
     }
 }

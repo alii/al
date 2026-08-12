@@ -97,9 +97,6 @@ pub struct STypeExport {
 #[derive(Debug, Clone)]
 pub struct StaticExport {
     pub name: &'static str,
-    /// Whether the name is a type (and so a constructor / annotation), rather
-    /// than a value.
-    pub is_type: bool,
     /// A function's parameter names, in order; empty for a non-function.
     pub params: Vec<&'static str>,
 }
@@ -235,7 +232,6 @@ impl StaticStdlib {
         for te in &self.stypeexport_pool[m.types.range()] {
             out.push(StaticExport {
                 name: self.str_pool[te.name.0 as usize],
-                is_type: true,
                 params: Vec::new(),
             });
             // A constructor is written `module.Ctor` exactly like a value
@@ -246,7 +242,6 @@ impl StaticStdlib {
         out.extend(self.sexport_pool[m.values.range()].iter().map(|e| {
             StaticExport {
                 name: self.str_pool[e.name.0 as usize],
-                is_type: false,
                 params: self.str_slice_pool[e.param_names.range()]
                     .iter()
                     .map(|&i| self.str_pool[i.0 as usize])
@@ -278,7 +273,6 @@ impl StaticStdlib {
                 let from = fields.start as usize;
                 Some(StaticExport {
                     name: self.str_pool.get(v.name.idx()).copied()?,
-                    is_type: false,
                     params: self.variant_fields[from..from + fields.len as usize]
                         .iter()
                         .filter_map(|f| self.str_pool.get(f.label.idx()).copied())
