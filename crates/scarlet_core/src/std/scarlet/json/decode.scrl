@@ -114,12 +114,6 @@ pub fn fail(expected String) Decoder(a) {
 	Decoder(fn(path, doc) Err(one_failure(path, expected, doc)))
 }
 
-// The `read` argument is passed as an explicit lambda at every call site
-// below rather than as the bare builtin. That is a workaround for T-135:
-// a `@vm` builtin used as a first-class value eta-expands into a wrapper
-// whose deferral-region jump-over is patched to the wrong target, which
-// `check_parity`'s `jump_overs_skip_every_body_parked_beside_them` catches.
-// The extra closure is built once per decoder, not once per field.
 fn scalar(expected String, read fn(json.Doc) Option(a)) Decoder(a) {
 	Decoder(fn(path, doc) match read(doc) {
 		Some(v) -> Ok(v)
@@ -128,21 +122,21 @@ fn scalar(expected String, read fn(json.Doc) Option(a)) Decoder(a) {
 }
 
 pub fn string_value() Decoder(String) {
-	scalar('a string', fn(d) json.string(d))
+	scalar('a string', json.string)
 }
 
 // A JSON integer. A number too large for an `Int` fails here rather than
 // arriving truncated — see `scarlet/json`.
 pub fn int() Decoder(Int) {
-	scalar('an integer', fn(d) json.int(d))
+	scalar('an integer', json.int)
 }
 
 pub fn float() Decoder(Float) {
-	scalar('a number', fn(d) json.float(d))
+	scalar('a number', json.float)
 }
 
 pub fn bool() Decoder(Bool) {
-	scalar('a boolean', fn(d) json.bool(d))
+	scalar('a boolean', json.bool)
 }
 
 // A 64-bit integer that arrived as a JSON *string*.

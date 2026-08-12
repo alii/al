@@ -93,16 +93,8 @@ pub type TlsError {
 // is not a decision a runtime should take on a program's behalf. Nothing is
 // therefore resumed across separate runs of a program.
 pub fn connect(host String, port Int) Result(TlsSocket, TlsError) {
-	// An explicit match, where this module would otherwise backpass. The
-	// backpassing form —
-	// `sock <- result.then(result.map_err(net.connect(host, port), Transport))`
-	// — miscompiles: a jump-over is patched to land on the first instruction of
-	// this body instead of past it, which check_parity catches. T-129. Restore
-	// the backpassing once that is fixed.
-	match net.connect(host, port) {
-		Ok(sock) -> handshake(sock, host)
-		Err(e) -> Err(Transport(e))
-	}
+	sock <- result.then(result.map_err(net.connect(host, port), Transport))
+	handshake(sock, host)
 }
 
 // Complete a TLS handshake over an already-connected socket, verifying the
