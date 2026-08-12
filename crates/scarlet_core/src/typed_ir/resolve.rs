@@ -16,7 +16,7 @@
 
 use crate::bytecode::Op;
 use crate::core_ir::{FuncIdx, VariantRef};
-use crate::types::{StrId, ValueKind};
+use crate::types::ValueKind;
 
 use super::{Arity, CaptureIdx, FrameSlot, GlobalSlot, RTy, TypedCallee, TypedExpr, ValueRef};
 
@@ -136,12 +136,19 @@ impl Denotation {
     /// `None` for [`ValueKind::Local`] / [`ValueKind::ModuleFn`], which denote
     /// a *place* only the binding frame knows. Taking no place parameter is
     /// what stops a constructor's frame resolution leaking into a [`ValueRef`].
-    pub(crate) fn from_kind(kind: ValueKind, name: StrId) -> Option<Self> {
+    ///
+    /// Takes no name either, for the same reason: every field of the
+    /// [`VariantRef`] is the declaration's, so the name a use site spelled the
+    /// constructor with cannot reach codegen. It used to be the one field read
+    /// off the binding, which is how an aliased import put `G` where `Green`
+    /// belonged.
+    pub(crate) fn from_kind(kind: ValueKind) -> Option<Self> {
         match kind {
             ValueKind::Constructor {
                 type_id,
                 variant_idx,
                 type_name,
+                variant_name,
                 arity,
                 ..
             } => Some(Denotation::ctor(
@@ -149,7 +156,7 @@ impl Denotation {
                     type_id,
                     variant_idx,
                     type_name,
-                    variant_name: name,
+                    variant_name,
                 },
                 Arity(arity),
             )),
@@ -205,6 +212,7 @@ impl Denotation {
 mod tests {
     use super::*;
     use crate::type_def::TypeId;
+    use crate::types::StrId;
 
     const TY: RTy = RTy(7);
 
@@ -234,8 +242,8 @@ mod tests {
     /// the frame that bound it knows where it lives.
     #[test]
     fn the_kind_bridge_defers_places_to_the_frame() {
-        assert_eq!(Denotation::from_kind(ValueKind::ModuleFn, StrId(0)), None);
-        assert_eq!(Denotation::from_kind(ValueKind::Local, StrId(0)), None);
+        assert_eq!(Denotation::from_kind(ValueKind::ModuleFn), None);
+        assert_eq!(Denotation::from_kind(ValueKind::Local), None);
     }
 
     /// A nested lambda's frame is a real closure frame, so `PushSelf` is right.
@@ -327,18 +335,21 @@ mod tests {
 
     /// A constructor's frame resolution is meaningless and must not leak into
     /// a `ValueRef`. `from_kind` takes no place at all, so it cannot.
+    ///
+    /// It takes no name either, so the `VariantRef` it builds is the
+    /// declaration's in every field. The name a use site bound the constructor
+    /// under used to be passed in alongside, and an aliased import made that
+    /// the alias.
     #[test]
     fn a_ctors_meaningless_frame_resolution_cannot_leak() {
-        let d = Denotation::from_kind(
-            ValueKind::Constructor {
-                type_name: StrId(10),
-                type_id: TypeId(3),
-                variant_idx: 1,
-                arity: 0,
-                field_labels: crate::types::ArenaSlice::EMPTY,
-            },
-            StrId(11),
-        )
+        let d = Denotation::from_kind(ValueKind::Constructor {
+            type_name: StrId(10),
+            type_id: TypeId(3),
+            variant_idx: 1,
+            variant_name: StrId(11),
+            arity: 0,
+            field_labels: crate::types::ArenaSlice::EMPTY,
+        })
         .expect("a constructor's kind fixes its denotation");
         assert_eq!(d.as_value(), ValueForm::Ctor(variant()));
         assert_eq!(d.as_ctor(), Some((variant(), Arity(0))));
@@ -347,7 +358,7 @@ mod tests {
     /// A builtin's kind fixes it too, and it is not a constructor.
     #[test]
     fn a_builtins_kind_fixes_its_denotation() {
-        let d = Denotation::from_kind(ValueKind::Builtin { op: Op::Add }, StrId(0))
+        let d = Denotation::from_kind(ValueKind::Builtin { op: Op::Add })
             .expect("a builtin's kind fixes its denotation");
         assert_eq!(d, Denotation::builtin(Op::Add));
         assert_eq!(d.as_ctor(), None);

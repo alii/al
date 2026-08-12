@@ -881,8 +881,13 @@ impl Compiler {
                 }
 
                 let fields = c.engine.push_variant_fields(&field_defs);
+                // One interned name for the variant, shared by the type's
+                // variant table and the constructor's own scheme, so a use
+                // site never has to re-derive it from the name it was bound
+                // under — which an alias changes.
+                let variant_name = c.engine.intern(&ctor.identifier.name);
                 variants.push(Variant {
-                    name: c.engine.intern(&ctor.identifier.name),
+                    name: variant_name,
                     fields,
                 });
                 let field_labels = c.engine.push_str_ids(&label_ids);
@@ -898,6 +903,7 @@ impl Compiler {
                     type_name: type_name_id,
                     type_id,
                     variant_idx,
+                    variant_name,
                     arity: ctor.fields.len() as u16,
                     field_labels,
                 };
