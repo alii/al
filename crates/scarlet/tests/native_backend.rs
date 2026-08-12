@@ -193,6 +193,58 @@ println(spin(3000000, 0))
     );
 }
 
+/// An aliased constructor's match arm, run hot. The alias tests in
+/// `modules.rs` all run cold, and cold is the one configuration where the two
+/// engines cannot be seen to disagree: with the ladder testing the name as
+/// the arm spelled it, the interpreted iterations fell to the catch-all and
+/// the compiled ones did not, so one program returned two answers inside one
+/// process, with no error on either stream.
+///
+/// `hit` is a separate body so it warms on call count, and 20,000 iterations
+/// put both sides of the threshold in the sum: 20,000 is reachable only if
+/// every iteration took the aliased arm, whichever engine ran it. The debug
+/// line is the witness that the compile fired at all — without it a green
+/// result could mean the body never left the interpreter.
+#[test]
+fn a_warmed_aliased_match_agrees_across_the_warmup_boundary() {
+    let src = "import ./color
+import ./color.{Color, Green as G}
+
+fn hit(c Color) Int {
+	match c {
+		G(_s) -> 1
+		_ -> 0
+	}
+}
+
+fn drive(i Int, acc Int) Int {
+	if i == 0 { acc } else { drive(i - 1, acc + hit(color.make(i))) }
+}
+
+println(drive(20000, 0))
+";
+    let proj = Project::new("alias_warm");
+    proj.write(
+        "color.scrl",
+        "pub type Color {\n\tRed\n\tGreen(shade Int)\n}\n\npub fn make(n Int) Color {\n\tGreen(n)\n}\n",
+    );
+    let path = proj.dir.join("prog.scrl");
+    std::fs::write(&path, src).unwrap();
+    let path = path.to_string_lossy().into_owned();
+    let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
+    assert!(out.success, "run failed:\n{}", out.stderr);
+    assert_eq!(
+        out.stdout, "20000\n",
+        "an aliased arm must match under both engines; stderr:\n{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("warmed fn"),
+        "the match must be compiled, or this only tests the interpreter; stderr:\n{}",
+        out.stderr
+    );
+}
+
 /// (d) Int overflow spill past ±2^47, where Ints leave the NaN-box payload,
 /// and at the i64 wrap. The recursion warms both functions mid-run, so the
 /// pinned literals hold across the interp→native switch.

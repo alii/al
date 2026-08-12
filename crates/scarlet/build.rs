@@ -354,10 +354,11 @@ fn valuekind(k: ValueKind) -> String {
             type_name,
             type_id,
             variant_idx,
+            variant_name,
             arity,
             field_labels,
         } => format!(
-            "ValueKind::Constructor {{ type_name: {type_name:?}, type_id: {}, variant_idx: {variant_idx}, arity: {arity}, field_labels: {} }}",
+            "ValueKind::Constructor {{ type_name: {type_name:?}, type_id: {}, variant_idx: {variant_idx}, variant_name: {variant_name:?}, arity: {arity}, field_labels: {} }}",
             tid(type_id),
             aslice(field_labels)
         ),

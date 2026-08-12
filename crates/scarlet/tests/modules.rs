@@ -453,6 +453,170 @@ fn an_aliased_arm_still_leaves_the_other_variant_missing() {
     project_rejects(&proj, "check", "main.scrl", &["not exhaustive", "Green"]);
 }
 
+/// `Color`, plus a constructor function in the declaring module. The four
+/// tests above all build their scrutinee in the matching file, which is the
+/// one arrangement where an alias-named value and an alias-named test agree;
+/// a value that crosses a module boundary is the ordinary case.
+const COLOR_MAKE_SRC: &str =
+    "pub type Color {\n\tRed\n\tGreen(shade Int)\n}\n\npub fn make(n Int) Color {\n\tGreen(n)\n}\n";
+
+/// Three variants, so a catch-all arm stays reachable alongside an arm that
+/// covers only one of them.
+const HUE_SRC: &str = "pub type Hue {\n\tRed\n\tGreen(shade Int)\n\tBlue\n}\n\npub fn make(n Int) Hue {\n\tGreen(n)\n}\n";
+
+/// A match with a catch-all arm is not exhaustive-by-heads, so it lowers to
+/// the test ladder rather than the tag switch. The ladder compared the
+/// scrutinee against the variant name *as the pattern spelled it*, so an
+/// aliased head tested for a name no value ever carries: the arm was dead and
+/// control fell to the catch-all, silently.
+///
+/// The four tests above omit a catch-all, so all four take the switch and
+/// none of them can see this.
+#[test]
+fn an_aliased_arm_matches_beside_a_catch_all() {
+    let proj = Project::new("alias_ctor_catchall");
+    proj.write("color.scrl", COLOR_MAKE_SRC);
+    proj.write(
+        "main.scrl",
+        "import ./color\nimport ./color.{Green as G}\n\nx = color.make(9)\nmatch x {\n\tG(s) -> println(s)\n\t_ -> println(0)\n}\n",
+    );
+    run_project_outputs(&proj, "run", "main.scrl", "9\n");
+}
+
+/// A bare binding arm is a catch-all too, and takes the same ladder. This is
+/// the shape that broke RESP3 pub/sub: `other -> ...` after an aliased head.
+#[test]
+fn an_aliased_arm_matches_beside_a_bare_binding_catch_all() {
+    let proj = Project::new("alias_ctor_binding_catchall");
+    proj.write("color.scrl", COLOR_MAKE_SRC);
+    proj.write(
+        "main.scrl",
+        "import ./color\nimport ./color.{Green as G}\n\nx = color.make(7)\nmatch x {\n\tG(s) -> println(s)\n\tother -> println(other)\n}\n",
+    );
+    run_project_outputs(&proj, "run", "main.scrl", "7\n");
+}
+
+/// The same match, with the scrutinee built through the qualifier in this
+/// file rather than returned from the module.
+#[test]
+fn an_aliased_arm_matches_a_qualified_scrutinee_beside_a_catch_all() {
+    let proj = Project::new("alias_ctor_qual_catchall");
+    proj.write("color.scrl", COLOR_MAKE_SRC);
+    proj.write(
+        "main.scrl",
+        "import ./color\nimport ./color.{Green as G}\n\nx = color.Green(4)\nmatch x {\n\tG(s) -> println(s)\n\t_ -> println(0)\n}\n",
+    );
+    run_project_outputs(&proj, "run", "main.scrl", "4\n");
+}
+
+/// An aliased head nested inside a tuple pattern reaches the ladder through a
+/// different lowering path than a top-level head, and resolved the same way.
+#[test]
+fn an_aliased_head_matches_nested_beside_a_catch_all() {
+    let proj = Project::new("alias_ctor_nested_catchall");
+    proj.write("hue.scrl", HUE_SRC);
+    proj.write(
+        "main.scrl",
+        "import ./hue\nimport ./hue.{Green as G}\n\nn = (hue.make(9), 1)\nmatch n {\n\t(G(s), 1) -> println(s)\n\t_ -> println(0)\n}\n",
+    );
+    run_project_outputs(&proj, "run", "main.scrl", "9\n");
+}
+
+/// An aliased head as one alternative of an or-pattern. `Hue`'s third variant
+/// keeps the catch-all reachable, so the match still takes the ladder.
+#[test]
+fn an_aliased_head_matches_in_an_or_pattern_beside_a_catch_all() {
+    let proj = Project::new("alias_ctor_or_catchall");
+    proj.write("hue.scrl", HUE_SRC);
+    proj.write(
+        "main.scrl",
+        "import ./hue\nimport ./hue.{Green as G}\n\no = hue.make(4)\nmatch o {\n\tG(_s) | hue.Red -> println(1)\n\t_ -> println(0)\n}\n",
+    );
+    run_project_outputs(&proj, "run", "main.scrl", "1\n");
+}
+
+/// As `an_aliased_constructor_destructures_irrefutably`, but the value comes
+/// from the declaring module rather than being built through the alias here.
+#[test]
+fn an_aliased_destructure_takes_a_value_from_the_declaring_module() {
+    let proj = Project::new("alias_ctor_destructure_cross");
+    proj.write(
+        "pair.scrl",
+        "pub type Pair {\n\tPair(a Int, b Int)\n}\n\npub fn make(x Int, y Int) Pair {\n\tPair(x, y)\n}\n",
+    );
+    proj.write(
+        "main.scrl",
+        "import ./pair\nimport ./pair.{Pair as P}\n\nP(a, b) = pair.make(1, 2)\nprintln(a + b)\n",
+    );
+    run_project_outputs(&proj, "run", "main.scrl", "3\n");
+}
+
+/// Resolving the head through the declaration must not make a dead arm look
+/// live: a catch-all placed first still shadows the aliased arm after it.
+#[test]
+fn a_catch_all_before_an_aliased_arm_is_still_unreachable() {
+    let proj = Project::new("alias_ctor_catchall_first");
+    proj.write("hue.scrl", HUE_SRC);
+    proj.write(
+        "main.scrl",
+        "import ./hue\nimport ./hue.{Green as G}\n\nc = hue.make(3)\nmatch c {\n\t_ -> println(0)\n\tG(_s) -> println(1)\n}\n",
+    );
+    project_rejects(&proj, "check", "main.scrl", &["unreachable"]);
+}
+
+/// The alias is a spelling, not an identity. A value built through it is the
+/// variant the module declares: it prints under that name and is equal to the
+/// same variant built any other way. Carrying the written name onto the value
+/// made `G(9) == color.Green(9)` false and printed `G(9)`.
+#[test]
+fn an_alias_does_not_change_a_constructed_value_identity() {
+    let proj = Project::new("alias_ctor_value_identity");
+    proj.write("color.scrl", COLOR_MAKE_SRC);
+    proj.write(
+        "main.scrl",
+        "import ./color\nimport ./color.{Green as G}\n\nprintln(G(9))\nprintln(G(9) == color.Green(9))\nprintln(G(9) == color.make(9))\n",
+    );
+    run_project_outputs(&proj, "run", "main.scrl", "Green(9)\nTrue\nTrue\n");
+}
+
+/// An alias is free to collide with a real variant of the same type, and the
+/// collision is where a wrong name stops being a dead arm. `Green as Red`
+/// made the ladder test for `"Red"`, which `color.Red` carries: the arm was
+/// entered against a nullary variant, and binding its field 0 indexed past
+/// the end of the value stack — an interpreter panic, exit 101, after two
+/// wrong lines of output.
+///
+/// The tests above all alias to a fresh name, where the mismatch only ever
+/// costs a branch. None of them can reach this.
+#[test]
+fn an_alias_colliding_with_a_real_variant_does_not_capture_it() {
+    let proj = Project::new("alias_ctor_collide");
+    proj.write("color.scrl", COLOR_MAKE_SRC);
+    proj.write(
+        "main.scrl",
+        "import ./color\nimport ./color.{Green as Red}\n\nprintln(Red(5))\nmatch color.make(5) {\n\tRed(_s) -> println(1)\n\t_ -> println(0)\n}\nmatch color.Red {\n\tRed(_s) -> println(1)\n\t_ -> println(0)\n}\n",
+    );
+    run_project_outputs(&proj, "run", "main.scrl", "Green(5)\n1\n0\n");
+}
+
+/// A stdlib constructor's `variant_name` is written into the static blob by
+/// `crates/scarlet/build.rs`, not by the resolver, so it is a second copy of
+/// the same decision and nothing else here exercises it: all the alias tests
+/// above use user modules.
+///
+/// `binary.from_int_ascii` dispatches on its `Radix` argument by name inside
+/// the VM, so an alias-named `Hex` was a `Radix` the builtin did not
+/// recognise: `expected Radix, got 'Radix'`, exit 1.
+#[test]
+fn an_aliased_stdlib_constructor_reaches_a_vm_builtin() {
+    let proj = Project::new("alias_ctor_stdlib");
+    proj.write(
+        "main.scrl",
+        "import scarlet/binary\nimport scarlet/binary.{Hex as H}\n\nprintln(binary.from_int_ascii(255, H))\n",
+    );
+    run_project_outputs(&proj, "run", "main.scrl", "<<102, 102>>\n");
+}
+
 /// Labelled arguments and `..` work through a qualifier, as they do bare.
 #[test]
 fn a_qualified_pattern_takes_labels_and_rest() {

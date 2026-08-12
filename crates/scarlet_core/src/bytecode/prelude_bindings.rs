@@ -354,6 +354,7 @@ mod tests {
                     type_name: StrId(0),
                     type_id,
                     variant_idx: 0,
+                    variant_name: StrId(0),
                     arity,
                     field_labels: ArenaSlice::EMPTY,
                 },

@@ -130,7 +130,7 @@ impl ElabCtx for Compiler {
         // Called even for constructors and builtins, for its side effects:
         // marking the name used, and recording a capture.
         let place = self.resolve_variable(id);
-        let den = match (Denotation::from_kind(kind, id), place) {
+        let den = match (Denotation::from_kind(kind), place) {
             (Some(fixed), _) => fixed,
             (None, Some(place)) => place,
             // `analyse_module` unwinds `self.locals` before `__main__`
@@ -159,10 +159,9 @@ impl ElabCtx for Compiler {
         let scheme = ev.scheme;
         let ty = self.engine.instantiate(&scheme, &self.rigid_ids);
         let local_slot = ev.local_slot;
-        let sid = self.engine.intern(member);
         // `@vm` builtins and re-exported constructors carry no `local_slot`;
         // their `ValueKind` alone denotes them. Everything else must have one.
-        let den = match Denotation::from_kind(scheme.kind, sid) {
+        let den = match Denotation::from_kind(scheme.kind) {
             Some(fixed) => fixed,
             None => match local_slot {
                 Some(slot) => self.global_denotation(slot),

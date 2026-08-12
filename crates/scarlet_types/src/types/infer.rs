@@ -268,6 +268,12 @@ pub enum ValueKind {
         type_name: StrId,
         type_id: TypeId,
         variant_idx: u16,
+        /// The name the *declaration* gives this variant, never the name a use
+        /// site spelled it with. An aliased import (`{Green as G}`) binds this
+        /// scheme under `G`, and a constructed value and a pattern test both
+        /// carry a variant name into codegen; taking it from the binding made
+        /// the two disagree whenever only one of them went through the alias.
+        variant_name: StrId,
         arity: u16,
         /// → `InferEngine.str_slices`
         field_labels: ArenaSlice<pool::StrSlices>,
