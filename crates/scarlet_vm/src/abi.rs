@@ -153,10 +153,28 @@ pub enum AbiSlot {
     JsonDoc,
     /// `[offset Int, message String]`
     JsonParseError,
+
+    /// A TLS connection record — `[conn, peer SocketAddress, server_name Str]`
+    TlsSocket,
+    /// The chain did not end at a trusted root.
+    TlsCertUnknownIssuer,
+    TlsCertExpired,
+    TlsCertNotYetValid,
+    TlsCertRevoked,
+    /// The chain verified but was not issued for the name asked for.
+    TlsHostnameMismatch,
+    TlsBadCertificate,
+    /// The peer is not speaking TLS, or not a version/suite we accept.
+    TlsProtocolError,
+    TlsHandshakeFailed,
+    /// The requested name is not one a certificate can be issued for.
+    TlsInvalidServerName,
+    /// The transport under TLS failed — `[cause NetError]`
+    TlsTransport,
 }
 
 impl AbiSlot {
-    pub(crate) const COUNT: usize = AbiSlot::JsonParseError as usize + 1;
+    pub(crate) const COUNT: usize = AbiSlot::TlsTransport as usize + 1;
 
     pub(crate) const ALL: [AbiSlot; AbiSlot::COUNT] = {
         use AbiSlot::*;
@@ -228,6 +246,17 @@ impl AbiSlot {
             H1ChunkedBad,
             JsonDoc,
             JsonParseError,
+            TlsSocket,
+            TlsCertUnknownIssuer,
+            TlsCertExpired,
+            TlsCertNotYetValid,
+            TlsCertRevoked,
+            TlsHostnameMismatch,
+            TlsBadCertificate,
+            TlsProtocolError,
+            TlsHandshakeFailed,
+            TlsInvalidServerName,
+            TlsTransport,
         ]
     };
 
@@ -301,6 +330,17 @@ impl AbiSlot {
             H1ChunkedBad => "H1ChunkedBad",
             JsonDoc => "JsonDoc",
             JsonParseError => "JsonParseError",
+            TlsSocket => "TlsSocket",
+            TlsCertUnknownIssuer => "TlsCertUnknownIssuer",
+            TlsCertExpired => "TlsCertExpired",
+            TlsCertNotYetValid => "TlsCertNotYetValid",
+            TlsCertRevoked => "TlsCertRevoked",
+            TlsHostnameMismatch => "TlsHostnameMismatch",
+            TlsBadCertificate => "TlsBadCertificate",
+            TlsProtocolError => "TlsProtocolError",
+            TlsHandshakeFailed => "TlsHandshakeFailed",
+            TlsInvalidServerName => "TlsInvalidServerName",
+            TlsTransport => "TlsTransport",
         }
     }
 
@@ -319,15 +359,20 @@ impl AbiSlot {
             | NetEaddrinuse | NetEaddrnotavail | NetEnetdown | NetEnetunreach | NetEhostunreach
             | NetEacces | NetInvalidPort | NetUnalignedBinary | ReadClosed | ExitNormal
             | ExitNoProcess | ExitKilled | CrashForeignReceive | H1Http10 | H1Http11
-            | H1ParsedNeedMore | H1FramingNoBody | H1FramingChunked | H1ChunkedNeedMore => 0,
+            | H1ParsedNeedMore | H1FramingNoBody | H1FramingChunked | H1ChunkedNeedMore
+            | TlsCertUnknownIssuer | TlsCertExpired | TlsCertNotYetValid | TlsCertRevoked
+            | TlsHostnameMismatch | TlsBadCertificate | TlsProtocolError | TlsHandshakeFailed
+            | TlsInvalidServerName => 0,
             ResultOk | ResultErr | OptionSome | FsEnoent | FsEacces | FsEexist | FsEnotdir
             | FsEisdir | FsErofs | FsEloop | FsEfbig | FsErrnoOther | NetErrnoOther | IpV4
             | IpV6 | ReadData | ExitCrashed | PortExited | PortSignaled | H1ParsedBad
-            | H1FramingLength | H1FramingInvalid | H1ChunkedBad => 1,
+            | H1FramingLength | H1FramingInvalid | H1ChunkedBad | TlsTransport => 1,
             JsonParseError => 2,
             JsonDoc => 3,
             SocketAddr | Socket | Monitor | Down | CrashIndexOutOfBounds | Port | H1Header => 2,
-            H1HeadFlags | H1ChunkedDone | CrashSliceOutOfBounds | CrashTypeMismatch => 3,
+            H1HeadFlags | H1ChunkedDone | CrashSliceOutOfBounds | CrashTypeMismatch | TlsSocket => {
+                3
+            }
             H1ParsedDone => 6,
         }
     }
@@ -424,6 +469,61 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::NetUnalignedBinary,
             S::NetErrnoOther,
         ],
+        // Every TLS op can report a transport cause, so each carries the
+        // `NetError` slots that `TlsTransport` wraps as well as its own.
+        Op::TlsHandshake => &[
+            S::ResultOk,
+            S::ResultErr,
+            S::TlsSocket,
+            S::SocketAddr,
+            S::IpV4,
+            S::IpV6,
+            S::TlsCertUnknownIssuer,
+            S::TlsCertExpired,
+            S::TlsCertNotYetValid,
+            S::TlsCertRevoked,
+            S::TlsHostnameMismatch,
+            S::TlsBadCertificate,
+            S::TlsProtocolError,
+            S::TlsHandshakeFailed,
+            S::TlsInvalidServerName,
+            S::TlsTransport,
+            S::NetEtimedout,
+            S::NetEconnrefused,
+            S::NetEconnreset,
+            S::NetEconnaborted,
+            S::NetEnotconn,
+            S::NetEpipe,
+            S::NetEhostunreach,
+            S::NetErrnoOther,
+        ],
+        Op::TlsRead => &[
+            S::ResultOk,
+            S::ResultErr,
+            S::ReadData,
+            S::ReadClosed,
+            S::TlsProtocolError,
+            S::TlsTransport,
+            S::NetEtimedout,
+            S::NetEconnreset,
+            S::NetEconnaborted,
+            S::NetEnotconn,
+            S::NetEpipe,
+            S::NetErrnoOther,
+        ],
+        Op::TlsWrite => &[
+            S::ResultOk,
+            S::ResultErr,
+            S::Unit,
+            S::TlsProtocolError,
+            S::TlsTransport,
+            S::NetEconnreset,
+            S::NetEpipe,
+            S::NetEnotconn,
+            S::NetUnalignedBinary,
+            S::NetErrnoOther,
+        ],
+        Op::TlsClose => &[S::ResultOk, S::ResultErr, S::Unit],
         Op::PortSpawn => &[
             S::ResultOk,
             S::ResultErr,

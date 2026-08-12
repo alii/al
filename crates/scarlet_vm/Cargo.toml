@@ -33,3 +33,11 @@ smallvec = "1.15"
 socket2 = { version = "0.5", features = ["all"] }
 libmimalloc-sys = { version = "0.1.49", features = ["v2"] }
 simd-json = { version = "0.17.3", default-features = false, features = ["runtime-detection"] }
+# TLS. rustls is sans-IO: it never owns the socket and never blocks, so it
+# drops into this crate's existing non-blocking poller without a thread of its
+# own and without a second event loop. See `vm/tls.rs` for the full argument.
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+rustls-pki-types = "1"
+# Trust roots: the machine's own store first, this bundle as the fallback.
+rustls-native-certs = "0.8"
+webpki-roots = "1"

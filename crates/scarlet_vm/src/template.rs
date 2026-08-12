@@ -162,6 +162,7 @@ pub(crate) mod test_fixture {
     const CODE: &[&str] = &["code"];
     const STATUS: &[&str] = &["status"];
     const NONE_: &[&str] = &[];
+    const CAUSE: &[&str] = &["cause"];
 
     const ROWS: &[Row] = &[
         (S::Unit, 262, 0, "Nil", "Nil", NONE_),
@@ -380,6 +381,87 @@ pub(crate) mod test_fixture {
             "ParseError",
             &["offset", "message"],
         ),
+        (
+            S::TlsSocket,
+            4098,
+            0,
+            "TlsSocket",
+            "TlsSocket",
+            &["conn", "peer", "server_name"],
+        ),
+        (
+            S::TlsCertUnknownIssuer,
+            3585,
+            0,
+            "TlsError",
+            "CertificateUnknownIssuer",
+            NONE_,
+        ),
+        (
+            S::TlsCertExpired,
+            3585,
+            1,
+            "TlsError",
+            "CertificateExpired",
+            NONE_,
+        ),
+        (
+            S::TlsCertNotYetValid,
+            3585,
+            2,
+            "TlsError",
+            "CertificateNotYetValid",
+            NONE_,
+        ),
+        (
+            S::TlsCertRevoked,
+            3585,
+            3,
+            "TlsError",
+            "CertificateRevoked",
+            NONE_,
+        ),
+        (
+            S::TlsHostnameMismatch,
+            3585,
+            4,
+            "TlsError",
+            "HostnameMismatch",
+            NONE_,
+        ),
+        (
+            S::TlsBadCertificate,
+            3585,
+            5,
+            "TlsError",
+            "BadCertificate",
+            NONE_,
+        ),
+        (
+            S::TlsProtocolError,
+            3585,
+            6,
+            "TlsError",
+            "ProtocolError",
+            NONE_,
+        ),
+        (
+            S::TlsHandshakeFailed,
+            3585,
+            7,
+            "TlsError",
+            "HandshakeFailed",
+            NONE_,
+        ),
+        (
+            S::TlsInvalidServerName,
+            3585,
+            8,
+            "TlsError",
+            "InvalidServerName",
+            NONE_,
+        ),
+        (S::TlsTransport, 3585, 9, "TlsError", "Transport", CAUSE),
     ];
 
     /// Intern every fixture constructor into `fb` and bind its slot.

@@ -48,6 +48,10 @@ const TERM_GRACE: Duration = Duration::from_secs(5);
 pub(super) enum ConnIo {
     Tcp(TcpStream),
     Port(PortIo),
+    /// A TCP stream with a TLS session over it. Reading decrypts and writing
+    /// encrypts, so the ops above this layer are the cleartext ones unchanged —
+    /// see [`super::tls`].
+    Tls(super::tls::TlsIo),
 }
 
 /// A live child: its stdio ends, and the `Child` itself, held un-reaped so
@@ -74,6 +78,16 @@ impl ConnIo {
                 ),
                 None,
             ),
+            // One fd, both directions — TLS adds no descriptor of its own, and
+            // registering both is what lets a decrypting read be woken by the
+            // writability it needed to send a handshake reply.
+            ConnIo::Tls(t) => (
+                (
+                    t.as_raw_fd(),
+                    mio::Interest::READABLE | mio::Interest::WRITABLE,
+                ),
+                None,
+            ),
             ConnIo::Port(p) => (
                 (p.stdout.as_raw_fd(), mio::Interest::READABLE),
                 Some((p.stdin.as_raw_fd(), mio::Interest::WRITABLE)),
@@ -94,6 +108,7 @@ impl Read for ConnIo {
         match self {
             ConnIo::Tcp(s) => s.read(buf),
             ConnIo::Port(p) => p.stdout.read(buf),
+            ConnIo::Tls(t) => t.read(buf),
         }
     }
 }
@@ -104,6 +119,7 @@ impl Write for ConnIo {
         match self {
             ConnIo::Tcp(s) => s.write(buf),
             ConnIo::Port(p) => p.stdin.write(buf),
+            ConnIo::Tls(t) => t.write(buf),
         }
     }
 
@@ -112,13 +128,18 @@ impl Write for ConnIo {
         match self {
             ConnIo::Tcp(s) => s.write_vectored(bufs),
             ConnIo::Port(p) => p.stdin.write_vectored(bufs),
+            ConnIo::Tls(t) => t.write_vectored(bufs),
         }
     }
 
+    /// For a cleartext stream this is the no-op `std` makes it; for TLS it is
+    /// load-bearing, and is what makes a completed `tls.write` mean the
+    /// ciphertext reached the kernel rather than a userspace buffer.
     fn flush(&mut self) -> io::Result<()> {
         match self {
             ConnIo::Tcp(s) => s.flush(),
             ConnIo::Port(p) => p.stdin.flush(),
+            ConnIo::Tls(t) => t.flush(),
         }
     }
 }
@@ -301,6 +322,9 @@ impl VM {
             )))),
             Some(ConnIo::Tcp(_)) => {
                 Err(VmError::internal("port.close applied to a TCP connection"))
+            }
+            Some(ConnIo::Tls(_)) => {
+                Err(VmError::internal("port.close applied to a TLS connection"))
             }
             None => {
                 self.push_stale_handle()?;

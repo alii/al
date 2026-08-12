@@ -323,6 +323,24 @@ pub enum Op {
     /// park until it has been collected. (scarlet/os/port.close)
     PortClose,
 
+    /// `[socket, server_name] -> Result(TlsSocket, TlsError)` — take a
+    /// connected cleartext socket over, verify the peer against `server_name`
+    /// and complete the handshake, parking while it is in flight. The
+    /// connection is re-keyed under a new id, so the `Socket` handed in is
+    /// stale afterwards. (scarlet/net/tls.handshake)
+    TlsHandshake,
+    /// `[tls_socket, max] -> Result(Read, TlsError)` — decrypting read. Split
+    /// from `TcpRead` because its failures are `TlsError` values, not
+    /// `NetError` ones. (scarlet/net/tls.read)
+    TlsRead,
+    /// `[tls_socket, data] -> Result(Nil, TlsError)` — encrypting write, which
+    /// returns only once the ciphertext has reached the kernel rather than the
+    /// session's own buffer. (scarlet/net/tls.write)
+    TlsWrite,
+    /// `[tls_socket] -> Result(Nil, TlsError)` — send `close_notify`, then
+    /// close. (scarlet/net/tls.close)
+    TlsClose,
+
     // Concurrency (scarlet/process)
     /// `[closure] -> Pid` — spawn a lightweight process running the closure,
     /// linked to the spawner, and push the child's pid. (scarlet/process.spawn)
@@ -621,6 +639,10 @@ impl Op {
             | Op::IpParse
             | Op::PortSpawn
             | Op::PortClose
+            | Op::TlsHandshake
+            | Op::TlsRead
+            | Op::TlsWrite
+            | Op::TlsClose
             | Op::ProcessSpawn
             | Op::ProcessSpawnUnlinked
             | Op::ProcessKill
@@ -818,6 +840,10 @@ impl Op {
             | Op::IpParse
             | Op::PortSpawn
             | Op::PortClose
+            | Op::TlsHandshake
+            | Op::TlsRead
+            | Op::TlsWrite
+            | Op::TlsClose
             | Op::ProcessSpawn
             | Op::ProcessSpawnUnlinked
             | Op::ProcessKill
