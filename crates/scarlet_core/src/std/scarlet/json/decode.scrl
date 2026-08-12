@@ -151,14 +151,39 @@ pub fn bool() Decoder(Bool) {
 // in implementations that read every number as a double, so protocols that
 // use them — Discord snowflakes among them — send them quoted. This decodes
 // the quoted form; `int` decodes a genuine JSON number.
+//
+// A leading `-` is accepted, so the range is the whole of `Int` and not only
+// its positive half. `+` is not: JSON has no leading plus on a number and a
+// quoted integer is the same integer in quotes.
 pub fn int_string() Decoder(Int) {
 	Decoder(fn(path, doc) match json.string(doc) {
 		None -> Err(one_failure(path, 'a quoted integer', doc))
-		Some(s) -> match binary.parse_int(binary.from_string(s), binary.Dec) {
+		Some(s) -> match parse_signed(s) {
 			Ok(n) -> Ok(n)
 			Err(Nil) -> Err([Failure(path, 'a quoted integer', 'the string "${s}"')])
 		}
 	})
+}
+
+// `binary.parse_int` reads unsigned digits and treats `-` as a non-digit, so
+// the sign is peeled off before it. `byte_at` is -1 past the end, which is
+// what makes an empty string safe here: it takes the unsigned branch and
+// fails there.
+//
+// `-9223372036854775808` is the one `Int` this cannot read — its magnitude is
+// one past the positive range `parse_int` accepts — and it fails rather than
+// wrapping to a positive number.
+fn parse_signed(s String) Result(Int, Nil) {
+	b = binary.from_string(s)
+	// 45 is `-`.
+	if binary.byte_at(b, 0) == 45 {
+		match binary.parse_int(binary.slice_bytes(b, 1, binary.byte_size(b) - 1), binary.Dec) {
+			Ok(n) -> Ok(0 - n)
+			Err(Nil) -> Err(Nil)
+		}
+	} else {
+		binary.parse_int(b, binary.Dec)
+	}
 }
 
 // `null`, decoded as a value of your choosing.
@@ -247,17 +272,36 @@ pub fn field(name String, inner Decoder(a)) Decoder(a) {
 	Decoder(step) = inner
 	Decoder(fn(path, doc) {
 		here = [..path, Key(name)]
-		match json.field(doc, name) {
-			Some(child) -> step(here, child)
-			None -> Err([Failure(here, 'a member named "${name}"', missing_or_not_object(doc))])
+		match member(here, doc, name) {
+			Err(e) -> Err(e)
+			Ok(Some(child)) -> step(here, child)
+			Ok(None) -> Err([Failure(here, 'a member named "${name}"', 'no such member')])
 		}
 	})
 }
 
-fn missing_or_not_object(d json.Doc) String {
-	match json.kind(d) {
-		json.ObjectKind -> 'no such member'
-		_ -> describe(d)
+// The member `name` of `doc`, or the failure that `doc` is not an object at
+// all. `Ok(None)` is the one case left: an object with no such member.
+//
+// `json.field` answers `None` to both questions, and every combinator that
+// reads a member has to separate them. `field` did it and `optional_field`
+// did not, so a decoder built only from optional fields succeeded against an
+// array, a string or a bare number — every field reported absent, which for a
+// partial update reads as "change nothing" and for `with_default` overwrites
+// held state. An instrument whose job is to report every failure was reporting
+// success for input of entirely the wrong shape. Both go through here now, so
+// the two combinators cannot drift apart again.
+fn member(
+	path Array(Segment),
+	doc json.Doc,
+	name String,
+) Result(Option(json.Doc), Array(Failure)) {
+	match json.field(doc, name) {
+		Some(child) -> Ok(Some(child))
+		None -> match json.kind(doc) {
+			json.ObjectKind -> Ok(None)
+			_ -> Err([Failure(path, 'a member named "${name}"', describe(doc))])
+		}
 	}
 }
 
@@ -267,13 +311,18 @@ fn missing_or_not_object(d json.Doc) String {
 // means "unchanged" and null means "cleared", and a decoder that returns
 // `Option` has thrown that difference away before the caller ever sees it.
 // Consume the result with `field.update` or `field.fold`.
+//
+// Optional is about the member, not about the document. A `doc` that is not
+// an object is a failure here exactly as it is in `field` — otherwise a
+// decoder with no required fields accepts anything at all.
 pub fn optional_field(name String, inner Decoder(a)) Decoder(presence.Field(a)) {
 	Decoder(step) = inner
 	Decoder(fn(path, doc) {
 		here = [..path, Key(name)]
-		match json.field(doc, name) {
-			None -> Ok(presence.absent())
-			Some(child) -> if json.is_null(child) {
+		match member(here, doc, name) {
+			Err(e) -> Err(e)
+			Ok(None) -> Ok(presence.absent())
+			Ok(Some(child)) -> if json.is_null(child) {
 				Ok(presence.null())
 			} else {
 				match step(here, child) {

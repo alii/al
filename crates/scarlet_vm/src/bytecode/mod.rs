@@ -429,11 +429,18 @@ pub enum Op {
     JsonIndex,
     /// `[d Doc] -> Array((String, Doc))` — an object's members in order.
     JsonEntries,
+    /// `[d Doc] -> Array(Doc)` — an array's elements in order, in one walk.
+    /// `JsonIndex` per element is O(n²) and the length is the sender's to
+    /// choose.
+    JsonElements,
     /// `[d Doc] -> Option(String)`
     JsonString,
     /// `[d Doc] -> Option(Int)` — `None` for a float or an out-of-range
     /// integer, never a truncation.
     JsonInt,
+    /// `[d Doc] -> Option(String)` — the integer at `d` in decimal, including
+    /// the ones `JsonInt` refuses because they do not fit an `Int`.
+    JsonIntText,
     /// `[d Doc] -> Option(Float)`
     JsonFloat,
     /// `[d Doc] -> Option(Bool)`
@@ -650,8 +657,10 @@ impl Op {
             | Op::JsonField
             | Op::JsonIndex
             | Op::JsonEntries
+            | Op::JsonElements
             | Op::JsonString
             | Op::JsonInt
+            | Op::JsonIntText
             | Op::JsonFloat
             | Op::JsonBool
             | Op::JsonEncode => false,
@@ -845,8 +854,10 @@ impl Op {
             | Op::JsonField
             | Op::JsonIndex
             | Op::JsonEntries
+            | Op::JsonElements
             | Op::JsonString
             | Op::JsonInt
+            | Op::JsonIntText
             | Op::JsonFloat
             | Op::JsonBool
             | Op::JsonEncode => false,

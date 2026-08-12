@@ -564,8 +564,10 @@ mod opc {
     pub const JSON_FIELD: u8 = Op::JsonField as u8;
     pub const JSON_INDEX: u8 = Op::JsonIndex as u8;
     pub const JSON_ENTRIES: u8 = Op::JsonEntries as u8;
+    pub const JSON_ELEMENTS: u8 = Op::JsonElements as u8;
     pub const JSON_STRING: u8 = Op::JsonString as u8;
     pub const JSON_INT: u8 = Op::JsonInt as u8;
+    pub const JSON_INT_TEXT: u8 = Op::JsonIntText as u8;
     pub const JSON_FLOAT: u8 = Op::JsonFloat as u8;
     pub const JSON_BOOL: u8 = Op::JsonBool as u8;
     pub const JSON_ENCODE: u8 = Op::JsonEncode as u8;
@@ -765,8 +767,10 @@ impl VM {
             opc::JSON_FIELD => self.json_field(),
             opc::JSON_INDEX => self.json_index(),
             opc::JSON_ENTRIES => self.json_entries(),
+            opc::JSON_ELEMENTS => self.json_elements(),
             opc::JSON_STRING => self.json_string(),
             opc::JSON_INT => self.json_int(),
+            opc::JSON_INT_TEXT => self.json_int_text(),
             opc::JSON_FLOAT => self.json_float(),
             opc::JSON_BOOL => self.json_bool(),
             opc::JSON_ENCODE => self.json_encode(),

@@ -227,8 +227,10 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::JsonField
         | Op::JsonIndex
         | Op::JsonEntries
+        | Op::JsonElements
         | Op::JsonString
         | Op::JsonInt
+        | Op::JsonIntText
         | Op::JsonFloat
         | Op::JsonBool
         | Op::JsonEncode => OpCoverage::Bridge,

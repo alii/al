@@ -490,8 +490,8 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
         Op::HttpHeaderGet | Op::MapGet => &[S::OptionSome, S::OptionNone],
         Op::JsonParse => &[S::ResultOk, S::ResultErr, S::JsonDoc, S::JsonParseError],
         Op::JsonField | Op::JsonIndex => &[S::OptionSome, S::OptionNone, S::JsonDoc],
-        Op::JsonEntries => &[S::JsonDoc],
-        Op::JsonString | Op::JsonInt | Op::JsonFloat | Op::JsonBool => {
+        Op::JsonEntries | Op::JsonElements => &[S::JsonDoc],
+        Op::JsonString | Op::JsonInt | Op::JsonIntText | Op::JsonFloat | Op::JsonBool => {
             &[S::OptionSome, S::OptionNone]
         }
         // `PushNil` is the value of a block that ends in a statement, and
