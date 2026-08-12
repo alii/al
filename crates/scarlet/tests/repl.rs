@@ -36,9 +36,33 @@ fn session(entries: &str) -> (String, String) {
         common::CHILD_TIMEOUT_SECS
     );
     (
-        String::from_utf8_lossy(&out.stdout).into_owned(),
+        strip_banner(&String::from_utf8_lossy(&out.stdout)),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+/// Drop the three banner lines the REPL prints before the first entry —
+/// version, help, blank.
+///
+/// The version is a build stamp: a release build carries a canary timestamp
+/// like `0.0.1-canary.20260812.0745`. Its digits are indistinguishable from
+/// program output to the single-character `contains` assertions below, which
+/// made them read the banner instead of the session — `0745` alone is enough
+/// to fail a `!contains('4')`. Every assertion here is about what the session
+/// printed, so the banner never reaches one.
+fn strip_banner(stdout: &str) -> String {
+    let mut lines = stdout.lines();
+    let version = lines.next().unwrap_or_default();
+    let help = lines.next().unwrap_or_default();
+    let blank = lines.next().unwrap_or_default();
+    assert!(
+        version.contains("scarlet")
+            && version.contains("REPL")
+            && help.contains(":help")
+            && blank.is_empty(),
+        "REPL banner is not the three lines this strips; stdout began:\n{stdout}"
+    );
+    lines.collect::<Vec<_>>().join("\n")
 }
 
 /// `'x' + 'y'` and `100 + 200` occupy the identical `Span` when each entry is
