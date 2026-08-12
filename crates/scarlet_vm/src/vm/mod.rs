@@ -101,6 +101,7 @@ mod templates;
 #[cfg(test)]
 mod tests;
 mod text;
+mod tls;
 
 pub use inspect::inspect;
 use inspect::value_type_name;

@@ -188,6 +188,7 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::StackDepth
         | Op::TcpListen
         | Op::TcpClose
+        | Op::TlsClose
         | Op::TcpGive
         | Op::TcpCloseServer
         | Op::TcpLocalAddr
@@ -246,6 +247,9 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::DnsResolve
         | Op::PortSpawn
         | Op::PortClose
+        | Op::TlsHandshake
+        | Op::TlsRead
+        | Op::TlsWrite
         | Op::Sleep
         | Op::SubjectReceive
         | Op::SubjectReceiveUntil => OpCoverage::Park,

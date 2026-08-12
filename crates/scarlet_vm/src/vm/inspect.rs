@@ -189,6 +189,7 @@ fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut S
                 SocketKind::Connection => "socket",
                 SocketKind::Listener => "listener",
                 SocketKind::Port => "port",
+                SocketKind::Tls => "tls",
             };
             let _ = write!(out, "<{}#{}>", kind, s.id);
         }

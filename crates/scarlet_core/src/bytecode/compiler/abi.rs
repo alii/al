@@ -40,6 +40,7 @@ const PORT: &[&str] = &["scarlet", "os", "port"];
 const HDRS: &[&str] = &["scarlet", "http", "headers"];
 const H1: &[&str] = &["scarlet", "http", "h1"];
 const JSON: &[&str] = &["scarlet", "json"];
+const TLS: &[&str] = &["scarlet", "net", "tls"];
 
 #[rustfmt::skip]
 const BINDINGS: &[Binding] = &[
@@ -110,6 +111,17 @@ const BINDINGS: &[Binding] = &[
     (AbiSlot::H1ChunkedBad,       H1,   "ChunkBody",     "ChunkedBad"),
     (AbiSlot::JsonDoc,            JSON, "Doc",           "Doc"),
     (AbiSlot::JsonParseError,     JSON, "ParseError",    "ParseError"),
+    (AbiSlot::TlsSocket,          TLS,  "TlsSocket",     "TlsSocket"),
+    (AbiSlot::TlsCertUnknownIssuer, TLS, "TlsError",     "CertificateUnknownIssuer"),
+    (AbiSlot::TlsCertExpired,     TLS,  "TlsError",      "CertificateExpired"),
+    (AbiSlot::TlsCertNotYetValid, TLS,  "TlsError",      "CertificateNotYetValid"),
+    (AbiSlot::TlsCertRevoked,     TLS,  "TlsError",      "CertificateRevoked"),
+    (AbiSlot::TlsHostnameMismatch, TLS, "TlsError",      "HostnameMismatch"),
+    (AbiSlot::TlsBadCertificate,  TLS,  "TlsError",      "BadCertificate"),
+    (AbiSlot::TlsProtocolError,   TLS,  "TlsError",      "ProtocolError"),
+    (AbiSlot::TlsHandshakeFailed, TLS,  "TlsError",      "HandshakeFailed"),
+    (AbiSlot::TlsInvalidServerName, TLS, "TlsError",     "InvalidServerName"),
+    (AbiSlot::TlsTransport,       TLS,  "TlsError",      "Transport"),
 ];
 
 impl Compiler {

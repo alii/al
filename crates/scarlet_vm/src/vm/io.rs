@@ -186,7 +186,7 @@ impl VM {
         let max = self.pop_int("socket.read")?;
         let sock_val = self.pop()?;
         let sv = connection_socket(&sock_val, "socket.read")?;
-        let (max, read_res) = self.socket_read(sv.id, max);
+        let (max, read_res) = self.socket_read(sv, max);
         match read_res {
             Ok(n) => self.push_read_ok(n)?,
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
@@ -209,7 +209,7 @@ impl VM {
         let max = self.pop_int("socket.read_within")?;
         let sock_val = self.pop()?;
         let sv = connection_socket(&sock_val, "socket.read_within")?;
-        let (max, read_res) = self.socket_read(sv.id, max);
+        let (max, read_res) = self.socket_read(sv, max);
         match read_res {
             // The read runs before the deadline check, so bytes that arrived
             // as the clock ran out are never discarded.
@@ -254,13 +254,22 @@ impl VM {
         let bytes = bin.full_bytes();
         // Write what the socket takes; if it fills up, park and resume this
         // instruction with the remaining bytes.
-        let result = connection_mut(&mut self.connections, sv.id)
-            .and_then(|conn| drain_write(conn, std::slice::from_ref(&bytes)));
+        let result = stream_entry(&mut self.connections, sv)
+            .and_then(|conn| drain_and_flush(conn, std::slice::from_ref(&bytes)));
         match &result {
             Ok(Drain::Park { offset, .. }) => {
                 self.stack.push(sock_val);
                 // The binary is byte-aligned; unaligned was rejected above.
                 let tail = self.tail_view(bin, *offset);
+                self.stack.push(tail);
+                return Ok(Some(Parked::retry(Wait::writable(sv.id))));
+            }
+            Ok(Drain::Flushing) => {
+                // All the plaintext was accepted, so the tail is empty; the
+                // re-run only finishes the flush.
+                let consumed = bytes.len();
+                self.stack.push(sock_val);
+                let tail = self.tail_view(bin, consumed);
                 self.stack.push(tail);
                 return Ok(Some(Parked::retry(Wait::writable(sv.id))));
             }
@@ -313,9 +322,18 @@ impl VM {
         // part is by the check above.
         let logical: Vec<_> = bins.iter().map(|b| bin_ref(b).full_bytes()).collect();
 
-        let result = connection_mut(&mut self.connections, sv.id)
-            .and_then(|conn| drain_write(conn, &logical));
+        let result = stream_entry(&mut self.connections, sv)
+            .and_then(|conn| drain_and_flush(conn, &logical));
         match &result {
+            Ok(Drain::Flushing) => {
+                // Every part was accepted; nothing is left to re-send and the
+                // re-run only finishes the flush.
+                drop(logical);
+                self.stack.push(sock_val);
+                let arr = Value::array_in(&mut self.heap, &[]);
+                self.stack.push(arr);
+                return Ok(Some(Parked::retry(Wait::writable(sv.id))));
+            }
             Ok(Drain::Park { idx, offset }) => {
                 let (idx, offset) = (*idx, *offset);
                 // Re-run with only the unwritten tail: zero-copy views over
@@ -421,12 +439,35 @@ impl VM {
     /// ONE eviction path. `detach_socket_ids` keeps the connection instead —
     /// the fd travels to another scheduler.
     pub(super) fn evict_connection(&mut self, id: i32) -> Option<super::Conn> {
-        let conn = self.connections.remove(&id);
+        let conn = self.retire_socket_id(id);
         if let Some(c) = &conn {
             for fd in c.io.fds() {
                 self.poller_deregister(fd);
             }
         }
+        conn
+    }
+
+    /// The ONE way an id leaves `self.connections`, and the reason removing the
+    /// entry and failing the parks on the id are a single operation rather than
+    /// two things a caller remembers to do in order.
+    ///
+    /// A park names an ID, not an fd. An id with no entry is therefore
+    /// unreachable by every wake path there is: no readiness event, because
+    /// `poll` resolves a token to an id and finds nothing; no eviction, because
+    /// this is the eviction; and no owner death, because
+    /// `release_connections_of` skips an id the table no longer holds. A waiter
+    /// left behind on one is woken by nothing and the program cannot end while
+    /// it exists.
+    ///
+    /// Callers differ only in what happens to the fd, which is why that half is
+    /// theirs and this half is not. [`Self::evict_connection`] deregisters and
+    /// closes it. `tls.handshake`'s `begin_tls` keeps it: the socket outlives
+    /// its id there, re-registered under the id of the TLS entry that replaces
+    /// it — which is exactly the case that made the two halves separable, and
+    /// exactly the case that hung the program when they were.
+    pub(super) fn retire_socket_id(&mut self, id: i32) -> Option<super::Conn> {
+        let conn = self.connections.remove(&id);
         self.fail_io_waiters(id);
         conn
     }
@@ -581,12 +622,16 @@ impl VM {
     /// connection `id`. Returns the clamped max so a parking caller re-pushes
     /// the same value.
     #[inline]
-    fn socket_read(&mut self, id: i32, max: i64) -> (usize, std::io::Result<usize>) {
+    pub(super) fn socket_read(
+        &mut self,
+        sv: SocketValue,
+        max: i64,
+    ) -> (usize, std::io::Result<usize>) {
         let max = (max.max(1) as usize).min(8 * 1024 * 1024);
         if self.read_scratch.len() < max {
             self.read_scratch.resize(max, 0);
         }
-        let read_res = match connection_mut(&mut self.connections, id) {
+        let read_res = match stream_entry(&mut self.connections, sv) {
             Ok(conn) => conn.read(&mut self.read_scratch[..max]),
             Err(e) => Err(e),
         };
@@ -596,7 +641,7 @@ impl VM {
     /// Push `Ok(socket.Read)` for a read of `n` bytes. `n == 0` is the POSIX
     /// peer-close signal and becomes `Closed`.
     #[inline]
-    fn push_read_ok(&mut self, n: usize) -> VmResult<()> {
+    pub(super) fn push_read_ok(&mut self, n: usize) -> VmResult<()> {
         let read = if n == 0 {
             self.abi_nullary(AbiSlot::ReadClosed)?
         } else {
@@ -611,7 +656,7 @@ impl VM {
     /// Zero-copy view over `bin` minus its first `skip` bytes: the unwritten
     /// tail a parked write resumes with. `bin` must be byte-aligned.
     #[inline]
-    fn tail_view(&mut self, bin: BinaryRef<'_>, skip: usize) -> Value {
+    pub(super) fn tail_view(&mut self, bin: BinaryRef<'_>, skip: usize) -> Value {
         let backing = bin.backing_arc();
         let off = bin.bit_offset() + (skip as u64) * 8;
         let len = bin.bit_len() - (skip as u64) * 8;
@@ -830,11 +875,45 @@ fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
     Ok(socket.into())
 }
 
-/// Outcome of [`drain_write`]: everything written, or the socket filled up
-/// at byte `offset` of `bufs[idx]`.
-enum Drain {
+/// Outcome of [`drain_and_flush`]: everything written and flushed, the socket
+/// filled up at byte `offset` of `bufs[idx]`, or everything was accepted but
+/// the stream is still pushing it out.
+pub(super) enum Drain {
     Done,
-    Park { idx: usize, offset: usize },
+    Park {
+        idx: usize,
+        offset: usize,
+    },
+    /// Every byte of `bufs` was accepted by the stream, but flushing it filled
+    /// the socket. Only reachable for TLS, where "accepted" means encrypted
+    /// into the session's buffer rather than handed to the kernel. The caller
+    /// re-runs with an EMPTY remainder: there is no plaintext left to send, so
+    /// re-sending any would duplicate it.
+    Flushing,
+}
+
+/// [`drain_write`], then flush.
+///
+/// The flush is what makes a completed write mean "the kernel has it" on a TLS
+/// stream as well as a cleartext one. For `ConnIo::Tcp` and `ConnIo::Port`
+/// flushing is the no-op `std` defines, so this is the previous behaviour
+/// exactly; for `ConnIo::Tls` it drains the ciphertext the encryption produced.
+/// Without it a program could write a request, see `Ok`, park reading the
+/// reply, and deadlock with its own request still buffered in userspace.
+pub(super) fn drain_and_flush<B: AsRef<[u8]>>(
+    conn: &mut ConnIo,
+    bufs: &[B],
+) -> std::io::Result<Drain> {
+    match drain_write(conn, bufs)? {
+        Drain::Park { idx, offset } => Ok(Drain::Park { idx, offset }),
+        // `drain_write` never returns this; it is this function's to produce.
+        Drain::Flushing => Ok(Drain::Flushing),
+        Drain::Done => match conn.flush() {
+            Ok(()) => Ok(Drain::Done),
+            Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(Drain::Flushing),
+            Err(e) => Err(e),
+        },
+    }
 }
 
 /// Drain `bufs` into a non-blocking stream: write until everything is gone,
@@ -898,19 +977,37 @@ fn connection_socket(v: &Value, op: &'static str) -> VmResult<SocketValue> {
     Err(VmError::type_mismatch(op, "Socket", v))
 }
 
-/// Resolve `id` in the connection table. A free function over the field, not
-/// a `&mut self` method, so callers keep split borrows of other VM fields. A
-/// stale id surfaces as an Scarlet `NetError`, never a VM halt.
+/// Resolve a stream handle, checking that the handle still agrees with the
+/// entry about whether the stream is encrypted.
+///
+/// A free function over the field, not a `&mut self` method, so callers keep
+/// split borrows of other VM fields. A stale id surfaces as a Scarlet
+/// `NetError`, never a VM halt.
+///
+/// The Scarlet type system is the primary defence — `Socket` and `TlsSocket`
+/// are different types, so naming the wrong one does not compile. This is the
+/// backstop for a handle that outlived what it named: `tls.handshake` re-keys
+/// the connection, so a cleartext handle to an upgraded connection is stale,
+/// and a stale handle must not silently address the TLS entry that replaced it.
+/// A disagreement is reported as the gone-socket error rather than a VM halt,
+/// because from the program's side that is exactly what happened.
 #[inline]
-fn connection_mut(conns: &mut HashMap<i32, super::Conn>, id: i32) -> std::io::Result<&mut ConnIo> {
-    conns
-        .get_mut(&id)
+pub(super) fn stream_entry(
+    conns: &mut HashMap<i32, super::Conn>,
+    sv: SocketValue,
+) -> std::io::Result<&mut ConnIo> {
+    let io = conns
+        .get_mut(&sv.id)
         .map(|c| &mut c.io)
-        .ok_or_else(stale_socket)
+        .ok_or_else(stale_socket)?;
+    if matches!(io, ConnIo::Tls(_)) != (sv.kind == SocketKind::Tls) {
+        return Err(stale_socket());
+    }
+    Ok(io)
 }
 
 #[cold]
-fn stale_socket() -> std::io::Error {
+pub(super) fn stale_socket() -> std::io::Error {
     // A raw errno, because the NetError mapping routes on `raw_os_error`: an
     // errno-less error would map use-after-close to `Errno(0)`.
     std::io::Error::from_raw_os_error(libc::ENOTCONN)

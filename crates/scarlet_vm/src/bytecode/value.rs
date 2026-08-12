@@ -120,8 +120,9 @@ fn decode_socket(bits: u64) -> SocketValue {
         0 => SocketKind::Connection,
         1 => SocketKind::Listener,
         2 => SocketKind::Port,
-        // Two bits, three kinds: only `Value::socket` writes the field, and
-        // it never writes 3.
+        3 => SocketKind::Tls,
+        // Two bits, four kinds: the field is saturated, and the mask keeps
+        // every other bit out, so this arm is unreachable by construction.
         _ => proof_violation("socket immediate with an undefined kind"),
     };
     SocketValue {
@@ -1308,6 +1309,11 @@ pub enum SocketKind {
     Connection = 0,
     Listener = 1,
     Port = 2,
+    /// A connection whose stream is encrypted. Separate from `Connection` so a
+    /// handle cannot be replayed against an entry of the other sort: the
+    /// Scarlet type system keeps `Socket` and `TlsSocket` apart at compile
+    /// time, and this keeps them apart in the VM.
+    Tls = 3,
 }
 
 impl SocketValue {
@@ -1316,7 +1322,7 @@ impl SocketValue {
     #[inline]
     pub(crate) fn is_stream(self) -> bool {
         match self.kind {
-            SocketKind::Connection | SocketKind::Port => true,
+            SocketKind::Connection | SocketKind::Port | SocketKind::Tls => true,
             SocketKind::Listener => false,
         }
     }
