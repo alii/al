@@ -1583,11 +1583,19 @@ fn is_truthy(v: &Value) -> VmResult<bool> {
 ///   instructions do, so `1 shift_left 64` is 0, not 1. Masking is the single
 ///   most-hit bitwise footgun in C, and it is undetectable at the call site.
 /// - **A negative count shifts the other way** by the same magnitude, so
-///   `shift_left(x, -n) == shift_right(x, n)`. This keeps the pair total over
-///   the whole of `i64` without a `Result` the caller would have to thread
-///   through a bitfield expression. `saturating_neg` is load-bearing: plain
-///   negation of `i64::MIN` overflows, and saturating to `i64::MAX` lands in
-///   the "past the width" case, which is the right answer anyway.
+///   `shift_left(x, -n) == shift_right(x, n)` for every `n` in
+///   `i64::MIN + 1..=i64::MAX`. This keeps the pair total over the whole of
+///   `i64` without a `Result` the caller would have to thread through a
+///   bitfield expression. `saturating_neg` is load-bearing: plain negation of
+///   `i64::MIN` overflows, and saturating to `i64::MAX` lands in the "past the
+///   width" case, which is the right answer anyway.
+///
+///   `n == i64::MIN` is excluded because `-n` is not expressible there, not
+///   because either side is wrong. Both saturate to `i64::MAX` and land past
+///   the width in opposite directions: `shift_left` shifts right and keeps the
+///   sign, `shift_right` shifts left and drops it, so for a negative `x` they
+///   read -1 against 0. `negative_count_law_holds_except_at_the_most_negative_count`
+///   pins the domain and the one exclusion.
 ///
 /// The shift itself goes through `u64` so that shifting into or through the
 /// sign bit is defined rather than an overflowing `i64 << n`.
@@ -1603,9 +1611,14 @@ pub(crate) fn shift_left_i64(x: i64, n: i64) -> i64 {
 
 /// Shift right by `n`, TOTAL for every `i64` count, and **arithmetic**: the
 /// sign bit propagates, so `-8 shift_right 1 == -4` and a negative value never
-/// becomes positive. `Int` is signed with no unsigned counterpart, so a
-/// logical shift would have no type to produce its result in; a caller wanting
-/// logical behaviour masks first (`bitwise_and(x, 0xFF) shift_right n`).
+/// becomes positive. `Int` is signed with no unsigned counterpart, so a logical
+/// shift would have no type to produce its result in.
+///
+/// A caller wanting logical behaviour shifts first and clears the copied sign
+/// bits after — `shift_right(x, n) & shift_right(i64::MAX, n - 1)`, for any
+/// `n >= 1`. Masking the INPUT does not work at any width: no positive `i64`
+/// preserves bit 63, since the mask that would is `2^64 - 1` — `-1`, which
+/// masks nothing. `logical_shift_right_idiom_matches_a_u64_shift` pins it.
 ///
 /// The count rules match [`shift_left_i64`]: at or past the width every bit
 /// shifts out, leaving the sign — 0 for a non-negative `x` and -1 for a
@@ -1679,6 +1692,66 @@ mod bitwise_tests {
         assert_eq!(shift_left_i64(8, -1), shift_right_i64(8, 1));
         assert_eq!(shift_right_i64(8, -1), shift_left_i64(8, 1));
         assert_eq!(shift_left_i64(-8, -1), -4);
+    }
+
+    /// The logical-shift idiom both shift docs hand to callers, against a real
+    /// `u64` shift. It has to hold at `i64::MIN`, which is the case that killed
+    /// the mask-the-input recipe these docs used to give: no positive mask
+    /// preserves bit 63.
+    #[test]
+    fn logical_shift_right_idiom_matches_a_u64_shift() {
+        let values = [
+            i64::MIN,
+            i64::MAX,
+            -1,
+            0,
+            1,
+            -8,
+            255,
+            0x5555_5555_5555_5555,
+            0xAAAA_AAAA_AAAA_AAAA_u64 as i64,
+            i64::MIN + 1,
+        ];
+        // n == 0 is excluded on purpose: the mask is -2 there and clears bit 0,
+        // which is exactly why both docs state the domain as `n >= 1`.
+        let counts = [1i64, 2, 3, 31, 32, 63, 64, 65, 200, i64::MAX];
+        for x in values {
+            for n in counts {
+                let idiom = shift_right_i64(x, n) & shift_right_i64(i64::MAX, n - 1);
+                let logical = if n >= 64 { 0 } else { ((x as u64) >> n) as i64 };
+                assert_eq!(idiom, logical, "logical shift right of {x} by {n}");
+            }
+        }
+        // The two figures the docs quote.
+        assert_eq!(
+            shift_right_i64(i64::MIN, 3) & shift_right_i64(i64::MAX, 2),
+            1152921504606846976
+        );
+        assert_eq!(
+            shift_right_i64(-1, 32) & shift_right_i64(i64::MAX, 31),
+            4294967295
+        );
+    }
+
+    /// The negative-count law holds for every count but `i64::MIN`, where
+    /// `-n` is not expressible and the two sides land in opposite cases.
+    #[test]
+    fn negative_count_law_holds_except_at_the_most_negative_count() {
+        let values = [i64::MIN, -8, -1, 0, 1, 255, i64::MAX];
+        for x in values {
+            for n in [1i64, 2, 63, 64, 200, i64::MAX, -1, -64, i64::MIN + 1] {
+                assert_eq!(
+                    shift_left_i64(x, n.wrapping_neg()),
+                    shift_right_i64(x, n),
+                    "law at x={x} n={n}"
+                );
+            }
+        }
+        // The one excluded count: `0 - i64::MIN` wraps back to `i64::MIN`, so
+        // the left side shifts right and keeps the sign while the right side
+        // shifts left and drops it.
+        assert_eq!(shift_left_i64(-1, i64::MIN.wrapping_neg()), -1);
+        assert_eq!(shift_right_i64(-1, i64::MIN), 0);
     }
 
     /// `i64::MIN` has no positive negation; saturating lands past the width,
