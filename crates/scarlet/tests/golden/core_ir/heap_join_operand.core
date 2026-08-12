@@ -1,10 +1,10 @@
 fn s0(%0:t0) -> :t1
   match %0 :t1
-    | 6912.0(%1, %2) ->
+    | 7680.0(%1, %2) ->
       drop %0 [Enum:2]
       drop %2
       ret %1
-    | 6912.1() ->
+    | 7680.1() ->
       drop %0 [Enum:0]
       ret c0
 
@@ -12,10 +12,10 @@ fn s1(%0:t0) -> :t1
   letj %3:t2 =
     if %0 :t2
       let %1:t3 = c1
-      let %2:t4 = ctor 6912.1()
-      ret ctor 6912.0(%1, %2)
+      let %2:t4 = ctor 7680.1()
+      ret ctor 7680.0(%1, %2)
     else
-      ret ctor 6912.1()
+      ret ctor 7680.1()
   drop %0
   ret call fn#0(%3)
 

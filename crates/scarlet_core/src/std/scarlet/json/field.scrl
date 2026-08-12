@@ -1,0 +1,112 @@
+// The three states a JSON object member can be in.
+//
+// A member is absent, or present and `null`, or present with a value. Those
+// are three states and a partial update means something different for each:
+//
+//   absent   the sender did not mention the field — leave it as it is
+//   null     the sender cleared the field — remove the value
+//   present  the sender set the field — use the new value
+//
+// A decoder that returns `Option` for a member has already lost the
+// difference between the first two, and the first partial update it sees
+// wipes data. So `Field` is the type `optional_field` returns, and it is
+// opaque: its constructors are not exported, which means it cannot be matched
+// on and cannot be collapsed by accident. The way through it is `fold`, which
+// takes one branch per state, or `update`, which is the partial-update rule
+// itself.
+//
+// There is deliberately no `Field(a) -> Option(a)`. That function is the bug.
+// `update` is the operation callers actually want and it cannot lose data: it
+// takes the current value, so the "leave it as it is" branch has something to
+// leave.
+
+pub opaque type Field(a) {
+	Absent
+	Null
+	Present(value a)
+}
+
+// The sender did not mention this member.
+pub fn absent() Field(a) {
+	Absent
+}
+
+// The sender sent `null` for this member.
+pub fn null() Field(a) {
+	Null
+}
+
+// The sender sent a value.
+pub fn present(value a) Field(a) {
+	Present(value)
+}
+
+// Consume a `Field` by naming what each of the three states means. This is
+// the general eliminator: every branch is a separate argument, so a collapse
+// is something you write on purpose and a reviewer can see.
+pub fn fold(f Field(a), on_absent fn() b, on_null fn() b, on_present fn(a) b) b {
+	match f {
+		Absent -> on_absent()
+		Null -> on_null()
+		Present(x) -> on_present(x)
+	}
+}
+
+// Apply a partial update to a value you already hold.
+//
+// This is the rule the three states exist for, and it cannot wipe data:
+// absent keeps `current`, null clears it, present replaces it. When there is
+// no current value, `update(f, None)` is correct and does collapse absent and
+// null onto `None` — because with nothing to preserve, there is nothing to
+// lose.
+pub fn update(f Field(a), current Option(a)) Option(a) {
+	match f {
+		Absent -> current
+		Null -> None
+		Present(x) -> Some(x)
+	}
+}
+
+// The value, if the member was present and not null. Absent and null both
+// become `Err(Nil)`: this narrows to a value or fails, so nothing is silently
+// carried past a state it did not handle.
+pub fn require(f Field(a)) Result(a, Nil) {
+	match f {
+		Absent -> Err(Nil)
+		Null -> Err(Nil)
+		Present(x) -> Ok(x)
+	}
+}
+
+// Transform a present value, leaving absent and null alone.
+pub fn map(f Field(a), g fn(a) b) Field(b) {
+	match f {
+		Absent -> Absent
+		Null -> Null
+		Present(x) -> Present(g(x))
+	}
+}
+
+pub fn is_absent(f Field(a)) Bool {
+	match f {
+		Absent -> True
+		Null -> False
+		Present(_) -> False
+	}
+}
+
+pub fn is_null(f Field(a)) Bool {
+	match f {
+		Absent -> False
+		Null -> True
+		Present(_) -> False
+	}
+}
+
+pub fn is_present(f Field(a)) Bool {
+	match f {
+		Absent -> False
+		Null -> False
+		Present(_) -> True
+	}
+}

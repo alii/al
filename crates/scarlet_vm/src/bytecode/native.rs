@@ -220,7 +220,18 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::BitXor
         | Op::BitNot
         | Op::BitShl
-        | Op::BitShr => OpCoverage::Bridge,
+        | Op::BitShr
+        | Op::JsonParse
+        | Op::JsonKind
+        | Op::JsonLen
+        | Op::JsonField
+        | Op::JsonIndex
+        | Op::JsonEntries
+        | Op::JsonString
+        | Op::JsonInt
+        | Op::JsonFloat
+        | Op::JsonBool
+        | Op::JsonEncode => OpCoverage::Bridge,
         Op::ArraySlice => OpCoverage::Try,
         Op::FileRead
         | Op::FileWrite

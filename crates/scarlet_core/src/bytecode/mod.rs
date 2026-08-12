@@ -107,6 +107,17 @@ fn builtin_op(name: &str) -> Option<Op> {
         "map__set" => Op::MapSet,
         "map__delete" => Op::MapDelete,
         "map__to_list" => Op::MapToList,
+        "json__parse_binary" => Op::JsonParse,
+        "json__kind" => Op::JsonKind,
+        "json__len" => Op::JsonLen,
+        "json__field" => Op::JsonField,
+        "json__index" => Op::JsonIndex,
+        "json__entries" => Op::JsonEntries,
+        "json__string" => Op::JsonString,
+        "json__int" => Op::JsonInt,
+        "json__float" => Op::JsonFloat,
+        "json__bool" => Op::JsonBool,
+        "json__encode" => Op::JsonEncode,
         _ => return None,
     })
 }

@@ -1,0 +1,75 @@
+-- parse and read on demand --
+kind          ObjectKind
+size          3
+a             Some(1)
+b.0           Some(True)
+b.1 is null   True
+c.d           Some(2.5)
+missing       True
+kind of null  Some(NullKind)
+
+-- absent, null and present are three states --
+held          Some(lovelace)
+after absent  Some(lovelace)
+after null    None
+after present Some(count)
+state {}      absent
+state {k:null}null
+state {k:v}   present(count)
+{} != {k:null}True
+
+-- typed records --
+null nick     User{ id: 1070000000000000001, name: ada, bot: False, nickname: Null }
+absent nick   User{ id: 1070000000000000001, name: ada, bot: False, nickname: Absent }
+set nick      User {
+  id: 1070000000000000001,
+  name: ada,
+  bot: True,
+  nickname: Present(c)
+}
+
+-- failures carry paths and accumulate --
+decode error: .id: expected a quoted integer, found an integer
+.username: expected a string, found an integer
+decode error: .profile.tags[1]: expected a string, found an integer
+decode error: .absent_here: expected a member named "absent_here", found no such member
+decode error: <root>: expected an integer, found an array
+
+-- tagged unions --
+message       Message(hi)
+heartbeat     Heartbeat(9)
+unknown tag   decode error: .t: expected a known tag, found the tag "NOPE"
+
+-- adversarial input --
+1e400                 rejected
+trailing garbage      rejected
+unterminated string   rejected
+trailing comma        rejected
+comment               rejected
+bare NaN              rejected
+empty input           rejected
+lone surrogate        rejected
+unpaired low          rejected
+valid surrogate pair  accepted
+invalid utf8          rejected
+i64 max               Some(9223372036854775807)
+i64 max + 1 as int    None
+i64 max + 1 as float  True
+i64 min               Some(-9223372036854775808)
+i64 max + 1 kind      Some(IntKind)
+1.0 as int            None
+dup first             Some(1)
+dup member count      2
+empty obj/arr         2 Some(ObjectKind) Some(ArrayKind)
+600-deep parses       ArrayKind size 1
+
+-- encode and round trip --
+encoded       {"name":"ada","id":1070000000000000001,"score":9.5,"active":true,"tags":["a","b"],"nickname":null,"empty":{}}
+reencoded     {"q":"a\"b","nl":"x\ny","tab":"p\tq","uni":"é","ctl":"\u0001","empty":"","obj":{},"arr":[]}
+stable        True
+floats        [1.0,2.5,-0.75,100.0]
+ready user    User{ id: 80351110224678912, name: ada, bot: False, nickname: Null }
+ready v       10
+ready guilds  [41771983423143937]
+ready session abc123
+round trip    True

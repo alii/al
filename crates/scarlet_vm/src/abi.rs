@@ -148,10 +148,15 @@ pub enum AbiSlot {
     H1ChunkedNeedMore,
     /// `[status Int]`
     H1ChunkedBad,
+
+    /// A parsed JSON document cursor — `[arena Binary, tape Binary, idx Int]`
+    JsonDoc,
+    /// `[offset Int, message String]`
+    JsonParseError,
 }
 
 impl AbiSlot {
-    pub(crate) const COUNT: usize = AbiSlot::H1ChunkedBad as usize + 1;
+    pub(crate) const COUNT: usize = AbiSlot::JsonParseError as usize + 1;
 
     pub(crate) const ALL: [AbiSlot; AbiSlot::COUNT] = {
         use AbiSlot::*;
@@ -221,6 +226,8 @@ impl AbiSlot {
             H1ChunkedDone,
             H1ChunkedNeedMore,
             H1ChunkedBad,
+            JsonDoc,
+            JsonParseError,
         ]
     };
 
@@ -292,6 +299,8 @@ impl AbiSlot {
             H1ChunkedDone => "H1ChunkedDone",
             H1ChunkedNeedMore => "H1ChunkedNeedMore",
             H1ChunkedBad => "H1ChunkedBad",
+            JsonDoc => "JsonDoc",
+            JsonParseError => "JsonParseError",
         }
     }
 
@@ -315,6 +324,8 @@ impl AbiSlot {
             | FsEisdir | FsErofs | FsEloop | FsEfbig | FsErrnoOther | NetErrnoOther | IpV4
             | IpV6 | ReadData | ExitCrashed | PortExited | PortSignaled | H1ParsedBad
             | H1FramingLength | H1FramingInvalid | H1ChunkedBad => 1,
+            JsonParseError => 2,
+            JsonDoc => 3,
             SocketAddr | Socket | Monitor | Down | CrashIndexOutOfBounds | Port | H1Header => 2,
             H1HeadFlags | H1ChunkedDone | CrashSliceOutOfBounds | CrashTypeMismatch => 3,
             H1ParsedDone => 6,
@@ -477,6 +488,12 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::H1Header,
         ],
         Op::HttpHeaderGet | Op::MapGet => &[S::OptionSome, S::OptionNone],
+        Op::JsonParse => &[S::ResultOk, S::ResultErr, S::JsonDoc, S::JsonParseError],
+        Op::JsonField | Op::JsonIndex => &[S::OptionSome, S::OptionNone, S::JsonDoc],
+        Op::JsonEntries => &[S::JsonDoc],
+        Op::JsonString | Op::JsonInt | Op::JsonFloat | Op::JsonBool => {
+            &[S::OptionSome, S::OptionNone]
+        }
         // `PushNil` is the value of a block that ends in a statement, and
         // `Print` pushes nothing so the emitter follows it with one.
         Op::PushNil | Op::Sleep | Op::SpawnOnEach => &[S::Unit],

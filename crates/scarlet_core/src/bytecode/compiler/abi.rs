@@ -39,6 +39,7 @@ const PROCESS: &[&str] = &["scarlet", "process"];
 const PORT: &[&str] = &["scarlet", "os", "port"];
 const HDRS: &[&str] = &["scarlet", "http", "headers"];
 const H1: &[&str] = &["scarlet", "http", "h1"];
+const JSON: &[&str] = &["scarlet", "json"];
 
 #[rustfmt::skip]
 const BINDINGS: &[Binding] = &[
@@ -107,6 +108,8 @@ const BINDINGS: &[Binding] = &[
     (AbiSlot::H1ChunkedDone,      H1,   "ChunkBody",     "ChunkedDone"),
     (AbiSlot::H1ChunkedNeedMore,  H1,   "ChunkBody",     "ChunkedNeedMore"),
     (AbiSlot::H1ChunkedBad,       H1,   "ChunkBody",     "ChunkedBad"),
+    (AbiSlot::JsonDoc,            JSON, "Doc",           "Doc"),
+    (AbiSlot::JsonParseError,     JSON, "ParseError",    "ParseError"),
 ];
 
 impl Compiler {
