@@ -18,7 +18,9 @@ fn program_of(src: &str) -> bytecode::Program {
     let expr = ast::Expression::BlockExpression(parsed.ast);
     let r = bytecode::compile(&expr, None, Some(&STDLIB));
     assert!(r.success(), "compile failed: {:?}", r.diagnostics);
-    r.emitted.expect("a successful compile emits").program
+    r.into_runnable()
+        .expect("a successful compile emits")
+        .program
 }
 
 const FACT: &str =

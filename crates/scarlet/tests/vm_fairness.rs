@@ -64,7 +64,10 @@ fn assert_self_tail(src: &str, name: &str) {
     let expr = ast::Expression::BlockExpression(parsed.ast);
     let r = bytecode::compile(&expr, None, Some(&STDLIB));
     assert!(r.success(), "compile failed: {:?}", r.diagnostics);
-    let program = r.emitted.expect("a successful compile emits").program;
+    let program = r
+        .into_runnable()
+        .expect("a successful compile emits")
+        .program;
     let text = dis::disassemble_fn(&program, name);
     assert!(
         text.contains("TailCallSelf"),

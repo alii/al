@@ -288,14 +288,10 @@ impl Compiler {
     fn snapshot_result(&mut self) -> (CompileResult, Vec<HoverFact>) {
         let (references, facts) = self.finalize_references();
         (
-            CompileResult {
-                // A check-only session emits no program: the LSP reads only
-                // diagnostics and the graph, and cloning the hydrated stdlib
-                // `Program` per keystroke would be pure waste.
-                emitted: None,
-                diagnostics: self.engine.diagnostics.clone(),
-                references,
-            },
+            // A check-only session emits no program: the LSP reads only
+            // diagnostics and the graph, and cloning the hydrated stdlib
+            // `Program` per keystroke would be pure waste.
+            CompileResult::analysis_only(self.engine.diagnostics.clone(), references),
             facts,
         )
     }

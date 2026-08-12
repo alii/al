@@ -32,7 +32,7 @@ println(apply_all([1, 2, 3]))
 ";
     let r = scarlet::bytecode::compile(&parse(src), None, Some(&scarlet::STDLIB));
     assert!(r.success(), "compile failed: {:?}", r.diagnostics);
-    let r = r.emitted.expect("a successful compile emits");
+    let r = r.into_runnable().expect("a successful compile emits");
 
     assert!(
         r.program.functions.len() > 50,

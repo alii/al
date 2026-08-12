@@ -561,7 +561,7 @@ f(3)\n";
     let ast = common::parse(src);
     let r = bytecode::compile(&ast, None, Some(&scarlet::STDLIB));
     assert!(r.success(), "compile failed: {:?}", r.diagnostics);
-    let r = r.emitted.expect("a successful compile emits");
+    let r = r.into_runnable().expect("a successful compile emits");
     // Restrict to `f`'s bytecode range so stdlib generics don't false-positive.
     let f = r
         .program
@@ -616,7 +616,7 @@ println(f())\n";
     let ast = common::parse(src);
     let r = bytecode::compile(&ast, None, Some(&scarlet::STDLIB));
     assert!(r.success(), "compile failed: {:?}", r.diagnostics);
-    let r = r.emitted.expect("a successful compile emits");
+    let r = r.into_runnable().expect("a successful compile emits");
     let f = r
         .program
         .functions
@@ -692,7 +692,7 @@ fn compile_native(src: &str, must_native: &[&str]) -> bytecode::Program {
         "compile failed: {:?}\n---\n{src}",
         r.diagnostics
     );
-    let emitted = r.emitted.expect("a successful compile emits");
+    let emitted = r.into_runnable().expect("a successful compile emits");
     let layouts = emitted.frame_layouts;
     let program = emitted.program;
 
@@ -759,7 +759,7 @@ fn run_counting_allocs(src: &str, must_native: &[&str]) -> (usize, String) {
         "compile failed: {:?}\n---\n{src}",
         r.diagnostics
     );
-    let r = r.emitted.expect("a successful compile emits");
+    let r = r.into_runnable().expect("a successful compile emits");
     let (interp_allocs, interp_out) = count_run(r.program);
 
     let (native_allocs, native_out) = count_run(compile_native(src, must_native));
@@ -964,7 +964,7 @@ fn dot_loop_emits_paired_reuse() {
     let ast = common::parse(&format!("{DOT_SRC}dot_loop(10, 0)\n"));
     let r = bytecode::compile(&ast, None, Some(&scarlet::STDLIB));
     assert!(r.success(), "compile failed: {:?}", r.diagnostics);
-    let r = r.emitted.expect("a successful compile emits");
+    let r = r.into_runnable().expect("a successful compile emits");
     let f = r
         .program
         .functions

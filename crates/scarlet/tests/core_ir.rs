@@ -27,7 +27,7 @@ fn lower(source: &str) -> String {
         "compile failed:\n{source}\n--- diagnostics ---\n{:#?}",
         r.diagnostics
     );
-    let emitted = r.emitted.as_ref().expect("a successful compile emits");
+    let emitted = r.into_runnable().expect("a successful compile emits");
     let core: &scarlet::core_ir::CoreProgram = &emitted.core;
     let raw = format!("{core}");
     // Consts first: the `where` block needs both the original index and the
@@ -788,7 +788,10 @@ mod unlowerable {
         let expr = crate::common::parse("1 + 1\n");
         let r = scarlet::bytecode::compile(&expr, None, Some(&scarlet::STDLIB));
         assert!(r.success(), "{:?}", r.diagnostics);
-        let program = r.emitted.expect("a successful compile emits").program;
+        let program = r
+            .into_runnable()
+            .expect("a successful compile emits")
+            .program;
         let mut vm = scarlet::vm::new_vm(program).expect("vm init");
         let val = vm.run().expect("vm run");
         assert_eq!(scarlet::vm::inspect(&val, vm.program()), "2");

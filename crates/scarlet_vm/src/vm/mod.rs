@@ -341,6 +341,10 @@ pub struct VM {
     read_scratch: Vec<u8>,
     /// Whether the currently-running process is the main (root) process.
     current_is_main: bool,
+    /// Stack depth of the main entry frame's locals. Its result is whatever
+    /// sits *above* them, so a `Halt` at exactly this depth means the entry
+    /// frame produced no value at all — see the check at `Step::Done`.
+    main_stack_floor: usize,
     /// The running process's id ([`Process::pid`]).
     current_pid: u64,
     /// The main process's result, stashed at its `Step::Done` if it finishes
@@ -475,6 +479,7 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
         pending_connects: HashMap::new(),
         read_scratch: Vec::new(),
         current_is_main: false,
+        main_stack_floor: 0,
         current_pid: 0,
         main_result: None,
         native_pending: None,
@@ -552,6 +557,7 @@ impl VM {
 
         self.stack
             .extend(std::iter::repeat_n(Value::small_int(0), locals as usize));
+        self.main_stack_floor = self.stack.len();
 
         self.current_is_main = true;
         self.current_pid = self.runtime.alloc_pid();
@@ -622,6 +628,19 @@ impl VM {
                         // Stash the (value, heap) pair together until the
                         // loop's exit hands the value out; dropping the heap
                         // here would dangle the result.
+                        //
+                        // Above the locals, or there is no result: the entry
+                        // frame's locals are pre-filled with `0`, so a bare
+                        // `pop` of an empty evaluation stack would hand back
+                        // one of those zeros as if the program had computed
+                        // it. That is what a program whose toplevel was never
+                        // emitted looks like, and it is a compiler bug, not a
+                        // value.
+                        if self.stack.len() <= self.main_stack_floor {
+                            return Err(VmError::internal(
+                                "the entry frame halted without a value: its toplevel is missing",
+                            ));
+                        }
                         let result = match self.stack.pop() {
                             Some(v) => v,
                             None => self.make_nil()?,

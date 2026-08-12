@@ -250,7 +250,7 @@ impl Session {
                 return;
             }
         }
-        let Some(emitted) = result.emitted else {
+        let Some(emitted) = result.into_runnable() else {
             // A successful non-check compile always emits, so reaching here
             // means the stdlib seed failed and was already reported.
             return;
@@ -330,7 +330,7 @@ impl Session {
             self.report(&result.diagnostics, &replay);
             return;
         }
-        let Some(emitted) = result.emitted else {
+        let Some(emitted) = result.into_runnable() else {
             return;
         };
         // Asked here rather than by looking at the listing, which carries a

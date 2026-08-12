@@ -291,7 +291,7 @@ fn main() -> process::ExitCode {
                         }),
                     )
                 });
-                let Some(emitted) = result.emitted else {
+                let Some(emitted) = result.into_runnable() else {
                     die("nothing to disassemble: the compile produced no program");
                 };
                 let plans = plans.take();
@@ -306,7 +306,7 @@ fn main() -> process::ExitCode {
                 }
             } else {
                 let result = compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
-                let Some(emitted) = result.emitted else {
+                let Some(emitted) = result.into_runnable() else {
                     die("nothing to disassemble: the compile produced no program");
                 };
                 let text = match &args.only {
@@ -376,7 +376,7 @@ fn cmd_run(args: RunArgs) {
             }),
         )
     });
-    let Some(emitted) = result.emitted else {
+    let Some(emitted) = result.into_runnable() else {
         die("nothing to run: the compile produced no program");
     };
     publish_native(

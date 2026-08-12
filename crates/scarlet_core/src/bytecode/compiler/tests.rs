@@ -150,7 +150,10 @@ mod perceus_drop {
             "snippet failed to compile: {:?}",
             r.diagnostics,
         );
-        r.emitted.expect("a non-check compile emits").program.code
+        r.into_runnable()
+            .expect("a non-check compile emits")
+            .program
+            .code
     }
 
     #[test]
@@ -338,7 +341,7 @@ mod clean_module_gate {
         let block = parse_ok("fn f(x Int) Int { x + 1 }\nf(1)\n");
         let r = compile(&ast::Expression::BlockExpression(block), None, None);
         assert!(r.success(), "{:#?}", r.diagnostics);
-        let emitted = r.emitted.expect("a non-check compile emits");
+        let emitted = r.into_runnable().expect("a non-check compile emits");
         assert!(
             !emitted.core.fns.is_empty(),
             "a diagnostics-clean module must produce Core"
@@ -611,15 +614,21 @@ mod stdlib_native_gate_probe {
     }
 }
 
-mod repl_entries {
-    //! A REPL entry is a fragment of a session, not a whole program: the line
-    //! that uses a binding is typed next. Reporting it as unused does not just
-    //! print a message — the error makes the module dirty, and a dirty module
-    //! emits no toplevel at all, so the entry silently does not run.
+mod runnable_programs {
+    //! Two facts a `CompileResult` must never confuse: what analysis built,
+    //! and whether there is a program worth running. A rejected module emits
+    //! no toplevel, so its `Program` runs the stdlib init and halts — and the
+    //! entry frame's pre-filled locals make that look like a computed `0`
+    //! rather than a failure.
+    //!
+    //! Also: a REPL entry is a fragment of a session, not a whole program, so
+    //! the line that uses a binding is typed next. That is why the prompt
+    //! turns the unused-binding check off — and why turning it off must mean
+    //! "do not report", never "report and skip the emit".
 
     use super::parse_ok;
     use crate::ast;
-    use crate::bytecode::{CompileOptions, Op, UnusedBindings, compile, compile_with};
+    use crate::bytecode::{CompileOptions, Op, UnusedBindings, check, compile, compile_with};
 
     fn entry(src: &str) -> ast::Expression {
         ast::Expression::BlockExpression(parse_ok(src))
@@ -634,6 +643,32 @@ mod repl_entries {
         );
     }
 
+    /// The shape of a real bug: the REPL filtered a diagnostic it did not want
+    /// to show, `success()` then said yes, and the `Program` it ran had no
+    /// toplevel — so the entry "evaluated" to one of the entry frame's
+    /// pre-filled locals. Whether a program is runnable is now the splice's
+    /// answer, not the diagnostics'.
+    #[test]
+    fn a_rejected_compile_stays_unrunnable_even_with_its_diagnostics_removed() {
+        let mut result = compile(&entry("x = 5\n42\n"), None, None);
+        assert!(!result.success(), "an unused binding rejects a file");
+        result.diagnostics.clear();
+        assert!(result.success(), "the filtered result looks clean");
+        assert!(
+            result.into_runnable().is_none(),
+            "a program whose toplevel was never emitted must not be runnable"
+        );
+    }
+
+    /// A check builds the function table but splices no toplevel: analysis,
+    /// never a run.
+    #[test]
+    fn a_check_has_artifacts_but_nothing_to_run() {
+        let src = entry("const x = 1\nx\n");
+        assert!(check(&src, None, None).into_runnable().is_none());
+        assert!(check(&src, None, None).into_artifacts().is_some());
+    }
+
     #[test]
     fn a_repl_entry_with_an_unused_binding_still_runs() {
         let result = compile_with(
@@ -644,7 +679,7 @@ mod repl_entries {
             },
         );
         assert!(result.success(), "{:?}", result.diagnostics);
-        let emitted = result.emitted.expect("a successful compile emits");
+        let emitted = result.into_runnable().expect("a successful compile emits");
         // The entry's value is its tail expression, left on the stack for the
         // `Halt` the REPL reads. A skipped toplevel ends `PushNil, Pop, Halt`.
         let ops: Vec<Op> = emitted

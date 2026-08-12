@@ -37,8 +37,10 @@ fn both(source: &str) -> (FnShape, FnShape) {
         "check failed:\n{source}\n{:#?}",
         checked.diagnostics
     );
-    let built = built.emitted.expect("compile emits").program;
-    let checked = checked.emitted.expect("check registers the function table");
+    let built = built.into_runnable().expect("compile emits").program;
+    let checked = checked
+        .into_artifacts()
+        .expect("check registers the function table");
     (fn_shape(&built), fn_shape(&checked.program))
 }
 
@@ -230,7 +232,7 @@ println(outer(4))
     );
     let built = scarlet::bytecode::compile(&ast, None, Some(&scarlet::STDLIB));
     assert!(built.success(), "{:#?}", built.diagnostics);
-    let built = built.emitted.expect("compile emits").program;
+    let built = built.into_runnable().expect("compile emits").program;
     assert_no_jump_into_a_foreign_body(&built);
 }
 
@@ -241,8 +243,10 @@ fn check_and_compile_agree_on_the_entry_index() {
     let built = scarlet::bytecode::compile(&ast, None, Some(&scarlet::STDLIB));
     let checked = scarlet::bytecode::check(&ast, None, Some(&scarlet::STDLIB));
     assert!(built.success() && checked.success());
-    let built = built.emitted.expect("compile emits").program;
-    let checked = checked.emitted.expect("check registers the function table");
+    let built = built.into_runnable().expect("compile emits").program;
+    let checked = checked
+        .into_artifacts()
+        .expect("check registers the function table");
     assert_eq!(built.entry, checked.program.entry);
     assert_eq!(&*built.functions[built.entry as usize].name, "__main__");
 }

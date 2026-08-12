@@ -249,8 +249,22 @@ impl CompileResult {
     /// `diagnostics`, so a caller that filters a diagnostic away cannot turn
     /// a compile that never emitted into a run.
     pub fn into_runnable(self) -> Option<Emitted> {
-        self.entry?;
+        let _spliced = self.entry?;
         self.emitted
+    }
+
+    /// A compile that materialised no program: a check-only session, or a
+    /// stdlib seed that failed before the user's program was touched.
+    pub(crate) fn analysis_only(
+        diagnostics: Vec<Diagnostic>,
+        references: Rc<ReferenceGraph>,
+    ) -> Self {
+        CompileResult {
+            emitted: None,
+            entry: None,
+            diagnostics,
+            references,
+        }
     }
 
     /// What analysis built, runnable or not: the function table, the Core IR,
@@ -1266,11 +1280,10 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         if has_errors(&c.engine.diagnostics) {
             // The seed itself failed: the user's program was never compiled,
             // so there is nothing to hand back — not even a partial one.
-            return CompileResult {
-                emitted: None,
-                diagnostics: c.engine.diagnostics,
-                references: Rc::new(ReferenceGraph::new()),
-            };
+            return CompileResult::analysis_only(
+                c.engine.diagnostics,
+                Rc::new(ReferenceGraph::new()),
+            );
         }
     }
     // `__main__` must include any module-init code already emitted (the
@@ -1354,6 +1367,10 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
     // Drained whether or not the entry elaborates, so a `check` that bailed
     // leaves nothing behind for the next compile on this `Compiler`.
     let walk_tys = c.take_toplevel_walk_tys();
+    // Stays `None` unless the splice below actually happens, which is what
+    // keeps a rejected or check-only compile from handing back a `Program`
+    // that runs the stdlib init and nothing else.
+    let mut entry = None;
     if let Some(clean) = c.clean_module() {
         let name = c.engine.intern("__main__");
         // The wrappers land ahead of `append_toplevel_init`'s `base`, inside
@@ -1373,7 +1390,7 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         // `frame_closures` in this compile is done with it.
         c.frame_closures.clear();
         if !check_only {
-            c.append_toplevel_init(lowered, code_mark, slot_base, TopKind::Entry);
+            entry = c.append_toplevel_init(lowered, code_mark, slot_base, TopKind::Entry);
             c.core.consts = c.program.constants.clone();
         }
     }
@@ -1415,6 +1432,7 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
             core: c.core,
             frame_layouts: c.frame_layouts,
         }),
+        entry,
         diagnostics: c.engine.diagnostics,
         references,
     }

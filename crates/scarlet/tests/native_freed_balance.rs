@@ -47,7 +47,7 @@ fn compile_with_backend(src: &str) -> (bytecode::Program, Vec<String>) {
         "compile failed: {:?}\n---\n{src}",
         r.diagnostics
     );
-    let emitted = r.emitted.expect("a successful compile emits");
+    let emitted = r.into_runnable().expect("a successful compile emits");
     let layouts = emitted.frame_layouts;
     let program = emitted.program;
     let mut module = vm::jit::jit_module().expect("jit module");

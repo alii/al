@@ -42,7 +42,7 @@ fn compile_recording(source: &str) -> (scarlet::bytecode::Program, Vec<Seen>) {
         "compile failed:\n{source}\n{:#?}",
         result.diagnostics
     );
-    let program = result.emitted.expect("compile emits").program;
+    let program = result.into_runnable().expect("compile emits").program;
     // The compiler dropped its `NativeHook` box, so the recording is ours.
     let seen = Rc::try_unwrap(seen).expect("hook released").into_inner();
     (program, seen)
@@ -108,7 +108,7 @@ fn installing_the_hook_does_not_perturb_fn_numbering() {
     let ast = parse(SOURCE);
     let plain = scarlet::bytecode::compile(&ast, None, Some(&scarlet::STDLIB));
     assert!(plain.success(), "compile failed: {:#?}", plain.diagnostics);
-    let plain = plain.emitted.expect("compile emits").program;
+    let plain = plain.into_runnable().expect("compile emits").program;
 
     let shape = |p: &scarlet::bytecode::Program| -> Vec<(String, i32, i32)> {
         p.functions
