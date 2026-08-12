@@ -10,16 +10,27 @@
  * mutable state: values are immutable, and anything that crosses between
  * processes behaves as a copy.
  *
+ * A process ends by returning, by crashing (a runtime error in its own code,
+ * such as an index out of range — it ends that process and nothing else), or
+ * by being killed. A process spawned with spawn is linked to the process that
+ * spawned it: if either of them crashes or is killed, so is the other, and so
+ * on through everything linked to those — so a crash takes down the whole
+ * linked tree, up to and including the main process, unless something in
+ * between was started with spawn_unlinked. That is the point: a failure
+ * nobody planned for stops the program instead of leaving part of it silently
+ * dead, and a failure somebody did plan for is contained exactly where they
+ * said. A supervisor is a process that starts its children with
+ * spawn_unlinked, monitors them, and restarts them when their notices arrive.
+ *
  * A Pid names a process. monitor(pid, inbox, wrap) asks to be sent a message
- * of your own choosing when that process ends, which is how supervisors,
- * worker pools, and request/reply with a dead server are built. A Pid
- * carries no right to send to the process — processes talk through Subjects.
- * A Subject(msg) is a typed mailbox: the process that calls subject() owns it
- * and is the only one that may receive on it; the handle itself is a value —
- * capture it in a spawned closure or send it inside a message (a reply
- * address) — and any process holding it may send. receive(s) blocks until a
- * message arrives; receive_within adds a timeout. Messages on one subject
- * arrive in the order they were sent.
+ * of your own choosing when that process ends, and how it ended; kill(pid)
+ * ends it. A Pid carries no right to send to the process — processes talk
+ * through Subjects. A Subject(msg) is a typed mailbox: the process that calls
+ * subject() owns it and is the only one that may receive on it; the handle
+ * itself is a value — capture it in a spawned closure or send it inside a
+ * message (a reply address) — and any process holding it may send.
+ * receive(s) blocks until a message arrives; receive_within adds a timeout.
+ * Messages on one subject arrive in the order they were sent.
  *
  * The program exits when every process has finished.
  */
@@ -31,7 +42,12 @@ import scarlet/time
 // Compares and hashes by identity: use it as a map key.
 pub type Pid
 
-// Start a new process running `f` and return its Pid.
+// Start a new process running `f`, linked to the calling process, and return
+// its Pid. The link is what makes an unplanned failure in either process end
+// the other (see the module docs); a process that should survive its
+// spawner's failure, or whose failure its spawner means to handle, is started
+// with `spawn_unlinked` instead. Returning normally does nothing to a linked
+// process.
 //
 // The closure returns `Nil`, not a generic `a`: a spawned process has nowhere
 // to send a result — its return value is dropped — so a closure that produces a
@@ -40,27 +56,62 @@ pub type Pid
 @vm(process__spawn)
 pub fn spawn(f fn() Nil) Pid
 
+// As `spawn`, with no link: the new process and the calling process fail
+// independently. What a supervisor uses to start the children it monitors,
+// and what `net.serve` uses to start connection handlers, so that one bad
+// request ends one connection and nothing else.
+@vm(process__spawn_unlinked)
+pub fn spawn_unlinked(f fn() Nil) Pid
+
 // The Pid of the calling process.
 @vm(process__self)
 pub fn self() Pid
+
+// End `pid`, wherever it is and whatever it is doing, as soon as the runtime
+// next looks at it: it stops between two instructions, its sockets and ports
+// close, its monitors report `Killed`, and everything linked to it is killed
+// in turn. Asynchronous, like a send — the process may still run for a
+// moment after this returns; monitor it to know when it has gone. Killing a
+// process that has already ended does nothing; a process may kill itself.
+@vm(process__kill)
+pub fn kill(pid Pid) Nil
 
 // Park only the calling process for `ms` milliseconds — every other process
 // keeps running. `ms <= 0` returns immediately.
 @vm(process__sleep)
 pub fn sleep(ms Int) Nil
 
-// Why a process ended, as reported by a monitor.
-//
-// `Normal` is a process that returned — today the only way a process ends; a
-// runtime that isolates faults to the faulting process will add its reasons
-// here, and every `match` on this type will be asked to handle them.
-// `NoProcess` is what a monitor placed after the process had already ended
-// reports: the runtime keeps nothing about a finished process, so how it
-// ended is no longer known — only that it is gone. (BEAM's `noproc`.) To be
-// sure of seeing the real reason, monitor a process before it can end.
+// Why a process ended, as reported by a monitor. `NoProcess` is what a
+// monitor placed after the process had already ended reports: the runtime
+// keeps nothing about a finished process, so how it ended is no longer known
+// — only that it is gone. To be sure of seeing the real reason, monitor a
+// process before it can end.
 pub type ExitReason {
+	// It returned.
 	Normal
+	// It had already ended when the monitor was placed.
 	NoProcess
+	// `kill` was called on it, or on something linked to it.
+	Killed
+	// Its own code raised a runtime error. Also printed to stderr as it
+	// happens, unless it was the main process, whose crash is the program's
+	// exit status.
+	Crashed(crash Crash)
+}
+
+// The runtime errors a process can crash with. Scarlet has no exceptions,
+// and its arithmetic and pattern matching are total, so this list is short
+// and every entry is an out-of-range access of one kind or another.
+pub type Crash {
+	// `xs[i]` with `i` outside `0..length`.
+	IndexOutOfBounds(index Int, length Int)
+	// A slice whose bounds are not `0 <= from <= to <= length`.
+	SliceOutOfBounds(from Int, to Int, length Int)
+	// A `receive` on a subject some other process owns.
+	ForeignReceive
+	// The runtime met a value of the wrong type — a compiler bug, reported
+	// with the operation and what it saw, so it can be filed.
+	TypeMismatch(op String, expected String, got String)
 }
 
 // The notice a monitor delivers: which process ended, and why.
@@ -79,9 +130,9 @@ pub opaque type Monitor {
 // it already has — `wrap(Down(pid, reason))` is sent to `notify`, so the
 // notice arrives in the same mailbox, and as the same type, as everything
 // else the calling process receives; one `receive` loop handles both. A
-// supervisor is a process that spawns its children, monitors each of them
-// into its own inbox, and matches the down message next to its ordinary
-// traffic:
+// supervisor is a process that starts its children with `spawn_unlinked`,
+// monitors each of them into its own inbox, and matches the down message
+// next to its ordinary traffic:
 //
 //	type Msg {
 //		Job(job Job)

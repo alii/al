@@ -507,9 +507,12 @@ fn array_slice_range_out_of_bounds_errors() {
     let err = new_vm(program)
         .expect("vm must construct")
         .run()
-        .expect_err("slicing a range out of bounds must error");
+        .expect_err("slicing a range out of bounds must crash the main process");
     assert!(
-        matches!(err, super::VmError::SliceOutOfBounds { len: 5, .. }),
+        matches!(
+            err,
+            super::VmError::MainCrashed(super::Crash::SliceOutOfBounds { len: 5, .. })
+        ),
         "unexpected error: {err}"
     );
 }

@@ -1,0 +1,8 @@
+PASS a killed process reports Killed
+PASS killing an ended pid is a no-op
+PASS a kill takes the whole linked tree with it
+PASS the cascade stopped at the unlinked boundary
+PASS the parent returned
+PASS its linked child outlived it and ended normally
+PASS self-kill reports Killed even though it returned
+done

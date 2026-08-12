@@ -49,6 +49,7 @@ use crate::bytecode::{BinaryRef, SocketKind, SocketValue, Value};
 
 use super::poll::{EPOCH, Parked, Wait, monotonic_now_ms};
 use super::port::ConnIo;
+use super::processes::Link;
 use super::sched::BlockingOp;
 use super::{IO_REDUCTION_COST, VM, VmError, VmResult, bin_ref, lock, str_ref};
 
@@ -350,6 +351,32 @@ impl VM {
         Ok(())
     }
 
+    /// `Op::TcpGive`. See the opcode's documentation for the contract. The
+    /// previous owner's entry in `conns_by_owner` is left behind: that index
+    /// tolerates stale ids (`release_connections_of` re-checks the owner), so
+    /// the give costs no scan.
+    pub(super) fn tcp_give(&mut self) -> VmResult<()> {
+        let pid_v = self.pop()?;
+        let Some(to) = pid_v.as_pid() else {
+            return Err(VmError::type_mismatch("net.give", "Pid", &pid_v));
+        };
+        let sv = self.pop_connection("net.give")?;
+        if self.connections.contains_key(&sv.id) {
+            let here = self.runtime.process_scheduler(to) == Some(self.scheduler_index);
+            if here {
+                if let Some(conn) = self.connections.get_mut(&sv.id) {
+                    conn.owner = to;
+                }
+                self.conns_by_owner.entry(to).or_default().push(sv.id);
+            } else if let Some(conn) = self.evict_connection(sv.id) {
+                self.reap_in_background(conn.io);
+            }
+        }
+        let nil = self.make_nil()?;
+        self.stack.push(nil);
+        Ok(())
+    }
+
     pub(super) fn tcp_close_server(&mut self) -> VmResult<()> {
         let sv = self.pop_listener("net.close")?;
         // Retire program-wide, then drain our own queue synchronously so a
@@ -464,14 +491,15 @@ impl VM {
         )))))
     }
 
-    /// `Op::ProcessSpawn`: pop the closure, spawn it, push the child's pid.
-    /// Spawning deep-copies the closure graph, so it is charged like I/O to
-    /// stop a spawn loop monopolizing the scheduler.
+    /// `Op::ProcessSpawn` / `Op::ProcessSpawnUnlinked`: pop the closure,
+    /// spawn it, push the child's pid. Spawning deep-copies the closure
+    /// graph, so it is charged like I/O to stop a spawn loop monopolizing
+    /// the scheduler.
     #[inline(never)]
-    pub(super) fn process_spawn(&mut self, reds: &mut i32) -> VmResult<()> {
+    pub(super) fn process_spawn(&mut self, reds: &mut i32, link: Link) -> VmResult<()> {
         *reds -= IO_REDUCTION_COST;
         let f = self.pop()?;
-        let pid = self.spawn_process(f)?;
+        let pid = self.spawn_process(f, link)?;
         self.stack.push(Value::pid(pid));
         Ok(())
     }

@@ -224,6 +224,12 @@ pub(super) struct SchedSlot {
     /// scheduler woke ([`Runtime::deliver_wake`]). Drained by this slot's
     /// owner; a stale id (the wait already ended on its deadline) is skipped.
     pub(super) wakes: Mutex<Vec<u64>>,
+    /// Pids to kill that were last seen on this scheduler
+    /// ([`Runtime::request_kill_on`]). Drained by the owner, which ends the
+    /// ones it holds; see [`super::processes`] for the ones it does not.
+    kills: Mutex<Vec<u64>>,
+    /// Fast-path gate for `kills`, so the yield path pays one load.
+    kills_pending: AtomicBool,
 }
 
 impl SchedSlot {
@@ -240,6 +246,8 @@ impl SchedSlot {
             run_len: AtomicUsize::new(usize::from(is_main)),
             completions: Mutex::new(VecDeque::new()),
             wakes: Mutex::new(Vec::new()),
+            kills: Mutex::new(Vec::new()),
+            kills_pending: AtomicBool::new(false),
         }
     }
 }
@@ -281,7 +289,7 @@ pub(super) struct Runtime {
     pub(super) live_subjects: AtomicUsize,
     /// Every live pid, with the monitors on it and the monitors it holds.
     /// See [`super::monitor`].
-    pub(super) processes: super::monitor::ProcessTable,
+    pub(super) processes: super::processes::ProcessTable,
     next_pid: AtomicU64,
     /// Per-scheduler shared slots, indexed by scheduler id.
     pub(super) slots: Vec<SchedSlot>,
@@ -329,7 +337,7 @@ impl Runtime {
             shared_listeners: Mutex::new(HashMap::new()),
             mailboxes: super::mailbox::Mailboxes::new(),
             live_subjects: AtomicUsize::new(0),
-            processes: super::monitor::ProcessTable::new(count),
+            processes: super::processes::ProcessTable::new(count),
             next_pid: AtomicU64::new(1),
             slots,
             submit_cursor: AtomicUsize::new(0),
@@ -412,13 +420,42 @@ impl Runtime {
 
     /// Mint a program-unique process id — never reused, so a `Pid` value held
     /// after its process ends still names only that process — and bring the
-    /// process into the live table. The one place processes are created, so
-    /// every process is monitorable from the moment its pid exists;
-    /// [`VM::end_process`](super::VM::end_process) is the matching exit.
-    pub(super) fn alloc_pid(&self) -> u64 {
+    /// process into the live table, on scheduler `sched`, linked to `parent`
+    /// if given. The one place processes are created, so every process is
+    /// monitorable and killable from the moment its pid exists;
+    /// [`VM::terminate`](super::VM::terminate) is the matching exit.
+    pub(super) fn alloc_pid(&self, sched: usize, parent: Option<u64>) -> u64 {
         let pid = self.next_pid.fetch_add(1, Ordering::Relaxed);
-        self.register_process(pid);
+        self.register_process(pid, sched, parent);
         pid
+    }
+
+    /// Route a kill for `pid` to scheduler `sched`, the one last known to
+    /// hold it, and wake it. The mark in the process table is what makes
+    /// the kill binding; this is only how the holder finds out promptly.
+    pub(super) fn request_kill_on(&self, sched: usize, pid: u64) {
+        let slot = &self.slots[sched];
+        lock(&slot.kills).push(pid);
+        slot.kills_pending.store(true, Ordering::Release);
+        if self.is_parked(sched) {
+            self.notify(sched);
+        }
+    }
+
+    pub(super) fn kills_pending(&self, sched: usize) -> bool {
+        self.slots[sched].kills_pending.load(Ordering::Acquire)
+    }
+
+    /// Take the kills routed to scheduler `sched`, or `None` when there are
+    /// none — the common case, answered by the gate alone. The gate drops
+    /// before the list is taken, so a kill pushed in between is either in
+    /// this batch or raises the gate again.
+    pub(super) fn take_kills(&self, sched: usize) -> Option<Vec<u64>> {
+        let slot = &self.slots[sched];
+        if !slot.kills_pending.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        Some(std::mem::take(&mut *lock(&slot.kills)))
     }
 
     /// Retire listener `id` program-wide: drop it from `shared_listeners`, then

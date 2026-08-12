@@ -52,7 +52,7 @@
 
 use std::borrow::Cow;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -79,7 +79,6 @@ pub mod jit;
 mod mailbox;
 mod map;
 mod migrate;
-mod monitor;
 /// Public because the JIT finalize step registers
 /// [`native::al_rt_enter_interp`] by symbol.
 pub mod native;
@@ -95,6 +94,7 @@ mod op_histogram;
 pub(crate) mod perf_map;
 mod poll;
 mod port;
+mod processes;
 mod sched;
 mod templates;
 #[cfg(test)]
@@ -106,16 +106,19 @@ use inspect::value_type_name;
 use migrate::Migrant;
 use native::NativePending;
 use poll::Wait;
+use processes::{Exit, Link};
 use sched::{Inbound, Runtime, Seed};
 use templates::Templates;
 use text::{int_to_ascii, parse_uint_ascii};
 
-/// A VM-level failure. The variants separate user-visible runtime errors from
-/// broken type-system invariants and from infrastructure failures, because
-/// [`VM::run`] and [`worker_main`] act differently on each.
+/// A failure raised while running one process's code. It ends that process
+/// and nothing else (see [`processes`]): a supervisor learns of it as
+/// `Crashed(..)`, and every process linked to the crashed one is killed.
 #[derive(Debug)]
-pub enum VmError {
-    /// An operand had the wrong runtime tag for `op`.
+pub enum Crash {
+    /// An operand had the wrong runtime tag for `op`. In a program the
+    /// checker accepted this is a compiler bug, but it is still one
+    /// process's bug.
     TypeMismatch {
         op: &'static str,
         expected: &'static str,
@@ -132,29 +135,9 @@ pub enum VmError {
     /// `process.receive` on a subject the calling process did not create.
     /// Only the owner may receive; the handle can travel, the right cannot.
     ForeignReceive,
-    /// Type-system invariant broken: a compiler bug, not user error. The
-    /// runtime behind an `Internal`-errored run is leaked (see [`VM::run`]).
-    Internal(Cow<'static, str>),
-    /// mio poll / fd registration / OS resource failure.
-    Io(std::io::Error),
 }
 
-impl VmError {
-    #[cold]
-    fn internal(msg: impl Into<Cow<'static, str>>) -> Self {
-        Self::Internal(msg.into())
-    }
-    #[cold]
-    fn type_mismatch(op: &'static str, expected: &'static str, got: &Value) -> Self {
-        Self::TypeMismatch {
-            op,
-            expected,
-            got: value_type_name(got),
-        }
-    }
-}
-
-impl fmt::Display for VmError {
+impl fmt::Display for Crash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TypeMismatch { op, expected, got } => {
@@ -175,6 +158,56 @@ impl fmt::Display for VmError {
                     "receive: only the process that created a subject may receive on it"
                 )
             }
+        }
+    }
+}
+
+/// What an operation can fail with. The variants are separated by blast
+/// radius: a [`Crash`] is contained to the process that raised it by
+/// [`VM::scheduler_loop`], while `Internal` and `Io` mean the runtime itself
+/// cannot be trusted and end the program. `MainCrashed` is how [`VM::run`]
+/// reports the former for the main process once the program is over.
+#[derive(Debug)]
+pub enum VmError {
+    /// The running process's own fault. Never escapes the scheduler loop.
+    Crash(Crash),
+    /// The main process crashed. Everything else ran on to completion (or
+    /// died with it, over its links); the crash is reported once, here, and
+    /// the run counts as failed. Other processes' crashes are reported to
+    /// stderr as they happen.
+    MainCrashed(Crash),
+    /// The main process was killed — in practice, because a process linked
+    /// to it crashed (that crash was reported to stderr as it happened) or
+    /// something called `kill` on it. The run counts as failed.
+    MainKilled,
+    /// Type-system invariant broken: a compiler bug, not user error. The
+    /// runtime behind an `Internal`-errored run is leaked (see [`VM::run`]).
+    Internal(Cow<'static, str>),
+    /// mio poll / fd registration / OS resource failure.
+    Io(std::io::Error),
+}
+
+impl VmError {
+    #[cold]
+    fn internal(msg: impl Into<Cow<'static, str>>) -> Self {
+        Self::Internal(msg.into())
+    }
+    #[cold]
+    fn type_mismatch(op: &'static str, expected: &'static str, got: &Value) -> Self {
+        Self::Crash(Crash::TypeMismatch {
+            op,
+            expected,
+            got: value_type_name(got),
+        })
+    }
+}
+
+impl fmt::Display for VmError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Crash(c) => write!(f, "{c}"),
+            Self::MainCrashed(c) => write!(f, "{c}"),
+            Self::MainKilled => write!(f, "the main process was killed"),
             Self::Internal(s) => {
                 write!(f, "internal VM error (compiler bug): {s}")
             }
@@ -227,6 +260,16 @@ enum Step {
     /// returned into a native-table frame): `run_slice`'s trampoline must
     /// re-dispatch. Never escapes `run_slice`.
     Dispatch,
+}
+
+/// How the main process ended, held until the whole program has.
+enum MainOutcome {
+    /// Its result, with the arena the value points into: the pair travels
+    /// together, and the heap is re-adopted when the value is handed out so
+    /// it stays alive while the caller prints or inspects it.
+    Returned(Value, ProcHeap),
+    Crashed(Crash),
+    Killed,
 }
 
 /// A suspended lightweight process: a complete resumable continuation. The
@@ -345,12 +388,10 @@ pub struct VM {
     main_stack_floor: usize,
     /// The running process's id ([`Process::pid`]).
     current_pid: u64,
-    /// The main process's result, stashed at its `Step::Done` if it finishes
-    /// while other processes are still running. The value points into main's
-    /// arena, so the pair travels together: the heap is re-adopted into
-    /// `self.heap` when the scheduler loop hands the value out, keeping it
-    /// alive while the caller prints or inspects it.
-    main_result: Option<(Value, ProcHeap)>,
+    /// How the main process ended, stashed when it does — usually while other
+    /// processes are still running — and handed out when the program is
+    /// over. Only ever `Some` on scheduler 0.
+    main_outcome: Option<MainOutcome>,
     // The three fields below are the RUNNING process's native-boundary
     // scratch, mirrored into the VM for the duration of a slice and moved in
     // and out by `suspend_current`/`resume`. They are NOT scheduler state: a
@@ -479,7 +520,7 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
         current_is_main: false,
         main_stack_floor: 0,
         current_pid: 0,
-        main_result: None,
+        main_outcome: None,
         native_pending: None,
         native_ctx: crate::bytecode::NativeCtx::new(),
         native_reds: 0,
@@ -558,17 +599,19 @@ impl VM {
         self.main_stack_floor = self.stack.len();
 
         self.current_is_main = true;
-        self.current_pid = self.runtime.alloc_pid();
+        // Main is the root of the link tree: nothing above it.
+        self.current_pid = self.runtime.alloc_pid(0, None);
         let mut result = self.scheduler_loop();
 
-        // On Ok the global live count is zero, so workers exit on their own.
-        // On Err the count never reaches zero (the errored main cannot
-        // decrement it), so the fault flag forces every scheduler out of its
-        // wait instead — either way the workers can be joined and the runtime
-        // reclaimed, which is what keeps a long-lived embedder (the REPL)
-        // from leaking a thread set per errored evaluation.
+        // Once the loop returns normally — with a value, or with main's
+        // crash after everything else finished — the global live count is
+        // zero and the workers exit on their own. On a runtime fault the
+        // count never gets there, so the fault flag forces every scheduler
+        // out of its wait instead. Either way the workers can be joined and
+        // the runtime reclaimed, which is what keeps a long-lived embedder
+        // (the REPL) from leaking a thread set per failed evaluation.
         let rt = Arc::clone(&self.runtime);
-        if result.is_err() {
+        if matches!(result, Err(VmError::Internal(_) | VmError::Io(_))) {
             rt.raise_fault_flag();
         }
         rt.shutdown_blocking();
@@ -591,41 +634,55 @@ impl VM {
     }
 
     /// Drive processes to completion, round-robin with reduction-budget
-    /// preemption. Scheduler 0 returns the main process's result once every
+    /// preemption. Scheduler 0 returns the main process's outcome once every
     /// process in the program (across all schedulers) has finished; worker
-    /// schedulers return Nil when the program is over.
+    /// schedulers return Nil when the program is over. A crash ends the
+    /// process that raised it and the loop carries on; only a fault of the
+    /// runtime itself returns early.
     fn scheduler_loop(&mut self) -> VmResult<Value> {
         loop {
             if self.frames.is_empty() && !self.acquire_work()? {
                 // Program over. Re-adopt main's arena before handing the value
-                // out: the value points into that heap, which must then live as
-                // long as the VM. Workers and an errored main have no stashed
-                // pair and return Nil, which needs no arena.
-                let result = match self.main_result.take() {
-                    Some((value, heap)) => {
+                // out: the value points into that heap, which must then live
+                // as long as the VM. Workers have no outcome and return Nil,
+                // which needs no arena.
+                return match self.main_outcome.take() {
+                    Some(MainOutcome::Returned(value, heap)) => {
                         self.heap = heap;
-                        value
+                        Ok(value)
                     }
-                    None => self.make_nil()?,
+                    Some(MainOutcome::Crashed(crash)) => Err(VmError::MainCrashed(crash)),
+                    Some(MainOutcome::Killed) => Err(VmError::MainKilled),
+                    None => self.make_nil(),
                 };
-                return Ok(result);
             }
 
-            match self.run_slice()? {
+            let step = match self.run_slice() {
+                Ok(step) => step,
+                Err(VmError::Crash(crash)) => {
+                    self.crash_current(crash)?;
+                    self.publish_load();
+                    continue;
+                }
+                Err(fault @ (VmError::Internal(_) | VmError::Io(_))) => return Err(fault),
+                // Minted only by this loop's own exit above.
+                Err(VmError::MainCrashed(_) | VmError::MainKilled) => {
+                    return Err(VmError::internal("a run outcome was raised inside a slice"));
+                }
+            };
+            match step {
                 // Consumed inside `run_slice`; reaching here is a bug.
                 Step::Dispatch => {
                     return Err(VmError::internal("Step::Dispatch escaped run_slice"));
                 }
                 Step::Done => {
-                    // The ended process's connections and mailboxes die with
-                    // it; then whoever was monitoring it is told. Mailboxes go
-                    // first so a notice can never be delivered to one of the
-                    // dead process's own subjects.
-                    self.release_connections_of(self.current_pid);
-                    self.runtime.subject_close_all(self.current_pid);
-                    self.end_process(self.current_pid)?;
-                    // The finished process's result is its top-of-stack.
-                    if self.current_is_main {
+                    let exit = self.terminate(self.current_pid, Exit::Normal)?;
+                    // The finished process's result is its top-of-stack —
+                    // unless it turned out to have been killed on the way
+                    // out, in which case main has no result to give.
+                    if self.current_is_main && matches!(exit, Exit::Killed) {
+                        self.note_main_killed();
+                    } else if self.current_is_main {
                         // Stash the (value, heap) pair together until the
                         // loop's exit hands the value out; dropping the heap
                         // here would dangle the result.
@@ -646,14 +703,16 @@ impl VM {
                             Some(v) => v,
                             None => self.make_nil()?,
                         };
-                        self.main_result = Some((result, std::mem::take(&mut self.heap)));
+                        self.main_outcome = Some(MainOutcome::Returned(
+                            result,
+                            std::mem::take(&mut self.heap),
+                        ));
                     } else {
                         self.heap = ProcHeap::new();
                     }
                     self.stack.clear();
                     self.frames.clear();
                     self.current_is_main = false;
-                    self.runtime.process_finished();
                 }
                 Step::Yield => {
                     // One balancing decision per yield: take whatever peers
@@ -666,13 +725,18 @@ impl VM {
                     // a closed listener's fd registered, and its port bound,
                     // until this scheduler next idled.
                     self.poll_parked(false)?;
-                    self.take_inbound();
+                    self.take_inbound()?;
                     let peer_idle = self.others_idle();
                     self.try_donate(peer_idle);
-                    if !self.run_queue.is_empty() {
+                    // A pending kill may name the running process itself, so
+                    // it goes back on the queue before the kills are applied
+                    // even when it is the only thing runnable.
+                    if !self.run_queue.is_empty() || self.kills_pending() {
                         let outgoing = self.suspend_current();
                         self.run_queue.push_back(outgoing);
-                        // The queue is non-empty, so this always succeeds.
+                        self.apply_kills()?;
+                        // Empty only if the kills emptied it; the next turn
+                        // of the loop then acquires work.
                         if let Some(p) = self.run_queue.pop_front() {
                             self.resume(p);
                         }
@@ -683,6 +747,7 @@ impl VM {
                     // since adoption, so parking arms nothing.
                     let outgoing = self.suspend_current();
                     self.park(wait, outgoing);
+                    self.apply_kills()?;
                 }
             }
             // Any step may have changed this scheduler's runnable count; peers
@@ -799,7 +864,9 @@ impl VM {
             if self.runtime.is_faulted() {
                 return Ok(false);
             }
-            // 1. Local runnable processes.
+            // 1. Kills that arrived while nothing was running, then local
+            //    runnable processes.
+            self.apply_kills()?;
             if let Some(p) = self.run_queue.pop_front() {
                 self.resume(p);
                 return Ok(true);
@@ -819,10 +886,10 @@ impl VM {
             // 3. Work directed here (pinned acceptors, donated migrants), then
             //    a migrant sitting untaken in a sleeping peer's inbox: stealing
             //    it starts it sooner than waiting for that scheduler to wake.
-            if self.take_inbound() {
+            if self.take_inbound()? {
                 continue;
             }
-            if self.steal_inbound() {
+            if self.steal_inbound()? {
                 continue;
             }
 
@@ -837,7 +904,7 @@ impl VM {
                 self.set_parked_flag(true);
                 // Re-check after publishing the flag: a submitter who scanned
                 // before it was visible may already have pushed work.
-                if self.take_inbound() {
+                if self.take_inbound()? {
                     self.set_parked_flag(false);
                     continue;
                 }
@@ -854,7 +921,7 @@ impl VM {
             // Wait for a seed or for the program to end. Flag first, then
             // re-check; `notify` is sticky, so the reverse race is safe.
             self.set_parked_flag(true);
-            if self.take_inbound() {
+            if self.take_inbound()? {
                 self.set_parked_flag(false);
                 continue;
             }
@@ -872,7 +939,7 @@ impl VM {
     /// migrants — into the local run queue. Called at every yield as well as
     /// when idle: directed work has a chosen destination and must not wait.
     /// Returns whether any arrived.
-    fn take_inbound(&mut self) -> bool {
+    fn take_inbound(&mut self) -> VmResult<bool> {
         let batch = self.runtime.take_inbound(self.scheduler_index);
         self.admit(batch)
     }
@@ -884,25 +951,88 @@ impl VM {
     /// sync, so the global area is refreshed first. Publish happens-before
     /// the hand-off and the hand-off happens-before take, so this can never
     /// be stale.
-    fn admit(&mut self, batch: Vec<Inbound>) -> bool {
+    ///
+    /// Arrival is also where a kill that was requested while the process was
+    /// in transit is honoured: the table is told where the process now is,
+    /// and answers whether it has been killed meanwhile, in which case the
+    /// process is ended right here instead of run. Both paths queue the
+    /// arrival at the back, which is where it is taken from again.
+    fn admit(&mut self, batch: Vec<Inbound>) -> VmResult<bool> {
         if batch.is_empty() {
-            return false;
+            return Ok(false);
         }
         self.sync_globals();
         for inbound in batch {
-            match inbound {
-                Inbound::Seed(seed) => self.hydrate_seed(seed),
-                Inbound::Migrant(m) => self.adopt_migrant(m),
+            let pid = match inbound {
+                Inbound::Seed(seed) => {
+                    let pid = seed.pid;
+                    self.hydrate_seed(seed);
+                    pid
+                }
+                Inbound::Migrant(m) => {
+                    let pid = m.process.pid;
+                    self.adopt_migrant(m);
+                    pid
+                }
+            };
+            if self.runtime.note_adopted(pid, self.scheduler_index)
+                && let Some(p) = self.run_queue.pop_back()
+            {
+                self.discard_killed(p)?;
             }
         }
-        true
+        Ok(true)
+    }
+
+    /// Whether a kill has been routed to this scheduler since the last
+    /// [`VM::apply_kills`]. One relaxed load, so the yield path can ask on
+    /// every turn.
+    fn kills_pending(&self) -> bool {
+        self.runtime.kills_pending(self.scheduler_index)
+    }
+
+    /// End every process routed here for killing that this scheduler holds:
+    /// queued or parked. One that is not here has either ended already or
+    /// moved on, and its adopter honours the mark on arrival (`admit`), so
+    /// there is nothing to chase. Anything routed here but not yet admitted
+    /// is admitted first, which is itself where such an arrival is killed.
+    /// A batch is applied in one pass over each table, so a kill storm costs
+    /// the storm plus the tables, not their product.
+    fn apply_kills(&mut self) -> VmResult<()> {
+        let Some(pids) = self.runtime.take_kills(self.scheduler_index) else {
+            return Ok(());
+        };
+        self.take_inbound()?;
+        let doomed: HashSet<u64> = pids.into_iter().collect();
+        let mut victims: Vec<Process> = Vec::new();
+        let mut i = 0;
+        while i < self.run_queue.len() {
+            if doomed.contains(&self.run_queue[i].pid) {
+                victims.extend(self.run_queue.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        let parked_ids: Vec<u64> = self
+            .parked
+            .iter()
+            .filter(|(_, (_, p))| doomed.contains(&p.pid))
+            .map(|(&wait_id, _)| wait_id)
+            .collect();
+        for wait_id in parked_ids {
+            victims.extend(self.park_remove(wait_id).map(|(_, p)| p));
+        }
+        for p in victims {
+            self.discard_killed(p)?;
+        }
+        Ok(())
     }
 
     /// Steal one undelivered unit of inbound work from a peer scheduler's
     /// inbox. Only called when this scheduler has nothing local to run.
-    fn steal_inbound(&mut self) -> bool {
+    fn steal_inbound(&mut self) -> VmResult<bool> {
         let Some(inbound) = self.runtime.steal_inbound(self.scheduler_index) else {
-            return false;
+            return Ok(false);
         };
         self.admit(vec![inbound])
     }
@@ -986,12 +1116,54 @@ impl VM {
     /// The worker threads are summoned by the first spawn so that donation
     /// has somewhere to send work; a program that never spawns never starts
     /// them.
-    fn spawn_process(&mut self, f: Value) -> VmResult<u64> {
+    fn spawn_process(&mut self, f: Value, link: Link) -> VmResult<u64> {
         self.check_spawnable(&f)?;
         self.runtime.ensure_workers();
         let (heap, root) = ProcHeap::spawn(&f);
         self.runtime.process_started();
-        Ok(self.spawn_process_with_heap(heap, root))
+        let pid = self.alloc_pid(link);
+        self.start_process(pid, heap, root, &[]);
+        Ok(pid)
+    }
+
+    fn note_main_killed(&mut self) {
+        self.main_outcome = Some(MainOutcome::Killed);
+    }
+
+    /// Mint a pid for a process this scheduler is creating, linked to the
+    /// running process or not.
+    fn alloc_pid(&self, link: Link) -> u64 {
+        let parent = match link {
+            Link::ToParent => Some(self.current_pid),
+            Link::None => None,
+        };
+        self.runtime.alloc_pid(self.scheduler_index, parent)
+    }
+
+    /// The scheduler loop's response to a `Crash` raised by the running
+    /// process: report it, throw the process's state away, and end it like
+    /// any other exit — its monitors hear `Crashed`, its links are killed.
+    /// Main's crash is not printed here but becomes the run's outcome, so
+    /// the embedder reports it exactly once and knows the run failed.
+    fn crash_current(&mut self, crash: Crash) -> VmResult<()> {
+        let pid = self.current_pid;
+        let was_main = std::mem::take(&mut self.current_is_main);
+        if !was_main {
+            eprintln!("process <pid#{pid}> crashed: {crash}");
+        }
+        // The stack is mid-instruction; nothing in it is needed. Its values
+        // free as it clears, and the native scratch must not leak into the
+        // next process this scheduler runs.
+        self.stack.clear();
+        self.frames.clear();
+        self.heap = ProcHeap::new();
+        self.native_reds = 0;
+        self.native_pending = None;
+        let exit = self.terminate(pid, Exit::Crashed(crash))?;
+        if was_main && let Exit::Crashed(crash) = exit {
+            self.main_outcome = Some(MainOutcome::Crashed(crash));
+        }
+        Ok(())
     }
 
     /// A spawned closure must be a nullary function. Both are compiler
@@ -1022,7 +1194,8 @@ impl VM {
             if i == self.scheduler_index {
                 let (heap, root) = ProcHeap::spawn(&f);
                 self.runtime.process_started();
-                self.spawn_process_with_heap(heap, root);
+                let pid = self.alloc_pid(Link::ToParent);
+                self.start_process(pid, heap, root, &[]);
             } else if self.runtime.is_live_scheduler(i) {
                 let seed = self.build_seed(&f);
                 self.runtime.submit_to(i, seed);
@@ -1054,31 +1227,18 @@ impl VM {
         }
     }
 
-    /// Create a process whose initial heap is `heap` and whose closure `f`
-    /// points into it. `f` is a nullary closure by construction: every caller
-    /// has run `check_spawnable`, and `ProcHeap::spawn` preserves value kind.
-    #[allow(clippy::expect_used)]
-    fn spawn_process_with_heap(&mut self, heap: ProcHeap, f: Value) -> u64 {
-        let pid = self.runtime.alloc_pid();
-        self.spawn_process_with_heap_as(pid, heap, f);
-        pid
-    }
-
-    fn spawn_process_with_heap_as(&mut self, pid: u64, heap: ProcHeap, f: Value) {
-        self.start_process(pid, heap, f, &[]);
-    }
-
     /// Create a process running the closure `f` applied to `args` — how a
-    /// monitor's notice starts, with its `Down` as the argument. `f`'s arity
-    /// is `args.len()` by the caller's check; `args` point into `heap` or are
-    /// immediates, like `f` itself.
+    /// monitor's notice starts, with its `Down` as the argument. Linked to
+    /// nothing: a notice must outlive whatever exit it is reporting. `f`'s
+    /// arity is `args.len()` by the caller's check; `args` point into `heap`
+    /// or are immediates, like `f` itself.
     pub(super) fn spawn_process_with_heap_args(
         &mut self,
         heap: ProcHeap,
         f: Value,
         args: &[Value],
     ) {
-        let pid = self.runtime.alloc_pid();
+        let pid = self.alloc_pid(Link::None);
         self.start_process(pid, heap, f, args);
     }
 
@@ -1135,8 +1295,10 @@ impl VM {
     fn build_seed(&mut self, f: &Value) -> Seed {
         // `root` points into `heap`, so the pair is self-contained and `Send`.
         let (heap, root) = ProcHeap::spawn(f);
+        // Registered here, on the minting scheduler; the destination corrects
+        // that when it adopts the seed. Linked like a local spawn.
         Seed {
-            pid: self.runtime.alloc_pid(),
+            pid: self.alloc_pid(Link::ToParent),
             heap,
             root,
         }
@@ -1146,7 +1308,7 @@ impl VM {
     /// no top-level bindings: those come from the global area, which `admit`
     /// syncs on every arrival path.
     fn hydrate_seed(&mut self, seed: Seed) {
-        self.spawn_process_with_heap_as(seed.pid, seed.heap, seed.root);
+        self.start_process(seed.pid, seed.heap, seed.root, &[]);
     }
 }
 

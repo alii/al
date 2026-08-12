@@ -12,6 +12,7 @@ import scarlet/net/error.{
 }
 import scarlet/result
 import scarlet/process
+import scarlet/process.{Pid}
 import scarlet/string
 
 // A TCP server. The value is only ever constructed by the VM, and has no values.
@@ -80,6 +81,12 @@ pub fn serve_on(server Server, handler fn(Socket) Nil) Nil {
 @vm(net__spawn_per_core)
 fn spawn_per_core(f fn() Nil) Nil
 
+// Make `to` the process whose end closes `sock`. Only meaningful for a
+// process just spawned by the caller, which is the one case here; the
+// runtime closes the connection outright if `to` has already ended.
+@vm(net__give)
+fn give(sock Socket, to Pid) Nil
+
 // The per-core accept loop: accept a connection, hand it to its own process,
 // then loop. A spawned process starts on the core that spawned it, so the
 // handler begins on the core whose poller holds the connection's socket. One
@@ -102,15 +109,16 @@ fn spawn_per_core(f fn() Nil) Nil
 fn accept_loop(server Server, handler fn(Socket) Nil) Nil {
 	match accept(server) {
 		Ok(Some(sock)) -> {
-			// Close after the handler returns, explicitly: the connection
-			// belongs to this acceptor process (its creator), which loops
-			// forever — a handler that forgot to close would otherwise leak
-			// the socket for the server's whole life. Double-closing a
-			// handler that did close is a harmless Err, swallowed here.
-			_ = process.spawn(fn() {
-				handler(sock)
-				socket.close(sock) or Nil
-			})
+			// The handler is unlinked, so one that crashes ends its own
+			// process and nothing else: the acceptor and every other
+			// connection carry on. The connection is then given to it, so
+			// that it closes when the handler ends — by returning, by
+			// forgetting to close, or by crashing — rather than belonging
+			// to this acceptor, which loops for the server's whole life.
+			// The handler has not run yet when the give happens: a spawned
+			// process starts only once this one yields.
+			handler_pid = process.spawn_unlinked(fn() handler(sock))
+			give(sock, handler_pid)
 			accept_loop(server, handler)
 		}
 		Ok(None) -> Nil

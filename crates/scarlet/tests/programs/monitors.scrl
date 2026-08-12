@@ -3,7 +3,7 @@
 // negative case (a released monitor stays silent) is a generous timeout.
 
 import scarlet/process
-import scarlet/process.{Down, NoProcess, Normal, Pid, Subject}
+import scarlet/process.{Crashed, Down, Killed, NoProcess, Normal, Pid, Subject}
 
 fn check(name String, ok Bool) Nil {
 	if ok {
@@ -39,6 +39,8 @@ check('down names the process', first.pid == child)
 check('a returned process ended normally', match first.reason {
 	Normal -> True
 	NoProcess -> False
+	Killed -> False
+	Crashed(_) -> False
 })
 
 // --- monitoring a process that has already ended fires at once -----------------
@@ -54,8 +56,10 @@ _ = process.monitor(gone, downs, fn(d) d)
 late = process.receive(downs)
 check('monitoring an ended pid still delivers', late.pid == gone)
 check('and reports that it was already gone', match late.reason {
-	Normal -> False
 	NoProcess -> True
+	Normal -> False
+	Killed -> False
+	Crashed(_) -> False
 })
 
 // --- the notice is wrapped into the receiver's own message type -----------------

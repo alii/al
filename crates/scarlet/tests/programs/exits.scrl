@@ -1,0 +1,134 @@
+// Killing and links. Every process here is watched by a monitor, so each
+// exit is observed as a message and the output is fixed; the crash cases,
+// which write to stderr, live in tests/vm_exits.rs.
+
+import scarlet/process
+import scarlet/process.{Down, Killed, NoProcess, Normal, Crashed, Pid, Subject}
+
+fn check(name String, ok Bool) Nil {
+	if ok {
+		println('PASS ${name}')
+	} else {
+		println('FAIL ${name}')
+	}
+}
+
+fn reason(d Down) String {
+	match d.reason {
+		Normal -> 'normal'
+		Killed -> 'killed'
+		NoProcess -> 'no process'
+		Crashed(_) -> 'crashed'
+	}
+}
+
+// A child that stays alive until released, or until killed: its pid and its
+// release subject. `link` decides how it is spawned.
+fn parked(link Bool) (Pid, Subject(Nil)) {
+	boot = process.subject()
+	pid = if link {
+		process.spawn(fn() wait_behind_gate(boot))
+	} else {
+		process.spawn_unlinked(fn() wait_behind_gate(boot))
+	}
+	(pid, process.receive(boot))
+}
+
+fn wait_behind_gate(boot Subject(Subject(Nil))) Nil {
+	gate = process.subject()
+	process.send(boot, gate)
+	process.receive(gate)
+}
+
+downs = process.subject()
+
+// --- kill ends a parked process, and its monitor says so ---------------------------
+
+(victim, _) = parked(False)
+_ = process.monitor(victim, downs, fn(d) d)
+process.kill(victim)
+check('a killed process reports Killed', reason(process.receive(downs)) == 'killed')
+
+// --- killing what has already ended is nothing -----------------------------------------
+
+process.kill(victim)
+_ = process.monitor(victim, downs, fn(d) d)
+check('killing an ended pid is a no-op', reason(process.receive(downs)) == 'no process')
+
+// --- a kill spreads over links, in both directions -------------------------------------
+// root is unlinked from this process, so the cascade stops there. Inside it:
+// root -> middle -> leaf, all linked. Killing middle must end all three.
+
+type Tree {
+	Built(root Pid, middle Pid, leaf Pid)
+	Ended(who String, down Down)
+}
+
+tree = process.subject()
+_ = process.spawn_unlinked(fn() {
+	// This is root. middle is its linked child and builds leaf as its own
+	// linked child; both then wait for ever, until the cascade ends them.
+	built = process.subject()
+	middle = process.spawn(fn() {
+		(leaf, _) = parked(True)
+		process.send(built, leaf)
+		wait_forever()
+	})
+	leaf = process.receive(built)
+	process.send(tree, Built(process.self(), middle, leaf))
+	wait_forever()
+})
+
+fn wait_forever() Nil {
+	process.receive(process.subject())
+}
+
+fn collect(inbox Subject(Tree), left Int, killed Int) Int {
+	if left == 0 {
+		killed
+	} else {
+		match process.receive(inbox) {
+			Ended(_, d) -> collect(inbox, left - 1, if reason(d) == 'killed' { killed + 1 } else { killed })
+			Built(_, _, _) -> collect(inbox, left, killed)
+		}
+	}
+}
+
+match process.receive(tree) {
+	Built(root, middle, leaf) -> {
+		_ = process.monitor(root, tree, fn(d) Ended('root', d))
+		_ = process.monitor(middle, tree, fn(d) Ended('middle', d))
+		_ = process.monitor(leaf, tree, fn(d) Ended('leaf', d))
+		process.kill(middle)
+		check('a kill takes the whole linked tree with it', collect(tree, 3, 0) == 3)
+	}
+	Ended(_, _) -> println('FAIL tree was never built')
+}
+// Reaching this line is the check: root was unlinked, so the cascade
+// stopped there and did not reach this process.
+check('the cascade stopped at the unlinked boundary', True)
+
+// --- a normal exit does not spread ----------------------------------------------------
+// parent (unlinked from us) spawns a linked child, then returns. The child
+// must still be alive afterwards: we can release it and see it end normally.
+
+handoff = process.subject()
+parent = process.spawn_unlinked(fn() {
+	(child, gate) = parked(True)
+	process.send(handoff, (child, gate))
+})
+// Monitored before it can have run: it starts only once this process parks.
+_ = process.monitor(parent, downs, fn(d) d)
+(child, gate) = process.receive(handoff)
+check('the parent returned', reason(process.receive(downs)) == 'normal')
+_ = process.monitor(child, downs, fn(d) d)
+process.send(gate, Nil)
+check('its linked child outlived it and ended normally', reason(process.receive(downs)) == 'normal')
+
+// --- a process may kill itself -----------------------------------------------------------
+
+// The process returns in the same slice as its kill; the kill still wins.
+suicide = process.spawn_unlinked(fn() process.kill(process.self()))
+_ = process.monitor(suicide, downs, fn(d) d)
+check('self-kill reports Killed even though it returned', reason(process.receive(downs)) == 'killed')
+println('done')

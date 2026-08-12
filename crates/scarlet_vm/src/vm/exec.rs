@@ -26,6 +26,7 @@ use crate::tivec::Idx;
 use smallvec::SmallVec;
 
 use super::poll::{Resume, monotonic_now_ms};
+use super::processes::Link;
 use super::{
     CallFrame, IO_REDUCTION_COST, REDUCTION_BUDGET, Step, VM, VmError, VmResult, freeze, inspect,
     value_type_name,
@@ -829,13 +830,16 @@ impl VM {
                 Op::TcpWrite => park!(self.tcp_write(&mut reds)),
                 Op::TcpWriteParts => park!(self.tcp_write_parts(&mut reds)),
                 Op::TcpClose => self.tcp_close(&mut reds)?,
+                Op::TcpGive => self.tcp_give()?,
                 Op::TcpCloseServer => self.tcp_close_server()?,
                 Op::TcpLocalAddr => self.tcp_local_addr()?,
                 Op::DnsResolve => park!(self.dns_resolve(&mut reds)),
                 Op::IpParse => self.ip_parse()?,
                 Op::PortSpawn => park!(self.port_spawn(&mut reds)),
                 Op::PortClose => park!(self.port_close(&mut reds)),
-                Op::ProcessSpawn => self.process_spawn(&mut reds)?,
+                Op::ProcessSpawn => self.process_spawn(&mut reds, Link::ToParent)?,
+                Op::ProcessSpawnUnlinked => self.process_spawn(&mut reds, Link::None)?,
+                Op::ProcessKill => self.process_kill(&mut reds)?,
                 Op::ProcessSelf => self.process_self(),
                 Op::ProcessMonitor => self.process_monitor(&mut reds)?,
                 Op::ProcessDemonitor => self.process_demonitor()?,

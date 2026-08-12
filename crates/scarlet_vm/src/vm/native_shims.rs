@@ -24,6 +24,7 @@ use crate::bytecode::value::{ReuseAddr, proof_violation, range_len};
 use crate::bytecode::{NativeStatus, Op, Value, ValueView, seq};
 
 use super::poll::{Parked, Resume};
+use super::processes::Link;
 use super::{Step, VM, VmResult};
 
 /// Escape raw bits from an owned value without running its destructor. The
@@ -564,9 +565,11 @@ mod opc {
     pub const PREPEND: u8 = Op::Prepend as u8;
     pub const PRINT: u8 = Op::Print as u8;
     pub const PROCESS_DEMONITOR: u8 = Op::ProcessDemonitor as u8;
+    pub const PROCESS_KILL: u8 = Op::ProcessKill as u8;
     pub const PROCESS_MONITOR: u8 = Op::ProcessMonitor as u8;
     pub const PROCESS_SELF: u8 = Op::ProcessSelf as u8;
     pub const PROCESS_SPAWN: u8 = Op::ProcessSpawn as u8;
+    pub const PROCESS_SPAWN_UNLINKED: u8 = Op::ProcessSpawnUnlinked as u8;
     pub const SEQ_DROP: u8 = Op::SeqDrop as u8;
     pub const SLEEP: u8 = Op::Sleep as u8;
     pub const SUBJECT_NEW: u8 = Op::SubjectNew as u8;
@@ -586,6 +589,7 @@ mod opc {
     pub const TCP_CLOSE: u8 = Op::TcpClose as u8;
     pub const TCP_CLOSE_SERVER: u8 = Op::TcpCloseServer as u8;
     pub const TCP_CONNECT: u8 = Op::TcpConnect as u8;
+    pub const TCP_GIVE: u8 = Op::TcpGive as u8;
     pub const TCP_LISTEN: u8 = Op::TcpListen as u8;
     pub const TCP_LOCAL_ADDR: u8 = Op::TcpLocalAddr as u8;
     pub const TCP_READ: u8 = Op::TcpRead as u8;
@@ -820,7 +824,9 @@ impl VM {
             opc::HTTP_HEADER_GET => self.http_header_get(),
             opc::STACK_DEPTH => self.stack_depth(),
             opc::TCP_LOCAL_ADDR => self.tcp_local_addr(),
-            opc::PROCESS_SPAWN => self.process_spawn(reds),
+            opc::PROCESS_SPAWN => self.process_spawn(reds, Link::ToParent),
+            opc::PROCESS_SPAWN_UNLINKED => self.process_spawn(reds, Link::None),
+            opc::PROCESS_KILL => self.process_kill(reds),
             opc::PROCESS_SELF => {
                 self.process_self();
                 Ok(())
@@ -830,6 +836,7 @@ impl VM {
             opc::ARGV => self.argv(),
             opc::TCP_LISTEN => self.tcp_listen(),
             opc::TCP_CLOSE => self.tcp_close(reds),
+            opc::TCP_GIVE => self.tcp_give(),
             opc::TCP_CLOSE_SERVER => self.tcp_close_server(),
             opc::SPAWN_ON_EACH => self.process_spawn_on_each(reds),
             opc::SUBJECT_NEW => self.subject_new(),

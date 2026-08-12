@@ -243,6 +243,10 @@ suite! {
         // Ports: stdio round trip through cat, exit codes, env, the
         // terminate-on-close schedule, spawn failure, owner-death cleanup.
         ports,
+        // Kill and links: Killed notices, cascades over links in both
+        // directions stopping at an unlinked boundary, normal exits not
+        // spreading, self-kill. (Crashes write to stderr: tests/vm_exits.rs.)
+        exits,
         // HTTP/1.1 surface. Locks the native scanners behind scarlet/http/h1 to the
         // sans-IO contract the Scarlet reference parser defined.
         http_parse,

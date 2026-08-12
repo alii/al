@@ -10,7 +10,7 @@
 
 use crate::bytecode::{Value, ValueView, seq};
 
-use super::{VM, VmError, VmResult, range_len, value_type_name};
+use super::{Crash, VM, VmError, VmResult, range_len, value_type_name};
 
 impl VM {
     pub(super) fn make_array(&mut self, operand: i32) -> VmResult<()> {
@@ -39,11 +39,11 @@ impl VM {
                 self.stack.push(t[idx as usize].clone());
                 Ok(())
             } else {
-                Err(VmError::IndexOutOfBounds {
+                Err(VmError::Crash(Crash::IndexOutOfBounds {
                     idx: idx as i64,
                     len: t.len() as i64,
                     what: "tuple",
-                })
+                }))
             }
         } else {
             Err(VmError::type_mismatch("tuple.index", "Tuple", &tuple_val))
@@ -287,11 +287,11 @@ fn check_slice_bounds(start: i64, end: i64, len: i64) -> VmResult<()> {
     if start >= 0 && end <= len && start <= end {
         Ok(())
     } else {
-        Err(VmError::SliceOutOfBounds {
+        Err(VmError::Crash(Crash::SliceOutOfBounds {
             lo: start,
             hi: end,
             len,
-        })
+        }))
     }
 }
 

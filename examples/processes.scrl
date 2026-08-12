@@ -38,8 +38,15 @@ process.spawn(fn() worker(4, 20))
 // process's for the life of the program. A process learns its own from
 // process.self(). A Pid is a name, not a mailbox — sending goes through
 // Subjects (see tests/programs/messages.scrl) — so what it is for is telling
-// processes apart: keying a map of workers, or naming which one an event was
-// about.
+// processes apart: keying a map of workers, naming which one an event was
+// about, monitoring it, or killing it.
+//
+// Every process spawned here is linked to this one: if one of them crashed
+// (say, an out-of-range slice), the crash would end it, be reported, and end
+// this process too — the program would exit with a failure instead of
+// running on with a piece missing. A process whose failure should be handled
+// rather than fatal is started with process.spawn_unlinked and watched with
+// process.monitor; tests/programs/monitors.scrl and exits.scrl show both.
 child = process.spawn(fn() println('child sees itself as ${process.self()}'))
 println('parent spawned ${child}; the parent itself is ${process.self()}')
 println('a pid equals only itself: ${child == child} ${child == process.self()}')

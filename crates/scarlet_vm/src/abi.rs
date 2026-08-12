@@ -107,6 +107,17 @@ pub enum AbiSlot {
     /// The exit reason reported by a monitor placed on a process that had
     /// already ended: how it ended is no longer known.
     ExitNoProcess,
+    /// The process was killed — explicitly, or through a link.
+    ExitKilled,
+    /// The process's own code failed — `[crash]`
+    ExitCrashed,
+    /// `[index Int, length Int]`
+    CrashIndexOutOfBounds,
+    /// `[from Int, to Int, length Int]`
+    CrashSliceOutOfBounds,
+    CrashForeignReceive,
+    /// `[op Str, expected Str, got Str]`
+    CrashTypeMismatch,
 
     /// A port record — `[conn, os_pid Int]`
     Port,
@@ -187,6 +198,12 @@ impl AbiSlot {
             Down,
             ExitNormal,
             ExitNoProcess,
+            ExitKilled,
+            ExitCrashed,
+            CrashIndexOutOfBounds,
+            CrashSliceOutOfBounds,
+            CrashForeignReceive,
+            CrashTypeMismatch,
             Port,
             PortExited,
             PortSignaled,
@@ -252,6 +269,12 @@ impl AbiSlot {
             Down => "Down",
             ExitNormal => "ExitNormal",
             ExitNoProcess => "ExitNoProcess",
+            ExitKilled => "ExitKilled",
+            ExitCrashed => "ExitCrashed",
+            CrashIndexOutOfBounds => "CrashIndexOutOfBounds",
+            CrashSliceOutOfBounds => "CrashSliceOutOfBounds",
+            CrashForeignReceive => "CrashForeignReceive",
+            CrashTypeMismatch => "CrashTypeMismatch",
             Port => "Port",
             PortExited => "PortExited",
             PortSignaled => "PortSignaled",
@@ -286,14 +309,14 @@ impl AbiSlot {
             | NetEconnrefused | NetEconnreset | NetEconnaborted | NetEnotconn | NetEpipe
             | NetEaddrinuse | NetEaddrnotavail | NetEnetdown | NetEnetunreach | NetEhostunreach
             | NetEacces | NetInvalidPort | NetUnalignedBinary | ReadClosed | ExitNormal
-            | ExitNoProcess | H1Http10 | H1Http11 | H1ParsedNeedMore | H1FramingNoBody
-            | H1FramingChunked | H1ChunkedNeedMore => 0,
+            | ExitNoProcess | ExitKilled | CrashForeignReceive | H1Http10 | H1Http11
+            | H1ParsedNeedMore | H1FramingNoBody | H1FramingChunked | H1ChunkedNeedMore => 0,
             ResultOk | ResultErr | OptionSome | FsEnoent | FsEacces | FsEexist | FsEnotdir
             | FsEisdir | FsErofs | FsEloop | FsEfbig | FsErrnoOther | NetErrnoOther | IpV4
-            | IpV6 | ReadData | PortExited | PortSignaled | H1ParsedBad | H1FramingLength
-            | H1FramingInvalid | H1ChunkedBad => 1,
-            SocketAddr | Socket | Monitor | Down | Port | H1Header => 2,
-            H1HeadFlags | H1ChunkedDone => 3,
+            | IpV6 | ReadData | ExitCrashed | PortExited | PortSignaled | H1ParsedBad
+            | H1FramingLength | H1FramingInvalid | H1ChunkedBad => 1,
+            SocketAddr | Socket | Monitor | Down | CrashIndexOutOfBounds | Port | H1Header => 2,
+            H1HeadFlags | H1ChunkedDone | CrashSliceOutOfBounds | CrashTypeMismatch => 3,
             H1ParsedDone => 6,
         }
     }
@@ -457,11 +480,22 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
         // `PushNil` is the value of a block that ends in a statement, and
         // `Print` pushes nothing so the emitter follows it with one.
         Op::PushNil | Op::Sleep | Op::SpawnOnEach => &[S::Unit],
-        Op::SubjectSend | Op::ProcessDemonitor => &[S::Unit],
+        Op::SubjectSend | Op::ProcessDemonitor | Op::ProcessKill | Op::TcpGive => &[S::Unit],
         // The op itself builds a `Down` only for a target that has already
-        // ended; the `Normal` one is built on the death path, which only a
-        // program that emitted this op can reach.
-        Op::ProcessMonitor => &[S::Monitor, S::Down, S::ExitNormal, S::ExitNoProcess],
+        // ended; every other reason is built when a monitored process ends,
+        // which only a program that emitted this op can arrange.
+        Op::ProcessMonitor => &[
+            S::Monitor,
+            S::Down,
+            S::ExitNormal,
+            S::ExitNoProcess,
+            S::ExitKilled,
+            S::ExitCrashed,
+            S::CrashIndexOutOfBounds,
+            S::CrashSliceOutOfBounds,
+            S::CrashForeignReceive,
+            S::CrashTypeMismatch,
+        ],
         Op::SubjectReceiveUntil => &[S::ResultOk, S::ResultErr, S::Unit],
         _ => &[],
     }

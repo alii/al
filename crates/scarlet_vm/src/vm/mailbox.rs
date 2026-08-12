@@ -34,7 +34,7 @@ use crate::heap::ProcHeap;
 
 use super::poll::{EPOCH, Parked, Wait, monotonic_now_ms};
 use super::sched::Runtime;
-use super::{IO_REDUCTION_COST, VM, VmError, VmResult, lock};
+use super::{Crash, IO_REDUCTION_COST, VM, VmError, VmResult, lock};
 
 /// Slots per lazily-allocated segment of the subject table.
 const SEGMENT_SLOTS: usize = 8192;
@@ -342,7 +342,7 @@ impl VM {
                 self.stack.push(subj);
                 Ok(Some(Parked::retry(Wait::mailbox(id))))
             }
-            TryReceive::NotOwner => Err(VmError::ForeignReceive),
+            TryReceive::NotOwner => Err(VmError::Crash(Crash::ForeignReceive)),
         }
     }
 
@@ -375,7 +375,7 @@ impl VM {
                     + Duration::from_millis(deadline_ms.max(0) as u64);
                 Ok(Some(Parked::retry(Wait::mailbox_until(id, deadline))))
             }
-            TryReceive::NotOwner => Err(VmError::ForeignReceive),
+            TryReceive::NotOwner => Err(VmError::Crash(Crash::ForeignReceive)),
         }
     }
 }

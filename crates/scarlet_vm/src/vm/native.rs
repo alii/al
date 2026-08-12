@@ -614,7 +614,7 @@ pub(crate) fn rt_symbols() -> [(&'static str, *const u8); 9] {
 mod tests {
     use std::time::Instant;
 
-    use super::super::halt_test_vm;
+    use super::super::{Crash, halt_test_vm};
     use super::*;
 
     #[test]
@@ -644,18 +644,18 @@ mod tests {
     #[test]
     fn error_round_trips_its_payload() {
         let mut vm = halt_test_vm();
-        let s = vm.status_from_outcome(Err(VmError::SliceOutOfBounds {
+        let s = vm.status_from_outcome(Err(VmError::Crash(Crash::SliceOutOfBounds {
             lo: 1,
             hi: 9,
             len: 3,
-        }));
+        })));
         assert_eq!(s, NativeStatus::Error);
         match vm.outcome_from_status(s) {
-            Err(VmError::SliceOutOfBounds {
+            Err(VmError::Crash(Crash::SliceOutOfBounds {
                 lo: 1,
                 hi: 9,
                 len: 3,
-            }) => {}
+            })) => {}
             _ => panic!("expected the slice error back"),
         }
         assert!(vm.native_pending.is_none());

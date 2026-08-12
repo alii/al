@@ -298,6 +298,13 @@ pub enum Op {
     /// `[sock, Array(Binary)] -> Result(Nil, NetError)` in one writev syscall.
     TcpWriteParts,
     TcpClose,
+    /// `[socket, pid] -> Nil` — make `pid` the connection's controlling
+    /// process, so the connection closes when *it* ends. `net.serve` hands
+    /// each accepted connection to the handler process it just spawned; a
+    /// pid that has already ended, or that is not on this scheduler, closes
+    /// the connection instead, so it can never be left with no live owner
+    /// here. Not part of the public socket API. (scarlet/net's accept loop)
+    TcpGive,
     TcpCloseServer,
     TcpLocalAddr,
     /// `[host] -> Result(IpAddress, NetError)`. IP literals return
@@ -317,9 +324,13 @@ pub enum Op {
     PortClose,
 
     // Concurrency (scarlet/process)
-    /// `[closure] -> Pid` — spawn a lightweight process running the closure
-    /// and push the child's pid. (scarlet/process.spawn)
+    /// `[closure] -> Pid` — spawn a lightweight process running the closure,
+    /// linked to the spawner, and push the child's pid. (scarlet/process.spawn)
     ProcessSpawn,
+    /// As `ProcessSpawn`, with no link. (scarlet/process.spawn_unlinked)
+    ProcessSpawnUnlinked,
+    /// `[pid] -> Nil` — ask for a process to be ended. (scarlet/process.kill)
+    ProcessKill,
     /// Push the running process's own `Pid`. (scarlet/process.self)
     ProcessSelf,
     /// `[pid, notice fn(Down) Nil] -> Monitor` — copy the closure and park it
@@ -551,6 +562,7 @@ impl Op {
             | Op::TcpWrite
             | Op::TcpWriteParts
             | Op::TcpClose
+            | Op::TcpGive
             | Op::TcpCloseServer
             | Op::TcpLocalAddr
             | Op::DnsResolve
@@ -558,6 +570,8 @@ impl Op {
             | Op::PortSpawn
             | Op::PortClose
             | Op::ProcessSpawn
+            | Op::ProcessSpawnUnlinked
+            | Op::ProcessKill
             | Op::ProcessSelf
             | Op::ProcessMonitor
             | Op::ProcessDemonitor
@@ -726,6 +740,7 @@ impl Op {
             | Op::TcpWrite
             | Op::TcpWriteParts
             | Op::TcpClose
+            | Op::TcpGive
             | Op::TcpCloseServer
             | Op::TcpLocalAddr
             | Op::DnsResolve
@@ -733,6 +748,8 @@ impl Op {
             | Op::PortSpawn
             | Op::PortClose
             | Op::ProcessSpawn
+            | Op::ProcessSpawnUnlinked
+            | Op::ProcessKill
             | Op::ProcessSelf
             | Op::ProcessMonitor
             | Op::ProcessDemonitor

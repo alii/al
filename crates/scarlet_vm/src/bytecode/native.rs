@@ -188,10 +188,13 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::StackDepth
         | Op::TcpListen
         | Op::TcpClose
+        | Op::TcpGive
         | Op::TcpCloseServer
         | Op::TcpLocalAddr
         | Op::IpParse
         | Op::ProcessSpawn
+        | Op::ProcessSpawnUnlinked
+        | Op::ProcessKill
         | Op::ProcessSelf
         | Op::ProcessMonitor
         | Op::ProcessDemonitor
