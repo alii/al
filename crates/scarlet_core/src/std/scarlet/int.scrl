@@ -30,3 +30,49 @@ pub fn abs(n Int) Int {
 pub fn clamp(n Int, lo Int, hi Int) Int {
 	min(max(n, lo), hi)
 }
+
+// --- Bitwise ---------------------------------------------------------------
+//
+// Int is a 64-bit signed two's-complement integer — `min_value` and
+// `max_value` above are its exact bounds — so these operate on 64 bits and
+// there is no width to pick. All six are total: every input has a defined
+// answer and nothing traps.
+
+@vm(int__bitwise_and)
+pub fn bitwise_and(a Int, b Int) Int
+
+@vm(int__bitwise_or)
+pub fn bitwise_or(a Int, b Int) Int
+
+@vm(int__bitwise_xor)
+pub fn bitwise_xor(a Int, b Int) Int
+
+// The two's-complement complement, so it flips the sign bit along with the
+// other 63: `bitwise_not(0) == -1` and `bitwise_not(n) == 0 - n - 1`. Int is
+// signed with no unsigned counterpart, so complementing a small non-negative
+// number gives a negative one — to keep a result inside a byte or a 32-bit
+// field, mask it: `bitwise_and(bitwise_not(n), 255)`.
+@vm(int__bitwise_not)
+pub fn bitwise_not(n Int) Int
+
+// Bits shifted off the top are discarded.
+//
+// A count of 64 or more shifts every bit out and gives 0. The count is NOT
+// masked to 6 bits the way C and most hardware shift instructions do, so
+// `bitwise_shift_left(1, 64)` is 0, not 1.
+//
+// A negative count shifts the other way by the same magnitude, so
+// `bitwise_shift_left(x, 0 - n) == bitwise_shift_right(x, n)`.
+@vm(int__bitwise_shift_left)
+pub fn bitwise_shift_left(x Int, n Int) Int
+
+// Arithmetic (sign-propagating), not logical: the sign bit is copied into the
+// vacated top bits, so `bitwise_shift_right(-8, 1) == -4` and a negative value
+// never becomes positive. For logical behaviour, mask first:
+// `bitwise_shift_right(bitwise_and(x, 255), n)`.
+//
+// Counts follow `bitwise_shift_left`: 64 or more shifts every bit out and
+// leaves the sign — 0 for a non-negative `x`, -1 for a negative one — and a
+// negative count shifts left instead.
+@vm(int__bitwise_shift_right)
+pub fn bitwise_shift_right(x Int, n Int) Int

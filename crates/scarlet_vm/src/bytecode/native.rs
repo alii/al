@@ -212,7 +212,15 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::MapNew
         | Op::MapSet
         | Op::MapDelete
-        | Op::MapToList => OpCoverage::Bridge,
+        | Op::MapToList
+        // Total by construction, so `Bridge` (pure, single-result, cannot
+        // fail) is exactly right — the same class `Add`/`Div`/`Mod` sit in.
+        | Op::BitAnd
+        | Op::BitOr
+        | Op::BitXor
+        | Op::BitNot
+        | Op::BitShl
+        | Op::BitShr => OpCoverage::Bridge,
         Op::ArraySlice => OpCoverage::Try,
         Op::FileRead
         | Op::FileWrite

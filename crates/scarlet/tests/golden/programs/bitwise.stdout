@@ -1,0 +1,31 @@
+and: 8 15 0
+or: 14 255 12345
+xor: 6 240 12345
+not: -1 -2 0 -256
+and identity: PASS PASS
+or identity: PASS PASS
+xor self: PASS PASS PASS PASS
+xor zero: PASS PASS
+not round trip: PASS PASS PASS
+not is -n-1: PASS PASS PASS
+de morgan: PASS PASS
+sign bit: PASS PASS PASS
+sign test: PASS PASS
+shl 0: PASS PASS PASS
+shr 0: PASS PASS PASS
+shl 64: 0 0 0 0
+shl width edge: PASS PASS PASS
+shr 64: 0 -1 -1 0
+shr width edge: PASS PASS PASS PASS
+shr arithmetic: -4 4 -1 -4611686018427387904
+shr keeps sign: PASS PASS
+logical via mask: 15
+negative count: PASS PASS PASS
+most negative count: PASS PASS PASS PASS
+boxed: PASS PASS PASS PASS
+boxed not: PASS PASS
+bitfield: 1099511627784 PASS PASS
+bitfield clear: 1099511627776 PASS PASS
+ws mask: 222 22 PASS
+key bytes: 222 173 190 239
+key rebuilt: PASS

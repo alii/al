@@ -228,6 +228,42 @@ println(12345678901 * 987654321)
     );
 }
 
+/// (e) The integer bitwise ops across the interp→native switch. They lower as
+/// `OpCoverage::Bridge`, so a wrong arm in `run_bridge_op` would be invisible
+/// to the interpreter-only golden program — every loop here is an IDENTITY
+/// (XOR by the same value twice, shift out and back, AND with all ones), so
+/// the printed value is fixed by the input and any mis-wired arm changes it.
+/// The recursion is long enough to warm all three functions.
+#[test]
+fn bitwise_ops_survive_the_native_bridge() {
+    let src = "import scarlet/int
+
+fn spin(n Int, acc Int) Int {
+\tif n == 0 { acc } else { spin(n - 1, int.bitwise_xor(int.bitwise_xor(acc, n), n)) }
+}
+
+fn shifty(n Int, acc Int) Int {
+\tif n == 0 { acc } else { shifty(n - 1, int.bitwise_shift_right(int.bitwise_shift_left(acc, 1), 1)) }
+}
+
+fn masky(n Int, acc Int) Int {
+\tif n == 0 { acc } else { masky(n - 1, int.bitwise_or(int.bitwise_and(acc, int.bitwise_not(0)), 0)) }
+}
+
+println(spin(3000000, 12345))
+println(shifty(3000000, 987654321))
+println(masky(3000000, -42))
+";
+    assert_prints(
+        "bitwise_bridge",
+        src,
+        None,
+        "12345\n\
+         987654321\n\
+         -42\n",
+    );
+}
+
 /// xorshift64 — deterministic, seedable, no dependency.
 struct Rng(u64);
 

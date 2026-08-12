@@ -224,6 +224,9 @@ suite! {
         // Numeric edges: i64 wrapping, boxed ints, float canonicalization,
         // exact decimals.
         numerics,
+        // Bitwise edges: the sign bit, shift counts at and past the 64-bit
+        // width, negative counts, and arithmetic (not logical) right shift.
+        bitwise,
         // The deterministic slice of the effectful stdlib. Everything is pinned
         // as a derived fact, never a clock reading or an env value.
         effects,

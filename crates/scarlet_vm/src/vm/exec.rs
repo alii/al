@@ -855,6 +855,13 @@ impl VM {
                 Op::StrContains => self.str_contains()?,
                 Op::StrTrim => self.str_trim()?,
                 Op::IntToString => self.int_to_string()?,
+                // Integer bitwise builtins (scarlet/int).
+                Op::BitAnd => self.bit_and()?,
+                Op::BitOr => self.bit_or()?,
+                Op::BitXor => self.bit_xor()?,
+                Op::BitNot => self.bit_not()?,
+                Op::BitShl => self.bit_shl()?,
+                Op::BitShr => self.bit_shr()?,
                 Op::BinFromString => self.bin_from_string()?,
                 Op::BinToString => self.bin_to_string()?,
                 Op::BinBitSize => self.bin_bit_size()?,
@@ -1397,6 +1404,61 @@ impl VM {
         )
     }
 
+    pub(super) fn bit_and(&mut self) -> VmResult<()> {
+        self.int_binop("bitwise_and", |x, y| x & y)
+    }
+
+    pub(super) fn bit_or(&mut self) -> VmResult<()> {
+        self.int_binop("bitwise_or", |x, y| x | y)
+    }
+
+    pub(super) fn bit_xor(&mut self) -> VmResult<()> {
+        self.int_binop("bitwise_xor", |x, y| x ^ y)
+    }
+
+    /// `bitwise_not` is the two's-complement complement, so it flips the sign
+    /// bit with every other: `not 0 == -1` and `not n == -n - 1`. `Int` has no
+    /// unsigned twin to land in, which is why the result of complementing a
+    /// small non-negative number is negative rather than large.
+    pub(super) fn bit_not(&mut self) -> VmResult<()> {
+        let a = self.pop()?;
+        let ValueView::Int(ai) = a.kind() else {
+            return Err(VmError::internal(format!(
+                "bitwise_not on '{}'",
+                value_type_name(&a)
+            )));
+        };
+        let v = self.boxed_int(!ai);
+        self.stack.push(v);
+        Ok(())
+    }
+
+    pub(super) fn bit_shl(&mut self) -> VmResult<()> {
+        self.int_binop("bitwise_shift_left", shift_left_i64)
+    }
+
+    pub(super) fn bit_shr(&mut self) -> VmResult<()> {
+        self.int_binop("bitwise_shift_right", shift_right_i64)
+    }
+
+    /// Integer core for the bitwise ops, mirroring [`Self::arith`]. There is no
+    /// float arm: HM types all six as `Int -> … -> Int`, so a non-`Int` operand
+    /// is a compiler bug rather than a user error.
+    fn int_binop(&mut self, what: &str, f: fn(i64, i64) -> i64) -> VmResult<()> {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        let (ValueView::Int(ai), ValueView::Int(bi)) = (a.kind(), b.kind()) else {
+            return Err(VmError::internal(format!(
+                "{what} on '{}' and '{}'",
+                value_type_name(&a),
+                value_type_name(&b)
+            )));
+        };
+        let v = self.boxed_int(f(ai, bi));
+        self.stack.push(v);
+        Ok(())
+    }
+
     /// Numeric core for the untyped `+ - * / %` fallbacks. A mixed pair is a
     /// compiler bug: HM unifies both operands to one numeric type. Arithmetic
     /// is TOTAL — int overflow wraps, and `Value::float` collapses any
@@ -1509,4 +1571,125 @@ fn compare_values(a: Value, b: Value) -> VmResult<std::cmp::Ordering> {
 fn is_truthy(v: &Value) -> VmResult<bool> {
     v.as_bool()
         .ok_or_else(|| VmError::type_mismatch("condition", "Bool", v))
+}
+
+/// Shift left by `n`, TOTAL for every `i64` count.
+///
+/// Two rules, both chosen so the shift agrees with the arithmetic it stands
+/// for rather than with the hardware instruction underneath it:
+///
+/// - **A count at or past the 64-bit width shifts every bit out**, giving 0.
+///   It does *not* mask the count to 6 bits the way C and the x86/ARM shift
+///   instructions do, so `1 shift_left 64` is 0, not 1. Masking is the single
+///   most-hit bitwise footgun in C, and it is undetectable at the call site.
+/// - **A negative count shifts the other way** by the same magnitude, so
+///   `shift_left(x, -n) == shift_right(x, n)`. This keeps the pair total over
+///   the whole of `i64` without a `Result` the caller would have to thread
+///   through a bitfield expression. `saturating_neg` is load-bearing: plain
+///   negation of `i64::MIN` overflows, and saturating to `i64::MAX` lands in
+///   the "past the width" case, which is the right answer anyway.
+///
+/// The shift itself goes through `u64` so that shifting into or through the
+/// sign bit is defined rather than an overflowing `i64 << n`.
+pub(crate) fn shift_left_i64(x: i64, n: i64) -> i64 {
+    if n < 0 {
+        shift_right_nonneg(x, n.saturating_neg())
+    } else if n >= 64 {
+        0
+    } else {
+        ((x as u64) << n) as i64
+    }
+}
+
+/// Shift right by `n`, TOTAL for every `i64` count, and **arithmetic**: the
+/// sign bit propagates, so `-8 shift_right 1 == -4` and a negative value never
+/// becomes positive. `Int` is signed with no unsigned counterpart, so a
+/// logical shift would have no type to produce its result in; a caller wanting
+/// logical behaviour masks first (`bitwise_and(x, 0xFF) shift_right n`).
+///
+/// The count rules match [`shift_left_i64`]: at or past the width every bit
+/// shifts out, leaving the sign — 0 for a non-negative `x` and -1 for a
+/// negative one — and a negative count shifts left instead.
+pub(crate) fn shift_right_i64(x: i64, n: i64) -> i64 {
+    if n < 0 {
+        shift_left_nonneg(x, n.saturating_neg())
+    } else {
+        shift_right_nonneg(x, n)
+    }
+}
+
+/// `shift_left_i64`'s positive-count half, split out so the two entry points
+/// can delegate to each other without recursing.
+fn shift_left_nonneg(x: i64, n: i64) -> i64 {
+    debug_assert!(n >= 0);
+    if n >= 64 { 0 } else { ((x as u64) << n) as i64 }
+}
+
+/// `shift_right_i64`'s positive-count half. `x >> 63` is the sign broadcast
+/// across every bit, which is exactly what shifting all 64 bits out leaves.
+fn shift_right_nonneg(x: i64, n: i64) -> i64 {
+    debug_assert!(n >= 0);
+    if n >= 64 { x >> 63 } else { x >> n }
+}
+
+#[cfg(test)]
+mod bitwise_tests {
+    use super::{shift_left_i64, shift_right_i64};
+
+    #[test]
+    fn shift_by_zero_is_identity() {
+        for x in [0i64, 1, -1, i64::MAX, i64::MIN, 0x5555_5555_5555_5555] {
+            assert_eq!(shift_left_i64(x, 0), x, "shl 0 on {x}");
+            assert_eq!(shift_right_i64(x, 0), x, "shr 0 on {x}");
+        }
+    }
+
+    /// The C/x86 masking trap: a masked count would make this 1.
+    #[test]
+    fn shift_past_the_width_does_not_mask_the_count() {
+        assert_eq!(shift_left_i64(1, 64), 0);
+        assert_eq!(shift_left_i64(1, 65), 0);
+        assert_eq!(shift_left_i64(1, i64::MAX), 0);
+        assert_eq!(shift_right_i64(i64::MAX, 64), 0);
+        assert_eq!(shift_right_i64(1, i64::MAX), 0);
+    }
+
+    /// Arithmetic, not logical: the sign survives, and a full-width right
+    /// shift of a negative leaves -1 rather than 0.
+    #[test]
+    fn right_shift_is_arithmetic() {
+        assert_eq!(shift_right_i64(-8, 1), -4);
+        assert_eq!(shift_right_i64(-1, 63), -1);
+        assert_eq!(shift_right_i64(-1, 64), -1);
+        assert_eq!(shift_right_i64(i64::MIN, 64), -1);
+        assert_eq!(shift_right_i64(i64::MIN, 63), -1);
+        assert_eq!(shift_right_i64(8, 1), 4);
+    }
+
+    #[test]
+    fn shifting_into_and_through_the_sign_bit_is_defined() {
+        assert_eq!(shift_left_i64(1, 63), i64::MIN);
+        assert_eq!(shift_left_i64(1, 62), 4611686018427387904);
+        assert_eq!(shift_left_i64(-1, 63), i64::MIN);
+        assert_eq!(shift_left_i64(i64::MAX, 1), -2);
+    }
+
+    #[test]
+    fn negative_count_shifts_the_other_way() {
+        assert_eq!(shift_left_i64(8, -1), shift_right_i64(8, 1));
+        assert_eq!(shift_right_i64(8, -1), shift_left_i64(8, 1));
+        assert_eq!(shift_left_i64(-8, -1), -4);
+    }
+
+    /// `i64::MIN` has no positive negation; saturating lands past the width,
+    /// which is the same answer an exact `|i64::MIN|` would give.
+    #[test]
+    fn most_negative_count_does_not_overflow() {
+        assert_eq!(shift_left_i64(-1, i64::MIN), -1);
+        assert_eq!(shift_left_i64(1, i64::MIN), 0);
+        assert_eq!(shift_right_i64(1, i64::MIN), 0);
+        // Delegates *left* by |MIN| saturated to i64::MAX — past the width,
+        // so every bit shifts out and nothing of the sign survives.
+        assert_eq!(shift_right_i64(-1, i64::MIN), 0);
+    }
 }
