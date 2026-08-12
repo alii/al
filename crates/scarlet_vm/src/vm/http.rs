@@ -276,7 +276,7 @@ pub(super) fn parse_response_head(
 }
 
 fn resp_bad(t: &H1, a: &mut ProcHeap, why: &Value) -> Value {
-    t.resp_bad.instantiate(a, &[why.clone()])
+    t.resp_bad.instantiate(a, std::slice::from_ref(why))
 }
 
 /// As `parse_head_window`, but for `HTTP-version SP status-code [SP reason]`.
