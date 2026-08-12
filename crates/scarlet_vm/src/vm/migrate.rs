@@ -45,7 +45,7 @@ const _: () = crate::assert_send::<Migrant>();
 /// It must descend into immortal (frozen) subgraphs: a socket is an immediate,
 /// so a frozen tuple can carry one. Pruning on `Value::is_immortal` drops those
 /// fds on the floor.
-pub(super) fn for_each_socket(v: &Value, visit: &mut impl FnMut(SocketValue)) {
+fn for_each_socket(v: &Value, visit: &mut impl FnMut(SocketValue)) {
     if let Some(s) = v.as_socket() {
         visit(s);
     }
@@ -167,7 +167,7 @@ impl VM {
     /// by spawn seeding and donation. Listeners in `ids` are left alone, and an
     /// id with no connection entry (a listener, or one an earlier spawn already
     /// moved away) is skipped.
-    pub(super) fn detach_socket_ids(&mut self, ids: impl IntoIterator<Item = i32>) -> DetachedFds {
+    fn detach_socket_ids(&mut self, ids: impl IntoIterator<Item = i32>) -> DetachedFds {
         let mut connections: DetachedFds = Vec::new();
         for id in ids {
             // `evict_connection` also fails anything parked on the id. Donation
@@ -186,7 +186,7 @@ impl VM {
     /// failure the stream is dropped (closing the fd), so the socket cannot
     /// sit live and unwatched — the owning process's next op on the id
     /// surfaces the stale-socket `NetError` and it is never parked on it.
-    pub(super) fn adopt_connections(&mut self, connections: DetachedFds) {
+    fn adopt_connections(&mut self, connections: DetachedFds) {
         for (id, c, owner) in connections {
             if let Err(e) = self.track_connection(id, c, owner) {
                 eprintln!("warning: adopted connection {id} closed (cannot watch it: {e})");
