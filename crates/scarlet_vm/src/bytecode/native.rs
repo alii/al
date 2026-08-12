@@ -193,6 +193,8 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::IpParse
         | Op::ProcessSpawn
         | Op::ProcessSelf
+        | Op::ProcessMonitor
+        | Op::ProcessDemonitor
         | Op::SpawnOnEach
         | Op::SubjectNew
         | Op::SubjectSend
@@ -218,6 +220,8 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::TcpWrite
         | Op::TcpWriteParts
         | Op::DnsResolve
+        | Op::PortSpawn
+        | Op::PortClose
         | Op::Sleep
         | Op::SubjectReceive
         | Op::SubjectReceiveUntil => OpCoverage::Park,

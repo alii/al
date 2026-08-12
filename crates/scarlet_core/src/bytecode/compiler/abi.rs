@@ -35,6 +35,8 @@ const IO: &[&str] = &["scarlet", "io"];
 const ADDR: &[&str] = &["scarlet", "net", "address"];
 const SOCK: &[&str] = &["scarlet", "net", "socket"];
 const NET: &[&str] = &["scarlet", "net", "error"];
+const PROCESS: &[&str] = &["scarlet", "process"];
+const PORT: &[&str] = &["scarlet", "os", "port"];
 const HDRS: &[&str] = &["scarlet", "http", "headers"];
 const H1: &[&str] = &["scarlet", "http", "h1"];
 
@@ -78,6 +80,13 @@ const BINDINGS: &[Binding] = &[
     (AbiSlot::NetInvalidPort,     NET,  "NetError",      "InvalidPort"),
     (AbiSlot::NetUnalignedBinary, NET,  "NetError",      "UnalignedBinary"),
     (AbiSlot::NetErrnoOther,      NET,  "NetError",      "Errno"),
+    (AbiSlot::Monitor,            PROCESS, "Monitor",    "Monitor"),
+    (AbiSlot::Down,               PROCESS, "Down",       "Down"),
+    (AbiSlot::ExitNormal,         PROCESS, "ExitReason", "Normal"),
+    (AbiSlot::ExitNoProcess,      PROCESS, "ExitReason", "NoProcess"),
+    (AbiSlot::Port,               PORT,    "Port",       "Port"),
+    (AbiSlot::PortExited,         PORT,    "ExitStatus", "Exited"),
+    (AbiSlot::PortSignaled,       PORT,    "ExitStatus", "Signaled"),
     (AbiSlot::H1Header,           HDRS, "Header",        "Header"),
     (AbiSlot::H1Http10,           H1,   "Version",       "Http10"),
     (AbiSlot::H1Http11,           H1,   "Version",       "Http11"),

@@ -108,15 +108,25 @@ const PTR_PAYLOAD: u64 = PAYLOAD & !VALUE_IMMORTAL;
 const SMALL_INT_MIN: i64 = -(1i64 << 47);
 const SMALL_INT_MAX: i64 = (1i64 << 47) - 1;
 
-/// Socket immediate payload: low 32 bits = id, bit 32 = is_listener.
-const SOCKET_LISTENER_BIT: u64 = 1 << 32;
+/// Socket immediate payload: low 32 bits = id, bits 32-33 = the
+/// [`SocketKind`] discriminant.
+const SOCKET_KIND_SHIFT: u32 = 32;
+const SOCKET_KIND_MASK: u64 = 0b11 << SOCKET_KIND_SHIFT;
 
 /// Decode the socket immediate payload; caller must have checked `is_socket`.
 #[inline]
 fn decode_socket(bits: u64) -> SocketValue {
+    let kind = match (bits & SOCKET_KIND_MASK) >> SOCKET_KIND_SHIFT {
+        0 => SocketKind::Connection,
+        1 => SocketKind::Listener,
+        2 => SocketKind::Port,
+        // Two bits, three kinds: only `Value::socket` writes the field, and
+        // it never writes 3.
+        _ => proof_violation("socket immediate with an undefined kind"),
+    };
     SocketValue {
         id: (bits & 0xFFFF_FFFF) as u32 as i32,
-        is_listener: bits & SOCKET_LISTENER_BIT != 0,
+        kind,
     }
 }
 
@@ -1280,10 +1290,36 @@ pub enum ValueView<'a> {
     Map(MapRef<'a>),
 }
 
+/// The handle inside a `Server`, a `Socket`, or a `Port`: an id into the
+/// owning scheduler's tables, plus which table and which operations apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SocketValue {
     pub(crate) id: i32,
-    pub(crate) is_listener: bool,
+    pub(crate) kind: SocketKind,
+}
+
+/// What a [`SocketValue`] denotes. A connection and a port are both stream
+/// endpoints in the connection table — a port's stream is a child process's
+/// stdio — and travel with their controlling process; a listener is one
+/// program-wide socket that every scheduler reaches by id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SocketKind {
+    Connection = 0,
+    Listener = 1,
+    Port = 2,
+}
+
+impl SocketValue {
+    /// Whether this handle lives in a scheduler's connection table (and so
+    /// moves with its process), as opposed to naming the shared listener.
+    #[inline]
+    pub(crate) fn is_stream(self) -> bool {
+        match self.kind {
+            SocketKind::Connection | SocketKind::Port => true,
+            SocketKind::Listener => false,
+        }
+    }
 }
 
 impl Value {
@@ -1500,12 +1536,8 @@ impl Value {
     }
     #[inline]
     pub(crate) fn socket(s: SocketValue) -> Value {
-        let listener = if s.is_listener {
-            SOCKET_LISTENER_BIT
-        } else {
-            0
-        };
-        Value(HDR_SOCKET | listener | s.id as u32 as u64)
+        let kind = (s.kind as u64) << SOCKET_KIND_SHIFT;
+        Value(HDR_SOCKET | kind | s.id as u32 as u64)
     }
 
     /// A mailbox handle by its registry id. Ids are minted by a monotonic
@@ -1930,6 +1962,14 @@ impl Value {
         }
     }
     #[inline]
+    pub(crate) fn as_pid(&self) -> Option<u64> {
+        if self.is_pid() {
+            Some(self.0 & PAYLOAD)
+        } else {
+            None
+        }
+    }
+    #[inline]
     pub fn as_str(&self) -> Option<&str> {
         if self.is_tag(HeapTag::Str) {
             // SAFETY: tag-checked; lifetime constrained to `&self`.
@@ -2086,7 +2126,7 @@ impl fmt::Debug for Value {
             ValueView::Float(x) => write!(f, "Float({x})"),
             ValueView::Bool(b) => write!(f, "Bool({b})"),
             ValueView::Nil => f.write_str("Nil"),
-            ValueView::Socket(s) => write!(f, "Socket({}, listener={})", s.id, s.is_listener),
+            ValueView::Socket(s) => write!(f, "Socket({}, {:?})", s.id, s.kind),
             ValueView::Subject(id) => write!(f, "Subject({id})"),
             ValueView::Pid(id) => write!(f, "Pid({id})"),
             ValueView::Str(s) => write!(f, "Str({s:?})"),
@@ -3116,7 +3156,7 @@ fn pair_equal(a: &Value, b: &Value, pending: &mut EqPending) -> bool {
         (ValueView::Binary(a), ValueView::Binary(b)) => a.bits_eq(&b),
         (ValueView::Tuple(at), ValueView::Tuple(bt)) => push_pairs(pending, at, bt),
         (ValueView::Socket(asv), ValueView::Socket(bsv)) => {
-            asv.id == bsv.id && asv.is_listener == bsv.is_listener
+            asv.id == bsv.id && asv.kind == bsv.kind
         }
         // Subject equality is identity: two handles are equal only when they
         // name the same mailbox.
@@ -3200,7 +3240,7 @@ pub(crate) fn hash_value(v: &Value) -> u64 {
         ValueView::Socket(s) => {
             // Socket equality is identity: descriptor id plus role.
             h = fnv1a_combine(h, s.id as u64);
-            h = fnv1a_combine(h, s.is_listener as u64);
+            h = fnv1a_combine(h, s.kind as u64);
         }
         ValueView::Subject(id) | ValueView::Pid(id) => {
             h = fnv1a_combine(h, id);
@@ -3341,16 +3381,15 @@ mod tests {
 
         let s = SocketValue {
             id: 7,
-            is_listener: true,
+            kind: SocketKind::Listener,
         };
         let v = Value::socket(s);
         assert!(!v.is_heap(), "sockets are immediates");
         assert_eq!(v.as_socket(), Some(s));
-        let c = SocketValue {
-            id: -3,
-            is_listener: false,
-        };
-        assert_eq!(Value::socket(c).as_socket(), Some(c));
+        for kind in [SocketKind::Connection, SocketKind::Port] {
+            let c = SocketValue { id: -3, kind };
+            assert_eq!(Value::socket(c).as_socket(), Some(c));
+        }
         assert!(matches!(v.kind(), ValueView::Socket(x) if x == s));
     }
 

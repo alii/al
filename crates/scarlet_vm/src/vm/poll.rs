@@ -45,6 +45,7 @@ use mio::unix::SourceFd;
 use crate::abi::AbiSlot;
 use crate::bytecode::Value;
 
+use super::port::ConnIo;
 use super::sched::{BlockingOp, BlockingResult, Completion};
 use super::{Process, VM, VmError, VmResult, lock};
 
@@ -173,6 +174,12 @@ pub(super) const WAKER_TOKEN: Token = Token(usize::MAX);
 /// Event-buffer capacity for one poll call.
 pub(super) const EVENTS_CAPACITY: usize = 1024;
 
+/// The wait id under which a blocking job nobody is parked on is filed (a
+/// port's child being collected after its owner died). Real ids count up
+/// from zero, so this one is never held, and `drain_completions` drops the
+/// completion on finding no park.
+pub(super) const DISCARDED_WAIT_ID: u64 = u64::MAX;
+
 /// Process-global monotonic origin, pinned to the first reading taken.
 pub(super) static EPOCH: OnceLock<Instant> = OnceLock::new();
 
@@ -270,27 +277,29 @@ impl VM {
         Ok(())
     }
 
-    /// Adopt a connection into this scheduler's table, watched for read and
-    /// write readiness. A registration failure drops the connection rather than
-    /// tabling a socket that could never wake its parks.
+    /// Adopt a connection or port into this scheduler's table, with every fd
+    /// it can be parked on registered. On a registration failure nothing is
+    /// tabled — a stream that could never wake its parks must not be — and
+    /// the entry comes back with the error so the caller can dispose of it
+    /// properly (a port still has a child to collect).
     pub(super) fn track_connection(
         &mut self,
         id: i32,
-        conn: TcpStream,
+        io: ConnIo,
         owner: u64,
-    ) -> io::Result<()> {
-        self.poller_register(
-            conn.as_raw_fd(),
-            id,
-            mio::Interest::READABLE | mio::Interest::WRITABLE,
-        )?;
-        self.tcp_connections.insert(
-            id,
-            super::Conn {
-                stream: conn,
-                owner,
-            },
-        );
+    ) -> Result<(), (io::Error, ConnIo)> {
+        let mut registered: Vec<RawFd> = Vec::with_capacity(2);
+        let registrations: Vec<(RawFd, mio::Interest)> = io.registrations().collect();
+        for (fd, interest) in registrations {
+            if let Err(e) = self.poller_register(fd, id, interest) {
+                for done in registered {
+                    self.poller_deregister(done);
+                }
+                return Err((e, io));
+            }
+            registered.push(fd);
+        }
+        self.connections.insert(id, super::Conn { io, owner });
         self.conns_by_owner.entry(owner).or_default().push(id);
         Ok(())
     }
@@ -443,7 +452,7 @@ impl VM {
         Ok(())
     }
 
-    /// Wake the processes whose wait ids a `scheduler.send` queued on this
+    /// Wake the processes whose wait ids a `process.send` queued on this
     /// slot. A stale id — the wait already ended on its deadline — is skipped.
     pub(super) fn drain_wakes(&mut self) -> bool {
         let drained: Vec<u64> = {
@@ -519,6 +528,8 @@ impl VM {
                     self.make_err(err)
                 }
             },
+            BlockingResult::SpawnChild { program, result } => self.port_spawned(&program, result),
+            BlockingResult::ReapChild { result } => self.port_reaped(result),
         }
     }
 

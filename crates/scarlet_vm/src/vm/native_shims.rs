@@ -559,8 +559,12 @@ mod opc {
     pub const NEG: u8 = Op::Neg as u8;
     pub const NEG_FLOAT: u8 = Op::NegFloat as u8;
     pub const NEQ: u8 = Op::Neq as u8;
+    pub const PORT_CLOSE: u8 = Op::PortClose as u8;
+    pub const PORT_SPAWN: u8 = Op::PortSpawn as u8;
     pub const PREPEND: u8 = Op::Prepend as u8;
     pub const PRINT: u8 = Op::Print as u8;
+    pub const PROCESS_DEMONITOR: u8 = Op::ProcessDemonitor as u8;
+    pub const PROCESS_MONITOR: u8 = Op::ProcessMonitor as u8;
     pub const PROCESS_SELF: u8 = Op::ProcessSelf as u8;
     pub const PROCESS_SPAWN: u8 = Op::ProcessSpawn as u8;
     pub const SEQ_DROP: u8 = Op::SeqDrop as u8;
@@ -703,6 +707,8 @@ impl VM {
             opc::TCP_WRITE_PARTS => self.tcp_write_parts(reds),
             opc::DNS_RESOLVE => self.dns_resolve(reds),
             opc::SLEEP => self.sleep(),
+            opc::PORT_SPAWN => self.port_spawn(reds),
+            opc::PORT_CLOSE => self.port_close(reds),
             opc::SUBJECT_RECEIVE => self.subject_receive(reds),
             opc::SUBJECT_RECEIVE_UNTIL => self.subject_receive_until(reds),
             _ => proof_violation("run_park_op on an op is_native_park_op excludes"),
@@ -819,6 +825,8 @@ impl VM {
                 self.process_self();
                 Ok(())
             }
+            opc::PROCESS_MONITOR => self.process_monitor(reds),
+            opc::PROCESS_DEMONITOR => self.process_demonitor(),
             opc::ARGV => self.argv(),
             opc::TCP_LISTEN => self.tcp_listen(),
             opc::TCP_CLOSE => self.tcp_close(reds),

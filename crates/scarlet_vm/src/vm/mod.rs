@@ -4,11 +4,10 @@
 //! another.
 //!
 //! ```text
-//!   spawn(f) — the closure graph is deep-copied into a fresh heap
-//!      │
-//!      ▼
-//!   SEED ──────── submit ───────> injector / a scheduler's inbox
-//!      │  take_inbound / steal_inbound: the receiver adopts the process whole
+//!   spawn(f) — the closure graph is deep-copied into a fresh heap and the
+//!      │        child is queued right here, on the spawning scheduler
+//!      │        (net.serve's per-core acceptors are the one exception: they
+//!      │        travel as SEEDs pinned to each scheduler's inbox)
 //!      ▼
 //!   RUNNABLE   run_queue, round-robin ◄────────────────────────────┐
 //!      │  resume: the process's heap/stack/frames swap into the VM │
@@ -21,10 +20,11 @@
 //!      │                       │ fd ready / deadline / completion  │
 //!      │                       └──────────── wake ─────────────────┤
 //!      │                                                           │
-//!      │     (a busy scheduler that sees an idle peer claims it    │
-//!      │      and donates a queued process — MIGRATE: the whole    │
-//!      │      Process moves, heap and all, fds re-homed, into the  │
-//!      │      peer's inbox and onto its run queue) ────────────────┘
+//!      │     (at each yield a scheduler with a queue donates its   │
+//!      │      coldest queued process to an idle or lighter peer —  │
+//!      │      MIGRATE: the whole Process moves, heap and all, fds  │
+//!      │      re-homed, into the peer's inbox and onto its run     │
+//!      │      queue; this is the only way work spreads) ───────────┘
 //!      ▼
 //!   DONE       the result is its top-of-stack; the process's values are
 //!              freed as it drops (main's result is stashed until run() returns)
@@ -41,9 +41,9 @@
 //! - Blocking parks the process, never the thread. An op that would block
 //!   returns [`Step::Parked`] with a [`Wait`]; the wake re-runs the
 //!   instruction.
-//! - Work moves between schedulers as owned memory. Spawns copy the closure
-//!   graph into a fresh heap; load balancing donates whole queued processes.
-//!   Plain moves in both cases.
+//! - Work moves between schedulers as owned memory. A spawn copies the
+//!   closure graph into a fresh heap and queues the child locally; load
+//!   balancing donates whole queued processes. Plain moves in both cases.
 //! - Memory is reference-counted, so there is no rooting rule and no
 //!   allocation reservation. A process owns every heap value it can reach,
 //!   which is what makes seeds, migrants, and suspended processes `Send` by
@@ -54,7 +54,7 @@ use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fmt;
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -79,6 +79,7 @@ pub mod jit;
 mod mailbox;
 mod map;
 mod migrate;
+mod monitor;
 /// Public because the JIT finalize step registers
 /// [`native::al_rt_enter_interp`] by symbol.
 pub mod native;
@@ -93,6 +94,7 @@ mod op_histogram;
 /// per JIT-compiled body.
 pub(crate) mod perf_map;
 mod poll;
+mod port;
 mod sched;
 mod templates;
 #[cfg(test)]
@@ -127,7 +129,7 @@ pub enum VmError {
         len: i64,
         what: &'static str,
     },
-    /// `scheduler.receive` on a subject the calling process did not create.
+    /// `process.receive` on a subject the calling process did not create.
     /// Only the owner may receive; the handle can travel, the right cannot.
     ForeignReceive,
     /// Type-system invariant broken: a compiler bug, not user error. The
@@ -213,12 +215,6 @@ const REDUCTION_BUDGET: i32 = 4000;
 /// budget, after which the process is preempted at its next call.
 const IO_REDUCTION_COST: i32 = 100;
 
-/// How deep a scheduler's run queue may grow through yield-time injector
-/// pickup. Overflow seeds late-bind to whichever scheduler has capacity
-/// instead of piling onto the first one to yield. Idle pickup and inbox drain
-/// stay unconditional: directed work already has a chosen destination.
-const YIELD_PICKUP_QUEUE_LIMIT: usize = 4;
-
 /// Why an execution slice ended.
 enum Step {
     /// The current process ran to completion; its result is its top-of-stack.
@@ -258,7 +254,8 @@ struct Process {
     native_pending: Option<Box<NativePending>>,
 }
 
-/// A tabled TCP connection: the stream plus its controlling process.
+/// A tabled stream — a TCP connection or a port's stdio — plus its
+/// controlling process.
 ///
 /// Ownership lives ON the entry, not in a parallel map, so the two cannot
 /// disagree, and it never moves implicitly — the process that adopted the
@@ -267,7 +264,7 @@ struct Process {
 /// order and would miss toplevel-bound sockets, since a global is not a
 /// capture.
 struct Conn {
-    stream: TcpStream,
+    io: port::ConnIo,
     owner: u64,
 }
 
@@ -328,9 +325,10 @@ pub struct VM {
     /// poller", not "I bound this". The socket lives in
     /// `Runtime.shared_listeners`; the fd closes when the last clone drops.
     tcp_listeners: HashMap<i32, Arc<TcpListener>>,
-    tcp_connections: HashMap<i32, Conn>,
+    /// Connections and ports, by socket id.
+    connections: HashMap<i32, Conn>,
     /// Connection ids by owning pid — the death path's index, kept in
-    /// lockstep with `tcp_connections` by track/evict. A stale id (already
+    /// lockstep with `connections` by track/evict. A stale id (already
     /// evicted) is skipped on drain, so eviction need not scrub this map.
     conns_by_owner: HashMap<u64, Vec<i32>>,
     /// Outbound connections whose non-blocking connect is still in flight,
@@ -474,7 +472,7 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
         label_cache: HashMap::new(),
         next_socket_id: 1,
         tcp_listeners: HashMap::new(),
-        tcp_connections: HashMap::new(),
+        connections: HashMap::new(),
         conns_by_owner: HashMap::new(),
         pending_connects: HashMap::new(),
         read_scratch: Vec::new(),
@@ -620,9 +618,12 @@ impl VM {
                 }
                 Step::Done => {
                     // The ended process's connections and mailboxes die with
-                    // it.
+                    // it; then whoever was monitoring it is told. Mailboxes go
+                    // first so a notice can never be delivered to one of the
+                    // dead process's own subjects.
                     self.release_connections_of(self.current_pid);
                     self.runtime.subject_close_all(self.current_pid);
+                    self.end_process(self.current_pid)?;
                     // The finished process's result is its top-of-stack.
                     if self.current_is_main {
                         // Stash the (value, heap) pair together until the
@@ -655,9 +656,9 @@ impl VM {
                     self.runtime.process_finished();
                 }
                 Step::Yield => {
-                    // One balancing decision per yield, off a single idleness
-                    // scan: pick up an overflow seed when every peer is busy
-                    // and the local queue is shallow, otherwise donate.
+                    // One balancing decision per yield: take whatever peers
+                    // directed here, then donate if someone is idle or much
+                    // lighter than us.
                     //
                     // `poll_parked` runs unconditionally even though it
                     // early-outs when nothing is parked, because it first
@@ -665,11 +666,8 @@ impl VM {
                     // a closed listener's fd registered, and its port bound,
                     // until this scheduler next idled.
                     self.poll_parked(false)?;
-                    self.take_directed();
+                    self.take_inbound();
                     let peer_idle = self.others_idle();
-                    if !peer_idle && self.run_queue.len() < YIELD_PICKUP_QUEUE_LIMIT {
-                        self.take_overflow_seed();
-                    }
                     self.try_donate(peer_idle);
                     if !self.run_queue.is_empty() {
                         let outgoing = self.suspend_current();
@@ -811,16 +809,16 @@ impl VM {
             //    scheduler send — the common case now that spawn places
             //    request/reply partners together — the receiver's wake is
             //    sitting in this slot's own queue, and draining it is one
-            //    uncontended lock. Probing the inbox, the injector, and every
-            //    peer's inbox first made that cheap handoff cost a full
-            //    idle-path walk per message.
+            //    uncontended lock. Probing the inbox and every peer's inbox
+            //    first made that cheap handoff cost a full idle-path walk per
+            //    message.
             if !self.parked.is_empty() && self.drain_wakes() {
                 continue;
             }
 
-            // 3. Remote seeds, then seeds sitting untaken in a peer's inbox:
-            //    stealing one starts it sooner than waiting for its assigned
-            //    scheduler to wake.
+            // 3. Work directed here (pinned acceptors, donated migrants), then
+            //    a migrant sitting untaken in a sleeping peer's inbox: stealing
+            //    it starts it sooner than waiting for that scheduler to wake.
             if self.take_inbound() {
                 continue;
             }
@@ -828,8 +826,8 @@ impl VM {
                 continue;
             }
 
-            // Republish the (zero) load before parking below. A seed a peer
-            // stole out of this inbox leaves `submit`'s in-flight bump in our
+            // Republish the (zero) load before parking below. A migrant a peer
+            // stole out of this inbox leaves the donor's in-flight bump in our
             // published-load slot, and nothing else corrects it while we sleep.
             self.publish_load();
 
@@ -870,31 +868,12 @@ impl VM {
         }
     }
 
-    /// Move inbound work destined for this scheduler (its inbox, falling back
-    /// to the shared overflow queue) into the local run queue. Returns whether
-    /// any arrived.
+    /// Move the work directed at this scheduler — pinned seeds and donated
+    /// migrants — into the local run queue. Called at every yield as well as
+    /// when idle: directed work has a chosen destination and must not wait.
+    /// Returns whether any arrived.
     fn take_inbound(&mut self) -> bool {
         let batch = self.runtime.take_inbound(self.scheduler_index);
-        self.admit(batch)
-    }
-
-    /// Take only the work directed at this scheduler's inbox. Called at every
-    /// yield: unlike overflow seeds, directed work has a chosen destination and
-    /// must not wait. Returns whether any arrived.
-    fn take_directed(&mut self) -> bool {
-        let batch = self.runtime.take_directed(self.scheduler_index);
-        self.admit(batch)
-    }
-
-    /// Pick up undirected overflow seeds (the shared injector) into the
-    /// local run queue. Returns whether any arrived.
-    fn take_overflow_seed(&mut self) -> bool {
-        let batch: Vec<Inbound> = self
-            .runtime
-            .take_overflow()
-            .into_iter()
-            .map(Inbound::Seed)
-            .collect();
         self.admit(batch)
     }
 
@@ -903,7 +882,8 @@ impl VM {
     ///
     /// Inbound work may reference top-level bindings published after our last
     /// sync, so the global area is refreshed first. Publish happens-before
-    /// submit and submit happens-before take, so this can never be stale.
+    /// the hand-off and the hand-off happens-before take, so this can never
+    /// be stale.
     fn admit(&mut self, batch: Vec<Inbound>) -> bool {
         if batch.is_empty() {
             return false;
@@ -964,7 +944,7 @@ impl VM {
         self.runtime.publish_load(self.scheduler_index, load);
     }
 
-    /// Whether some other scheduler is idle and able to take injector seeds.
+    /// Whether some other scheduler is idle, and so worth donating to.
     fn others_idle(&self) -> bool {
         self.runtime.any_other_idle(self.scheduler_index)
     }
@@ -991,31 +971,27 @@ impl VM {
     /// `process.spawn(f)`: start a new process running the closure `f` and
     /// return its pid.
     ///
-    /// Placement is the runtime's decision, never the program's — the BEAM
-    /// rule, which spawns onto the parent's scheduler and lets balancing move
-    /// work afterwards. Two things keep a child here: an empty local queue
-    /// (a request/reply pair then messages without crossing threads) or a
-    /// captured connection, whose fd is registered with this scheduler's
-    /// poller and would otherwise have to be re-homed for the child to use
-    /// it — the accept loop spawns one such child per connection. Otherwise a
-    /// non-empty local queue means real parallel work, so the seed is handed
-    /// to an idle peer (the first such submit summons the worker threads) and
-    /// donation keeps levelling from there.
+    /// The child always starts on this scheduler — the BEAM rule: spawn onto
+    /// the parent's run queue and let balancing move work afterwards. A
+    /// spawn is then a heap copy and a queue push, and a request/reply pair
+    /// messages without crossing threads; `try_donate` levels a queue that
+    /// builds up from the next yield on, one process per slice, which fills
+    /// every core within a few slices of a burst. Handing each child to an
+    /// idle peer at spawn time instead cost a claim, an inbox lock and a
+    /// wake syscall per spawn — twenty times the spawn itself — and bought
+    /// only the first slice of latency. A captured connection needs no
+    /// special case under this rule: its fd is registered here, and a child
+    /// that later migrates carries the fds it references with it.
     ///
-    /// Placement never changes semantics: a connection stays controlled by
-    /// the process that opened it whichever way the child is placed, and a
-    /// child that later migrates carries the fds it references with it.
+    /// The worker threads are summoned by the first spawn so that donation
+    /// has somewhere to send work; a program that never spawns never starts
+    /// them.
     fn spawn_process(&mut self, f: Value) -> VmResult<u64> {
         self.check_spawnable(&f)?;
-        if self.run_queue.is_empty() || migrate::captures_connection(&f) {
-            let (heap, root) = ProcHeap::spawn(&f);
-            self.runtime.process_started();
-            return Ok(self.spawn_process_with_heap(heap, root));
-        }
-        let seed = self.build_seed(&f);
-        let pid = seed.pid;
-        self.runtime.submit(seed);
-        Ok(pid)
+        self.runtime.ensure_workers();
+        let (heap, root) = ProcHeap::spawn(&f);
+        self.runtime.process_started();
+        Ok(self.spawn_process_with_heap(heap, root))
     }
 
     /// A spawned closure must be a nullary function. Both are compiler
@@ -1055,13 +1031,13 @@ impl VM {
         Ok(())
     }
 
-    /// Close every connection the just-ended process `pid` controls — the BEAM
-    /// rule that a socket lives as long as its controlling process. Anything
-    /// parked on one fails with the stale-socket `NetError` instead of sleeping
-    /// forever.
+    /// Close every connection and port the just-ended process `pid` controls
+    /// — the BEAM rule that a socket lives as long as its controlling process.
+    /// Anything parked on one fails with the stale-socket `NetError` instead
+    /// of sleeping forever; a port's child is collected in the background.
     ///
-    /// Scans every live connection on this scheduler per process death, behind
-    /// an emptiness gate so compute-only programs pay one branch.
+    /// Only processes that own something reach past the index lookup, so
+    /// compute-only programs pay one hash probe per death.
     fn release_connections_of(&mut self, pid: u64) {
         let Some(ids) = self.conns_by_owner.remove(&pid) else {
             return;
@@ -1069,12 +1045,11 @@ impl VM {
         for id in ids {
             // Skip ids already evicted (close, migration): the index is
             // append-only between deaths.
-            if self
-                .tcp_connections
-                .get(&id)
-                .is_some_and(|c| c.owner == pid)
-            {
-                drop(self.evict_connection(id));
+            if !self.connections.get(&id).is_some_and(|c| c.owner == pid) {
+                continue;
+            }
+            if let Some(conn) = self.evict_connection(id) {
+                self.reap_in_background(conn.io);
             }
         }
     }
@@ -1089,16 +1064,41 @@ impl VM {
         pid
     }
 
-    #[allow(clippy::expect_used)]
     fn spawn_process_with_heap_as(&mut self, pid: u64, heap: ProcHeap, f: Value) {
+        self.start_process(pid, heap, f, &[]);
+    }
+
+    /// Create a process running the closure `f` applied to `args` — how a
+    /// monitor's notice starts, with its `Down` as the argument. `f`'s arity
+    /// is `args.len()` by the caller's check; `args` point into `heap` or are
+    /// immediates, like `f` itself.
+    pub(super) fn spawn_process_with_heap_args(
+        &mut self,
+        heap: ProcHeap,
+        f: Value,
+        args: &[Value],
+    ) {
+        let pid = self.runtime.alloc_pid();
+        self.start_process(pid, heap, f, args);
+    }
+
+    /// Build the initial frame: the arguments occupy the first locals, as
+    /// `enter_frame` lays a call out, and the rest are zero-filled.
+    #[allow(clippy::expect_used)]
+    fn start_process(&mut self, pid: u64, heap: ProcHeap, f: Value, args: &[Value]) {
         let cl = f
             .as_closure()
-            .expect("spawn: caller-checked nullary closure");
+            .expect("spawn: caller-checked closure of the right arity");
         let func = &self.program.functions[cl.func_idx() as usize];
         let (func_idx, code_start, locals) = (cl.func_idx(), func.code_start, func.locals);
+        debug_assert_eq!(func.arity as usize, args.len());
 
         let mut stack = Vec::with_capacity(locals as usize + 8);
-        stack.extend(std::iter::repeat_n(Value::small_int(0), locals as usize));
+        stack.extend_from_slice(args);
+        stack.extend(std::iter::repeat_n(
+            Value::small_int(0),
+            (locals as usize).saturating_sub(args.len()),
+        ));
 
         let frames = vec![CallFrame {
             func_idx,
@@ -1151,7 +1151,7 @@ impl VM {
 }
 
 /// Entry point for worker scheduler threads (indices 1..N), spawned by
-/// `Runtime::ensure_workers` on the first submit. Each worker runs its own VM
+/// `Runtime::ensure_workers` on the first spawn. Each worker runs its own VM
 /// over the shared runtime and acquires work like any scheduler until the
 /// whole program finishes.
 fn worker_main(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) {

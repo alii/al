@@ -98,6 +98,23 @@ pub enum AbiSlot {
     ReadData,
     ReadClosed,
 
+    /// A monitor registration — `[target Pid, id Int]`
+    Monitor,
+    /// A death notice — `[pid Pid, reason]`
+    Down,
+    /// The exit reason of a process that returned.
+    ExitNormal,
+    /// The exit reason reported by a monitor placed on a process that had
+    /// already ended: how it ended is no longer known.
+    ExitNoProcess,
+
+    /// A port record — `[conn, os_pid Int]`
+    Port,
+    /// A closed port's child exited — `[code Int]`
+    PortExited,
+    /// A closed port's child was ended by a signal — `[signal Int]`
+    PortSignaled,
+
     /// `[name Binary, value Binary]`
     H1Header,
     H1Http10,
@@ -166,6 +183,13 @@ impl AbiSlot {
             Socket,
             ReadData,
             ReadClosed,
+            Monitor,
+            Down,
+            ExitNormal,
+            ExitNoProcess,
+            Port,
+            PortExited,
+            PortSignaled,
             H1Header,
             H1Http10,
             H1Http11,
@@ -224,6 +248,13 @@ impl AbiSlot {
             Socket => "Socket",
             ReadData => "ReadData",
             ReadClosed => "ReadClosed",
+            Monitor => "Monitor",
+            Down => "Down",
+            ExitNormal => "ExitNormal",
+            ExitNoProcess => "ExitNoProcess",
+            Port => "Port",
+            PortExited => "PortExited",
+            PortSignaled => "PortSignaled",
             H1Header => "H1Header",
             H1Http10 => "H1Http10",
             H1Http11 => "H1Http11",
@@ -254,15 +285,14 @@ impl AbiSlot {
             OptionNone | Unit | FsEnospc | FsEdquot | FsUnalignedBinary | NetEtimedout
             | NetEconnrefused | NetEconnreset | NetEconnaborted | NetEnotconn | NetEpipe
             | NetEaddrinuse | NetEaddrnotavail | NetEnetdown | NetEnetunreach | NetEhostunreach
-            | NetEacces | NetInvalidPort | NetUnalignedBinary | ReadClosed | H1Http10
-            | H1Http11 | H1ParsedNeedMore | H1FramingNoBody | H1FramingChunked
-            | H1ChunkedNeedMore => 0,
+            | NetEacces | NetInvalidPort | NetUnalignedBinary | ReadClosed | ExitNormal
+            | ExitNoProcess | H1Http10 | H1Http11 | H1ParsedNeedMore | H1FramingNoBody
+            | H1FramingChunked | H1ChunkedNeedMore => 0,
             ResultOk | ResultErr | OptionSome | FsEnoent | FsEacces | FsEexist | FsEnotdir
             | FsEisdir | FsErofs | FsEloop | FsEfbig | FsErrnoOther | NetErrnoOther | IpV4
-            | IpV6 | ReadData | H1ParsedBad | H1FramingLength | H1FramingInvalid | H1ChunkedBad => {
-                1
-            }
-            SocketAddr | Socket | H1Header => 2,
+            | IpV6 | ReadData | PortExited | PortSignaled | H1ParsedBad | H1FramingLength
+            | H1FramingInvalid | H1ChunkedBad => 1,
+            SocketAddr | Socket | Monitor | Down | Port | H1Header => 2,
             H1HeadFlags | H1ChunkedDone => 3,
             H1ParsedDone => 6,
         }
@@ -360,6 +390,30 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::NetUnalignedBinary,
             S::NetErrnoOther,
         ],
+        Op::PortSpawn => &[
+            S::ResultOk,
+            S::ResultErr,
+            S::Port,
+            S::FsEnoent,
+            S::FsEacces,
+            S::FsEexist,
+            S::FsEnotdir,
+            S::FsEisdir,
+            S::FsErofs,
+            S::FsEloop,
+            S::FsEfbig,
+            S::FsEnospc,
+            S::FsEdquot,
+            S::FsErrnoOther,
+        ],
+        Op::PortClose => &[
+            S::ResultOk,
+            S::ResultErr,
+            S::PortExited,
+            S::PortSignaled,
+            S::NetEnotconn,
+            S::NetErrnoOther,
+        ],
         Op::TcpLocalAddr => &[
             S::ResultOk,
             S::ResultErr,
@@ -403,7 +457,11 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
         // `PushNil` is the value of a block that ends in a statement, and
         // `Print` pushes nothing so the emitter follows it with one.
         Op::PushNil | Op::Sleep | Op::SpawnOnEach => &[S::Unit],
-        Op::SubjectSend => &[S::Unit],
+        Op::SubjectSend | Op::ProcessDemonitor => &[S::Unit],
+        // The op itself builds a `Down` only for a target that has already
+        // ended; the `Normal` one is built on the death path, which only a
+        // program that emitted this op can reach.
+        Op::ProcessMonitor => &[S::Monitor, S::Down, S::ExitNormal, S::ExitNoProcess],
         Op::SubjectReceiveUntil => &[S::ResultOk, S::ResultErr, S::Unit],
         _ => &[],
     }

@@ -1,0 +1,15 @@
+PASS os pid is reported
+PASS write succeeds
+PASS write_parts succeeds
+PASS cat echoes what was written
+PASS nothing more within the timeout
+PASS close reports a clean exit
+PASS closing again is NotConnected
+PASS output is readable
+PASS read after exit is Closed
+PASS close reports the exit code
+PASS env reaches the child
+PASS a lingering child is terminated on close
+PASS a missing program is NotFound
+PASS a port spawned by a process that then ends is cleaned up
+done

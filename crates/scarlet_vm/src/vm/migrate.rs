@@ -2,30 +2,30 @@
 //!
 //! A process owns its stack, frames and heap, so moving it is a plain
 //! [`Process`] move. The exception is its socket fds: `tcp_listeners` and
-//! `tcp_connections` are per-scheduler side tables, so those must be re-homed
+//! `connections` are per-scheduler side tables, so those must be re-homed
 //! from the donor into the destination. A [`Migrant`] is that pairing.
 //!
 //! Two invariants the donation path in `scheduler_loop` relies on:
 //!
 //! - A migrant stays counted in `Runtime::live` for its whole journey. Donation
 //!   never decrements and adoption never increments, so [`VM::adopt_migrant`]
-//!   must push the run queue directly rather than call `Runtime::submit`, which
-//!   would double-count.
+//!   must push the run queue directly rather than count it as a new process,
+//!   which would double-count.
 //! - [`VM::can_donate_fds`] is read-only and runs first, so [`VM::detach_fds`]
 //!   can be infallible.
 
 use std::collections::HashSet;
-use std::net::TcpStream;
 
 use crate::bytecode::{SocketValue, Value};
 
+use super::port::ConnIo;
 use super::{Process, VM};
 
-/// Connection fds re-homed out of a scheduler's tables, ready to travel with a
-/// [`Migrant`] or `Seed`. Listeners are excluded: the listener socket is
+/// Connections and ports re-homed out of a scheduler's tables, ready to
+/// travel with a [`Migrant`]. Listeners are excluded: the listener socket is
 /// program-wide (`Runtime.shared_listeners`) and every scheduler registers the
 /// same fd on demand (`VM::listener_for_accept`).
-pub(super) type DetachedFds = Vec<(i32, TcpStream, u64)>;
+pub(super) type DetachedFds = Vec<(i32, ConnIo, u64)>;
 
 /// A process in flight between schedulers.
 pub(super) struct Migrant {
@@ -50,23 +50,6 @@ fn for_each_socket(v: &Value, visit: &mut impl FnMut(SocketValue)) {
         visit(s);
     }
     v.for_each_child_ref(|c| for_each_socket(c, visit));
-}
-
-/// Whether a connection (not a listener) is reachable from `v`. Decides
-/// spawn placement, so it runs per spawn and stops descending at the first
-/// hit; the accept loop's handler closure captures its connection directly.
-/// Descends into frozen subgraphs for the same reason `for_each_socket` does.
-pub(super) fn captures_connection(v: &Value) -> bool {
-    if let Some(s) = v.as_socket() {
-        return !s.is_listener;
-    }
-    let mut found = false;
-    v.for_each_child_ref(|c| {
-        if !found {
-            found = captures_connection(c);
-        }
-    });
-    found
 }
 
 /// Visit every socket reachable from the process's stack or any frame's
@@ -119,12 +102,12 @@ impl VM {
         // connection out from under its parked read.
         let mut ids = Vec::new();
         for_each_process_socket(victim, &mut |s| {
-            if !s.is_listener {
+            if s.is_stream() {
                 ids.push(s.id);
             }
         });
         ids.extend(
-            self.tcp_connections
+            self.connections
                 .iter()
                 .filter(|&(_, conn)| conn.owner == victim.pid)
                 .map(|(&id, _)| id),
@@ -153,7 +136,7 @@ impl VM {
         // on, so leaving them here strands them open forever.
         let mut ids = process_socket_ids(p);
         ids.extend(
-            self.tcp_connections
+            self.connections
                 .iter()
                 .filter(|&(_, conn)| conn.owner == p.pid)
                 .map(|(&id, _)| id),
@@ -163,33 +146,31 @@ impl VM {
         self.detach_socket_ids(ids)
     }
 
-    /// Move the connections among `ids` out of this scheduler's table. Shared
-    /// by spawn seeding and donation. Listeners in `ids` are left alone, and an
-    /// id with no connection entry (a listener, or one an earlier spawn already
-    /// moved away) is skipped.
+    /// Move the streams among `ids` out of this scheduler's table. Listeners
+    /// in `ids` are left alone, and an id with no entry (a listener, or a
+    /// stream already closed) is skipped. `evict_connection` also fails
+    /// anything parked on the id; `can_donate_fds` has ruled that out for a
+    /// donation, so nothing is actually woken here.
     fn detach_socket_ids(&mut self, ids: impl IntoIterator<Item = i32>) -> DetachedFds {
         let mut connections: DetachedFds = Vec::new();
         for id in ids {
-            // `evict_connection` also fails anything parked on the id. Donation
-            // is guarded by `can_donate_fds`, but `build_seed` is not: a sibling
-            // parked on a captured id would be unwakeable forever, its readiness
-            // going to a poller that no longer owns the fd.
             if let Some(conn) = self.evict_connection(id) {
-                connections.push((id, conn.stream, conn.owner));
+                connections.push((id, conn.io, conn.owner));
             }
         }
         connections
     }
 
-    /// Adopt connection fds arriving with a seed or migrant. Each keeps the
-    /// owner it arrived with. Infallible by design: on a poller-registration
-    /// failure the stream is dropped (closing the fd), so the socket cannot
-    /// sit live and unwatched — the owning process's next op on the id
-    /// surfaces the stale-socket `NetError` and it is never parked on it.
+    /// Adopt the streams arriving with a migrant. Each keeps the owner it
+    /// arrived with. Infallible by design: on a poller-registration failure
+    /// the stream is closed (and a port's child collected), so it cannot sit
+    /// live and unwatched — the owning process's next op on the id surfaces
+    /// the stale-socket `NetError` and it is never parked on it.
     fn adopt_connections(&mut self, connections: DetachedFds) {
-        for (id, c, owner) in connections {
-            if let Err(e) = self.track_connection(id, c, owner) {
+        for (id, io, owner) in connections {
+            if let Err((e, io)) = self.track_connection(id, io, owner) {
                 eprintln!("warning: adopted connection {id} closed (cannot watch it: {e})");
+                self.reap_in_background(io);
             }
         }
     }
@@ -197,9 +178,9 @@ impl VM {
     /// Adopt a migrated process: take its fds and queue it runnable.
     ///
     /// The migrant is already counted in `Runtime::live`, so it goes on the run
-    /// queue directly, never through `Runtime::submit`, which assumes uncounted
-    /// work. The caller must `sync_globals()` first so the top-level bindings
-    /// the migrant reads exist here.
+    /// queue directly without `process_started`. The caller must
+    /// `sync_globals()` first so the top-level bindings the migrant reads
+    /// exist here.
     pub(super) fn adopt_migrant(&mut self, m: Migrant) {
         self.adopt_connections(m.connections);
         self.run_queue.push_back(m.process);
@@ -449,7 +430,7 @@ mod tests {
 
     #[test]
     fn sockets_leave_listeners_put_move_connections_skip_dangling() {
-        use crate::bytecode::SocketValue;
+        use crate::bytecode::{SocketKind, SocketValue};
         use std::net::{TcpListener, TcpStream};
 
         let mut donor = halt_test_vm();
@@ -461,21 +442,25 @@ mod tests {
         let client = TcpStream::connect(bind_addr).expect("connect");
         let (_server, _) = listener.accept().expect("accept");
         donor.tcp_listeners.insert(1, std::sync::Arc::new(listener));
-        donor.tcp_connections.insert(
+        donor.connections.insert(
             2,
             super::super::Conn {
-                stream: client,
+                io: ConnIo::Tcp(client),
                 owner: 7,
             },
         );
 
-        let socket = |id, is_listener| Value::socket(SocketValue { id, is_listener });
+        let socket = |id, kind| Value::socket(SocketValue { id, kind });
         // Id 2 is on the stack and in a frame's captures: its fd must move once.
         let mut heap = test_heap();
-        let captures = Value::closure_in(&mut heap, 0, &[socket(2, false)]);
+        let captures = Value::closure_in(&mut heap, 0, &[socket(2, SocketKind::Connection)]);
         let p = Process {
             heap,
-            stack: vec![socket(1, true), socket(2, false), socket(3, false)],
+            stack: vec![
+                socket(1, SocketKind::Listener),
+                socket(2, SocketKind::Connection),
+                socket(3, SocketKind::Connection),
+            ],
             frames: vec![CallFrame {
                 func_idx: 0,
                 code_start: 0,
@@ -495,7 +480,7 @@ mod tests {
         assert!(donor.tcp_listeners.contains_key(&1));
         assert_eq!(connections.len(), 1);
         assert_eq!(connections[0].0, 2);
-        assert!(donor.tcp_connections.is_empty());
+        assert!(donor.connections.is_empty());
 
         let mut dest = halt_test_vm();
         dest.adopt_migrant(Migrant {
@@ -503,7 +488,7 @@ mod tests {
             connections,
         });
         assert!(!dest.tcp_listeners.contains_key(&1));
-        assert!(dest.tcp_connections.contains_key(&2));
+        assert!(dest.connections.contains_key(&2));
         assert_eq!(dest.run_queue.len(), 1);
 
         let q = dest.run_queue.pop_back().expect("queued migrant");
@@ -516,7 +501,7 @@ mod tests {
             cl.captures()[0].as_socket(),
             Some(SocketValue {
                 id: 2,
-                is_listener: false
+                kind: SocketKind::Connection,
             })
         );
     }

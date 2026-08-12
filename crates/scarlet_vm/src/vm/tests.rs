@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::bytecode::values_equal;
-use crate::bytecode::{Instruction, SocketValue, op, op_ab, op_arg};
+use crate::bytecode::{Instruction, SocketKind, SocketValue, op, op_ab, op_arg};
 use crate::frozen::FrozenArea;
 
 // A single-function Program ("main", arity 0, no captures). Constants go
@@ -345,16 +345,10 @@ fn inspect_closure_renders_name() {
 // A socket value renders with its kind and id.
 #[test]
 fn inspect_socket_renders_kind_and_id() {
-    let conn = Value::socket(SocketValue {
-        id: 7,
-        is_listener: false,
-    });
-    let listener = Value::socket(SocketValue {
-        id: 2,
-        is_listener: true,
-    });
-    assert_eq!(inspect(&conn), "<socket#7>");
-    assert_eq!(inspect(&listener), "<listener#2>");
+    let handle = |id, kind| Value::socket(SocketValue { id, kind });
+    assert_eq!(inspect(&handle(7, SocketKind::Connection)), "<socket#7>");
+    assert_eq!(inspect(&handle(2, SocketKind::Listener)), "<listener#2>");
+    assert_eq!(inspect(&handle(4, SocketKind::Port)), "<port#4>");
 }
 
 // An all-simple array too wide for one line wraps at six values per line.
@@ -474,13 +468,15 @@ fn values_equal_binary() {
     assert!(!values_equal(&d, &a));
 }
 
-// `values_equal` on Socket compares (id, is_listener).
+// `values_equal` on Socket compares (id, kind).
 #[test]
 fn values_equal_socket() {
-    let sock = |id, is_listener| Value::socket(SocketValue { id, is_listener });
-    assert!(values_equal(&sock(5, false), &sock(5, false)));
-    assert!(!values_equal(&sock(5, false), &sock(6, false)));
-    assert!(!values_equal(&sock(5, false), &sock(5, true)));
+    use SocketKind::{Connection, Listener, Port};
+    let sock = |id, kind| Value::socket(SocketValue { id, kind });
+    assert!(values_equal(&sock(5, Connection), &sock(5, Connection)));
+    assert!(!values_equal(&sock(5, Connection), &sock(6, Connection)));
+    assert!(!values_equal(&sock(5, Connection), &sock(5, Listener)));
+    assert!(!values_equal(&sock(5, Connection), &sock(5, Port)));
 }
 
 // Slicing a Range past its length is a runtime error, not a wrap or an empty
@@ -643,7 +639,7 @@ fn fd_wake_leaves_stale_timer_entry_that_wake_due_timers_discards() {
 #[test]
 fn donation_fd_guard_blocks_entangled_connections() {
     let mut vm = halt_test_vm();
-    let sock = |id, is_listener| Value::socket(SocketValue { id, is_listener });
+    let sock = |id, kind| Value::socket(SocketValue { id, kind });
     let victim = |v: Value| Process {
         heap: ProcHeap,
         stack: vec![v],
@@ -655,24 +651,24 @@ fn donation_fd_guard_blocks_entangled_connections() {
     };
 
     // A quiescent connection is donatable.
-    assert!(vm.can_donate_fds(&victim(sock(7, false))));
+    assert!(vm.can_donate_fds(&victim(sock(7, SocketKind::Connection))));
 
     // A listener socket is shared program-wide, so a moved process resolves
     // the same fd wherever it lands. No guarding needed even while armed.
     park_wait(&mut vm, Wait::readable(3));
-    assert!(vm.can_donate_fds(&victim(sock(3, true))));
+    assert!(vm.can_donate_fds(&victim(sock(3, SocketKind::Listener))));
 
     // A parked sibling armed fd 7; moving it would break the sleeper.
     park_wait(&mut vm, Wait::readable(7));
-    assert!(!vm.can_donate_fds(&victim(sock(7, false))));
+    assert!(!vm.can_donate_fds(&victim(sock(7, SocketKind::Connection))));
 
     // The armed id is found through nested containers too.
     let mut h = ProcHeap::new();
-    let arr = Value::array_in(&mut h, &[sock(7, false)]);
+    let arr = Value::array_in(&mut h, &[sock(7, SocketKind::Connection)]);
     assert!(!vm.can_donate_fds(&victim(arr)));
 
     // ... and through a frame's closure captures.
-    let closure = Value::closure_in(&mut h, 0, &[sock(7, false)]);
+    let closure = Value::closure_in(&mut h, 0, &[sock(7, SocketKind::Connection)]);
     let framed = Process {
         heap: h,
         stack: Vec::new(),
@@ -695,10 +691,10 @@ fn donation_fd_guard_blocks_entangled_connections() {
     let pending = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
         .expect("socket creation");
     vm.pending_connects.insert(9, pending);
-    assert!(!vm.can_donate_fds(&victim(sock(9, false))));
+    assert!(!vm.can_donate_fds(&victim(sock(9, SocketKind::Connection))));
 
     // Unrelated connection ids remain donatable throughout.
-    assert!(vm.can_donate_fds(&victim(sock(8, false))));
+    assert!(vm.can_donate_fds(&victim(sock(8, SocketKind::Connection))));
 }
 
 // Donation must skip workers that never spawned. Such a worker publishes a

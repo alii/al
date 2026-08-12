@@ -237,6 +237,12 @@ suite! {
         // Subjects: send/receive ordering, park/wake, timeouts, owner death.
         // Cross-sender interleavings are asserted as aggregates only.
         messages,
+        // Monitors: notices after and before the end, wrapping into the
+        // receiver's type, demonitor, and request/reply against a dead server.
+        monitors,
+        // Ports: stdio round trip through cat, exit codes, env, the
+        // terminate-on-close schedule, spawn failure, owner-death cleanup.
+        ports,
         // HTTP/1.1 surface. Locks the native scanners behind scarlet/http/h1 to the
         // sans-IO contract the Scarlet reference parser defined.
         http_parse,

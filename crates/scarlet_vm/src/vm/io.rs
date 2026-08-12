@@ -45,9 +45,10 @@ use std::time::{Duration, Instant};
 use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::abi::{self, AbiSlot};
-use crate::bytecode::{BinaryRef, SocketValue, Value};
+use crate::bytecode::{BinaryRef, SocketKind, SocketValue, Value};
 
 use super::poll::{EPOCH, Parked, Wait, monotonic_now_ms};
+use super::port::ConnIo;
 use super::sched::BlockingOp;
 use super::{IO_REDUCTION_COST, VM, VmError, VmResult, bin_ref, lock, str_ref};
 
@@ -100,7 +101,7 @@ impl VM {
             lock(&self.runtime.shared_listeners).insert(socket_id, listener);
             Ok(Value::socket(SocketValue {
                 id: socket_id,
-                is_listener: true,
+                kind: SocketKind::Listener,
             }))
         });
         self.push_net(res)?;
@@ -252,7 +253,7 @@ impl VM {
         let bytes = bin.full_bytes();
         // Write what the socket takes; if it fills up, park and resume this
         // instruction with the remaining bytes.
-        let result = connection_mut(&mut self.tcp_connections, sv.id)
+        let result = connection_mut(&mut self.connections, sv.id)
             .and_then(|conn| drain_write(conn, std::slice::from_ref(&bytes)));
         match &result {
             Ok(Drain::Park { offset, .. }) => {
@@ -311,7 +312,7 @@ impl VM {
         // part is by the check above.
         let logical: Vec<_> = bins.iter().map(|b| bin_ref(b).full_bytes()).collect();
 
-        let result = connection_mut(&mut self.tcp_connections, sv.id)
+        let result = connection_mut(&mut self.connections, sv.id)
             .and_then(|conn| drain_write(conn, &logical));
         match &result {
             Ok(Drain::Park { idx, offset }) => {
@@ -393,9 +394,11 @@ impl VM {
     /// ONE eviction path. `detach_socket_ids` keeps the connection instead —
     /// the fd travels to another scheduler.
     pub(super) fn evict_connection(&mut self, id: i32) -> Option<super::Conn> {
-        let conn = self.tcp_connections.remove(&id);
+        let conn = self.connections.remove(&id);
         if let Some(c) = &conn {
-            self.poller_deregister(c.stream.as_raw_fd());
+            for fd in c.io.fds() {
+                self.poller_deregister(fd);
+            }
         }
         self.fail_io_waiters(id);
         conn
@@ -492,7 +495,7 @@ impl VM {
     }
 
     pub(super) fn sleep(&mut self) -> VmResult<Option<Parked>> {
-        let ms = self.pop_int("scheduler.sleep")?;
+        let ms = self.pop_int("process.sleep")?;
         let nil = self.make_nil()?;
         self.stack.push(nil);
         if ms > 0 {
@@ -555,7 +558,7 @@ impl VM {
         if self.read_scratch.len() < max {
             self.read_scratch.resize(max, 0);
         }
-        let read_res = match connection_mut(&mut self.tcp_connections, id) {
+        let read_res = match connection_mut(&mut self.connections, id) {
             Ok(conn) => conn.read(&mut self.read_scratch[..max]),
             Err(e) => Err(e),
         };
@@ -597,6 +600,12 @@ impl VM {
         Ok(())
     }
 
+    /// Push `Err(NotConnected)`: the op named a connection or port that is no
+    /// longer in the table.
+    pub(super) fn push_stale_handle(&mut self) -> VmResult<()> {
+        self.push_net(Err(stale_socket()))
+    }
+
     /// Push `Ok(v)` or a typed `NetError` built from the socket `io::Error`.
     #[inline]
     fn push_net(&mut self, r: std::io::Result<Value>) -> VmResult<()> {
@@ -627,7 +636,7 @@ impl VM {
     /// between schedulers without colliding. The sequence is masked so a wrap
     /// cannot spill into another scheduler's tag.
     #[inline]
-    fn alloc_socket_id(&mut self) -> i32 {
+    pub(super) fn alloc_socket_id(&mut self) -> i32 {
         debug_assert!(
             self.scheduler_index < 256,
             "scheduler index overflows socket-id tag"
@@ -692,12 +701,12 @@ impl VM {
         // The adopting process owns the connection: when it ends, the
         // connection closes. Ownership never moves implicitly.
         let owner = self.current_pid;
-        if let Err(e) = self.track_connection(id, stream, owner) {
+        if let Err((e, _dropped)) = self.track_connection(id, ConnIo::Tcp(stream), owner) {
             return Ok(Err(self.net_error_value(&e)?));
         }
         let handle = Value::socket(SocketValue {
             id,
-            is_listener: false,
+            kind: SocketKind::Connection,
         });
         Ok(Ok(self.templates.make_socket(
             &mut self.heap,
@@ -805,7 +814,7 @@ enum Drain {
 /// takes plain `write` to avoid a per-pass allocation on the `socket.write`
 /// hot path; several take one vectored write per pass. Drained buffers are
 /// skipped up front, so `Ok(0)` always means peer close.
-fn drain_write<B: AsRef<[u8]>>(conn: &mut TcpStream, bufs: &[B]) -> std::io::Result<Drain> {
+fn drain_write<B: AsRef<[u8]>>(conn: &mut ConnIo, bufs: &[B]) -> std::io::Result<Drain> {
     let mut idx = 0usize;
     let mut offset = 0usize;
     loop {
@@ -865,18 +874,15 @@ fn connection_socket(v: &Value, op: &'static str) -> VmResult<SocketValue> {
 /// a `&mut self` method, so callers keep split borrows of other VM fields. A
 /// stale id surfaces as an Scarlet `NetError`, never a VM halt.
 #[inline]
-fn connection_mut(
-    conns: &mut HashMap<i32, super::Conn>,
-    id: i32,
-) -> std::io::Result<&mut TcpStream> {
+fn connection_mut(conns: &mut HashMap<i32, super::Conn>, id: i32) -> std::io::Result<&mut ConnIo> {
     conns
         .get_mut(&id)
-        .map(|c| &mut c.stream)
+        .map(|c| &mut c.io)
         .ok_or_else(stale_socket)
 }
 
 #[cold]
-fn stale_socket() -> std::io::Error {
+pub(super) fn stale_socket() -> std::io::Error {
     // A raw errno, because the NetError mapping routes on `raw_os_error`: an
     // errno-less error would map use-after-close to `Errno(0)`.
     std::io::Error::from_raw_os_error(libc::ENOTCONN)

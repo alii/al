@@ -81,11 +81,11 @@ pub fn serve_on(server Server, handler fn(Socket) Nil) Nil {
 fn spawn_per_core(f fn() Nil) Nil
 
 // The per-core accept loop: accept a connection, hand it to its own process,
-// then loop. The handler captures the connection, which the runtime takes as
-// its cue to start the handler on this same core, so the socket stays local.
-// One copy runs on every core, all draining the listener's single shared
-// accept queue — spreading the accepts is a locality preference, not a
-// correctness need.
+// then loop. A spawned process starts on the core that spawned it, so the
+// handler begins on the core whose poller holds the connection's socket. One
+// copy runs on every core, all draining the listener's single shared accept
+// queue — spreading the accepts is a locality preference, not a correctness
+// need.
 //
 // A per-connection accept failure (ECONNABORTED, ECONNRESET, an unmapped errno
 // such as EMFILE/EPROTO) means one incoming connection was lost, not that the

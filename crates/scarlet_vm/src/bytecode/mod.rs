@@ -32,8 +32,8 @@ pub use native::{
     is_native_try_op,
 };
 pub use value::{
-    Arena, BinaryRef, ClosureRef, EnumRef, HeapTag, MapRef, SeqRef, SocketValue, Value, ValueView,
-    enum_name_prefix_hash, take_freed_objects,
+    Arena, BinaryRef, ClosureRef, EnumRef, HeapTag, MapRef, SeqRef, SocketKind, SocketValue, Value,
+    ValueView, enum_name_prefix_hash, take_freed_objects,
 };
 pub(crate) use value::{MapBacking, freed_objects_pending, hash_value, values_equal};
 
@@ -307,6 +307,14 @@ pub enum Op {
     /// `[String] -> Option(IpAddress)` — the only constructor for
     /// `IpAddress`. (scarlet/net/address.parse)
     IpParse,
+    /// `[program, args, env] -> Result(Port, IoError)` — start a child
+    /// process with piped stdio, parking on the blocking pool while it is
+    /// spawned. Its stdio is then a connection: the `Tcp*` stream ops serve
+    /// `port.read`/`write` too. (scarlet/os/port.spawn)
+    PortSpawn,
+    /// `[port] -> Result(ExitStatus, NetError)` — close the child's pipes and
+    /// park until it has been collected. (scarlet/os/port.close)
+    PortClose,
 
     // Concurrency (scarlet/process)
     /// `[closure] -> Pid` — spawn a lightweight process running the closure
@@ -314,6 +322,13 @@ pub enum Op {
     ProcessSpawn,
     /// Push the running process's own `Pid`. (scarlet/process.self)
     ProcessSelf,
+    /// `[pid, notice fn(Down) Nil] -> Monitor` — copy the closure and park it
+    /// on the process; when that process ends it is started as a process of
+    /// its own with the `Down`. A pid that has already ended starts it at
+    /// once. (scarlet/process.monitor)
+    ProcessMonitor,
+    /// `[Monitor] -> Nil` — cancel a monitor. (scarlet/process.demonitor)
+    ProcessDemonitor,
     /// `[closure] -> Nil` — spawn one copy of the closure pinned to every
     /// live scheduler. `net.serve`'s accept fan-out: with per-scheduler fd
     /// tables, one acceptor per scheduler keeps every accepted connection on
@@ -540,8 +555,12 @@ impl Op {
             | Op::TcpLocalAddr
             | Op::DnsResolve
             | Op::IpParse
+            | Op::PortSpawn
+            | Op::PortClose
             | Op::ProcessSpawn
             | Op::ProcessSelf
+            | Op::ProcessMonitor
+            | Op::ProcessDemonitor
             | Op::SpawnOnEach
             | Op::Sleep
             | Op::SubjectNew
@@ -711,8 +730,12 @@ impl Op {
             | Op::TcpLocalAddr
             | Op::DnsResolve
             | Op::IpParse
+            | Op::PortSpawn
+            | Op::PortClose
             | Op::ProcessSpawn
             | Op::ProcessSelf
+            | Op::ProcessMonitor
+            | Op::ProcessDemonitor
             | Op::SpawnOnEach
             | Op::Sleep
             | Op::SubjectNew

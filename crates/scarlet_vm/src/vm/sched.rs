@@ -2,12 +2,14 @@
 //!
 //! A [`Runtime`] is built before any code runs, with only scheduler 0's poller.
 //! Worker threads, one per core beyond the main thread, are summoned by the
-//! first `submit` ([`Runtime::ensure_workers`]).
+//! first spawn ([`Runtime::ensure_workers`]).
 //!
-//! A spawned process starts as a [`Seed`]: an owned mini-heap holding a deep
-//! copy of the closure graph plus the root pointing into it. The receiving
-//! scheduler adopts that heap whole; nothing is rebuilt. A process's heap is
-//! only ever touched by the scheduler currently running it.
+//! A spawn queues the child on the spawning scheduler; work reaches other
+//! schedulers only by donation ([`Runtime::hand`] / [`Runtime::donate`]) or,
+//! for `net.serve`'s per-core acceptors, as a [`Seed`] pinned to a chosen
+//! scheduler: an owned mini-heap holding a deep copy of the closure graph
+//! plus the root pointing into it, adopted whole. A process's heap is only
+//! ever touched by the scheduler currently running it.
 //!
 //! Idle schedulers park inside their poller and are woken via
 //! [`mio::Waker::wake`].
@@ -23,10 +25,6 @@ use crate::heap::ProcHeap;
 use super::freeze::FrozenValue;
 use super::lock;
 use super::migrate::Migrant;
-
-/// How many seeds a scheduler takes from the injector per visit. One at a time
-/// maximizes spread: k seeds across k idle schedulers is one each.
-const SEED_BATCH: usize = 1;
 
 /// A spawned-but-not-yet-started process, the unit of cross-scheduler work
 /// distribution. `heap` is owned memory and `root` points only into it or the
@@ -46,9 +44,9 @@ pub(super) struct Seed {
 // spawning must fail to build.
 const _: () = crate::assert_send::<Seed>();
 
-/// Work delivered to a scheduler's private inbox. Migrants are always
-/// direct-handed to a chosen peer, never queued to the shared injector, which
-/// stays `Seed`-only.
+/// One unit of work directed at a specific scheduler: a pinned seed or a
+/// donated migrant. The inbox itself only ever holds migrants; pinned seeds
+/// join them when a scheduler drains both ([`Runtime::take_inbound`]).
 pub(super) enum Inbound {
     Seed(Seed),
     Migrant(Migrant),
@@ -61,6 +59,14 @@ pub(super) enum BlockingOp {
     ReadFile(String),
     WriteFile(String, Vec<u8>),
     ResolveDns(String),
+    /// Start a child process for a port. See [`super::port`].
+    SpawnChild {
+        program: String,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    },
+    /// Wait for a closed port's child, escalating to signals if it lingers.
+    ReapChild(std::process::Child),
 }
 
 /// The result of a [`BlockingOp`], delivered back to the originating scheduler.
@@ -77,6 +83,15 @@ pub(super) enum BlockingResult {
     },
     ResolveDns {
         result: std::io::Result<std::net::IpAddr>,
+    },
+    /// The child's pipes and handle, still raw: the origin scheduler adopts
+    /// them into its own tables on wake.
+    SpawnChild {
+        program: String,
+        result: std::io::Result<super::port::PortIo>,
+    },
+    ReapChild {
+        result: std::io::Result<super::port::ChildExit>,
     },
 }
 
@@ -100,6 +115,16 @@ fn failed_blocking_result(op: BlockingOp) -> BlockingResult {
             result: Err(err()),
         },
         BlockingOp::ResolveDns(_) => BlockingResult::ResolveDns { result: Err(err()) },
+        BlockingOp::SpawnChild { program, .. } => BlockingResult::SpawnChild {
+            program,
+            result: Err(err()),
+        },
+        // The child exists and nothing can wait for it: kill it outright
+        // rather than leave it running unowned. `wait` after a kill is
+        // prompt, and this path only runs when no pool thread could be made.
+        BlockingOp::ReapChild(mut child) => BlockingResult::ReapChild {
+            result: child.kill().and_then(|()| child.wait()).and(Err(err())),
+        },
     }
 }
 
@@ -142,10 +167,10 @@ impl BlockingPool {
 /// pool touch to place work on, wake, or read the load of one scheduler. One
 /// struct rather than parallel `Vec`s that could end up different lengths.
 pub(super) struct SchedSlot {
-    /// Work inbox. `submit` hands a seed straight into a chosen idle
-    /// scheduler's inbox, so placement is decided at submit time instead of
-    /// raced through a shared queue. The handoff is a preference, not
-    /// ownership: an idle peer with nothing to run may steal from here
+    /// Work inbox: migrants donated to this scheduler, placed here by the
+    /// donor so the destination is decided at donation time instead of raced
+    /// through a shared queue. The handoff is a preference, not ownership:
+    /// an idle peer with nothing to run may steal from here
     /// ([`Runtime::steal_inbound`]) and the woken owner just re-parks.
     inbox: Mutex<VecDeque<Inbound>>,
     /// Listener ids retired by `net.close` on some scheduler, drained by this
@@ -195,7 +220,7 @@ pub(super) struct SchedSlot {
     /// A blocking worker pushes a finished job here and notifies this
     /// scheduler's poller.
     pub(super) completions: Mutex<VecDeque<Completion>>,
-    /// Wait ids of processes parked here that a `scheduler.send` on some
+    /// Wait ids of processes parked here that a `process.send` on some
     /// scheduler woke ([`Runtime::deliver_wake`]). Drained by this slot's
     /// owner; a stale id (the wait already ended on its deadline) is skipped.
     pub(super) wakes: Mutex<Vec<u64>>,
@@ -254,12 +279,13 @@ pub(super) struct Runtime {
     /// Live mailbox count, gating the per-process-death cleanup scan so
     /// subject-free programs pay one relaxed load.
     pub(super) live_subjects: AtomicUsize,
+    /// Every live pid, with the monitors on it and the monitors it holds.
+    /// See [`super::monitor`].
+    pub(super) processes: super::monitor::ProcessTable,
     next_pid: AtomicU64,
     /// Per-scheduler shared slots, indexed by scheduler id.
     pub(super) slots: Vec<SchedSlot>,
-    /// Overflow queue: seeds submitted while every scheduler was busy.
-    pub injector: Mutex<VecDeque<Seed>>,
-    /// Rotates the start of every idle-scheduler scan so consecutive placements
+    /// Rotates the start of every idle-peer scan so consecutive donations
     /// spread across schedulers.
     pub submit_cursor: AtomicUsize,
     /// Live processes across all schedulers, counting undelivered seeds and the
@@ -303,9 +329,9 @@ impl Runtime {
             shared_listeners: Mutex::new(HashMap::new()),
             mailboxes: super::mailbox::Mailboxes::new(),
             live_subjects: AtomicUsize::new(0),
+            processes: super::monitor::ProcessTable::new(count),
             next_pid: AtomicU64::new(1),
             slots,
-            injector: Mutex::new(VecDeque::new()),
             submit_cursor: AtomicUsize::new(0),
             // The main process is live.
             live: AtomicUsize::new(1),
@@ -318,12 +344,12 @@ impl Runtime {
         Ok((runtime, poll))
     }
 
-    /// Spawn the worker scheduler threads (1..N), exactly once, on the first
-    /// [`Runtime::submit`]. Waker slot and parked flag are set only after a
-    /// successful spawn, so both always have a live thread behind them. They
-    /// may trail the spawn because nothing can target a worker until
-    /// `call_once` returns: every other submitter is blocked in it and the new
-    /// workers hold no work.
+    /// Spawn the worker scheduler threads (1..N), exactly once, on the
+    /// program's first spawn. Waker slot and parked flag are set only after a
+    /// successful thread spawn, so both always have a live thread behind
+    /// them. They may trail the spawn because nothing can target a worker
+    /// until `call_once` returns: any other caller is blocked in it and the
+    /// new workers hold no work.
     ///
     /// A worker whose poller or thread cannot be created is skipped. Its flag
     /// stays down and its waker slot empty forever, so no placement path
@@ -384,9 +410,15 @@ impl Runtime {
         }
     }
 
-    /// Allocate a program-unique process id. Never reused.
+    /// Mint a program-unique process id — never reused, so a `Pid` value held
+    /// after its process ends still names only that process — and bring the
+    /// process into the live table. The one place processes are created, so
+    /// every process is monitorable from the moment its pid exists;
+    /// [`VM::end_process`](super::VM::end_process) is the matching exit.
     pub(super) fn alloc_pid(&self) -> u64 {
-        self.next_pid.fetch_add(1, Ordering::Relaxed)
+        let pid = self.next_pid.fetch_add(1, Ordering::Relaxed);
+        self.register_process(pid);
+        pid
     }
 
     /// Retire listener `id` program-wide: drop it from `shared_listeners`, then
@@ -415,31 +447,6 @@ impl Runtime {
                 self.notify(i);
             }
         }
-    }
-
-    /// Submit a seed: hand it directly to an idle scheduler when one exists,
-    /// otherwise push it onto the shared overflow queue.
-    ///
-    /// Direct handoff is what spreads work across cores. A seed in a shared
-    /// queue is raced for by every scheduler, and an already-awake one nearly
-    /// always wins because a lock is faster than waking a parked thread. Under
-    /// a connection flood that pins every process onto one or two schedulers.
-    pub fn submit(self: &Arc<Self>, seed: Seed) {
-        self.ensure_workers();
-        self.process_started();
-
-        if let Some(claim) = self.claim_idle_peer() {
-            self.hand(claim, Inbound::Seed(seed));
-            return;
-        }
-
-        // Overflow, then wake one in case a scheduler parked between the scan
-        // above and this push and would otherwise sleep on the stranded seed.
-        {
-            let mut q = lock(&self.injector);
-            q.push_back(seed);
-        }
-        self.wake_one();
     }
 
     /// Number of schedulers the runtime was built with (live or not).
@@ -555,10 +562,11 @@ impl Runtime {
     /// idle peer instead, so the [`Claim`] is consumed. The load is bumped here
     /// so a freshly fed peer is not dog-piled before it reports its own count.
     ///
-    /// Must NOT go through [`Runtime::submit`]: a migrant is already counted in
-    /// `live`, and counting it twice would keep `live` above zero and the
-    /// program would never shut down. That count is also what stops a scheduler
-    /// observing program-end while a process sits in transit.
+    /// A migrant is already counted in `live` — it must not be counted again
+    /// as [`Runtime::submit_to`] counts a seed, or `live` would never reach
+    /// zero and the program would never shut down. That standing count is
+    /// also what stops a scheduler observing program-end while a process
+    /// sits in transit.
     pub fn donate(&self, peer: usize, m: Migrant) {
         let slot = &self.slots[peer];
         slot.run_len.fetch_add(1, Ordering::Relaxed);
@@ -566,30 +574,13 @@ impl Runtime {
         self.notify(peer);
     }
 
-    /// Take the work destined for scheduler `me`, plus up to [`SEED_BATCH`]
-    /// overflow seeds when its own inbox is empty.
+    /// Drain everything directed at scheduler `me`: its pinned seeds and its
+    /// inbox, taken whole.
     pub fn take_inbound(&self, me: usize) -> Vec<Inbound> {
-        let mut out = self.take_directed(me);
-        if out.is_empty() {
-            out.extend(self.take_overflow().into_iter().map(Inbound::Seed));
-        }
-        out
-    }
-
-    /// Drain scheduler `me`'s pinned seeds and inbox. Directed work is taken
-    /// whole; only the overflow queue has a pickup limit.
-    pub fn take_directed(&self, me: usize) -> Vec<Inbound> {
         let slot = &self.slots[me];
         let mut out: Vec<Inbound> = lock(&slot.pinned).drain(..).map(Inbound::Seed).collect();
         out.extend(lock(&slot.inbox).drain(..));
         out
-    }
-
-    /// Take up to [`SEED_BATCH`] seeds from the shared overflow queue.
-    pub fn take_overflow(&self) -> Vec<Seed> {
-        let mut q = lock(&self.injector);
-        let take = q.len().min(SEED_BATCH);
-        q.drain(..take).collect()
     }
 
     /// Steal one inbound work item from another scheduler's inbox. Only for an
@@ -620,8 +611,8 @@ impl Runtime {
         }
     }
 
-    /// Whether any scheduler other than `me` is parked. Busy schedulers leave
-    /// injector seeds to idle ones.
+    /// Whether any scheduler other than `me` is parked — the cheapest
+    /// donation target, checked at every yield.
     pub fn any_other_idle(&self, me: usize) -> bool {
         self.slots
             .iter()
@@ -682,14 +673,6 @@ impl Runtime {
 
     pub(super) fn take_fault(&self) -> Option<(usize, super::VmError)> {
         lock(&self.fault).take()
-    }
-
-    /// Wake one parked scheduler. The wake clears its flag, so back-to-back
-    /// submissions fan out instead of all notifying the same one.
-    fn wake_one(&self) {
-        if let Some(claim) = self.claim_idle_peer() {
-            self.release(claim);
-        }
     }
 
     /// Wake every scheduler that has a thread.
@@ -797,6 +780,13 @@ fn run_blocking(op: BlockingOp) -> BlockingResult {
         }
         BlockingOp::ResolveDns(host) => BlockingResult::ResolveDns {
             result: resolve_host(&host),
+        },
+        BlockingOp::SpawnChild { program, args, env } => {
+            let result = super::port::spawn_child(&program, &args, &env);
+            BlockingResult::SpawnChild { program, result }
+        }
+        BlockingOp::ReapChild(child) => BlockingResult::ReapChild {
+            result: super::port::reap(child),
         },
     }
 }

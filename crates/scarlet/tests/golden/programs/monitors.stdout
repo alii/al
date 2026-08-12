@@ -1,0 +1,12 @@
+PASS down names the process
+PASS a returned process ended normally
+PASS monitoring an ended pid still delivers
+PASS and reports that it was already gone
+PASS down tagged with the slot
+PASS down carries the worker pid
+PASS traffic before the down was seen first
+PASS each monitor delivers its own notice
+PASS demonitor before the end delivers nothing
+PASS a live server answers
+PASS a dead server is reported as down
+done

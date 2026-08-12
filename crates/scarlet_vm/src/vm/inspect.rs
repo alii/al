@@ -12,7 +12,7 @@
 
 use std::fmt::Write;
 
-use crate::bytecode::{MapBacking, Program, Value, ValueView, hamt};
+use crate::bytecode::{MapBacking, Program, SocketKind, Value, ValueView, hamt};
 
 use super::{binary, str_ref};
 
@@ -185,7 +185,11 @@ fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut S
             );
         }
         ValueView::Socket(s) => {
-            let kind = if s.is_listener { "listener" } else { "socket" };
+            let kind = match s.kind {
+                SocketKind::Connection => "socket",
+                SocketKind::Listener => "listener",
+                SocketKind::Port => "port",
+            };
             let _ = write!(out, "<{}#{}>", kind, s.id);
         }
         ValueView::Subject(id) => {

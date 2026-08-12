@@ -314,7 +314,7 @@ impl VM {
         let msg = self.pop()?;
         let subj = self.pop()?;
         let Some(id) = subj.as_subject() else {
-            return Err(VmError::type_mismatch("scheduler.send", "Subject", &subj));
+            return Err(VmError::type_mismatch("process.send", "Subject", &subj));
         };
         // The receiver adopts the copy; the sender's original drops with
         // `msg`. The heap handle is zero-sized, so the root alone carries the
@@ -352,7 +352,7 @@ impl VM {
         *reds -= IO_REDUCTION_COST;
         // Stack, top first: the deadline, then the subject. The deadline is
         // absolute, so a re-run after a wake never resets the clock.
-        let deadline_ms = self.pop_int("scheduler.receive_within")?;
+        let deadline_ms = self.pop_int("process.receive_within")?;
         let subj = self.pop()?;
         let id = receive_subject(&subj)?;
         match self.runtime.subject_try_receive(id, self.current_pid) {
@@ -384,5 +384,5 @@ impl VM {
 /// program never produces.
 fn receive_subject(v: &Value) -> VmResult<u64> {
     v.as_subject()
-        .ok_or_else(|| VmError::type_mismatch("scheduler.receive", "Subject", v))
+        .ok_or_else(|| VmError::type_mismatch("process.receive", "Subject", v))
 }
