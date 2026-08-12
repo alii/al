@@ -91,6 +91,7 @@ fn op_coverage(op: Op) -> OpCoverage {
         // program contains it.
         Op::Count => OpCoverage::NotAPrimOp,
         Op::PushGlobal
+        | Op::PushNil
         | Op::PushTrue
         | Op::PushFalse
         | Op::AddInt
@@ -223,7 +224,6 @@ fn op_coverage(op: Op) -> OpCoverage {
         Op::PushConst
         | Op::PushLocal
         | Op::StoreLocal
-        | Op::PushNil
         | Op::Pop
         | Op::Dup
         | Op::Jump

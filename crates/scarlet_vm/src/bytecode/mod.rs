@@ -810,6 +810,16 @@ pub struct Program {
     pub abi: crate::template::AbiTable,
 }
 
+impl Program {
+    /// The pre-built value bound to a nullary ABI slot: an immortal word the
+    /// native backend may bake into an instruction, exactly as the
+    /// interpreter pushes it. `None` when the slot is unbound or bound to a
+    /// constructor with fields.
+    pub fn abi_nullary(&self, slot: crate::abi::AbiSlot) -> Option<&Value> {
+        self.templates.get(self.abi.get(slot)?)?.nullary()
+    }
+}
+
 // Worker scheduler threads clone the shared program, so it must stay
 // thread-shareable.
 const _: () = crate::assert_send_sync::<Program>();

@@ -840,7 +840,12 @@ impl Uses {
                 }
                 // `PushGlobal` reads the entry frame, not a local; the Bool
                 // heads are nullary constants. Neither has an operand.
-                Op::PushGlobal | Op::PushCapture | Op::PushSelf | Op::PushTrue | Op::PushFalse => {}
+                Op::PushGlobal
+                | Op::PushCapture
+                | Op::PushSelf
+                | Op::PushNil
+                | Op::PushTrue
+                | Op::PushFalse => {}
                 // The bridges hand every operand to their shim as an owned word.
                 _ if is_native_bridge_op(*op)
                     || is_native_park_op(*op)
@@ -1241,6 +1246,14 @@ pub fn compile<M: Module>(
         let b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
         let fns = declare_imports(module, b.func)?;
         let live = cont_live_sets(&plan.fun.body);
+        // The word `Op::PushNil` pushes: the prelude's `Nil` constructor,
+        // pre-built in the frozen area, so compiled code bakes it as an
+        // immediate exactly as it does the Bool heads. Every real program
+        // binds it (the prelude is always loaded); only a test program can
+        // leave it `None`, and lowering a `PushNil` then is loud.
+        let unit = program
+            .abi_nullary(scarlet_vm::abi::AbiSlot::Unit)
+            .map(Value::to_bits);
         let g = BodyGen::prologue(
             b,
             plan,
@@ -1249,6 +1262,7 @@ pub fn compile<M: Module>(
             uses,
             cmap,
             ctor_sites,
+            unit,
             fns,
             ptr_ty,
         );
@@ -1394,6 +1408,8 @@ struct BodyGen<'a> {
     uses: Uses,
     cmap: ConstMap,
     facts: ValueBits,
+    /// The frozen `Nil` constructor's bits, for `Op::PushNil`. See [`compile`].
+    unit: Option<u64>,
     fns: RtRefs,
     ptr_ty: ir::Type,
     /// The frame-base pointer (`&stack[frame.base_slot]`), re-fetched after
@@ -1428,6 +1444,7 @@ impl<'a> BodyGen<'a> {
         uses: Uses,
         cmap: ConstMap,
         ctor_sites: Vec<EnumCtorSite>,
+        unit: Option<u64>,
         fns: RtRefs,
         ptr_ty: ir::Type,
     ) -> BodyGen<'a> {
@@ -1465,6 +1482,7 @@ impl<'a> BodyGen<'a> {
             uses,
             cmap,
             facts: value_bits(),
+            unit,
             fns,
             ptr_ty,
             base,
@@ -1898,6 +1916,22 @@ impl<'a> BodyGen<'a> {
                 let call = self.b.ins().call(self.fns.push_self, &[vmx]);
                 let w = self.b.inst_results(call)[0];
                 self.field_result(w, want_word, want_int)
+            }
+            // One iconst of the frozen constructor's bits: immortal, so no
+            // retain is owed, the same as the interpreter's clone of it.
+            Atom::PrimOp {
+                op: Op::PushNil, ..
+            } => {
+                if want_int {
+                    unsupported_node("int view of Nil");
+                }
+                let Some(bits) = self.unit else {
+                    unsupported_node("PushNil in a program whose Unit ABI slot is unbound")
+                };
+                AtomVal {
+                    word: want_word.then(|| self.b.ins().iconst(types::I64, bits as i64)),
+                    int: None,
+                }
             }
             // One iconst of the immediate's bits.
             Atom::PrimOp {
@@ -4087,10 +4121,21 @@ mod tests {
                 code_len: 0,
             });
         }
+        // Bind the Unit slot the way `bind_abi` does, so a body whose value
+        // is a statement's implicit `Nil` (`Op::PushNil`) compiles here too.
+        let prelude = test_prelude();
+        let unit =
+            scarlet_vm::EnumTemplate::build(&mut ctx.fb, prelude.nil().id, 0, "Nil", "Nil", &[]);
+        let mut templates = crate::tivec::TiVec::new();
+        let mut abi = scarlet_vm::AbiTable::default();
+        abi.bind(scarlet_vm::abi::AbiSlot::Unit, templates.push(unit));
+        drop(ctx.fb);
         let program = crate::bytecode::Program {
             constants: ctx.consts,
             frozen: area,
             functions,
+            templates,
+            abi,
             ..Default::default()
         };
         jit_with(fns, pool, program, &layouts)
@@ -4710,6 +4755,41 @@ mod tests {
         assert_eq!(v.to_bits(), Value::bool(true).to_bits());
         let (v, _) = run(&j, 1, &[], 1 << 40);
         assert_eq!(v.to_bits(), Value::bool(false).to_bits());
+    }
+
+    /// A block that ends in a statement has the prelude's `Nil` as its value
+    /// (`Op::PushNil`): it must lower to the very word the interpreter pushes,
+    /// in tail position and through a `Let`, without any runtime call.
+    #[test]
+    fn statement_blocks_yield_the_frozen_nil_constructor() {
+        let (pool, int) = int_pool();
+        let t = testkit::func(vec![], CoreExpr::Tail(Atom::prim(Op::PushNil, vec![])), int);
+        let f = testkit::func(
+            vec![],
+            CoreExpr::Let {
+                bind: testkit::bind(0, int),
+                rhs: Atom::prim(Op::PushNil, vec![]),
+                body: Box::new(CoreExpr::Tail(Atom::Local(local(0)))),
+            },
+            int,
+        );
+        let j = jit(&[t, f], &pool, &test_consts());
+        let expected = j
+            ._program
+            .abi_nullary(scarlet_vm::abi::AbiSlot::Unit)
+            .expect("the harness binds Unit")
+            .to_bits();
+        let baked = format!("iconst.i64 {}", expected as i64);
+        for (i, clif) in j.clifs.iter().enumerate() {
+            assert!(
+                clif.contains(&baked),
+                "PushNil must bake the constructor word as an immediate; body {i} was:\n{clif}"
+            );
+        }
+        let (v, _) = run(&j, 0, &[], 1 << 40);
+        assert_eq!(v.to_bits(), expected);
+        let (v, _) = run(&j, 1, &[], 1 << 40);
+        assert_eq!(v.to_bits(), expected);
     }
 
     #[test]

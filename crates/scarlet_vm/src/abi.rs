@@ -400,7 +400,9 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::H1Header,
         ],
         Op::HttpHeaderGet | Op::MapGet => &[S::OptionSome, S::OptionNone],
-        Op::Sleep | Op::SpawnOnEach => &[S::Unit],
+        // `PushNil` is the value of a block that ends in a statement, and
+        // `Print` pushes nothing so the emitter follows it with one.
+        Op::PushNil | Op::Sleep | Op::SpawnOnEach => &[S::Unit],
         Op::SubjectSend => &[S::Unit],
         Op::SubjectReceiveUntil => &[S::ResultOk, S::ResultErr, S::Unit],
         _ => &[],
