@@ -396,6 +396,27 @@ pub enum Op {
     /// (scarlet/map.to_list)
     MapToList,
 
+    // Integer bitwise ops. `Int` is exactly `i64`, so these are the i64
+    // two's-complement operations and there is no width to choose. Like
+    // `+ - * / %` they are TOTAL: no input traps, and the shifts in
+    // particular define every count rather than masking it — see
+    // `shift_left_i64` in `vm::exec` for the count rules.
+    /// `[a, b] -> Int` — bitwise AND. (scarlet/int.bitwise_and)
+    BitAnd,
+    /// `[a, b] -> Int` — bitwise OR. (scarlet/int.bitwise_or)
+    BitOr,
+    /// `[a, b] -> Int` — bitwise XOR. (scarlet/int.bitwise_xor)
+    BitXor,
+    /// `[a] -> Int` — two's-complement complement, equal to `-a - 1`.
+    /// (scarlet/int.bitwise_not)
+    BitNot,
+    /// `[x, n] -> Int` — shift left, discarding bits shifted off the top.
+    /// (scarlet/int.bitwise_shift_left)
+    BitShl,
+    /// `[x, n] -> Int` — *arithmetic* shift right: the sign bit propagates,
+    /// so a negative `x` stays negative. (scarlet/int.bitwise_shift_right)
+    BitShr,
+
     /// Not an opcode: one past the last real variant, so [`Op::from_u8`] can
     /// bound its check without a hand-maintained count. Never emitted, never
     /// executed; every consumer of real ops rejects it.
@@ -592,7 +613,13 @@ impl Op {
             | Op::MapNew
             | Op::MapSet
             | Op::MapDelete
-            | Op::MapToList => false,
+            | Op::MapToList
+            | Op::BitAnd
+            | Op::BitOr
+            | Op::BitXor
+            | Op::BitNot
+            | Op::BitShl
+            | Op::BitShr => false,
         }
     }
 
@@ -770,7 +797,13 @@ impl Op {
             | Op::MapNew
             | Op::MapSet
             | Op::MapDelete
-            | Op::MapToList => false,
+            | Op::MapToList
+            | Op::BitAnd
+            | Op::BitOr
+            | Op::BitXor
+            | Op::BitNot
+            | Op::BitShl
+            | Op::BitShr => false,
         }
     }
 }

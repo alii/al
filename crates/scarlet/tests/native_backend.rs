@@ -280,6 +280,136 @@ println(12345678901 * 987654321)
     );
 }
 
+/// Iterations of each bitwise loop in [`bitwise_ops_survive_the_native_bridge`].
+/// Far past `NativeTable::WARM_CALLS`, so all but the first handful of steps
+/// run compiled.
+const BITWISE_ROUNDS: i64 = 3_000_000;
+
+/// `rotor`'s step: rotate `bitwise_not(acc)` left by 7, then fold in `n`.
+/// Written from the language's stated semantics rather than called out of the
+/// VM, so it is ground truth and not a second opinion from the same code.
+fn rotor_step(acc: i64, n: i64) -> i64 {
+    let a = !acc;
+    let hi = ((a as u64) << 7) as i64;
+    let lo = (a >> 57) & 127;
+    (hi | lo) ^ n
+}
+
+/// `mixer`'s step. `0x4444…` is a strict subset of the `0xCCCC…` mask, so the
+/// bits OR contributes survive the AND and reach the printed value.
+fn mixer_step(acc: i64, n: i64) -> i64 {
+    ((acc | 0x4444_4444_4444_4444_u64 as i64) & 0xCCCC_CCCC_CCCC_CCCC_u64 as i64) ^ n
+}
+
+/// Apply `step` for `n = BITWISE_ROUNDS, …, 1`, matching the tail recursion.
+fn fold_rounds(seed: i64, step: fn(i64, i64) -> i64) -> i64 {
+    let mut acc = seed;
+    let mut n = BITWISE_ROUNDS;
+    while n != 0 {
+        acc = step(acc, n);
+        n -= 1;
+    }
+    acc
+}
+
+/// The `FuncIdx` `SCARLET_NATIVE_DEBUG` assigned to `name`, from its
+/// `al-native: selected fn#N <name>` line. Panics if the body was never even
+/// planned for compilation.
+fn selected_index(stderr: &str, name: &str) -> String {
+    stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("al-native: selected "))
+        .filter_map(|rest| rest.split_once(' '))
+        .find(|(_, fname)| *fname == name)
+        .map(|(idx, _)| idx.to_owned())
+        .unwrap_or_else(|| {
+            panic!("`{name}` was never selected for native compilation; stderr:\n{stderr}")
+        })
+}
+
+/// Assert `name` actually crossed to native in this run — planned AND warmed.
+/// This is the negative control the bitwise test lacked: raise
+/// `NativeTable::WARM_CALLS` past the loop count and the JIT never runs, which
+/// a test named for the native bridge must notice.
+fn assert_warmed(stderr: &str, name: &str) {
+    let idx = selected_index(stderr, name);
+    let needle = format!("al-native: warmed {idx} in");
+    assert!(
+        stderr.contains(&needle),
+        "`{name}` ({idx}) never warmed to native, so nothing crossed the bridge; stderr:\n{stderr}"
+    );
+}
+
+/// (e) The integer bitwise ops across the interp→native switch. They lower as
+/// `OpCoverage::Bridge`, so a wrong arm in `run_bridge_op` is invisible to the
+/// interpreter-only golden program (`bitwise.scrl` compiles only `ok`), and
+/// this test is the only thing holding the interpreter and the JIT together on
+/// these six ops.
+///
+/// **No operand here is an identity element, and that is the whole point.**
+/// The first version of this test made every loop an identity — `x ^ k ^ k`,
+/// `x << 1 >> 1`, `(x & -1) | 0` — and stayed green with `BIT_OR` wired to
+/// `bit_xor`, because `0` is the identity of OR *and* of XOR, so no downstream
+/// value can tell those two arms apart. `-1` does the same for AND and XOR;
+/// that plant was caught only because the natively-executed iteration count
+/// happened to be odd, which moving `WARM_CALLS` by one would have undone.
+///
+/// So both loops evolve state instead, fold `n` in on every step so there is
+/// no fixed point to collapse onto, and pick operands that separate each arm
+/// from its siblings:
+///
+/// - `rotor` rotates `bitwise_not(acc)` left by 7 — `shift_left 7`,
+///   `shift_right 57`, `and 127`. The two shift counts differ, so SHL and SHR
+///   never see the same operand, and neither count is 0.
+/// - `mixer` ORs in `0x4444…`, ANDs with `0xCCCC…`, XORs `n`. The OR bits are
+///   a strict subset of the AND mask, so what OR contributes is not masked
+///   away, and the accumulator carries those bits into the next round's OR —
+///   which is what makes OR and XOR disagree there.
+///
+/// The expected output is recomputed in Rust from the same recurrence, so a
+/// miscompile fails against ground truth rather than against a second run.
+#[test]
+fn bitwise_ops_survive_the_native_bridge() {
+    let src = "import scarlet/int
+
+fn rotor(n Int, acc Int) Int {
+\ta = int.bitwise_not(acc)
+\thi = int.bitwise_shift_left(a, 7)
+\tlo = int.bitwise_and(int.bitwise_shift_right(a, 57), 127)
+\tnext = int.bitwise_xor(int.bitwise_or(hi, lo), n)
+\tif n == 0 { acc } else { rotor(n - 1, next) }
+}
+
+fn mixer(n Int, acc Int) Int {
+\ta = int.bitwise_or(acc, 4919131752989213764)
+\tb = int.bitwise_and(a, 0 - 3689348814741910324)
+\tnext = int.bitwise_xor(b, n)
+\tif n == 0 { acc } else { mixer(n - 1, next) }
+}
+
+println(rotor(ROUNDS, 12345))
+println(mixer(ROUNDS, 0 - 42))
+";
+    // One source of truth for the count: the Rust fold below must run exactly
+    // as many steps as the program does.
+    let src = src.replace("ROUNDS", &BITWISE_ROUNDS.to_string());
+    let expected = format!(
+        "{}\n{}\n",
+        fold_rounds(12345, rotor_step),
+        fold_rounds(-42, mixer_step),
+    );
+
+    let proj = Project::new("bitwise_bridge");
+    let path = proj.dir.join("prog.scrl");
+    std::fs::write(&path, src).unwrap();
+    let path = path.to_string_lossy().into_owned();
+    let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
+    assert!(out.success, "run failed:\n{}", out.stderr);
+    assert_eq!(out.stdout, expected, "stderr:\n{}", out.stderr);
+    assert_warmed(&out.stderr, "rotor");
+    assert_warmed(&out.stderr, "mixer");
+}
+
 /// xorshift64 — deterministic, seedable, no dependency.
 struct Rng(u64);
 

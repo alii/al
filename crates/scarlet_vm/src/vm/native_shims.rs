@@ -509,6 +509,12 @@ mod opc {
     pub const BIN_TO_ASCII_LOWER: u8 = Op::BinToAsciiLower as u8;
     pub const BIN_TO_STRING: u8 = Op::BinToString as u8;
     pub const BIN_VIEW: u8 = Op::BinView as u8;
+    pub const BIT_AND: u8 = Op::BitAnd as u8;
+    pub const BIT_NOT: u8 = Op::BitNot as u8;
+    pub const BIT_OR: u8 = Op::BitOr as u8;
+    pub const BIT_SHL: u8 = Op::BitShl as u8;
+    pub const BIT_SHR: u8 = Op::BitShr as u8;
+    pub const BIT_XOR: u8 = Op::BitXor as u8;
     pub const DIV: u8 = Op::Div as u8;
     pub const DIV_FLOAT: u8 = Op::DivFloat as u8;
     pub const DNS_RESOLVE: u8 = Op::DnsResolve as u8;
@@ -787,6 +793,12 @@ impl VM {
             opc::DIV => self.div(),
             opc::MOD => self.rem(),
             opc::NEG => self.neg(),
+            opc::BIT_AND => self.bit_and(),
+            opc::BIT_OR => self.bit_or(),
+            opc::BIT_XOR => self.bit_xor(),
+            opc::BIT_NOT => self.bit_not(),
+            opc::BIT_SHL => self.bit_shl(),
+            opc::BIT_SHR => self.bit_shr(),
             // The polymorphic comparisons: the emitter sends these here only
             // when it could not prove both operands Int (the Int case lowers
             // inline via `nop_of`).
