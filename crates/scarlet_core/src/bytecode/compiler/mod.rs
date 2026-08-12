@@ -79,9 +79,10 @@ use crate::reference::{
 use crate::span::Span;
 use crate::type_def::TypeId;
 use crate::types::{
-    AnnotationContext, ArenaSlice, Constraint, DefinitionLocation, EntityKind, Hydrator,
-    InferEngine, MatchFunTypeError, NullaryPrim, Pat, PatternBindings, PatternSink, Scheme, StrId,
-    Ty, TypeEnv, TypeInfo, TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine, new_env, pool,
+    AnnotationContext, ArenaSlice, Constraint, CtorResolver, DefinitionLocation, EntityKind,
+    Hydrator, InferEngine, MatchFunTypeError, NullaryPrim, Pat, PatternBindings, PatternSink,
+    Scheme, StrId, Ty, TypeEnv, TypeInfo, TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine,
+    new_env, pool,
 };
 
 mod abi;
@@ -2444,7 +2445,7 @@ impl Compiler {
                         self.engine
                             .resolve_for_patterns(init_ty, Some(&self.env), depth);
                     let mut um = UsefulnessMatrix::new(resolved);
-                    let pat = um.lower(&pattern);
+                    let pat = um.lower(&pattern, self);
                     if let Some(missing) = um.find_missing(&[pat]) {
                         self.error(
                             format!(
@@ -5258,7 +5259,11 @@ impl Compiler {
                 self.engine
                     .resolve_for_patterns(subject_ty, Some(&self.env), depth);
             let mut um = UsefulnessMatrix::new(resolved_subj);
-            let all_pats: Vec<Pat> = m.arms.iter().map(|arm| um.lower(&arm.pattern)).collect();
+            let all_pats: Vec<Pat> = m
+                .arms
+                .iter()
+                .map(|arm| um.lower(&arm.pattern, self))
+                .collect();
             // Guarded arms don't contribute to exhaustiveness (the guard may be
             // false) and don't make later arms unreachable.
             let unguarded = m

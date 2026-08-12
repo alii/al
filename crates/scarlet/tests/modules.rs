@@ -397,6 +397,62 @@ fn a_qualified_pattern_is_seen_by_exhaustiveness() {
     project_rejects(&proj, "check", "main.scrl", &["not exhaustive", "Green"]);
 }
 
+/// An arm written with an aliased constructor import (`{Red as R}`) covers the
+/// variant it was imported from. Exhaustiveness used to match the head against
+/// the variant table by the name it was *written* with, which an alias never
+/// equals: every arm read as covering nothing, and a total match was rejected
+/// as missing every variant.
+#[test]
+fn an_aliased_constructor_import_covers_its_variant() {
+    let proj = Project::new("alias_ctor_exh");
+    proj.write("color.scrl", COLOR_SRC);
+    proj.write(
+        "main.scrl",
+        "import ./color.{Color, Red as R, Green as G}\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tR -> 0\n\t\tG(s) -> s\n\t}\n}\nprintln(v(G(9)))\n",
+    );
+    run_project_outputs(&proj, "run", "main.scrl", "9\n");
+}
+
+/// The alias is resolved once, through the scope, not rewritten name-by-name:
+/// two aliases that swap a pair of constructor names still name the variant
+/// each was imported from.
+#[test]
+fn swapped_constructor_aliases_keep_their_own_variants() {
+    let proj = Project::new("alias_ctor_swap");
+    proj.write("color.scrl", COLOR_SRC);
+    proj.write(
+        "main.scrl",
+        "import ./color.{Color, Red as Green, Green as Red}\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tGreen -> 0\n\t\tRed(s) -> s\n\t}\n}\nprintln(v(Red(9)))\n",
+    );
+    run_project_outputs(&proj, "run", "main.scrl", "9\n");
+}
+
+/// The irrefutability check on a destructuring binding lowers its pattern
+/// through the same path, so an aliased head must resolve there too.
+#[test]
+fn an_aliased_constructor_destructures_irrefutably() {
+    let proj = Project::new("alias_ctor_destructure");
+    proj.write("pair.scrl", "pub type Pair {\n\tPair(a Int, b Int)\n}\n");
+    proj.write(
+        "main.scrl",
+        "import ./pair.{Pair as P}\n\nP(a, b) = P(1, 2)\nprintln(a + b)\n",
+    );
+    run_project_outputs(&proj, "run", "main.scrl", "3\n");
+}
+
+/// Aliasing does not weaken the check: a match that leaves a variant out is
+/// still rejected, and the witness names the variant as the module declares it.
+#[test]
+fn an_aliased_arm_still_leaves_the_other_variant_missing() {
+    let proj = Project::new("alias_ctor_missing");
+    proj.write("color.scrl", COLOR_SRC);
+    proj.write(
+        "main.scrl",
+        "import ./color.{Color, Red as R}\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tR -> 0\n\t}\n}\nprintln(v(R))\n",
+    );
+    project_rejects(&proj, "check", "main.scrl", &["not exhaustive", "Green"]);
+}
+
 /// Labelled arguments and `..` work through a qualifier, as they do bare.
 #[test]
 fn a_qualified_pattern_takes_labels_and_rest() {

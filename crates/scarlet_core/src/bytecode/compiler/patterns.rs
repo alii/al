@@ -397,3 +397,25 @@ impl Compiler {
         (by_pos.into_iter().map(|s| s.map(|(v, _)| v)).collect(), ok)
     }
 }
+
+/// The exhaustiveness checker resolves pattern heads through the same scope
+/// `type_pattern` did, so an aliased constructor import (`{Circle as Round}`)
+/// names the variant it was imported from rather than a variant the subject
+/// type has no name for. Silent on failure by contract: it runs only on
+/// patterns `type_pattern` accepted, so a `None` here is a head that already
+/// has a diagnostic.
+impl CtorResolver for Compiler {
+    fn variant_index(&self, qualifier: Option<&str>, name: &str) -> Option<usize> {
+        let scheme = match qualifier {
+            Some(q) => {
+                let key = self.imported_qualifiers.get(q)?;
+                self.module_table.get(key)?.values.get(name)?.scheme
+            }
+            None => *self.env.lookup(name)?,
+        };
+        match scheme.kind {
+            ValueKind::Constructor { variant_idx, .. } => Some(variant_idx as usize),
+            _ => None,
+        }
+    }
+}

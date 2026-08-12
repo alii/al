@@ -58,6 +58,33 @@ impl CtorIdSet {
     }
 }
 
+/// Resolves a constructor pattern's head to the variant it names.
+///
+/// The exhaustiveness checker sees only the source pattern, whose head is
+/// whatever name is in scope at the use site; an aliased import (`{Circle as
+/// Round}`) makes that differ from the variant's declared name. Only the
+/// compiler's scope knows the two are the same constructor, so it answers
+/// here, in the one currency both layers agree on: the variant's index in its
+/// type's declaration order.
+pub trait CtorResolver {
+    /// Index of the variant `qualifier`-qualified `name` denotes, in the
+    /// declaration order of the type that owns it. `None` when the head does
+    /// not resolve to a constructor, which only happens for patterns the
+    /// typechecker has already rejected.
+    fn variant_index(&self, qualifier: Option<&str>, name: &str) -> Option<usize>;
+}
+
+/// Resolves nothing: every head falls back to matching on its written name.
+/// For callers with no scope to consult, which therefore cannot see through an
+/// alias.
+pub struct NoCtorResolver;
+
+impl CtorResolver for NoCtorResolver {
+    fn variant_index(&self, _qualifier: Option<&str>, _name: &str) -> Option<usize> {
+        None
+    }
+}
+
 /// Lowered pattern used by the matrix recursion. Sub-pattern lists are
 /// `Rc`-shared so the row clones in `specialize`/`default_matrix` are refcount
 /// bumps, not deep copies.
@@ -560,7 +587,12 @@ fn pat_to_string(p: &Pat, t: &RcType, interner: &Interner) -> String {
     }
 }
 
-fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
+fn lower_pattern(
+    p: &ast::Pattern,
+    t: &RcType,
+    interner: &mut Interner,
+    ctors: &dyn CtorResolver,
+) -> Pat {
     fn nullary(id: u32) -> Pat {
         Pat::Ctor {
             id,
@@ -575,10 +607,32 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
                 nullary(interner.intern(&format!("lit:'{}'", s.value)))
             }
         },
-        ast::Pattern::Constructor { name, args, .. } => {
+        ast::Pattern::Constructor {
+            qualifier,
+            name,
+            args,
+            ..
+        } => {
             let type_ctors = get_type_ctors(t);
-            let id = interner.intern(&name.name);
-            let pat_args: Rc<[Pat]> = match type_ctors.find(id) {
+            // The head names a variant of `t`, and the name it is *written*
+            // with need not be that variant's declared name: an aliased import
+            // (`{Circle as Round}`) puts a local name in scope that the type's
+            // variant table has never heard of. Resolve through the scope to
+            // the variant index — the constructor's canonical identity — and
+            // only fall back to matching on the written name for heads the
+            // resolver cannot see (ill-typed patterns), which stay opaque
+            // exactly as before.
+            let by_index = ctors
+                .variant_index(qualifier.as_ref().map(|q| q.name.as_str()), &name.name)
+                .and_then(|i| type_ctors.ctors.get(i));
+            let (id, resolved) = match by_index {
+                Some(c) => (c.id, Some(c)),
+                None => {
+                    let id = interner.intern(&name.name);
+                    (id, type_ctors.find(id))
+                }
+            };
+            let pat_args: Rc<[Pat]> = match resolved {
                 Some(ctor) => {
                     // Slot args into field-DECLARATION order with the same
                     // `slot_labeled` the typechecker and elaborator use; empty
@@ -608,7 +662,7 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
                         .into_iter()
                         .zip(&ctor.types)
                         .map(|(slot, field_t)| match slot {
-                            Some(p) => lower_pattern(p, field_t, interner),
+                            Some(p) => lower_pattern(p, field_t, interner, ctors),
                             None => Pat::Wildcard,
                         })
                         .collect()
@@ -622,7 +676,7 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
                             ast::PatternArg::Positional(p) => p,
                             ast::PatternArg::Labeled { pattern, .. } => pattern,
                         };
-                        lower_pattern(inner, &RcType::Infinite, interner)
+                        lower_pattern(inner, &RcType::Infinite, interner, ctors)
                     })
                     .collect(),
             };
@@ -638,7 +692,12 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
                 .iter()
                 .enumerate()
                 .map(|(i, e)| {
-                    lower_pattern(e, elem_types.get(i).unwrap_or(&RcType::Infinite), interner)
+                    lower_pattern(
+                        e,
+                        elem_types.get(i).unwrap_or(&RcType::Infinite),
+                        interner,
+                        ctors,
+                    )
                 })
                 .collect();
             Pat::Ctor {
@@ -663,7 +722,7 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
                     ast::ArrayPatternElement::Pattern(p) => {
                         acc = Pat::Ctor {
                             id: CONS_ID,
-                            args: Rc::from([lower_pattern(p, elem_type, interner), acc]),
+                            args: Rc::from([lower_pattern(p, elem_type, interner, ctors), acc]),
                         };
                     }
                 }
@@ -683,7 +742,7 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
         ast::Pattern::Or { first, rest, .. } => Pat::Or {
             patterns: std::iter::once(&**first)
                 .chain(rest.iter())
-                .map(|p| lower_pattern(p, t, interner))
+                .map(|p| lower_pattern(p, t, interner, ctors))
                 .collect(),
         },
         ast::Pattern::Range { start, end, .. } => {
@@ -713,10 +772,10 @@ impl UsefulnessMatrix {
         }
     }
 
-    /// Lower an `ast::Pattern` against this checker's subject type. Ctor names
-    /// are interned here, once.
-    pub fn lower(&mut self, p: &ast::Pattern) -> Pat {
-        lower_pattern(p, &self.subject_type, &mut self.interner)
+    /// Lower an `ast::Pattern` against this checker's subject type, resolving
+    /// constructor heads through `ctors`. Ctor names are interned here, once.
+    pub fn lower(&mut self, p: &ast::Pattern, ctors: &dyn CtorResolver) -> Pat {
+        lower_pattern(p, &self.subject_type, &mut self.interner, ctors)
     }
 
     pub fn is_useful(&self, pat: &Pat) -> bool {
@@ -1088,24 +1147,27 @@ mod tests {
     #[test]
     fn binary_fixed_segments_not_exhaustive() {
         let mut um = UsefulnessMatrix::new(t_binary());
-        let p = um.lower(&bin_pat(
-            vec![bin_seg(p_var("a"), None), bin_seg(p_var("b"), None)],
-            false,
-        ));
+        let p = um.lower(
+            &bin_pat(
+                vec![bin_seg(p_var("a"), None), bin_seg(p_var("b"), None)],
+                false,
+            ),
+            &NoCtorResolver,
+        );
         assert_eq!(um.find_missing(&[p]).as_deref(), Some("_"));
     }
 
     #[test]
     fn binary_empty_literal_not_exhaustive() {
         let mut um = UsefulnessMatrix::new(t_binary());
-        let p = um.lower(&bin_pat(vec![], false));
+        let p = um.lower(&bin_pat(vec![], false), &NoCtorResolver);
         assert_eq!(um.find_missing(&[p]).as_deref(), Some("_"));
     }
 
     #[test]
     fn binary_rest_only_is_exhaustive() {
         let mut um = UsefulnessMatrix::new(t_binary());
-        let p = um.lower(&bin_pat(vec![], true));
+        let p = um.lower(&bin_pat(vec![], true), &NoCtorResolver);
         assert!(matches!(p, Pat::Wildcard));
         assert_eq!(um.find_missing(&[p]), None);
     }
@@ -1113,25 +1175,37 @@ mod tests {
     #[test]
     fn binary_segments_with_rest_not_exhaustive() {
         let mut um = UsefulnessMatrix::new(t_binary());
-        let p = um.lower(&bin_pat(vec![bin_seg(p_var("a"), None)], true));
+        let p = um.lower(
+            &bin_pat(vec![bin_seg(p_var("a"), None)], true),
+            &NoCtorResolver,
+        );
         assert_eq!(um.find_missing(&[p]).as_deref(), Some("_"));
     }
 
     #[test]
     fn binary_fixed_then_else_exhaustive() {
         let mut um = UsefulnessMatrix::new(t_binary());
-        let p1 = um.lower(&bin_pat(
-            vec![bin_seg(p_var("a"), None), bin_seg(p_var("b"), None)],
-            false,
-        ));
+        let p1 = um.lower(
+            &bin_pat(
+                vec![bin_seg(p_var("a"), None), bin_seg(p_var("b"), None)],
+                false,
+            ),
+            &NoCtorResolver,
+        );
         assert_eq!(um.find_missing(&[p1, Pat::Wildcard]), None);
     }
 
     #[test]
     fn binary_same_shape_redundant() {
         let mut m = UsefulnessMatrix::new(t_binary());
-        let p1 = m.lower(&bin_pat(vec![bin_seg(p_var("a"), Some("8"))], false));
-        let p2 = m.lower(&bin_pat(vec![bin_seg(p_var("b"), Some("8"))], false));
+        let p1 = m.lower(
+            &bin_pat(vec![bin_seg(p_var("a"), Some("8"))], false),
+            &NoCtorResolver,
+        );
+        let p2 = m.lower(
+            &bin_pat(vec![bin_seg(p_var("b"), Some("8"))], false),
+            &NoCtorResolver,
+        );
         m.push(&p1);
         assert!(!m.is_useful(&p2));
     }
@@ -1145,8 +1219,14 @@ mod tests {
                 span: scarlet_syntax::span::Span::DUMMY,
             }))
         };
-        let p1 = m.lower(&bin_pat(vec![bin_seg(lit("1"), None)], false));
-        let p2 = m.lower(&bin_pat(vec![bin_seg(lit("2"), None)], false));
+        let p1 = m.lower(
+            &bin_pat(vec![bin_seg(lit("1"), None)], false),
+            &NoCtorResolver,
+        );
+        let p2 = m.lower(
+            &bin_pat(vec![bin_seg(lit("2"), None)], false),
+            &NoCtorResolver,
+        );
         m.push(&p1);
         assert!(m.is_useful(&p2));
     }
@@ -1162,14 +1242,20 @@ mod tests {
             }))
         };
         let mut m = UsefulnessMatrix::new(t_binary());
-        let p1 = m.lower(&bin_pat(vec![bin_seg(str_lit("a'i8,'b"), None)], false));
-        let p2 = m.lower(&bin_pat(
-            vec![
-                bin_seg(str_lit("a"), Some("8")),
-                bin_seg(str_lit("b"), None),
-            ],
-            false,
-        ));
+        let p1 = m.lower(
+            &bin_pat(vec![bin_seg(str_lit("a'i8,'b"), None)], false),
+            &NoCtorResolver,
+        );
+        let p2 = m.lower(
+            &bin_pat(
+                vec![
+                    bin_seg(str_lit("a"), Some("8")),
+                    bin_seg(str_lit("b"), None),
+                ],
+                false,
+            ),
+            &NoCtorResolver,
+        );
         m.push(&p1);
         assert!(m.is_useful(&p2));
     }
@@ -1243,7 +1329,7 @@ mod tests {
         };
         let missing = |arms: &[ast::Pattern]| {
             let mut um = UsefulnessMatrix::new(pair.clone());
-            let ipats: Vec<Pat> = arms.iter().map(|p| um.lower(p)).collect();
+            let ipats: Vec<Pat> = arms.iter().map(|p| um.lower(p, &NoCtorResolver)).collect();
             um.find_missing(&ipats)
         };
 
