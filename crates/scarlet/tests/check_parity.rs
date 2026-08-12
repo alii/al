@@ -236,6 +236,76 @@ println(outer(4))
     assert_no_jump_into_a_foreign_body(&built);
 }
 
+/// Compile `source` against the stdlib and hand back the emitted program.
+fn layout_of(source: &str) -> scarlet::bytecode::Program {
+    let ast = parse(source);
+    let built = scarlet::bytecode::compile(&ast, None, Some(&scarlet::STDLIB));
+    assert!(
+        built.success(),
+        "compile failed:\n{source}\n{:#?}",
+        built.diagnostics
+    );
+    built.into_runnable().expect("compile emits").program
+}
+
+/// A constructor named without being called is eta-expanded into a wrapper
+/// function, and a wrapper minted for a *function body* is written inside the
+/// deferral region, immediately ahead of the body that named it. Its jump-over
+/// therefore has the whole rest of the region behind it, not just its own
+/// `Ret`: patched to its own end it lands on `wrap`'s first instruction.
+#[test]
+fn an_eta_wrapper_in_a_body_clears_the_whole_region() {
+    assert_no_jump_into_a_foreign_body(&layout_of(
+        r#"import scarlet/array
+type W { W(v Int) }
+fn wrap(xs) {
+	array.map(xs, W)
+}
+println(array.length(wrap([1, 2, 3])))
+"#,
+    ));
+}
+
+/// The same shape reached through a `@vm` builtin as a value. It is one bug,
+/// not two: `ValueKind::Builtin` and `ValueKind::Constructor` both eta-expand,
+/// and it is where the wrapper is written — inside the region — that decides
+/// the jump-over's target.
+#[test]
+fn an_eta_wrapper_over_a_builtin_clears_the_whole_region() {
+    assert_no_jump_into_a_foreign_body(&layout_of(
+        r#"import scarlet/array
+import scarlet/string
+fn lens(xs) {
+	array.map(xs, string.length)
+}
+println(array.length(lens(['ab', 'cde'])))
+"#,
+    ));
+}
+
+/// The other splice, which the region patch must leave alone: a wrapper the
+/// *toplevel* named is written after the region has drained, ahead of the
+/// toplevel init, so "just past my own `Ret`" names the next wrapper's jump-over
+/// or the init — never a body. That is the `None` arm, and this pins it.
+///
+/// It does not witness the jump being *taken*, and neither do the two above: no
+/// jump-over in either splice is reachable, because `append_toplevel_init`
+/// overwrites the head of the region with a `Jump` to the init. What all three
+/// pin is the layout.
+#[test]
+fn an_eta_wrapper_at_the_toplevel_is_spliced_past_every_body() {
+    assert_no_jump_into_a_foreign_body(&layout_of(
+        r#"import scarlet/array
+type W { W(v Int) }
+fn ident(n) {
+	n
+}
+ws = array.map([1, 2, 3], W)
+println(array.length(ws) + ident(1))
+"#,
+    ));
+}
+
 /// The entry point is the last function either mode registers.
 #[test]
 fn check_and_compile_agree_on_the_entry_index() {

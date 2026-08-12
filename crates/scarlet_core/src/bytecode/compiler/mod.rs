@@ -667,6 +667,23 @@ pub struct Compiler {
     /// constructor or sibling decl (`println = 5` after `fn g() { println(x) }`
     /// turned the callee into a self-call).
     deferred_env_pin: Option<(usize, TypeEnv)>,
+    /// Jump-overs emitted by [`Self::materialize_eta_wrappers`] *while a
+    /// deferral region is draining*, collected for the region-wide patch at
+    /// the end of [`Self::end_deferred_elaboration`].
+    ///
+    /// `Some` for exactly the span of that drain, and that is the whole point:
+    /// what a wrapper's jump-over may target is decided by what was emitted
+    /// after it, and only the drain knows. Outside a drain the wrappers are the
+    /// last thing before the toplevel init, so "just past my own `Ret`" names
+    /// the next wrapper's jump-over or the init itself — neither inside a
+    /// function body. Inside a drain it names the next *body*'s `code_start`,
+    /// which is a jump into a foreign frame's code.
+    ///
+    /// The invariant is a layout one, not a control-flow one: no jump-over in
+    /// either splice is ever executed, because `append_toplevel_init` overwrites
+    /// the head of the region with a `Jump` to the init and control reaches a
+    /// body only by `CallKnown`.
+    region_jump_overs: Option<Vec<i32>>,
     /// Native-backend hook, installed by [`compile_with_native`] and fired by
     /// `elaborate_body` / `materialize_eta_wrappers` once per lowered body —
     /// see [`NativeHook`]. `None` on every other path (plain compile/check,
@@ -833,6 +850,31 @@ fn unclaimed_toplevel_slots(n: usize) -> ! {
 fn function_reserved_during_elaboration() -> ! {
     panic!(
         "internal compiler error: a `Function` was reserved while the elaborator walked. \
+         Report this as a compiler bug."
+    )
+}
+
+/// The deferral drain opened a jump-over collector and it was gone by the end
+/// of the same call, so something re-entered `end_deferred_elaboration`.
+///
+/// A detector, not a preventer, and the difference is worth knowing before
+/// trusting it: a re-entrant drain replaces the outer collector on the way in,
+/// dropping the jump-overs already in it, and its own `take()` leaves `None`
+/// behind — so every wrapper materialized between that point and here takes the
+/// `None` arm, with the mispatch [`Compiler::region_jump_overs`] exists to stop.
+/// By the time this fires the region is already laid down. Aborting is what is
+/// left, and it happens in release too; in debug the `debug_assert` in
+/// `end_deferred_elaboration` fires first.
+///
+/// Nothing nests today: `begin_deferred_elaboration` has three callers
+/// (`analyse_module` and the two bare-expression entries) and none of them runs
+/// from inside a drained body.
+#[allow(clippy::panic)]
+#[cold]
+#[inline(never)]
+fn region_collector_lost() -> ! {
+    panic!(
+        "internal compiler error: the deferral drain's jump-over collector went missing. \
          Report this as a compiler bug."
     )
 }
@@ -1187,6 +1229,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         deferred_bodies: Vec::new(),
         defer_depth: 0,
         deferred_env_pin: None,
+        region_jump_overs: None,
         native_hook: None,
         native_stats: super::native::UnitStats::default(),
         frame_layouts: std::collections::HashMap::new(),
@@ -4492,9 +4535,10 @@ impl Compiler {
     /// its own body, and `base` becomes the body's `Function.code_start`, which
     /// the VM adds to every frame-relative jump operand `emit` produced. So
     /// `base` must name the body's first instruction. Each wrapper is
-    /// self-contained — a `Jump` over its own body, then the body — so the
-    /// surrounding stream falls straight through it. The elaborator itself
-    /// cannot touch `program.code`; the debug assertion below pins that.
+    /// self-contained — a `Jump` over its own body, then the body — so it can be
+    /// spliced into a stream without disturbing it. Where that `Jump` points is
+    /// [`Self::materialize_eta_wrappers`]'s call, not this one's. The elaborator
+    /// itself cannot touch `program.code`; the debug assertion below pins that.
     fn elaborate_then_materialize(
         &mut self,
         _clean: CleanModule,
@@ -4609,6 +4653,13 @@ impl Compiler {
     ///
     /// They go down ahead of the body that named them, each behind a `Jump`
     /// over itself, exactly where the old request-and-synthesise path put them.
+    ///
+    /// Where that `Jump` may point is not a local question. Ahead of a toplevel
+    /// init the wrappers are the last thing emitted, so clearing its own body
+    /// lands it outside every body; emitted inside a deferral drain the code
+    /// after it is the next *body*, so it must clear the whole region and only
+    /// the drain knows where that ends — [`Self::region_jump_overs`] is how it
+    /// says so, and patches them.
     fn materialize_eta_wrappers(
         &mut self,
         pool: &ResolvedPool,
@@ -4641,7 +4692,14 @@ impl Compiler {
             self.program.code.extend(out.code);
             self.emit(Op::Ret);
             let end = self.current_addr();
-            self.program.code[jump_over as usize].operand = end;
+            match self.region_jump_overs.as_mut() {
+                // A drain is running, so `end` is the next body's `code_start`,
+                // not the tail of the splice: patching here would aim this jump
+                // at a foreign frame's first instruction. The drain patches it
+                // past the whole region instead.
+                Some(region) => region.push(jump_over),
+                None => self.program.code[jump_over as usize].operand = end,
+            }
             let f = &mut self.program.functions[base + i];
             f.locals = f.arity.max(out.locals);
             f.code_start = body_start;
@@ -4806,7 +4864,16 @@ impl Compiler {
             return;
         }
         let bodies = std::mem::take(&mut self.deferred_bodies);
-        let jumps: Vec<i32> = bodies.iter().map(|d| d.jump_over).collect();
+        let mut jumps: Vec<i32> = bodies.iter().map(|d| d.jump_over).collect();
+        // Open the collector for the eta-wrapper jump-overs the bodies below
+        // will emit. It is `Some` for exactly this drain, which is what tells
+        // `materialize_eta_wrappers` that what follows a wrapper is another
+        // body rather than the tail of the splice.
+        debug_assert!(
+            self.region_jump_overs.is_none(),
+            "a deferral drain is already collecting jump-overs"
+        );
+        self.region_jump_overs = Some(Vec::new());
         // Bodies parked before `pin_deferred_env` (the declaration walk's)
         // elaborate against the env that walk saw; the rest (lambdas the
         // toplevel `let` walk parked) against the live one. See the pin's docs.
@@ -4837,6 +4904,13 @@ impl Compiler {
         if let Some(live) = live_env {
             self.env = live;
         }
+        // The wrappers written between the bodies clear the region on the same
+        // terms as the bodies' own jump-overs: everything the drain emitted is
+        // behind `end`.
+        let Some(region) = self.region_jump_overs.take() else {
+            region_collector_lost()
+        };
+        jumps.extend(region);
         let end = self.current_addr();
         for j in jumps {
             self.program.code[j as usize].operand = end;
