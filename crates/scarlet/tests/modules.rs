@@ -579,6 +579,44 @@ fn an_alias_does_not_change_a_constructed_value_identity() {
     run_project_outputs(&proj, "run", "main.scrl", "Green(9)\nTrue\nTrue\n");
 }
 
+/// An alias is free to collide with a real variant of the same type, and the
+/// collision is where a wrong name stops being a dead arm. `Green as Red`
+/// made the ladder test for `"Red"`, which `color.Red` carries: the arm was
+/// entered against a nullary variant, and binding its field 0 indexed past
+/// the end of the value stack — an interpreter panic, exit 101, after two
+/// wrong lines of output.
+///
+/// The tests above all alias to a fresh name, where the mismatch only ever
+/// costs a branch. None of them can reach this.
+#[test]
+fn an_alias_colliding_with_a_real_variant_does_not_capture_it() {
+    let proj = Project::new("alias_ctor_collide");
+    proj.write("color.scrl", COLOR_MAKE_SRC);
+    proj.write(
+        "main.scrl",
+        "import ./color\nimport ./color.{Green as Red}\n\nprintln(Red(5))\nmatch color.make(5) {\n\tRed(_s) -> println(1)\n\t_ -> println(0)\n}\nmatch color.Red {\n\tRed(_s) -> println(1)\n\t_ -> println(0)\n}\n",
+    );
+    run_project_outputs(&proj, "run", "main.scrl", "Green(5)\n1\n0\n");
+}
+
+/// A stdlib constructor's `variant_name` is written into the static blob by
+/// `crates/scarlet/build.rs`, not by the resolver, so it is a second copy of
+/// the same decision and nothing else here exercises it: all the alias tests
+/// above use user modules.
+///
+/// `binary.from_int_ascii` dispatches on its `Radix` argument by name inside
+/// the VM, so an alias-named `Hex` was a `Radix` the builtin did not
+/// recognise: `expected Radix, got 'Radix'`, exit 1.
+#[test]
+fn an_aliased_stdlib_constructor_reaches_a_vm_builtin() {
+    let proj = Project::new("alias_ctor_stdlib");
+    proj.write(
+        "main.scrl",
+        "import scarlet/binary\nimport scarlet/binary.{Hex as H}\n\nprintln(binary.from_int_ascii(255, H))\n",
+    );
+    run_project_outputs(&proj, "run", "main.scrl", "<<102, 102>>\n");
+}
+
 /// Labelled arguments and `..` work through a qualifier, as they do bare.
 #[test]
 fn a_qualified_pattern_takes_labels_and_rest() {
