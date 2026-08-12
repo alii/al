@@ -13,7 +13,7 @@ import scarlet/net.{Server}
 import scarlet/net/address.{IpAddress, SocketAddress}
 import scarlet/net/error.{InvalidPort, NetError, TimedOut, UnexpectedEof}
 import scarlet/net/socket.{Closed, Data, Socket}
-import scarlet/scheduler
+import scarlet/process
 import scarlet/string
 import scarlet/time
 
@@ -33,7 +33,7 @@ fn accept_loop(server Server) Nil {
 			// about a microsecond to start, so this is the cheap option, not
 			// the extravagant one. Accepting parks this process until a client
 			// arrives; nothing else in the program stops while it waits.
-			scheduler.spawn(fn() serve_one(sock))
+			_ = process.spawn(fn() serve_one(sock))
 			accept_loop(server)
 		}
 		// Not a failure: this is what net.close delivers to a parked accept.
@@ -215,7 +215,7 @@ match address.parse('127.0.0.1') {
 						assigned = address.port(local) > 0
 						println('bound ${host}, kernel picked a port: ${assigned}')
 
-						scheduler.spawn(fn() accept_loop(server))
+						_ = process.spawn(fn() accept_loop(server))
 
 						println(echo_once(local, 'hello'))
 						println(echo_once(local, 'sockets'))

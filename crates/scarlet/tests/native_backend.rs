@@ -111,10 +111,10 @@ println(outer(6))
 /// must find `x` — bound before the parking call, used after it — intact.
 #[test]
 fn native_caller_parks_and_resumes_through_interpreted_callee() {
-    let src = "import scarlet/scheduler
+    let src = "import scarlet/process
 
 fn pause(n Int) Int {
-\tscheduler.sleep(1)
+\tprocess.sleep(1)
 \tn + 1
 }
 
@@ -142,7 +142,7 @@ println(drive(24, 0))
 /// and the output order inverts.
 #[test]
 fn fairness_native_self_tail_loop_yields_to_sibling() {
-    let src = "import scarlet/scheduler
+    let src = "import scarlet/process
 
 fn spin(n Int, acc Int) Int {
 \tif n == 0 { acc } else { spin(n - 1, acc + 1) }
@@ -152,10 +152,10 @@ fn kick(n Int) Int {
 \tif n == 0 { 0 } else { spin(1, 0) + kick(n - 1) }
 }
 
-scheduler.spawn_local(fn() {
+_ = process.spawn(fn() {
 \tprintln(kick(10) + spin(20000000, 0))
 })
-scheduler.spawn_local(fn() {
+_ = process.spawn(fn() {
 \tprintln('sibling progressed')
 })
 ";

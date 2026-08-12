@@ -834,7 +834,7 @@ impl VM {
                 Op::DnsResolve => park!(self.dns_resolve(&mut reds)),
                 Op::IpParse => self.ip_parse()?,
                 Op::ProcessSpawn => self.process_spawn(&mut reds)?,
-                Op::SpawnLocal => self.process_spawn_local(&mut reds)?,
+                Op::ProcessSelf => self.process_self(),
                 Op::SpawnOnEach => self.process_spawn_on_each(&mut reds)?,
                 Op::Sleep => park!(self.sleep()),
                 Op::SubjectNew => self.subject_new()?,

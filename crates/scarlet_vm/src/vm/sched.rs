@@ -22,7 +22,7 @@ use crate::heap::ProcHeap;
 
 use super::freeze::FrozenValue;
 use super::lock;
-use super::migrate::{DetachedFds, Migrant};
+use super::migrate::Migrant;
 
 /// How many seeds a scheduler takes from the injector per visit. One at a time
 /// maximizes spread: k seeds across k idle schedulers is one each.
@@ -32,15 +32,11 @@ const SEED_BATCH: usize = 1;
 /// distribution. `heap` is owned memory and `root` points only into it or the
 /// frozen area, so handing a seed to another scheduler is a plain move.
 pub(super) struct Seed {
-    /// The child's process id, minted early so the detached connections can be
-    /// stamped with their new controlling process before they travel.
+    /// The child's process id, minted by the spawner so `spawn` can return
+    /// it before the child has been placed anywhere.
     pub pid: u64,
     /// The spawned closure, as a pointer into the child heap.
     pub root: Value,
-    /// Connections the closure captured; the spawner loses them. Listeners do
-    /// not travel — the socket is shared program-wide and the destination
-    /// registers the same fd on first accept.
-    pub connections: DetachedFds,
     /// The child's allocator handle. Zero-sized: allocation goes to mimalloc's
     /// per-thread default heap and `mi_free` works from any thread.
     pub heap: ProcHeap,

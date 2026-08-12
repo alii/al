@@ -30,7 +30,7 @@ import scarlet/net.{Server}
 import scarlet/net/address
 import scarlet/net/error.{NetError, UnexpectedEof}
 import scarlet/net/socket.{Closed, Data, Socket}
-import scarlet/scheduler
+import scarlet/process
 import scarlet/string
 import scarlet/time.{Instant}
 
@@ -272,7 +272,7 @@ fn serve_raw(sock Socket) Nil {
 fn accept_loop(server Server) Nil {
 	match net.accept(server) {
 		Ok(Some(sock)) -> {
-			scheduler.spawn(fn() serve_raw(sock))
+			_ = process.spawn(fn() serve_raw(sock))
 			accept_loop(server)
 		}
 		Ok(None) -> Nil
@@ -291,7 +291,7 @@ fn by_hand() Nil {
 		Ok(server) -> match net.local_addr(server) {
 			Ok(addr) -> {
 				port = address.port(addr)
-				scheduler.spawn(fn() accept_loop(server))
+				_ = process.spawn(fn() accept_loop(server))
 
 				show('POST /pump', request(port, 'POST', '/pump', pump_payload()))
 				show('GET /bare', request(port, 'GET', '/bare', ''))

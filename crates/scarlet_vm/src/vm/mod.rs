@@ -428,14 +428,14 @@ pub struct VM {
 ///
 /// Fails only when scheduler 0's poller cannot be created.
 ///
-/// `process.argv` is empty; use [`new_vm_with_argv`] to pass arguments.
+/// `os.argv` is empty; use [`new_vm_with_argv`] to pass arguments.
 pub fn new_vm(program: Program) -> VmResult<VM> {
     new_vm_with_argv(program, Vec::new())
 }
 
 /// Build the VM that runs `program` as scheduler 0, exposing `argv` (the
 /// entrypoint path followed by the arguments passed after it) to
-/// `process.argv`. The program's `templates`/`abi` tables are the runtime's
+/// `os.argv`. The program's `templates`/`abi` tables are the runtime's
 /// only knowledge of a front end's stdlib; they are validated here, once.
 pub fn new_vm_with_argv(program: Program, argv: Vec<String>) -> VmResult<VM> {
     program
@@ -988,25 +988,34 @@ impl VM {
         Ok(())
     }
 
-    /// `scheduler.spawn(f)`: start a new process running the closure `f`.
+    /// `process.spawn(f)`: start a new process running the closure `f` and
+    /// return its pid.
     ///
-    /// Placement is local-first, the BEAM rule: with nothing else runnable
-    /// here, the child starts on this scheduler, so a request/reply pair
-    /// messages without ever crossing threads. A non-empty local queue means
-    /// real parallel work, so the seed is handed to an idle peer instead —
-    /// the first such submit summons the worker threads — and donation keeps
-    /// levelling from there. Ownership semantics do not depend on placement:
-    /// captured connections travel through the seed either way.
-    fn spawn_process(&mut self, f: Value) -> VmResult<()> {
+    /// Placement is the runtime's decision, never the program's — the BEAM
+    /// rule, which spawns onto the parent's scheduler and lets balancing move
+    /// work afterwards. Two things keep a child here: an empty local queue
+    /// (a request/reply pair then messages without crossing threads) or a
+    /// captured connection, whose fd is registered with this scheduler's
+    /// poller and would otherwise have to be re-homed for the child to use
+    /// it — the accept loop spawns one such child per connection. Otherwise a
+    /// non-empty local queue means real parallel work, so the seed is handed
+    /// to an idle peer (the first such submit summons the worker threads) and
+    /// donation keeps levelling from there.
+    ///
+    /// Placement never changes semantics: a connection stays controlled by
+    /// the process that opened it whichever way the child is placed, and a
+    /// child that later migrates carries the fds it references with it.
+    fn spawn_process(&mut self, f: Value) -> VmResult<u64> {
         self.check_spawnable(&f)?;
-        let seed = self.build_seed(&f);
-        if self.run_queue.is_empty() {
+        if self.run_queue.is_empty() || migrate::captures_connection(&f) {
+            let (heap, root) = ProcHeap::spawn(&f);
             self.runtime.process_started();
-            self.hydrate_seed(seed);
-        } else {
-            self.runtime.submit(seed);
+            return Ok(self.spawn_process_with_heap(heap, root));
         }
-        Ok(())
+        let seed = self.build_seed(&f);
+        let pid = seed.pid;
+        self.runtime.submit(seed);
+        Ok(pid)
     }
 
     /// A spawned closure must be a nullary function. Both are compiler
@@ -1021,26 +1030,12 @@ impl VM {
         Ok(())
     }
 
-    /// Spawn `f` pinned to this scheduler, so any socket it captured stays in
-    /// this scheduler's tables: no fd detach, no cross-core handoff. The
-    /// shared-nothing half of the accept fan-out.
-    fn spawn_local(&mut self, f: Value) -> VmResult<()> {
-        self.check_spawnable(&f)?;
-        // Processes share no heap, so the closure graph is copied, but captured
-        // fds stay in place: parent and child run on the same scheduler and
-        // reference the same socket tables.
-        let (heap, root) = ProcHeap::spawn(&f);
-        self.runtime.process_started();
-        // No ownership change. A handler that should close the socket when it
-        // finishes must do so explicitly.
-        self.spawn_process_with_heap(heap, root);
-        Ok(())
-    }
-
     /// Spawn one copy of `f` pinned to every live scheduler, turning a single
     /// accept loop into one acceptor per core. A listener is one kernel socket,
     /// so all copies drain the same queue; the spread is only a locality
-    /// preference.
+    /// preference. A connection the closure captures stays in this
+    /// scheduler's tables, so only the local copy can use it — `net.serve`,
+    /// the one caller, captures a listener and a handler.
     fn spawn_on_each(&mut self, f: Value) -> VmResult<()> {
         self.check_spawnable(&f)?;
         // Every scheduler slot must be live before a copy is placed on it.
@@ -1134,32 +1129,16 @@ impl VM {
     /// Copy a closure into a seed the child adopts wholesale. No value is
     /// shared with this scheduler afterwards, so handing the seed to another OS
     /// thread is a plain move. `Binary` `Arc` backings are shared zero-copy:
-    /// only the box is copied, never the bytes.
+    /// only the box is copied, never the bytes. Captured listeners need no
+    /// transfer (the socket is program-wide); captured connections never
+    /// reach here from `spawn_process`, which keeps such a child local.
     fn build_seed(&mut self, f: &Value) -> Seed {
-        // The heap copy knows nothing about fd tables, so captured sockets need
-        // their own walk.
-        let mut captured_sockets = Vec::new();
-        migrate::for_each_socket(f, &mut |s| captured_sockets.push(s.id));
-
         // `root` points into `heap`, so the pair is self-contained and `Send`.
         let (heap, root) = ProcHeap::spawn(f);
-
-        // Captured connections move to the child; captured listeners stay put,
-        // since the shared socket needs no transfer. The move IS the ownership
-        // handoff: once the fd leaves this scheduler the child is the only
-        // process that can use it. This is the one place ownership changes
-        // hands, and it follows the fd's forced move, not a capture heuristic.
-        let pid = self.runtime.alloc_pid();
-        let mut connections = self.detach_socket_ids(captured_sockets);
-        for (_, _, owner) in &mut connections {
-            *owner = pid;
-        }
-
         Seed {
-            pid,
+            pid: self.runtime.alloc_pid(),
             heap,
             root,
-            connections,
         }
     }
 
@@ -1168,7 +1147,6 @@ impl VM {
     /// syncs on every arrival path.
     fn hydrate_seed(&mut self, seed: Seed) {
         self.spawn_process_with_heap_as(seed.pid, seed.heap, seed.root);
-        self.adopt_connections(seed.connections);
     }
 }
 

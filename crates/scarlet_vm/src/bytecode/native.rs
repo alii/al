@@ -191,7 +191,7 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::TcpLocalAddr
         | Op::IpParse
         | Op::ProcessSpawn
-        | Op::SpawnLocal
+        | Op::ProcessSelf
         | Op::SpawnOnEach
         | Op::SubjectNew
         | Op::SubjectSend

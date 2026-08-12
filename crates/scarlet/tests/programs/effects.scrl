@@ -11,8 +11,8 @@ import scarlet/array
 import scarlet/io.{IsADirectory, NotFound, UnalignedBinary}
 import scarlet/map
 import scarlet/option
+import scarlet/os
 import scarlet/process
-import scarlet/scheduler
 import scarlet/string
 import scarlet/time
 
@@ -75,15 +75,15 @@ println('monotonic never rewinds: ${time.since_ms(time.monotonic(), start) >= 0}
 // between two of them is ours to print.
 println('deadline in raw ms: ${time.to_deadline_ms(deadline) - time.to_deadline_ms(start)}')
 
-scheduler.sleep(50)
+process.sleep(50)
 println('slept at least 50ms: ${time.since_ms(time.monotonic(), start) >= 50}')
 
 // --- scarlet/process ------------------------------------------------------------
 // argv[0] is the script's path and env values are the machine's, so what gets
 // printed is derived from them, never the values themselves.
 
-println('argv is non-empty: ${array.length(process.argv()) > 0}')
-println('PATH is set: ${option.is_some(process.get_env('PATH'))}')
-println('unset var: ${process.get_env('AL_DEFINITELY_UNSET')}')
-println('env has PATH: ${map.has(process.env(), 'PATH')}')
-println('env inspects as: ${string.inspect(process.env())}')
+println('argv is non-empty: ${array.length(os.argv()) > 0}')
+println('PATH is set: ${option.is_some(os.get_env('PATH'))}')
+println('unset var: ${os.get_env('AL_DEFINITELY_UNSET')}')
+println('env has PATH: ${map.has(os.env(), 'PATH')}')
+println('env inspects as: ${string.inspect(os.env())}')

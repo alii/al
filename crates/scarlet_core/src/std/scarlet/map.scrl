@@ -5,7 +5,7 @@ import scarlet/array
 // `Map` is opaque: it is a host-backed handle whose storage is chosen by the
 // runtime, not a value you can pattern-match. `new` gives an empty in-memory
 // map; updates (`set`/`delete`) return a new map and leave the original intact,
-// sharing structure between versions. `process.env` returns a special
+// sharing structure between versions. `os.env` returns a special
 // `Map(String, String)` that reads through to the process environment without
 // copying it — a lookup touches only the key you ask for.
 pub type Map(k, v)
@@ -63,7 +63,7 @@ pub fn from_list(entries Array((k, v))) Map(k, v) {
 // Reduce over the entries: `f` is called with the accumulator, key, and value
 // of each entry. Iteration order is the backing's own.
 //
-// Folds a single `to_list` snapshot so a live-backed map (e.g. `process.env`)
+// Folds a single `to_list` snapshot so a live-backed map (e.g. `os.env`)
 // cannot skew keys against values between two separate host reads.
 pub fn fold(m Map(k, v), init r, f fn(r, k, v) r) r {
 	array.fold(to_list(m), init, fn(acc, entry) match entry {

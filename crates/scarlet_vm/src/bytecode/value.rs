@@ -89,6 +89,7 @@ const HDR_BOOL: u64 = QNAN | 0x0002_0000_0000_0000;
 const HDR_NIL: u64 = QNAN | 0x0003_0000_0000_0000;
 const HDR_SOCKET: u64 = QNAN | 0x0004_0000_0000_0000;
 const HDR_SUBJECT: u64 = QNAN | 0x0005_0000_0000_0000;
+const HDR_PID: u64 = QNAN | 0x0006_0000_0000_0000;
 /// The sign bit makes `(bits & (SIGN|QNAN)) == (SIGN|QNAN)` the heap test,
 /// disjoint from the sign-clear immediate headers above.
 const HDR_PTR: u64 = SIGN | QNAN;
@@ -1266,6 +1267,9 @@ pub enum ValueView<'a> {
     /// A mailbox handle (`Subject(msg)`): the program-unique mailbox id. The
     /// queue itself lives in the runtime's registry, never in the value.
     Subject(u64),
+    /// A process identity (`Pid`): the program-unique, never-reused process
+    /// id. Names the process for monitoring; carries no right to send to it.
+    Pid(u64),
     Str(&'a str),
     Array(SeqRef<'a>),
     Range(i64, i64),
@@ -1452,6 +1456,10 @@ impl Value {
         (self.0 & HDR_MASK) == HDR_SUBJECT
     }
     #[inline(always)]
+    fn is_pid(&self) -> bool {
+        (self.0 & HDR_MASK) == HDR_PID
+    }
+    #[inline(always)]
     pub fn is_heap(&self) -> bool {
         (self.0 & (SIGN | QNAN)) == (SIGN | QNAN)
     }
@@ -1506,6 +1514,14 @@ impl Value {
     pub(crate) fn subject(id: u64) -> Value {
         debug_assert!(id <= PAYLOAD, "subject id exceeds the 48-bit payload");
         Value(HDR_SUBJECT | (id & PAYLOAD))
+    }
+
+    /// A process identity. Pids come from a monotonic counter that is never
+    /// reused, so 48 bits cannot be exhausted in practice.
+    #[inline]
+    pub(crate) fn pid(id: u64) -> Value {
+        debug_assert!(id <= PAYLOAD, "pid exceeds the 48-bit payload");
+        Value(HDR_PID | (id & PAYLOAD))
     }
 
     // These allocate but never collect, so process-heap callers must have
@@ -2016,6 +2032,8 @@ impl Value {
             ValueView::Socket(decode_socket(self.0))
         } else if self.is_subject() {
             ValueView::Subject(self.0 & PAYLOAD)
+        } else if self.is_pid() {
+            ValueView::Pid(self.0 & PAYLOAD)
         } else if self.is_heap() {
             let obj = self.heap_obj();
             // SAFETY: heap values point at live arena objects; each arm is
@@ -2070,6 +2088,7 @@ impl fmt::Debug for Value {
             ValueView::Nil => f.write_str("Nil"),
             ValueView::Socket(s) => write!(f, "Socket({}, listener={})", s.id, s.is_listener),
             ValueView::Subject(id) => write!(f, "Subject({id})"),
+            ValueView::Pid(id) => write!(f, "Pid({id})"),
             ValueView::Str(s) => write!(f, "Str({s:?})"),
             ValueView::Range(a, b) => write!(f, "Range({a}, {b})"),
             ValueView::Binary(b) => write!(f, "Binary({} bits)", b.bit_len()),
@@ -3102,6 +3121,7 @@ fn pair_equal(a: &Value, b: &Value, pending: &mut EqPending) -> bool {
         // Subject equality is identity: two handles are equal only when they
         // name the same mailbox.
         (ValueView::Subject(a), ValueView::Subject(b)) => a == b,
+        (ValueView::Pid(a), ValueView::Pid(b)) => a == b,
         (ValueView::Map(am), ValueView::Map(bm)) => match (am.backing(), bm.backing()) {
             (MapBacking::Hamt, MapBacking::Hamt) => super::hamt::hamts_equal(am, bm, pending),
             (MapBacking::Env, MapBacking::Env) => true,
@@ -3182,7 +3202,7 @@ pub(crate) fn hash_value(v: &Value) -> u64 {
             h = fnv1a_combine(h, s.id as u64);
             h = fnv1a_combine(h, s.is_listener as u64);
         }
-        ValueView::Subject(id) => {
+        ValueView::Subject(id) | ValueView::Pid(id) => {
             h = fnv1a_combine(h, id);
         }
         ValueView::Nil => {

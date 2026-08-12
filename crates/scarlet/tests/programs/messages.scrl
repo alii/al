@@ -1,10 +1,10 @@
-// Message passing with scarlet/scheduler Subjects. Everything here is pinned
+// Message passing with scarlet/process Subjects. Everything here is pinned
 // as a derived fact: interleavings across senders are not deterministic, so
 // multi-sender traffic is asserted as an aggregate, and every sequenced line
 // rides a request/reply handshake that forces the order it prints in.
 
-import scarlet/scheduler
-import scarlet/scheduler.{Subject}
+import scarlet/process
+import scarlet/process.{Subject}
 
 fn check(name String, expected Bool, actual Bool) Nil {
 	if expected == actual {
@@ -17,54 +17,54 @@ fn check(name String, expected Bool, actual Bool) Nil {
 // --- identity and FIFO on one subject -----------------------------------------
 // A subject equals only itself, and messages from one sender arrive in order.
 
-inbox = scheduler.subject()
-scheduler.send(inbox, 1)
-scheduler.send(inbox, 2)
-scheduler.send(inbox, 3)
+inbox = process.subject()
+process.send(inbox, 1)
+process.send(inbox, 2)
+process.send(inbox, 3)
 check('subject eq self', True, inbox == inbox)
-check('fifo first', True, scheduler.receive(inbox) == 1)
-check('fifo second', True, scheduler.receive(inbox) == 2)
-check('fifo third', True, scheduler.receive(inbox) == 3)
+check('fifo first', True, process.receive(inbox) == 1)
+check('fifo second', True, process.receive(inbox) == 2)
+check('fifo third', True, process.receive(inbox) == 3)
 
 // --- payloads are copied whole ------------------------------------------------
 // A message is deep-copied at send; structure and equality survive the trip.
 
-parcels = scheduler.subject()
-scheduler.send(parcels, (7, 'seven', [1, 2, 3]))
-check('structured payload', True, scheduler.receive(parcels) == (7, 'seven', [1, 2, 3]))
+parcels = process.subject()
+process.send(parcels, (7, 'seven', [1, 2, 3]))
+check('structured payload', True, process.receive(parcels) == (7, 'seven', [1, 2, 3]))
 
-blobs = scheduler.subject()
-scheduler.send(blobs, <<1, 2, 3>>)
-check('binary payload', True, scheduler.receive(blobs) == <<1, 2, 3>>)
+blobs = process.subject()
+process.send(blobs, <<1, 2, 3>>)
+check('binary payload', True, process.receive(blobs) == <<1, 2, 3>>)
 
 // --- a blocking receive parks, a send wakes -----------------------------------
 // The child sleeps first, so main is parked in receive when the send lands.
 
-wake = scheduler.subject()
-scheduler.spawn(fn() {
-	scheduler.sleep(10)
-	scheduler.send(wake, 'from the child')
+wake = process.subject()
+process.spawn(fn() {
+	process.sleep(10)
+	process.send(wake, 'from the child')
 })
-println('cross-process: ${scheduler.receive(wake)}')
+println('cross-process: ${process.receive(wake)}')
 
 // --- receive_within -----------------------------------------------------------
 // A quiet subject times out with Err(Nil); a served one returns Ok before the
 // deadline.
 
 fn wait_quiet(s Subject(Int)) String {
-	match scheduler.receive_within(s, 30) {
+	match process.receive_within(s, 30) {
 		Ok(_) -> 'message'
 		Err(Nil) -> 'timeout'
 	}
 }
-check('receive_within times out', True, wait_quiet(scheduler.subject()) == 'timeout')
+check('receive_within times out', True, wait_quiet(process.subject()) == 'timeout')
 
-slowpoke = scheduler.subject()
-scheduler.spawn(fn() {
-	scheduler.sleep(10)
-	scheduler.send(slowpoke, 7)
+slowpoke = process.subject()
+process.spawn(fn() {
+	process.sleep(10)
+	process.send(slowpoke, 7)
 })
-check('receive_within delivers', True, scheduler.receive_within(slowpoke, 5000) == Ok(7))
+check('receive_within delivers', True, process.receive_within(slowpoke, 5000) == Ok(7))
 
 // --- a server process: sum type in, reply subjects out ------------------------
 // The server owns its inbox, so it creates it itself and hands the handle back
@@ -76,53 +76,53 @@ type Msg {
 }
 
 fn serve(inbox Subject(Msg), total Int) Nil {
-	match scheduler.receive(inbox) {
+	match process.receive(inbox) {
 		Add(n, reply) -> {
-			scheduler.send(reply, total + n)
+			process.send(reply, total + n)
 			serve(inbox, total + n)
 		}
-		Stop(done) -> scheduler.send(done, 'served ${total}')
+		Stop(done) -> process.send(done, 'served ${total}')
 	}
 }
 
-boot = scheduler.subject()
-scheduler.spawn(fn() {
-	server_inbox = scheduler.subject()
-	scheduler.send(boot, server_inbox)
+boot = process.subject()
+process.spawn(fn() {
+	server_inbox = process.subject()
+	process.send(boot, server_inbox)
 	serve(server_inbox, 0)
 })
-server = scheduler.receive(boot)
+server = process.receive(boot)
 
-reply = scheduler.subject()
-scheduler.send(server, Add(5, reply))
-println('add 5 -> ${scheduler.receive(reply)}')
-scheduler.send(server, Add(37, reply))
-println('add 37 -> ${scheduler.receive(reply)}')
+reply = process.subject()
+process.send(server, Add(5, reply))
+println('add 5 -> ${process.receive(reply)}')
+process.send(server, Add(37, reply))
+println('add 37 -> ${process.receive(reply)}')
 
-done = scheduler.subject()
-scheduler.send(server, Stop(done))
-println('stop -> ${scheduler.receive(done)}')
+done = process.subject()
+process.send(server, Stop(done))
+println('stop -> ${process.receive(done)}')
 
 // --- many senders, one aggregate ----------------------------------------------
 // Arrival order across processes is unspecified; the sum is not.
 
 fn shout(out Subject(Int), base Int) Nil {
-	scheduler.send(out, base)
-	scheduler.send(out, base * 2)
+	process.send(out, base)
+	process.send(out, base * 2)
 }
 
 fn drain(s Subject(Int), left Int, acc Int) Int {
 	if left == 0 {
 		acc
 	} else {
-		drain(s, left - 1, acc + scheduler.receive(s))
+		drain(s, left - 1, acc + process.receive(s))
 	}
 }
 
-tally = scheduler.subject()
-scheduler.spawn(fn() shout(tally, 10))
-scheduler.spawn(fn() shout(tally, 100))
-scheduler.spawn(fn() shout(tally, 1000))
+tally = process.subject()
+process.spawn(fn() shout(tally, 10))
+process.spawn(fn() shout(tally, 100))
+process.spawn(fn() shout(tally, 1000))
 check('every send arrives', True, drain(tally, 6, 0) == 3330)
 
 // --- a subject-returning function stays generic ---------------------------------
@@ -131,22 +131,22 @@ check('every send arrives', True, drain(tally, 6, 0) == 3330)
 // polymorphic.
 
 fn fresh() Subject(msg) {
-	scheduler.subject()
+	process.subject()
 }
 
 ints = fresh()
 texts = fresh()
-scheduler.send(ints, 1)
-scheduler.send(texts, 'text')
-println('fresh subjects: ${scheduler.receive(ints)} ${scheduler.receive(texts)}')
+process.send(ints, 1)
+process.send(texts, 'text')
+println('fresh subjects: ${process.receive(ints)} ${process.receive(texts)}')
 
 // --- a subject dies with its owner --------------------------------------------
 // The child hands its own subject out and finishes; a later send to it is
 // dropped, not an error.
 
-graveyard = scheduler.subject()
-scheduler.spawn(fn() scheduler.send(graveyard, scheduler.subject()))
-orphan = scheduler.receive(graveyard)
-scheduler.sleep(30)
-scheduler.send(orphan, 99)
+graveyard = process.subject()
+process.spawn(fn() process.send(graveyard, process.subject()))
+orphan = process.receive(graveyard)
+process.sleep(30)
+process.send(orphan, 99)
 println('send to a dead subject: ok')

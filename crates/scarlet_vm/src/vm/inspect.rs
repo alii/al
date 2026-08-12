@@ -29,6 +29,7 @@ pub(super) fn value_type_name(v: &Value) -> String {
         ValueView::Enum(e) => e.enum_name().to_string(),
         ValueView::Socket(_) => "Socket".to_string(),
         ValueView::Subject(_) => "Subject".to_string(),
+        ValueView::Pid(_) => "Pid".to_string(),
         ValueView::Nil => "Nil".to_string(),
         ValueView::Map(_) => "Map".to_string(),
     }
@@ -189,6 +190,9 @@ fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut S
         }
         ValueView::Subject(id) => {
             let _ = write!(out, "<subject#{id}>");
+        }
+        ValueView::Pid(id) => {
+            let _ = write!(out, "<pid#{id}>");
         }
         ValueView::Range(a, z) => {
             // Render like the materialized array without building one:

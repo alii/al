@@ -109,11 +109,11 @@ impl Compiler {
         if let Some(memo) = &self.restricted_gen_cons {
             return memo.clone();
         }
-        let scheduler: Vec<String> = ["scarlet", "scheduler"]
+        let process: Vec<String> = ["scarlet", "process"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let key = ModuleKey::of(&scheduler);
+        let key = ModuleKey::of(&process);
         let found = self
             .module_table
             .get_or_hydrate(&key)
@@ -122,7 +122,7 @@ impl Compiler {
             Some(id) => {
                 let set = std::collections::HashSet::from([id]);
                 // Memoize only a hit: a module unresolvable now (a
-                // from-source compile that has not loaded scheduler yet) may
+                // from-source compile that has not loaded process yet) may
                 // load later in this session.
                 self.restricted_gen_cons = Some(set.clone());
                 set

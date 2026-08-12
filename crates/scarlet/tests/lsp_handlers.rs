@@ -1067,11 +1067,11 @@ fn find_refs_on_module_alias_lists_the_qualifier() {
     assert_eq!(with_decl.as_array().map(Vec::len), Some(2));
 }
 
-/// `scarlet/scheduler` is seeded from the static blob and never re-compiled, so its
+/// `scarlet/process` is seeded from the static blob and never re-compiled, so its
 /// module doc reaches hover only through `synth_refs_from_interface`.
 #[test]
 fn hover_on_a_stdlib_module_alias_shows_its_module_doc() {
-    let src = "import scarlet/scheduler as s\n\ns.spawn(fn() { Nil })\n";
+    let src = "import scarlet/process as s\n\ns.spawn(fn() { Nil })\n";
     let (_p, mut w, uri) = open_single("stdlib_moddoc", src);
 
     let (l, c) = cursor(src, "s.spawn", 1, 0);
@@ -1082,7 +1082,7 @@ fn hover_on_a_stdlib_module_alias_shows_its_module_doc() {
     );
     assert!(
         md.contains("Lightweight processes and message passing."),
-        "hover must render scarlet/scheduler's module doc: {md:?}"
+        "hover must render scarlet/process's module doc: {md:?}"
     );
 }
 

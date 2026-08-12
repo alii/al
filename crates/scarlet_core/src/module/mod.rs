@@ -137,7 +137,7 @@ pub struct ModuleInterface {
     pub(crate) private_names: BTreeSet<String>,
     /// The module's own doc comment: the `/** */` block at line 0 of its
     /// source. Unlike every other doc, this one is carried through the
-    /// precompiled stdlib blob so hovering `scarlet/scheduler` shows its prose.
+    /// precompiled stdlib blob so hovering `scarlet/process` shows its prose.
     pub(crate) doc: Option<String>,
 }
 

@@ -81,7 +81,7 @@ struct RunArgs {
     /// Print the parsed program before execution starts
     #[arg(long = "debug-printer")]
     debug_printer: bool,
-    /// Arguments passed through to the program, readable via `process.argv`.
+    /// Arguments passed through to the program, readable via `os.argv`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }

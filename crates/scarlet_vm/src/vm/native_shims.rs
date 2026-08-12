@@ -561,6 +561,7 @@ mod opc {
     pub const NEQ: u8 = Op::Neq as u8;
     pub const PREPEND: u8 = Op::Prepend as u8;
     pub const PRINT: u8 = Op::Print as u8;
+    pub const PROCESS_SELF: u8 = Op::ProcessSelf as u8;
     pub const PROCESS_SPAWN: u8 = Op::ProcessSpawn as u8;
     pub const SEQ_DROP: u8 = Op::SeqDrop as u8;
     pub const SLEEP: u8 = Op::Sleep as u8;
@@ -568,7 +569,6 @@ mod opc {
     pub const SUBJECT_RECEIVE: u8 = Op::SubjectReceive as u8;
     pub const SUBJECT_RECEIVE_UNTIL: u8 = Op::SubjectReceiveUntil as u8;
     pub const SUBJECT_SEND: u8 = Op::SubjectSend as u8;
-    pub const SPAWN_LOCAL: u8 = Op::SpawnLocal as u8;
     pub const SPAWN_ON_EACH: u8 = Op::SpawnOnEach as u8;
     pub const STACK_DEPTH: u8 = Op::StackDepth as u8;
     pub const STR_CONCAT_N: u8 = Op::StrConcatN as u8;
@@ -815,11 +815,14 @@ impl VM {
             opc::STACK_DEPTH => self.stack_depth(),
             opc::TCP_LOCAL_ADDR => self.tcp_local_addr(),
             opc::PROCESS_SPAWN => self.process_spawn(reds),
+            opc::PROCESS_SELF => {
+                self.process_self();
+                Ok(())
+            }
             opc::ARGV => self.argv(),
             opc::TCP_LISTEN => self.tcp_listen(),
             opc::TCP_CLOSE => self.tcp_close(reds),
             opc::TCP_CLOSE_SERVER => self.tcp_close_server(),
-            opc::SPAWN_LOCAL => self.process_spawn_local(reds),
             opc::SPAWN_ON_EACH => self.process_spawn_on_each(reds),
             opc::SUBJECT_NEW => self.subject_new(),
             opc::SUBJECT_SEND => self.subject_send(reds),

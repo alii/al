@@ -309,13 +309,15 @@ pub enum Op {
     IpParse,
 
     // Concurrency (scarlet/scheduler)
-    /// Spawn a lightweight process running the popped closure.
+    /// `[closure] -> Pid` — spawn a lightweight process running the closure
+    /// and push the child's pid. (scarlet/process.spawn)
     ProcessSpawn,
-    /// Spawn the popped closure pinned to the current scheduler, so captured
-    /// sockets stay put (no fd move, no cross-core handoff).
-    SpawnLocal,
-    /// Spawn one copy of the popped closure pinned to every live scheduler.
-    /// Drives the accept fan-out: one acceptor per `SO_REUSEPORT` socket.
+    /// Push the running process's own `Pid`. (scarlet/process.self)
+    ProcessSelf,
+    /// `[closure] -> Nil` — spawn one copy of the closure pinned to every
+    /// live scheduler. `net.serve`'s accept fan-out: with per-scheduler fd
+    /// tables, one acceptor per scheduler keeps every accepted connection on
+    /// the scheduler that will serve it. Not part of the process API.
     SpawnOnEach,
     /// Park the current process for `ms` milliseconds.
     Sleep,
@@ -338,13 +340,13 @@ pub enum Op {
     Monotonic,
 
     /// Push an `Array(String)` of the entrypoint path followed by every
-    /// argument after it on the command line. (scarlet/process.argv)
+    /// argument after it on the command line. (scarlet/os.argv)
     Argv,
 
     // Maps (scarlet/map). A `Map(k, v)` is an opaque heap value with a pluggable
     // backing; read ops dispatch on the backing.
     /// Push a `Map(String, String)` reading through to the process
-    /// environment, copying nothing. (scarlet/process.env)
+    /// environment, copying nothing. (scarlet/os.env)
     EnvMap,
     /// `[map, key] -> Option(v)` — look up a key. (scarlet/map.get)
     MapGet,
@@ -539,7 +541,7 @@ impl Op {
             | Op::DnsResolve
             | Op::IpParse
             | Op::ProcessSpawn
-            | Op::SpawnLocal
+            | Op::ProcessSelf
             | Op::SpawnOnEach
             | Op::Sleep
             | Op::SubjectNew
@@ -710,7 +712,7 @@ impl Op {
             | Op::DnsResolve
             | Op::IpParse
             | Op::ProcessSpawn
-            | Op::SpawnLocal
+            | Op::ProcessSelf
             | Op::SpawnOnEach
             | Op::Sleep
             | Op::SubjectNew

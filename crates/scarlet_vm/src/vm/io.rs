@@ -461,35 +461,33 @@ impl VM {
         )))))
     }
 
+    /// `Op::ProcessSpawn`: pop the closure, spawn it, push the child's pid.
+    /// Spawning deep-copies the closure graph, so it is charged like I/O to
+    /// stop a spawn loop monopolizing the scheduler.
     #[inline(never)]
     pub(super) fn process_spawn(&mut self, reds: &mut i32) -> VmResult<()> {
-        self.spawn_op(reds, Self::spawn_process)
+        *reds -= IO_REDUCTION_COST;
+        let f = self.pop()?;
+        let pid = self.spawn_process(f)?;
+        self.stack.push(Value::pid(pid));
+        Ok(())
     }
 
-    #[inline(never)]
-    pub(super) fn process_spawn_local(&mut self, reds: &mut i32) -> VmResult<()> {
-        self.spawn_op(reds, Self::spawn_local)
+    /// `Op::ProcessSelf`: push the running process's pid.
+    #[inline]
+    pub(super) fn process_self(&mut self) {
+        self.stack.push(Value::pid(self.current_pid));
     }
 
+    /// `Op::SpawnOnEach`: pop the closure, start one copy per scheduler, push
+    /// Nil. Charged as `process_spawn` is, once for the whole fan-out.
     #[inline(never)]
     pub(super) fn process_spawn_on_each(&mut self, reds: &mut i32) -> VmResult<()> {
-        self.spawn_op(reds, Self::spawn_on_each)
-    }
-
-    /// Pop the closure, spawn it, push Nil. Spawning deep-copies the closure
-    /// and dups captured fds, so it is charged like I/O to stop a spawn loop
-    /// monopolizing the scheduler.
-    #[inline]
-    fn spawn_op(
-        &mut self,
-        reds: &mut i32,
-        spawn: fn(&mut Self, Value) -> VmResult<()>,
-    ) -> VmResult<()> {
+        *reds -= IO_REDUCTION_COST;
         let f = self.pop()?;
-        spawn(self, f)?;
+        self.spawn_on_each(f)?;
         let nil = self.make_nil()?;
         self.stack.push(nil);
-        *reds -= IO_REDUCTION_COST;
         Ok(())
     }
 

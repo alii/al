@@ -52,6 +52,23 @@ pub(super) fn for_each_socket(v: &Value, visit: &mut impl FnMut(SocketValue)) {
     v.for_each_child_ref(|c| for_each_socket(c, visit));
 }
 
+/// Whether a connection (not a listener) is reachable from `v`. Decides
+/// spawn placement, so it runs per spawn and stops descending at the first
+/// hit; the accept loop's handler closure captures its connection directly.
+/// Descends into frozen subgraphs for the same reason `for_each_socket` does.
+pub(super) fn captures_connection(v: &Value) -> bool {
+    if let Some(s) = v.as_socket() {
+        return !s.is_listener;
+    }
+    let mut found = false;
+    v.for_each_child_ref(|c| {
+        if !found {
+            found = captures_connection(c);
+        }
+    });
+    found
+}
+
 /// Visit every socket reachable from the process's stack or any frame's
 /// closure. Frames of a recursive function share one closure object, so
 /// closures are walked once each by address. A socket reachable from several

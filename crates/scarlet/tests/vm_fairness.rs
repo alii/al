@@ -76,10 +76,10 @@ fn assert_self_tail(src: &str, name: &str) {
 }
 
 /// A million self-tail iterations, ~250 preemptions. A light sibling spawned
-/// after it must still finish first under one scheduler.
+/// after it must still finish first under one process.
 #[test]
 fn self_tail_spinner_yields_to_lightweight_sibling() {
-    let src = r#"import scarlet/scheduler
+    let src = r#"import scarlet/process
 
 fn count(n) {
 	if n == 0 {
@@ -89,11 +89,11 @@ fn count(n) {
 	}
 }
 
-scheduler.spawn(fn() {
+process.spawn(fn() {
 	_ = count(1000000)
 	println('heavy done')
 })
-scheduler.spawn(fn() {
+process.spawn(fn() {
 	println('light done')
 })
 println('main done')
@@ -125,7 +125,7 @@ fn self_tail_accumulator_survives_preemption() {
     let gauss = |n: u64| n * (n + 1) / 2;
 
     let src = format!(
-        r#"import scarlet/scheduler
+        r#"import scarlet/process
 
 fn sum(n, acc) {{
 	if n == 0 {{
@@ -135,10 +135,10 @@ fn sum(n, acc) {{
 	}}
 }}
 
-scheduler.spawn(fn() {{
+process.spawn(fn() {{
 	println('heavy ${{sum({heavy_n}, 0)}}')
 }})
-scheduler.spawn(fn() {{
+_ = process.spawn(fn() {{
 	println('light ${{sum({light_n}, 0)}}')
 }})
 "#

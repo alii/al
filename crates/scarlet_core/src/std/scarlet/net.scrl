@@ -11,7 +11,7 @@ import scarlet/net/error.{
 	NetworkUnreachable,
 }
 import scarlet/result
-import scarlet/scheduler
+import scarlet/process
 import scarlet/string
 
 // A TCP server. The value is only ever constructed by the VM, and has no values.
@@ -69,13 +69,23 @@ pub fn serve(host String, port Int, handler fn(Socket) Nil) Result(Server, NetEr
 // Returns `Nil`: once the listener is bound the acceptors cannot fail here —
 // the only fallible step is the bind, which the caller has already done.
 pub fn serve_on(server Server, handler fn(Socket) Nil) Nil {
-	scheduler.spawn_per_core(fn() accept_loop(server, handler))
+	spawn_per_core(fn() accept_loop(server, handler))
 }
 
-// The per-core accept loop: accept a connection, hand it to its own process on
-// this same core (so the connection's socket stays local), then loop. One copy
-// runs on every core, all draining the listener's single shared accept queue —
-// spreading the accepts is a locality preference, not a correctness need.
+// Start one copy of `f` pinned to every core. Not a process-level primitive —
+// where a process runs is normally the runtime's decision alone — but the
+// accept fan-out is the one place the program knows better: a connection's
+// socket is registered with the core that accepted it, so an acceptor per
+// core is what keeps every connection on the core that serves it.
+@vm(net__spawn_per_core)
+fn spawn_per_core(f fn() Nil) Nil
+
+// The per-core accept loop: accept a connection, hand it to its own process,
+// then loop. The handler captures the connection, which the runtime takes as
+// its cue to start the handler on this same core, so the socket stays local.
+// One copy runs on every core, all draining the listener's single shared
+// accept queue — spreading the accepts is a locality preference, not a
+// correctness need.
 //
 // A per-connection accept failure (ECONNABORTED, ECONNRESET, an unmapped errno
 // such as EMFILE/EPROTO) means one incoming connection was lost, not that the
@@ -97,7 +107,7 @@ fn accept_loop(server Server, handler fn(Socket) Nil) Nil {
 			// forever — a handler that forgot to close would otherwise leak
 			// the socket for the server's whole life. Double-closing a
 			// handler that did close is a harmless Err, swallowed here.
-			scheduler.spawn_local(fn() {
+			_ = process.spawn(fn() {
 				handler(sock)
 				socket.close(sock) or Nil
 			})
@@ -110,7 +120,7 @@ fn accept_loop(server Server, handler fn(Socket) Nil) Nil {
 		| Err(NetworkUnreachable)
 		| Err(HostUnreachable) -> accept_loop(server, handler)
 		Err(Errno(_)) -> {
-			scheduler.sleep(100)
+			process.sleep(100)
 			accept_loop(server, handler)
 		}
 		Err(e) -> println('accept failed: ${string.inspect(e)}')

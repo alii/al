@@ -128,7 +128,7 @@ fn tcp_echo_server_roundtrip() {
 #[test]
 fn tcp_connect_and_vectored_echo() {
     let proj = Project::new("io_connect");
-    let src = r#"import scarlet/scheduler
+    let src = r#"import scarlet/process
 import scarlet/net
 import scarlet/net/socket
 import scarlet/binary
@@ -136,7 +136,7 @@ import scarlet/binary
 match net.listen('127.0.0.1', 0) {
 	Ok(server) -> match net.local_addr(server) {
 		Ok(addr) -> {
-			scheduler.spawn(fn() {
+			_ = process.spawn(fn() {
 				match net.accept(server) {
 					Ok(Some(sock)) -> match socket.read_exact(sock, 5) {
 						Ok(first) -> match socket.read_exact(sock, 6) {
@@ -350,7 +350,7 @@ fn file_read_offloads_to_blocking_pool() {
     let data = proj.dir.join("data.txt");
     std::fs::write(&data, "payload").unwrap();
     let src = r#"import scarlet/io
-import scarlet/scheduler
+import scarlet/process
 
 fn reader() fn() Nil {
 	fn() match io.read_text('__PATH__') {
@@ -359,9 +359,9 @@ fn reader() fn() Nil {
 	}
 }
 
-scheduler.spawn(reader())
-scheduler.spawn(reader())
-scheduler.spawn(reader())
+process.spawn(reader())
+process.spawn(reader())
+process.spawn(reader())
 match io.read_text('__PATH__') {
 	Ok(_) -> println('ok')
 	Err(_) -> println('err')
@@ -386,9 +386,9 @@ match io.read_text('__PATH__') {
 fn dns_resolve_runs_on_pool() {
     let proj = Project::new("dns_resolve");
     let src = r#"import scarlet/net
-import scarlet/scheduler
+import scarlet/process
 
-scheduler.spawn(fn() Nil)
+process.spawn(fn() Nil)
 match net.resolve('localhost') {
 	Ok(_) -> println('resolved')
 	Err(_) -> println('err')
@@ -809,7 +809,7 @@ fn run_with_schedulers(tag: &str, src: &str, schedulers: u32, secs: u64) -> (Opt
 /// `vm::io::tests::a_foreign_scheduler_registers_the_same_kernel_socket`.
 #[test]
 fn accept_on_a_scheduler_that_did_not_listen() {
-    let src = r#"import scarlet/scheduler
+    let src = r#"import scarlet/process
 import scarlet/net
 import scarlet/net/socket
 import scarlet/binary
@@ -825,7 +825,7 @@ fn burn(n Int) Int {
 match net.listen('127.0.0.1', 0) {
 	Ok(server) -> match net.local_addr(server) {
 		Ok(addr) -> {
-			scheduler.spawn(fn() {
+			_ = process.spawn(fn() {
 				match net.accept(server) {
 					Ok(Some(c)) -> {
 						socket.write(c, binary.from_string('pong')) or Nil
@@ -866,7 +866,7 @@ match net.listen('127.0.0.1', 0) {
 /// with `Ok(None)`, not leave them parked forever.
 #[test]
 fn closing_a_listener_wakes_a_foreign_parked_acceptor() {
-    let src = r#"import scarlet/scheduler
+    let src = r#"import scarlet/process
 import scarlet/net
 import scarlet/net/socket
 
@@ -880,7 +880,7 @@ fn burn(n Int) Int {
 
 match net.listen('127.0.0.1', 0) {
 	Ok(server) -> {
-		scheduler.spawn(fn() {
+		_ = process.spawn(fn() {
 			match net.accept(server) {
 				Ok(Some(_)) -> println('unexpected accept')
 				Ok(None) -> println('accept ended')
@@ -911,14 +911,14 @@ match net.listen('127.0.0.1', 0) {
 /// the peer side must see EOF rather than park on a leaked fd.
 #[test]
 fn a_connection_closes_when_its_owner_ends() {
-    let src = r#"import scarlet/scheduler
+    let src = r#"import scarlet/process
 import scarlet/net
 import scarlet/net/socket
 
 match net.listen('127.0.0.1', 0) {
 	Ok(server) -> match net.local_addr(server) {
 		Ok(addr) -> {
-			scheduler.spawn_local(fn() {
+			_ = process.spawn(fn() {
 				match net.connect('127.0.0.1', addr.port) {
 					Ok(_) -> println('child connected')
 					Err(e) -> println('connect failed: ${e}')
@@ -951,14 +951,14 @@ match net.listen('127.0.0.1', 0) {
 /// `NetError`.
 #[test]
 fn closing_a_connection_wakes_a_parked_reader() {
-    let src = r#"import scarlet/scheduler
+    let src = r#"import scarlet/process
 import scarlet/net
 import scarlet/net/socket
 
 match net.listen('127.0.0.1', 0) {
 	Ok(server) -> match net.local_addr(server) {
 		Ok(addr) -> {
-			scheduler.spawn_local(fn() {
+			_ = process.spawn(fn() {
 				match net.accept(server) {
 					Ok(_) -> Nil
 					Err(_) -> Nil
@@ -966,13 +966,13 @@ match net.listen('127.0.0.1', 0) {
 			})
 			match net.connect('127.0.0.1', addr.port) {
 				Ok(conn) -> {
-					scheduler.spawn_local(fn() {
+					_ = process.spawn(fn() {
 						match socket.read_exact(conn, 1) {
 							Ok(_) -> println('unexpected data')
 							Err(_) -> println('reader failed')
 						}
 					})
-					scheduler.sleep(50)
+					process.sleep(50)
 					socket.close(conn) or Nil
 					println('closed')
 				}
@@ -1001,7 +1001,7 @@ match net.listen('127.0.0.1', 0) {
 /// program's fate depend on spawn order.
 #[test]
 fn a_siblings_exit_does_not_close_a_foreign_socket() {
-    let src = r#"import scarlet/scheduler
+    let src = r#"import scarlet/process
 import scarlet/net
 import scarlet/net/socket
 import scarlet/binary
@@ -1009,10 +1009,10 @@ import scarlet/binary
 match net.listen('127.0.0.1', 0) {
 	Ok(server) -> match net.local_addr(server) {
 		Ok(addr) -> {
-			scheduler.spawn_local(fn() {
+			_ = process.spawn(fn() {
 				match net.accept(server) {
 					Ok(Some(peer)) -> {
-						scheduler.sleep(150)
+						process.sleep(150)
 						socket.write(peer, binary.from_string('x')) or Nil
 					}
 					Ok(None) -> Nil
@@ -1021,7 +1021,7 @@ match net.listen('127.0.0.1', 0) {
 			})
 			match net.connect('127.0.0.1', addr.port) {
 				Ok(conn) -> {
-					scheduler.spawn_local(fn() {
+					_ = process.spawn(fn() {
 						socket.write(conn, binary.from_string('w')) or Nil
 						println('writer done')
 					})

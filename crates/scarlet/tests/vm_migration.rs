@@ -59,7 +59,7 @@ fn fib(n: u64) -> u64 {
 }
 
 /// Shared imports + `fib` source every migration program starts with.
-const FIB_PREAMBLE: &str = r#"import scarlet/scheduler
+const FIB_PREAMBLE: &str = r#"import scarlet/process
 import scarlet/array
 
 fn fib(n) {
@@ -88,7 +88,7 @@ fn cpu_bound_smoke(tag: &str, schedulers: u32, spawns: u64, base: u64, modulo: u
 	println('${{i}} done ${{fib({base} + i % {modulo})}}')
 }}
 
-array.each(1..{end}, fn(i) scheduler.spawn(fn() work(i)))
+array.each(1..{end}, fn(i) {{ _ = process.spawn(fn() work(i)) }})
 println('main done')
 "#,
         end = spawns + 1
@@ -129,8 +129,8 @@ fn deep_recursive_worker_survives_two_schedulers() {
     let stdout = run_fib_program(
         "sched2_deep",
         2,
-        r#"scheduler.spawn(fn() println('deep ${fib(26)}'))
-array.each(1..6, fn(i) scheduler.spawn(fn() println('light ${i} ${fib(18)}')))
+        r#"process.spawn(fn() println('deep ${fib(26)}'))
+array.each(1..6, fn(i) { _ = process.spawn(fn() println('light ${i} ${fib(18)}')) })
 "#,
     );
 
@@ -158,7 +158,7 @@ fn migrated_process_keeps_loaded_globals_valid() {
 labels = ['alpha', 'beta', 'gamma', 'delta']
 banner = 'frozen-global'
 
-array.each(1..9, fn(i) scheduler.spawn(fn() work(labels[i % 4] or '?', banner, i)))
+array.each(1..9, fn(i) { _ = process.spawn(fn() work(labels[i % 4] or '?', banner, i)) })
 println('main done')
 "#,
     );

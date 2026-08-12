@@ -382,21 +382,21 @@ reject_case! {
     /// ordinary mismatch. (An empty `Map` stays polymorphic: it is
     /// immutable, so reuse at two types is sound.)
     u24_toplevel_subject_binding_does_not_generalize: (
-        "import scarlet/scheduler\n\
-         s = scheduler.subject()\n\
-         scheduler.send(s, 1)\n\
-         scheduler.send(s, 'text')\n",
+        "import scarlet/process\n\
+         s = process.subject()\n\
+         process.send(s, 1)\n\
+         process.send(s, 'text')\n",
         "Type mismatch: expected 'Int', got 'String'",
     ),
 
     /// U24, the local-let form: block bindings generalize through the same
     /// path and must be guarded the same way.
     u24_local_subject_binding_does_not_generalize: (
-        "import scarlet/scheduler\n\
+        "import scarlet/process\n\
          fn f() Nil {\n\
-         \ts = scheduler.subject()\n\
-         \tscheduler.send(s, 1)\n\
-         \tscheduler.send(s, 'text')\n\
+         \ts = process.subject()\n\
+         \tprocess.send(s, 1)\n\
+         \tprocess.send(s, 'text')\n\
          }\n\
          f()\n",
         "Type mismatch: expected 'Int', got 'String'",
@@ -408,13 +408,13 @@ reject_case! {
 #[test]
 fn u25_foreign_receive_is_a_clean_error() {
     run_rejects(
-        "import scarlet/scheduler\n\
-         mine = scheduler.subject()\n\
-         scheduler.spawn(fn() {\n\
-         \tprintln(scheduler.receive(mine))\n\
+        "import scarlet/process\n\
+         mine = process.subject()\n\
+         process.spawn(fn() {\n\
+         \tprintln(process.receive(mine))\n\
          })\n\
-         scheduler.sleep(50)\n\
-         scheduler.send(mine, 1)\n",
+         process.sleep(50)\n\
+         process.send(mine, 1)\n",
         "only the process that created a subject may receive on it",
     );
 }

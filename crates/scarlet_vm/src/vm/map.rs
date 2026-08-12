@@ -24,7 +24,7 @@ impl VM {
         Ok(())
     }
 
-    /// `process.env` — push the environment-backed map. Allocates only the
+    /// `os.env` — push the environment-backed map. Allocates only the
     /// two-word handle; no environment data is copied.
     #[inline(never)]
     pub(super) fn env_map(&mut self) -> VmResult<()> {

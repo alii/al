@@ -338,20 +338,20 @@ mod tests {
             );
         }
 
-        // The module doc is what hover shows for `scarlet/scheduler`, which is
+        // The module doc is what hover shows for `scarlet/process`, which is
         // never recompiled.
         for (k, iface) in &out.blob.interfaces {
             let (_, m) = p.modules.iter().find(|(mk, _)| mk == k).unwrap();
             let flat = m.doc.map(|i| p.str_pool[i.0 as usize].as_str());
             assert_eq!(flat, iface.doc.as_deref(), "module doc lost for '{k}'");
         }
-        let (_, sched) = p
+        let (_, process) = p
             .modules
             .iter()
-            .find(|(k, _)| k == "scarlet/scheduler")
-            .expect("scarlet/scheduler is precompiled");
+            .find(|(k, _)| k == "scarlet/process")
+            .expect("scarlet/process is precompiled");
         let doc =
-            p.str_pool[sched.doc.expect("scarlet/scheduler has a module doc").0 as usize].as_str();
+            p.str_pool[process.doc.expect("scarlet/process has a module doc").0 as usize].as_str();
         assert!(doc.contains("Lightweight processes and message passing."));
 
         assert_eq!(p.typeinfo_by_name.len(), out.blob.type_info.len());
