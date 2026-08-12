@@ -48,10 +48,6 @@
         "extensions": [
           ".scrl"
         ],
-        "icon": {
-          "light": "./images/file-icon-light.svg",
-          "dark": "./images/file-icon-dark.svg"
-        },
         "configuration": "./language-configuration.json"
       }
     ],
