@@ -431,12 +431,9 @@ impl VM {
                 "tls.handshake applied to a port, not a TCP connection",
             )));
         };
-        for fd in [{
-            use std::os::fd::AsRawFd;
-            tcp.as_raw_fd()
-        }] {
-            self.poller_deregister(fd);
-        }
+        // The fd survives into the TLS entry, so its registration is rebuilt
+        // under the new id by `track_connection` below rather than torn down.
+        self.poller_deregister(std::os::fd::AsRawFd::as_raw_fd(&tcp));
 
         let tls = TlsIo {
             tcp,

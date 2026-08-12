@@ -84,13 +84,13 @@ pub type TlsError {
 // is never written to disk: a session ticket is key material, and persisting it
 // is not a decision a runtime should take on a program's behalf. Nothing is
 // therefore resumed across separate runs of a program.
-// Written as an explicit match rather than the backpassing this module would
-// otherwise use. The backpassing form —
-// `sock <- result.then(result.map_err(net.connect(host, port), Transport))` —
-// makes `check_parity`'s jump-over assertion fail: a jump-over is patched to
-// land on the first instruction of this function's body instead of past it.
-// See T-129. Restore the backpassing only once that is fixed.
 pub fn connect(host String, port Int) Result(TlsSocket, TlsError) {
+	// An explicit match, where this module would otherwise backpass. The
+	// backpassing form —
+	// `sock <- result.then(result.map_err(net.connect(host, port), Transport))`
+	// — miscompiles: a jump-over is patched to land on the first instruction of
+	// this body instead of past it, which check_parity catches. T-129. Restore
+	// the backpassing once that is fixed.
 	match net.connect(host, port) {
 		Ok(sock) -> handshake(sock, host)
 		Err(e) -> Err(Transport(e))
