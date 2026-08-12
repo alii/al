@@ -1,0 +1,38 @@
+-- a forty-member record, one line per member --
+40 members    10 hi mentions=2 guild=present(13) nick=null ref=absent
+40, two wrong 2: .id: expected a quoted integer, found an integer
+.tts: expected a boolean, found a string
+
+-- independent members accumulate, past the old five-member ceiling --
+8 members ok  Row{ a: 1, b: x, c: True, d: 2, e: y, f: False, g: 3, h: z }
+3 of 8 wrong  3: .a: expected an integer, found a string
+.e: expected a string, found an integer
+.h: expected a string, found a boolean
+only 1st wrong1: .a: expected an integer, found a string
+
+-- absent, null and present stay three outcomes --
+absent        absent -> Some(held)
+null          null -> None
+present       present(ada) -> Some(ada)
+bad id + null 1: .id: expected an integer, found a string
+bad optional  1: .nick: expected a string, found an integer
+
+-- one_of: the same field written 2 or 2.0 --
+2 and 2.0     Pair{ v: 2, w: 2 }
+2.0 and 2     Pair{ v: 2, w: 2 }
+neither       2: .v: expected an integer, found a string
+.v: expected a number, found a string
+
+-- fail takes no value, at any type --
+fail String   1: <root>: expected a string this program approves of, found an object
+fail Message  1: <root>: expected a message this program approves of, found an object
+halts after   1: <root>: expected a string this program approves of, found an object
+
+-- guard refines without halting; then+fail halts --
+guard, both   2: .v: expected a positive integer, found an integer
+.w: expected a positive integer, found an integer
+then+fail     1: .v: expected a positive integer, found an integer
+
+-- a bad discriminant reports itself, not an untaken branch --
+chat          Chat(hi)
+bad tag       1: .t: expected a string, found an integer
