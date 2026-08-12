@@ -163,6 +163,7 @@ pub(crate) mod test_fixture {
     const STATUS: &[&str] = &["status"];
     const NONE_: &[&str] = &[];
     const CAUSE: &[&str] = &["cause"];
+    const ERR: &[&str] = &["err"];
 
     const ROWS: &[Row] = &[
         (S::Unit, 262, 0, "Nil", "Nil", NONE_),
@@ -380,6 +381,41 @@ pub(crate) mod test_fixture {
             NONE_,
         ),
         (S::H1ChunkedBad, 3076, 2, "ChunkBody", "ChunkedBad", STATUS),
+        (
+            S::H1RespDone,
+            3077,
+            0,
+            "ParsedResponse",
+            "ResponseDone",
+            &["version", "code", "reason", "headers", "flags", "consumed"],
+        ),
+        (
+            S::H1RespNeedMore,
+            3077,
+            1,
+            "ParsedResponse",
+            "ResponseNeedMore",
+            NONE_,
+        ),
+        (S::H1RespBad, 3077, 2, "ParsedResponse", "ResponseBad", ERR),
+        (
+            S::H1BadStatusLine,
+            3078,
+            0,
+            "BadResponse",
+            "BadStatusLine",
+            NONE_,
+        ),
+        (S::H1BadVersion, 3078, 1, "BadResponse", "BadVersion", NONE_),
+        (S::H1BadField, 3078, 2, "BadResponse", "BadField", NONE_),
+        (
+            S::H1BadHeadTooLarge,
+            3078,
+            3,
+            "BadResponse",
+            "HeadTooLarge",
+            NONE_,
+        ),
         (S::JsonDoc, 7168, 0, "Doc", "Doc", &["arena", "tape", "idx"]),
         (
             S::JsonParseError,

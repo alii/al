@@ -187,36 +187,16 @@ fn parse_head_window(t: &H1, a: &mut ProcHeap, win: &ByteWindow, off: i64) -> Va
 
     // The cap measures from the request-line start, so the whole head shares
     // MAX_HEAD.
-    let (headers, flags, consumed) = match parse_header_block(
-        t,
-        a,
-        win,
-        eol + 2,
-        off,
-        MAX_HEAD,
-        Reject::HeaderFieldsTooLarge,
-    ) {
+    let (headers, flags, consumed) = match parse_header_block(t, a, win, eol + 2, off, MAX_HEAD) {
         HeaderBlock::Done(headers, flags, consumed) => (headers, flags, consumed),
         HeaderBlock::NeedMore => return t.parsed_need_more.clone(),
-        HeaderBlock::Bad(status) => return reject(&t.parsed_bad, a, status),
+        HeaderBlock::Bad(r) => return reject(&t.parsed_bad, a, r.as_status()),
     };
 
     let method = win.view(a, off, sp1 - off);
     let target = win.view(a, sp1 + 1, sp2 - sp1 - 1);
     let headers = Value::array_in(a, &headers);
-    let flags = if flags == HeadFlags::default() {
-        // Share the frozen all-false record instead of one per request.
-        t.head_flags_none.clone()
-    } else {
-        t.head_flags.instantiate(
-            a,
-            &[
-                Value::bool(flags.conn.has_close()),
-                Value::bool(flags.conn.has_keep_alive()),
-                Value::bool(flags.expect_100_continue),
-            ],
-        )
-    };
+    let flags = build_head_flags(t, a, flags);
     t.parsed_done.instantiate(
         a,
         &[
@@ -277,6 +257,134 @@ impl ConnTokens {
     }
 }
 
+/// The minimum status line: `HTTP/1.1 200` — eight version bytes, one space,
+/// three digits. The reason phrase and the space before it are optional here;
+/// RFC 9112 §4 requires the space, and enough servers omit it that refusing
+/// the message over a byte a client must ignore anyway would be the wrong
+/// call.
+const MIN_STATUS_LINE: usize = 12;
+
+/// Parse one response head out of `bin` starting at byte offset `off`, pushing
+/// an `scarlet/http/h1.ParsedResponse` value.
+pub(super) fn parse_response_head(
+    t: &H1,
+    a: &mut ProcHeap,
+    bin: &BinaryRef<'_>,
+    off: i64,
+) -> Value {
+    parse_response_head_window(t, a, &ByteWindow::of(bin), off)
+}
+
+fn resp_bad(t: &H1, a: &mut ProcHeap, why: &Value) -> Value {
+    t.resp_bad.instantiate(a, &[why.clone()])
+}
+
+/// As `parse_head_window`, but for `HTTP-version SP status-code [SP reason]`.
+/// Only the start line differs: the field block below it goes through the same
+/// `parse_header_block`, so a response head and a request head disagree about
+/// nothing a smuggling vector could hide in.
+fn parse_response_head_window(t: &H1, a: &mut ProcHeap, win: &ByteWindow, off: i64) -> Value {
+    let bytes = win.bytes();
+    let head_start = (off.max(0) as usize).min(win.len);
+
+    // No leading-empty-line tolerance, unlike the request path: RFC 7230 §3.5
+    // excuses a stray CRLF *before a request*, and a server emitting one before
+    // a status line means the connection has desynchronized. Swallowing it
+    // would hide exactly the failure a pipelining client must notice.
+    let Some(eol) = find_crlf(bytes, head_start) else {
+        return if win.len - head_start > MAX_HEAD {
+            resp_bad(t, a, &t.bad_head_too_large)
+        } else {
+            t.resp_need_more.clone()
+        };
+    };
+
+    let line = &bytes[head_start..eol];
+    if line.len() < MIN_STATUS_LINE || line[8] != b' ' {
+        return resp_bad(t, a, &t.bad_status_line);
+    }
+    let version = match &line[..8] {
+        b"HTTP/1.1" => t.version_http11.clone(),
+        b"HTTP/1.0" => t.version_http10.clone(),
+        // `HTTP/` and something else is a version we do not speak; anything
+        // else is not a status line at all. The distinction is what tells a
+        // caller "wrong protocol version" from "this peer is not speaking
+        // HTTP/1" — a plaintext server answering a TLS ClientHello lands in
+        // the second.
+        v if v.starts_with(b"HTTP/") => return resp_bad(t, a, &t.bad_version),
+        _ => return resp_bad(t, a, &t.bad_status_line),
+    };
+
+    let digits = &line[9..MIN_STATUS_LINE];
+    if !digits.iter().all(u8::is_ascii_digit) {
+        return resp_bad(t, a, &t.bad_status_line);
+    }
+    let code = (digits[0] - b'0') as i64 * 100
+        + (digits[1] - b'0') as i64 * 10
+        + (digits[2] - b'0') as i64;
+
+    // Either the line ends at the code, or a single SP introduces the reason
+    // phrase. A bare CR or LF inside that phrase is refused: `find_crlf`
+    // stopped at the first CRLF, so one can still be sitting in the reason,
+    // and a caller forwarding it (a proxy re-serializing the status line)
+    // would split the message downstream.
+    let reason = match line.len() {
+        MIN_STATUS_LINE => win.view(a, head_start + MIN_STATUS_LINE, 0),
+        _ if line[MIN_STATUS_LINE] != b' ' => return resp_bad(t, a, &t.bad_status_line),
+        n => {
+            let phrase = &line[MIN_STATUS_LINE + 1..];
+            if phrase.contains(&b'\r') || phrase.contains(&b'\n') {
+                return resp_bad(t, a, &t.bad_status_line);
+            }
+            win.view(a, head_start + MIN_STATUS_LINE + 1, n - MIN_STATUS_LINE - 1)
+        }
+    };
+
+    // The cap measures from the status-line start, so the whole head shares
+    // MAX_HEAD — same accounting as a request head.
+    let (headers, flags, consumed) =
+        match parse_header_block(t, a, win, eol + 2, head_start, MAX_HEAD) {
+            HeaderBlock::Done(headers, flags, consumed) => (headers, flags, consumed),
+            HeaderBlock::NeedMore => return t.resp_need_more.clone(),
+            HeaderBlock::Bad(FieldReject::Malformed) => return resp_bad(t, a, &t.bad_field),
+            HeaderBlock::Bad(FieldReject::TooLarge) => {
+                return resp_bad(t, a, &t.bad_head_too_large);
+            }
+        };
+
+    let headers = Value::array_in(a, &headers);
+    let flags = build_head_flags(t, a, flags);
+    t.resp_done.instantiate(
+        a,
+        &[
+            version,
+            Value::small_int(code),
+            reason,
+            headers,
+            flags,
+            Value::small_int(consumed as i64),
+        ],
+    )
+}
+
+/// The `HeadFlags` record for a parsed head, sharing the frozen all-false
+/// value when nothing was found. One place, so a request head and a response
+/// head cannot start allocating differently.
+fn build_head_flags(t: &H1, a: &mut ProcHeap, flags: HeadFlags) -> Value {
+    if flags == HeadFlags::default() {
+        t.head_flags_none.clone()
+    } else {
+        t.head_flags.instantiate(
+            a,
+            &[
+                Value::bool(flags.conn.has_close()),
+                Value::bool(flags.conn.has_keep_alive()),
+                Value::bool(flags.expect_100_continue),
+            ],
+        )
+    }
+}
+
 /// The `Connection`/`Expect` token-list answers an HTTP/1.1 server needs from
 /// every request head, recorded by `parse_header_block` while it already has
 /// each field's trimmed name and value in hand. Raw findings, not decisions:
@@ -311,21 +419,49 @@ fn trim_ows(mut el: &[u8]) -> &[u8] {
     el
 }
 
-/// Outcome of parsing one CRLF-terminated header block (request-head fields
-/// or chunked-body trailers).
+/// The only two ways a header block is refused. `Reject` is the *request*
+/// vocabulary — a status to answer with — and a client reading a response has
+/// nobody to answer, so the block scanner names the condition and each caller
+/// maps it. Two variants, not six, is what stops a `_` arm appearing in a
+/// caller for conditions this scanner cannot produce.
+#[derive(Clone, Copy)]
+enum FieldReject {
+    /// No colon, whitespace before the colon, or an obs-fold continuation.
+    Malformed,
+    /// The block crossed its byte cap.
+    TooLarge,
+}
+
+impl FieldReject {
+    /// The status a SERVER answers a malformed request head or trailer block
+    /// with.
+    fn as_status(self) -> Reject {
+        match self {
+            FieldReject::Malformed => Reject::BadRequest,
+            FieldReject::TooLarge => Reject::HeaderFieldsTooLarge,
+        }
+    }
+}
+
+/// Outcome of parsing one CRLF-terminated header block (request-head fields,
+/// response-head fields, or chunked-body trailers).
 enum HeaderBlock {
     /// Fields, tokens seen among them, and the offset past the blank line.
     Done(Vec<Value>, HeadFlags, usize),
     NeedMore,
-    Bad(Reject),
+    Bad(FieldReject),
 }
 
 /// Parse a header block at `start`: one field per CRLF-terminated line, ended
 /// by a blank line. Obs-fold and whitespace before the colon are rejected;
 /// both are request-smuggling vectors parsers disagree on (RFC 7230 §3.2.4).
 ///
-/// `cap_start`/`cap`/`over_cap_status` bound the block. A request head
-/// measures from the request-line start; a trailer block from itself.
+/// This is the ONE header-field grammar in the VM: request heads, response
+/// heads and trailer blocks all come through here, so a reject added for one
+/// of them is in force for all three.
+///
+/// `cap_start`/`cap` bound the block. A request or response head measures from
+/// its start line; a trailer block from itself.
 fn parse_header_block(
     t: &H1,
     a: &mut ProcHeap,
@@ -333,7 +469,6 @@ fn parse_header_block(
     start: usize,
     cap_start: usize,
     cap: usize,
-    over_cap_status: Reject,
 ) -> HeaderBlock {
     let bytes = win.bytes();
     let len = bytes.len();
@@ -342,11 +477,11 @@ fn parse_header_block(
     let mut flags = HeadFlags::default();
     loop {
         if pos - cap_start > cap {
-            return HeaderBlock::Bad(over_cap_status);
+            return HeaderBlock::Bad(FieldReject::TooLarge);
         }
         let Some(crlf) = find_crlf(bytes, pos) else {
             return if len - cap_start > cap {
-                HeaderBlock::Bad(over_cap_status)
+                HeaderBlock::Bad(FieldReject::TooLarge)
             } else {
                 HeaderBlock::NeedMore
             };
@@ -355,14 +490,14 @@ fn parse_header_block(
             return HeaderBlock::Done(headers, flags, pos + 2);
         }
         if is_ows(bytes[pos]) {
-            return HeaderBlock::Bad(Reject::BadRequest);
+            return HeaderBlock::Bad(FieldReject::Malformed);
         }
         let Some(colon_rel) = memchr::memchr(b':', &bytes[pos..crlf]) else {
-            return HeaderBlock::Bad(Reject::BadRequest);
+            return HeaderBlock::Bad(FieldReject::Malformed);
         };
         let colon = pos + colon_rel;
         if colon == pos || is_ows(bytes[colon - 1]) {
-            return HeaderBlock::Bad(Reject::BadRequest);
+            return HeaderBlock::Bad(FieldReject::Malformed);
         }
         let mut vstart = colon + 1;
         while vstart < crlf && is_ows(bytes[vstart]) {
@@ -535,7 +670,6 @@ fn chunk_decode_window(t: &H1, a: &mut ProcHeap, win: &ByteWindow, off: i64, max
                 trailer_start,
                 trailer_start,
                 MAX_TRAILER_BLOCK,
-                Reject::HeaderFieldsTooLarge,
             ) {
                 // Tokens the trailer block recorded are dropped: a trailer field
                 // carries no connection or expectation semantics (RFC 9110 §6.5.1).
@@ -550,7 +684,7 @@ fn chunk_decode_window(t: &H1, a: &mut ProcHeap, win: &ByteWindow, off: i64, max
                         .instantiate(a, &[body, trailers, Value::small_int(consumed as i64)])
                 }
                 HeaderBlock::NeedMore => t.chunked_need_more.clone(),
-                HeaderBlock::Bad(status) => reject(&t.chunked_bad, a, status),
+                HeaderBlock::Bad(r) => reject(&t.chunked_bad, a, r.as_status()),
             };
         }
 

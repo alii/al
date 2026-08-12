@@ -919,6 +919,7 @@ impl VM {
                 Op::BinFromIntAscii => self.bin_from_int_ascii()?,
                 // HTTP/1.1 protocol ops, cold for the same reason.
                 Op::HttpParseHead => self.http_parse_head()?,
+                Op::HttpParseResponseHead => self.http_parse_response_head()?,
                 Op::HttpFraming => self.http_framing()?,
                 Op::HttpChunkDecode => self.http_chunk_decode()?,
                 Op::HttpHeaderGet => self.http_header_get()?,

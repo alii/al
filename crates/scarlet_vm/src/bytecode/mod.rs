@@ -251,6 +251,13 @@ pub enum Op {
     /// consumed)` / `NeedMore` / `Bad(status)`, with method, target and header
     /// names/values as zero-copy views into `buf`'s backing.
     HttpParseHead,
+    /// `[buf, off] -> ParsedResponse` — parse one response head from `buf` at
+    /// byte offset `off`. Pushes `ResponseDone(version, code, reason, headers,
+    /// flags, consumed)` / `ResponseNeedMore` / `ResponseBad(err)`, with
+    /// `reason` and header names/values as zero-copy views into `buf`'s
+    /// backing. Shares `parse_header_block` with [`Op::HttpParseHead`], so the
+    /// field grammar and its smuggling rejects have one implementation.
+    HttpParseResponseHead,
     /// `[headers] -> Framing` — RFC 7230 §3.3.3 body framing over an
     /// `Array(Header)`: `NoBody` / `Length(n)` / `Chunked` / `Invalid(status)`.
     HttpFraming,
@@ -664,6 +671,7 @@ impl Op {
             | Op::BinToAsciiLower
             | Op::BinFromIntAscii
             | Op::HttpParseHead
+            | Op::HttpParseResponseHead
             | Op::HttpFraming
             | Op::HttpChunkDecode
             | Op::HttpHeaderGet
@@ -881,6 +889,7 @@ impl Op {
             | Op::BinToAsciiLower
             | Op::BinFromIntAscii
             | Op::HttpParseHead
+            | Op::HttpParseResponseHead
             | Op::HttpFraming
             | Op::HttpChunkDecode
             | Op::HttpHeaderGet

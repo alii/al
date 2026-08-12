@@ -150,6 +150,15 @@ pub enum AbiSlot {
     H1ChunkedNeedMore,
     /// `[status Int]`
     H1ChunkedBad,
+    /// `[version, code Int, reason Binary, headers, flags, consumed Int]`
+    H1RespDone,
+    H1RespNeedMore,
+    /// `[err BadResponse]`
+    H1RespBad,
+    H1BadStatusLine,
+    H1BadVersion,
+    H1BadField,
+    H1BadHeadTooLarge,
 
     /// A parsed JSON document cursor — `[arena Binary, tape Binary, idx Int]`
     JsonDoc,
@@ -247,6 +256,13 @@ impl AbiSlot {
             H1ChunkedDone,
             H1ChunkedNeedMore,
             H1ChunkedBad,
+            H1RespDone,
+            H1RespNeedMore,
+            H1RespBad,
+            H1BadStatusLine,
+            H1BadVersion,
+            H1BadField,
+            H1BadHeadTooLarge,
             JsonDoc,
             JsonParseError,
             TlsSocket,
@@ -332,6 +348,13 @@ impl AbiSlot {
             H1ChunkedDone => "H1ChunkedDone",
             H1ChunkedNeedMore => "H1ChunkedNeedMore",
             H1ChunkedBad => "H1ChunkedBad",
+            H1RespDone => "H1RespDone",
+            H1RespNeedMore => "H1RespNeedMore",
+            H1RespBad => "H1RespBad",
+            H1BadStatusLine => "H1BadStatusLine",
+            H1BadVersion => "H1BadVersion",
+            H1BadField => "H1BadField",
+            H1BadHeadTooLarge => "H1BadHeadTooLarge",
             JsonDoc => "JsonDoc",
             JsonParseError => "JsonParseError",
             TlsSocket => "TlsSocket",
@@ -366,18 +389,20 @@ impl AbiSlot {
             | H1ParsedNeedMore | H1FramingNoBody | H1FramingChunked | H1ChunkedNeedMore
             | TlsCertUnknownIssuer | TlsCertExpired | TlsCertNotYetValid | TlsCertRevoked
             | TlsHostnameMismatch | TlsBadCertificate | TlsProtocolError | TlsHandshakeFailed
-            | TlsInvalidServerName => 0,
+            | TlsInvalidServerName | H1RespNeedMore | H1BadStatusLine | H1BadVersion
+            | H1BadField | H1BadHeadTooLarge => 0,
             ResultOk | ResultErr | OptionSome | FsEnoent | FsEacces | FsEexist | FsEnotdir
             | FsEisdir | FsErofs | FsEloop | FsEfbig | FsErrnoOther | NetErrnoOther | IpV4
             | IpV6 | ReadData | ExitCrashed | CrashSupervision | PortExited | PortSignaled
-            | H1ParsedBad | H1FramingLength | H1FramingInvalid | H1ChunkedBad | TlsTransport => 1,
+            | H1ParsedBad | H1FramingLength | H1FramingInvalid | H1ChunkedBad | TlsTransport
+            | H1RespBad => 1,
             JsonParseError => 2,
             JsonDoc => 3,
             SocketAddr | Socket | Monitor | Down | CrashIndexOutOfBounds | Port | H1Header => 2,
             H1HeadFlags | H1ChunkedDone | CrashSliceOutOfBounds | CrashTypeMismatch | TlsSocket => {
                 3
             }
-            H1ParsedDone => 6,
+            H1ParsedDone | H1RespDone => 6,
         }
     }
 }
@@ -574,6 +599,19 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::H1ParsedDone,
             S::H1ParsedNeedMore,
             S::H1ParsedBad,
+            S::H1Header,
+            S::H1Http10,
+            S::H1Http11,
+            S::H1HeadFlags,
+        ],
+        Op::HttpParseResponseHead => &[
+            S::H1RespDone,
+            S::H1RespNeedMore,
+            S::H1RespBad,
+            S::H1BadStatusLine,
+            S::H1BadVersion,
+            S::H1BadField,
+            S::H1BadHeadTooLarge,
             S::H1Header,
             S::H1Http10,
             S::H1Http11,

@@ -1,6 +1,6 @@
 fn s0() -> :t0
   let %0:t0 = c0
-  let %1:t1 = ctor 7936.0(%0)
+  let %1:t1 = ctor 8448.0(%0)
   let %2:t2 = ctor 263.0(%1)
   drop %1 [Enum:1]
   match %2 :t0

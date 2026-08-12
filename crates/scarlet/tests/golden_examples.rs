@@ -259,6 +259,10 @@ suite! {
         // HTTP/1.1 surface. Locks the native scanners behind scarlet/http/h1 to the
         // sans-IO contract the Scarlet reference parser defined.
         http_parse,
+        // The HTTP CLIENT: response-head parsing, response body framing, URL
+        // parsing, and the whole request/response path driven over an
+        // in-memory transport — the reach the `Io` shape was chosen for.
+        http_response,
         // Backpassing: `x <- f(args)` desugars to a trailing callback.
         backpassing,
         // JSON: the SIMD parse, on-demand reads off the tape, typed decoding

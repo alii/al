@@ -76,6 +76,7 @@ fn builtin_op(name: &str) -> Option<Op> {
         "binary__to_ascii_lower" => Op::BinToAsciiLower,
         "binary__from_int_ascii" => Op::BinFromIntAscii,
         "http__parse_head" => Op::HttpParseHead,
+        "http__parse_response_head" => Op::HttpParseResponseHead,
         "http__framing" => Op::HttpFraming,
         "http__chunk_decode" => Op::HttpChunkDecode,
         "http__header_get" => Op::HttpHeaderGet,

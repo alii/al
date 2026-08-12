@@ -383,6 +383,17 @@ impl VM {
 
     #[cold]
     #[inline(never)]
+    pub(super) fn http_parse_response_head(&mut self) -> VmResult<()> {
+        let off = self.pop_int("h1.parse_response")?;
+        let buf_v = self.pop_binary("h1.parse_response")?;
+        let v =
+            http::parse_response_head(self.templates.h1()?, &mut self.heap, &bin_ref(&buf_v), off);
+        self.stack.push(v);
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
     pub(super) fn http_framing(&mut self) -> VmResult<()> {
         let headers = self.pop()?;
         let v = http::framing(self.templates.h1()?, &mut self.heap, &headers)?;

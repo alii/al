@@ -177,6 +177,7 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::BinToAsciiLower
         | Op::BinFromIntAscii
         | Op::HttpChunkDecode
+        | Op::HttpParseResponseHead
         | Op::HttpHeaderGet
         | Op::FloatFloor
         | Op::FloatCeil
