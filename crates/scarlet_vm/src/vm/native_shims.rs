@@ -615,6 +615,10 @@ mod opc {
     pub const TCP_READ_UNTIL: u8 = Op::TcpReadUntil as u8;
     pub const TCP_WRITE: u8 = Op::TcpWrite as u8;
     pub const TCP_WRITE_PARTS: u8 = Op::TcpWriteParts as u8;
+    pub const TLS_CLOSE: u8 = Op::TlsClose as u8;
+    pub const TLS_HANDSHAKE: u8 = Op::TlsHandshake as u8;
+    pub const TLS_READ: u8 = Op::TlsRead as u8;
+    pub const TLS_WRITE: u8 = Op::TlsWrite as u8;
     pub const TO_STRING: u8 = Op::ToString as u8;
     pub const TUPLE_INDEX: u8 = Op::TupleIndex as u8;
 }
@@ -728,6 +732,9 @@ impl VM {
             opc::TCP_READ_UNTIL => self.tcp_read_until(reds),
             opc::TCP_WRITE => self.tcp_write(reds),
             opc::TCP_WRITE_PARTS => self.tcp_write_parts(reds),
+            opc::TLS_HANDSHAKE => self.tls_handshake(reds),
+            opc::TLS_READ => self.tls_read(reds),
+            opc::TLS_WRITE => self.tls_write(reds),
             opc::DNS_RESOLVE => self.dns_resolve(reds),
             opc::SLEEP => self.sleep(),
             opc::PORT_SPAWN => self.port_spawn(reds),
@@ -874,6 +881,7 @@ impl VM {
             opc::ARGV => self.argv(),
             opc::TCP_LISTEN => self.tcp_listen(),
             opc::TCP_CLOSE => self.tcp_close(reds),
+            opc::TLS_CLOSE => self.tls_close(reds),
             opc::TCP_GIVE => self.tcp_give(),
             opc::TCP_CLOSE_SERVER => self.tcp_close_server(),
             opc::SPAWN_ON_EACH => self.process_spawn_on_each(reds),

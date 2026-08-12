@@ -38,6 +38,10 @@ serde_json = "1"
 rcgen = "0.13"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pki-types = "1"
+# `SO_RCVBUF` on the listener behind the large-write test. The writer's socket
+# has to actually fill for its park-and-resume path to run at all, and loopback
+# autotuning will not oblige.
+socket2 = { version = "0.5", features = ["all"] }
 
 [[bin]]
 name = "scarlet"

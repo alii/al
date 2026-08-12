@@ -23,7 +23,7 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 
@@ -32,6 +32,9 @@ use rcgen::{
 };
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+mod common;
+use common::{CHILD_TIMEOUT_SECS, wait_or_kill};
 
 // ---------------------------------------------------------------------------
 // Certificate authority and leaves
@@ -117,6 +120,89 @@ fn install_provider() {
     });
 }
 
+/// Serve one TLS connection that does NOT read for `stall`, then drains exactly
+/// `expect` bytes of plaintext and answers `got:<n>:<ok|mismatch>`.
+///
+/// The listener carries a small `SO_RCVBUF`, inherited by the accepted socket,
+/// so the writer's window stays small and its socket fills while the peer is
+/// stalled. That is the state the VM's write path is only ever in here — a few
+/// hundred bytes over loopback never fills anything.
+fn spawn_stalled_tls_server(leaf: Leaf, expect: usize, stall: std::time::Duration) -> u16 {
+    install_provider();
+    let config = Arc::new(
+        ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(leaf.chain, leaf.key)
+            .expect("server config"),
+    );
+
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )
+    .expect("listener socket");
+    let _ = sock.set_recv_buffer_size(4096);
+    sock.bind(
+        &"127.0.0.1:0"
+            .parse::<std::net::SocketAddr>()
+            .unwrap()
+            .into(),
+    )
+    .expect("bind");
+    sock.listen(8).expect("listen");
+    let listener: TcpListener = sock.into();
+    let port = listener.local_addr().expect("local_addr").port();
+
+    thread::spawn(move || {
+        let Ok((mut sock, _)) = listener.accept() else {
+            return;
+        };
+        let Ok(mut conn) = rustls::ServerConnection::new(config) else {
+            return;
+        };
+        if conn.complete_io(&mut sock).is_err() {
+            return;
+        }
+        thread::sleep(stall);
+        let mut all = Vec::with_capacity(expect);
+        let mut stream = rustls::Stream::new(&mut conn, &mut sock);
+        let mut buf = vec![0u8; 16 * 1024];
+        while all.len() < expect {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => all.extend_from_slice(&buf[..n]),
+            }
+        }
+        let ok = all.len() == expect && all.chunks(16).all(|c| c == &PATTERN.as_bytes()[..c.len()]);
+        let verdict = if ok { "ok" } else { "mismatch" };
+        let _ = stream.write_all(format!("got:{}:{verdict}", all.len()).as_bytes());
+        let _ = stream.flush();
+    });
+
+    port
+}
+
+/// The 16-byte unit the large-write payload is built from, by doubling.
+const PATTERN: &str = "0123456789abcdef";
+
+/// Accept `n` connections and hang up on each without speaking TLS, so a
+/// client's `tls.handshake` fails the same way `n` times over. Enough
+/// repetitions to warm the Scarlet function around it, which is the point.
+fn spawn_hangup_server(n: usize) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    thread::spawn(move || {
+        for _ in 0..n {
+            match listener.accept() {
+                Ok((sock, _)) => drop(sock),
+                Err(_) => return,
+            }
+        }
+    });
+    port
+}
+
 /// Serve exactly one TLS connection, echoing back a fixed reply, and return the
 /// port it bound. The thread is detached: a test that fails the handshake on
 /// purpose leaves it waiting, and the process exiting collects it.
@@ -170,17 +256,30 @@ fn project_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// Write `src` as a one-file program and run it. `trust` is the PEM installed
-/// as the machine's certificate store for the child, or `None` to leave the
-/// child with the roots it would ordinarily have.
-fn run_program(tag: &str, src: &str, trust: Option<&str>) -> String {
+/// Write `src` as a one-file program and run it, giving up after `secs`.
+/// `trust` is the PEM installed as the machine's certificate store for the
+/// child, or `None` to leave the child with the roots it would ordinarily
+/// have. Returns the exit code and the combined streams.
+///
+/// Bounded rather than `Command::output()`, which waits forever: one test here
+/// is about a program that used to never end, and a wedge must be one red test
+/// rather than a hung suite. `wait_or_kill` reports a killed child as no exit
+/// code at all, which is the discriminator that test asserts on — a program
+/// that hangs and one that exits having printed nothing are otherwise the same
+/// empty string.
+fn run_bounded(tag: &str, src: &str, trust: Option<&str>, secs: u64) -> (Option<i32>, String) {
     let dir = project_dir(tag);
     let entry = dir.join("main.scrl");
     std::fs::write(&entry, src).expect("write program");
     std::fs::write(dir.join("package.scrl"), "name = 'tls_test'\n").expect("write package");
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scarlet"));
-    cmd.arg("run").arg(&entry).current_dir(&dir);
+    cmd.arg("run")
+        .arg(&entry)
+        .current_dir(&dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     match trust {
         Some(pem) => {
             let roots = dir.join("roots.pem");
@@ -196,10 +295,20 @@ fn run_program(tag: &str, src: &str, trust: Option<&str>) -> String {
             cmd.env("SSL_CERT_FILE", &empty);
         }
     }
-    let out = cmd.output().expect("run scarlet");
-    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-    combined.push_str(&String::from_utf8_lossy(&out.stderr));
-    combined
+    let out = wait_or_kill(cmd.spawn().expect("run scarlet"), secs);
+    (
+        out.status.code(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+/// [`run_bounded`] for the tests that only read the output.
+fn run_program(tag: &str, src: &str, trust: Option<&str>) -> String {
+    run_bounded(tag, src, trust, CHILD_TIMEOUT_SECS).1
 }
 
 /// A program that connects and reports the outcome.
@@ -397,6 +506,324 @@ match net.connect('127.0.0.1', {port}) {{
     assert!(
         out.contains("cleartext refused: NotConnected"),
         "the pre-upgrade handle must be reported as a gone socket, got:\n{out}"
+    );
+}
+
+/// A TLS opcode must survive the Scarlet function around it being compiled.
+///
+/// `NativeTable::WARM_CALLS` is 8, so the ninth call to a function runs
+/// natively and every opcode in its body goes through `native_shims`'
+/// dispatchers instead of the interpreter's own match. All four TLS opcodes
+/// were classified there — `TlsHandshake`, `TlsRead` and `TlsWrite` as `Park`,
+/// `TlsClose` as `Bridge` — and given an arm in NEITHER dispatcher, so the
+/// ninth call fell through to `proof_violation` and killed the program with
+/// `internal invariant violated: run_park_op on an op is_native_park_op
+/// excludes (compiler bug)`.
+///
+/// Nothing caught it because every other test in this file calls TLS from the
+/// top level of `main`, which is interpreted and never warms. The standard
+/// library does not have that luxury: `tls.read_exact` recurses through
+/// `read_exact_loop`, and `tls.connect` calls `handshake` from inside a
+/// function body. A program that read a connection in a loop for nine
+/// iterations would have died.
+///
+/// Each of the four is called TWELVE times, which is what makes this a test of
+/// the dispatch rather than of TLS: three past the threshold, and the outcome
+/// asserted is only that the program finished and reported typed results.
+#[test]
+fn a_tls_op_survives_the_function_around_it_being_compiled() {
+    const REPS: usize = 12;
+    let ca = make_ca();
+    let leaf = make_leaf(&ca, "localhost", Validity::Current);
+    // Twelve 16-byte writes; the peer drains them all and reports.
+    let expect = PATTERN.len() * REPS;
+    let port = spawn_stalled_tls_server(leaf, expect, std::time::Duration::ZERO);
+    let dead = spawn_hangup_server(REPS);
+
+    let src = format!(
+        r#"import scarlet/net
+import scarlet/net/tls.{{TlsSocket, TlsError}}
+import scarlet/net/socket.{{Data, Closed}}
+import scarlet/binary
+import scarlet/string
+
+fn send_n(c TlsSocket, b Binary, n Int) Result(Nil, TlsError) {{
+    if n <= 0 {{
+        Ok(Nil)
+    }} else {{
+        match tls.write(c, b) {{
+            Ok(Nil) -> send_n(c, b, n - 1)
+            Err(e) -> Err(e)
+        }}
+    }}
+}}
+
+fn recv_n(c TlsSocket, n Int, acc Int) Int {{
+    if n <= 0 {{
+        acc
+    }} else {{
+        match tls.read(c, 1) {{
+            Ok(Data(b)) -> recv_n(c, n - 1, acc + binary.byte_size(b))
+            Ok(Closed) -> acc
+            Err(_) -> acc
+        }}
+    }}
+}}
+
+fn close_n(c TlsSocket, n Int) Nil {{
+    if n <= 0 {{
+        Nil
+    }} else {{
+        {{
+            tls.close(c) or Nil
+            close_n(c, n - 1)
+        }}
+    }}
+}}
+
+// A handshake that fails the same way every time. The point is that the OP
+// runs at all once the function around it is compiled, not what it returns.
+fn shake_n(n Int, acc Int) Int {{
+    if n <= 0 {{
+        acc
+    }} else {{
+        match net.connect('127.0.0.1', {dead}) {{
+            Ok(s) -> match tls.handshake(s, 'localhost') {{
+                Ok(_) -> shake_n(n - 1, acc)
+                Err(_) -> shake_n(n - 1, acc + 1)
+            }}
+            Err(_) -> shake_n(n - 1, acc)
+        }}
+    }}
+}}
+
+println('handshakes refused ${{shake_n({REPS}, 0)}}')
+
+match net.connect('127.0.0.1', {port}) {{
+    Ok(sock) -> match tls.handshake(sock, 'localhost') {{
+        Ok(conn) -> {{
+            match send_n(conn, <<'{PATTERN}'>>, {REPS}) {{
+                Ok(Nil) -> println('wrote {REPS}')
+                Err(e) -> println('write failed: ${{string.inspect(e)}}')
+            }}
+            println('read back ${{recv_n(conn, {REPS}, 0)}}')
+            close_n(conn, {REPS})
+            println('closed {REPS}')
+        }}
+        Err(e) -> println('handshake failed: ${{string.inspect(e)}}')
+    }}
+    Err(e) -> println('connect failed: ${{string.inspect(e)}}')
+}}
+"#
+    );
+
+    let (code, out) = run_bounded("native_shim", &src, Some(&ca.pem), 60);
+
+    assert_eq!(
+        code,
+        Some(0),
+        "no TLS opcode may halt the VM once its function is compiled, got:\n{out}"
+    );
+    assert!(
+        out.contains(&format!("handshakes refused {REPS}")),
+        "every handshake against a peer that hangs up must come back as a \
+         typed error, got:\n{out}"
+    );
+    assert!(
+        out.contains(&format!("wrote {REPS}")),
+        "all {REPS} writes must complete, got:\n{out}"
+    );
+    // The peer's whole reply, a byte per `tls.read`, then end of stream: the
+    // reply is shorter than `REPS`, so the last reads see `Closed`.
+    let reply_len = format!("got:{expect}:ok").len();
+    assert!(
+        out.contains(&format!("read back {reply_len}")),
+        "the reads must return the bytes the peer sent, got:\n{out}"
+    );
+    assert!(
+        out.contains(&format!("closed {REPS}")),
+        "`tls.close` must be dispatchable from a compiled body, got:\n{out}"
+    );
+}
+
+/// `tls.write` against a peer that has stopped reading parks and resumes, and
+/// every byte arrives exactly once and in order.
+///
+/// This is the VM half of the flush guarantee. The mechanism itself —
+/// `drain_and_flush` answering `Flushing` rather than `Done` while the session
+/// still owes ciphertext — is asserted in `vm::tls::tests`, where the returned
+/// value can be read directly. What this covers is what the VM does with it:
+/// `tls_write`'s `Flushing` arm parks at `bytes.len()`, so the re-run carries an
+/// EMPTY tail and only finishes the flush. Re-sending the plaintext instead
+/// would show up here as a byte count larger than what was written, and a
+/// wedged re-run as no exit code at all.
+///
+/// The write is a LOOP of chunks rather than one big binary, and that is
+/// load-bearing in two directions at once. Each chunk is under rustls's 64 KiB
+/// send-buffer limit, so the session accepts it whole and `drain_write` reaches
+/// `Done` — the only way out other than `Done` is then the flush. And the loop
+/// is what fills the socket at all: this host's send buffer takes 1.79 MB
+/// before it refuses a byte, which no single write under the 64 KiB limit could
+/// ever reach.
+#[test]
+fn a_large_tls_write_parks_and_resumes_without_duplicating_a_byte() {
+    // 16 << 11 = 32 KiB per write, under rustls's 64 KiB limit; 96 of them is
+    // 3 MiB, comfortably past a loopback socket's capacity with the peer's
+    // receive window pinned small.
+    const DOUBLINGS: u32 = 11;
+    const WRITES: usize = 96;
+    let chunk = PATTERN.len() << DOUBLINGS;
+    let total = chunk * WRITES;
+
+    let ca = make_ca();
+    let leaf = make_leaf(&ca, "localhost", Validity::Current);
+    let port = spawn_stalled_tls_server(leaf, total, std::time::Duration::from_secs(1));
+
+    let src = format!(
+        r#"import scarlet/net
+import scarlet/net/tls.{{TlsSocket, TlsError}}
+import scarlet/net/socket.{{Data, Closed}}
+import scarlet/binary
+import scarlet/string
+
+fn grow(b Binary, n Int) Binary {{
+    if n <= 0 {{
+        b
+    }} else {{
+        grow(binary.append(b, b), n - 1)
+    }}
+}}
+
+fn send_n(c TlsSocket, b Binary, n Int) Result(Nil, TlsError) {{
+    if n <= 0 {{
+        Ok(Nil)
+    }} else {{
+        match tls.write(c, b) {{
+            Ok(Nil) -> send_n(c, b, n - 1)
+            Err(e) -> Err(e)
+        }}
+    }}
+}}
+
+payload = grow(<<'{PATTERN}'>>, {DOUBLINGS})
+
+match net.connect('127.0.0.1', {port}) {{
+    Ok(sock) -> match tls.handshake(sock, 'localhost') {{
+        Ok(conn) -> {{
+            println('sending ${{binary.byte_size(payload)}} x {WRITES}')
+            match send_n(conn, payload, {WRITES}) {{
+                Ok(Nil) -> match tls.read(conn, 1024) {{
+                    Ok(Data(b)) -> println('reply: ${{binary.to_string(b) or "<not utf-8>"}}')
+                    Ok(Closed) -> println('reply: closed')
+                    Err(e) -> println('read failed: ${{string.inspect(e)}}')
+                }}
+                Err(e) -> println('write failed: ${{string.inspect(e)}}')
+            }}
+            tls.close(conn) or Nil
+        }}
+        Err(e) -> println('handshake failed: ${{string.inspect(e)}}')
+    }}
+    Err(e) -> println('connect failed: ${{string.inspect(e)}}')
+}}
+"#
+    );
+
+    let (code, out) = run_bounded("large_write", &src, Some(&ca.pem), 60);
+
+    assert_eq!(
+        code,
+        Some(0),
+        "a TLS write past the socket's capacity must complete, not wedge, \
+         got:\n{out}"
+    );
+    assert!(
+        out.contains(&format!("sending {chunk} x {WRITES}")),
+        "the payload must be the size this test is about, got:\n{out}"
+    );
+    assert!(
+        out.contains(&format!("reply: got:{total}:ok")),
+        "the peer must receive exactly the bytes written, once each and in \
+         order, got:\n{out}"
+    );
+}
+
+/// An upgrade must not orphan a process already parked on the cleartext id.
+///
+/// `tls.handshake` re-keys the connection under a new id, and it takes the old
+/// entry out WITHOUT `evict_connection` on purpose, so the fd survives into the
+/// TLS entry instead of being torn down. But a park names an ID, not an fd, and
+/// `evict_connection` is also what fails the parks on an id that has gone away.
+/// A sibling parked in `socket.read` when the upgrade happens is then waiting on
+/// an id that nothing can ever resolve — no readiness event, because the fd is
+/// registered under the new id; no eviction, because the entry left by another
+/// door; and no owner death, because `release_connections_of` skips an id with
+/// no entry. The program ends only when every process does, so it never ends.
+///
+/// STARTTLS and a proxied `CONNECT` are the shapes this module advertises, and
+/// they are exactly the ones where a reader is most likely to be parked
+/// already.
+///
+/// The assertion is on the program EXITING, and on the sibling reaching the
+/// same gone-socket error `socket.close` gives it. The handshake's own outcome
+/// is deliberately not asserted: it is the hang that is the defect, and it
+/// happens whether the handshake succeeds or fails — the failure path evicts
+/// the NEW id, which is not the one the sibling is on.
+#[test]
+fn an_upgrade_wakes_a_sibling_parked_on_the_cleartext_id() {
+    let ca = make_ca();
+    let leaf = make_leaf(&ca, "localhost", Validity::Current);
+    let port = spawn_tls_server(leaf, "hello over tls");
+
+    let src = format!(
+        r#"import scarlet/net
+import scarlet/net/tls
+import scarlet/net/socket
+import scarlet/process
+import scarlet/string
+
+match net.connect('127.0.0.1', {port}) {{
+    Ok(sock) -> {{
+        _ = process.spawn(fn() {{
+            println('sibling: parking in socket.read')
+            match socket.read(sock, 16) {{
+                Ok(r) -> println('sibling: read ${{string.inspect(r)}}')
+                Err(e) -> println('sibling: err ${{string.inspect(e)}}')
+            }}
+        }})
+        // Nothing is on the wire until the ClientHello, so the sibling has
+        // nothing to read and is parked well before the upgrade re-keys it.
+        process.sleep(500)
+        println('parent: upgrading')
+        match tls.handshake(sock, 'localhost') {{
+            Ok(conn) -> {{
+                println('parent: handshake ok')
+                tls.close(conn) or Nil
+            }}
+            Err(e) -> println('parent: handshake err ${{string.inspect(e)}}')
+        }}
+        println('parent: done')
+    }}
+    Err(e) -> println('connect failed: ${{string.inspect(e)}}')
+}}
+"#
+    );
+
+    let (code, out) = run_bounded("upgrade_sibling", &src, Some(&ca.pem), 60);
+
+    assert!(
+        out.contains("sibling: parking in socket.read"),
+        "the sibling must reach its read before the upgrade, or this test is \
+         not exercising the park at all, got:\n{out}"
+    );
+    assert!(
+        code.is_some(),
+        "the program never ended: a process parked on the pre-upgrade id was \
+         left waiting on an id nothing can resolve, got:\n{out}"
+    );
+    assert!(
+        out.contains("sibling: err NotConnected"),
+        "the sibling must be woken onto the gone-socket error, exactly as \
+         `socket.close` on the same id gives it, got:\n{out}"
     );
 }
 

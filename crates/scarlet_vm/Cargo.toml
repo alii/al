@@ -41,3 +41,11 @@ rustls-pki-types = "1"
 # Trust roots: the machine's own store first, this bundle as the fallback.
 rustls-native-certs = "0.8"
 webpki-roots = "1"
+
+[dev-dependencies]
+# A throwaway CA and leaf, so `vm::tls`'s own tests can establish a real session
+# against a real peer without touching the machine's trust store or the network.
+# The write path's flush step is only observable over an ESTABLISHED session:
+# before the handshake rustls buffers plaintext instead of encoding records, so
+# there is no ciphertext for a full socket to refuse and nothing to flush.
+rcgen = "0.13"

@@ -1214,6 +1214,7 @@ dependencies = [
  "scarlet_core",
  "scarlet_vm",
  "serde_json",
+ "socket2",
  "ureq",
 ]
 
@@ -1268,6 +1269,7 @@ dependencies = [
  "libmimalloc-sys",
  "memchr",
  "mio",
+ "rcgen",
  "rustls",
  "rustls-native-certs",
  "rustls-pki-types",

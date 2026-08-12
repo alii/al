@@ -439,12 +439,35 @@ impl VM {
     /// ONE eviction path. `detach_socket_ids` keeps the connection instead —
     /// the fd travels to another scheduler.
     pub(super) fn evict_connection(&mut self, id: i32) -> Option<super::Conn> {
-        let conn = self.connections.remove(&id);
+        let conn = self.retire_socket_id(id);
         if let Some(c) = &conn {
             for fd in c.io.fds() {
                 self.poller_deregister(fd);
             }
         }
+        conn
+    }
+
+    /// The ONE way an id leaves `self.connections`, and the reason removing the
+    /// entry and failing the parks on the id are a single operation rather than
+    /// two things a caller remembers to do in order.
+    ///
+    /// A park names an ID, not an fd. An id with no entry is therefore
+    /// unreachable by every wake path there is: no readiness event, because
+    /// `poll` resolves a token to an id and finds nothing; no eviction, because
+    /// this is the eviction; and no owner death, because
+    /// `release_connections_of` skips an id the table no longer holds. A waiter
+    /// left behind on one is woken by nothing and the program cannot end while
+    /// it exists.
+    ///
+    /// Callers differ only in what happens to the fd, which is why that half is
+    /// theirs and this half is not. [`Self::evict_connection`] deregisters and
+    /// closes it. `tls.handshake`'s `begin_tls` keeps it: the socket outlives
+    /// its id there, re-registered under the id of the TLS entry that replaces
+    /// it — which is exactly the case that made the two halves separable, and
+    /// exactly the case that hung the program when they were.
+    pub(super) fn retire_socket_id(&mut self, id: i32) -> Option<super::Conn> {
+        let conn = self.connections.remove(&id);
         self.fail_io_waiters(id);
         conn
     }

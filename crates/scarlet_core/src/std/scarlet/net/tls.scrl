@@ -18,12 +18,20 @@ import scarlet/result
 // confused even by a handle that outlives its upgrade.
 pub type TlsConnection
 
-// An established TLS connection to `peer`, verified as `server_name`.
+// An established TLS connection to `peer`.
 //
-// `server_name` is retained because it is the identity the certificate was
-// checked against. A caller that pools connections must key on it: reusing a
-// connection opened for one host to talk to another is exactly the confusion
-// the certificate check exists to prevent.
+// `server_name` is the name `handshake` was given, on a value `handshake`
+// built. It is not evidence. The constructor is public and the fields are
+// readable, so `TlsSocket(c.conn, c.peer, 'attacker.example')` compiles and
+// reads back the name it was handed, over a connection verified as something
+// else entirely.
+//
+// A connection pool must therefore key on the name it passed to `handshake`
+// itself, never on a name read off a `TlsSocket` it was given. The certificate
+// is checked against that argument and against nothing else. Reusing a
+// connection opened for one host to talk to another is the confusion
+// `HostnameMismatch` exists to catch, and a key taken from a field any caller
+// can write is not what catches it.
 pub type TlsSocket {
 	conn TlsConnection
 	peer SocketAddress
@@ -118,6 +126,16 @@ pub fn handshake(sock Socket, server_name String) Result(TlsSocket, TlsError)
 // `max` bounds the PLAINTEXT handed back, not the ciphertext read from the
 // socket. A TLS record is decrypted whole or not at all, so a read that returns
 // fewer bytes than arrived has the remainder buffered and ready, not lost.
+//
+// `Closed` does NOT prove the stream ended on purpose. A peer that sends data
+// and then tears the TCP connection down without a `close_notify` arrives here
+// as `Closed`, indistinguishable from an orderly shutdown, so a truncation
+// attack is not detectable at this call. `close`'s own documentation argues
+// that `close_notify` is what lets a peer tell the two apart; that holds for
+// the alert this client SENDS and not for the one it receives. A caller that
+// needs the distinction must carry a length or a terminator in the protocol
+// above — which is what `read_exact` does, and why it is the one read here
+// that can report `Transport(UnexpectedEof)`.
 @vm(tls__read)
 pub fn read(c TlsSocket, max Int) Result(Read, TlsError)
 
@@ -155,5 +173,13 @@ pub fn write(c TlsSocket, data Binary) Result(Nil, TlsError)
 // the peer the stream ended on purpose; without it a peer cannot tell an
 // orderly shutdown from a truncation attack, and well-behaved ones report an
 // error.
+//
+// The connection closes either way, and the result says whether the peer was
+// told. `Err(Transport(..))` means the alert did not reach the kernel — a
+// socket already full is the usual reason — so the peer sees the stream stop
+// without an alert and may report a truncation. There is nothing to retry: the
+// connection is gone by the time this returns, and calling again finds no
+// handle. What the error buys is knowing which of the two shutdowns the peer
+// saw.
 @vm(tls__close)
 pub fn close(c TlsSocket) Result(Nil, TlsError)

@@ -33,9 +33,19 @@
 //! **re-run** protocol unchanged: park on the fd, re-run the instruction, and
 //! let rustls re-derive what it needs next from state it kept itself.
 //!
-//! Every park here is taken only after a genuine `WouldBlock` from the fd,
-//! which is what an edge-triggered poller requires: the edge that wakes us is
-//! the one that arrives after the buffer we just found full has drained.
+//! Nearly every park here follows a genuine `WouldBlock` from the fd, which is
+//! what an edge-triggered poller requires: the edge that wakes us is the one
+//! that arrives after the buffer we just found full has drained.
+//!
+//! **One park does not, and this paragraph used to claim they all did.**
+//! [`TlsIo::write`] synthesizes a `WouldBlock` when the session refuses the
+//! plaintext because its own send buffer is at its limit. It calls `flush_out`
+//! first to make room — and if that flush SUCCEEDS, the last thing that touched
+//! the fd was a write that worked, so there may be no edge left to arrive and
+//! the park would be waiting on one. Nobody has constructed an input that
+//! reaches it: the buffer is at its limit only because an earlier flush could
+//! not empty it, which is the case where this one cannot either. That is an
+//! argument, not a proof, so it is written down rather than relied on.
 //!
 //! # Why reads and writes are not new opcodes
 //!
@@ -174,14 +184,17 @@ impl TlsIo {
     /// Begin an orderly shutdown: queue `close_notify` and push it. Without the
     /// alert a peer cannot distinguish an intentional end of stream from a
     /// truncation attack, and a correct peer reports an error.
+    ///
+    /// `Err` means the alert did not reach the kernel, and `WouldBlock` is one
+    /// of the ways — a socket that filled leaves the alert in userspace, and
+    /// the caller closes the fd immediately afterwards, so it is never sent at
+    /// all. That is a report, not a retry: the caller cannot make it succeed by
+    /// calling again, because by then the connection is gone. Reporting it is
+    /// the only thing that stops `tls.close` telling a program the peer was
+    /// told when it was not.
     fn send_close_notify(&mut self) -> io::Result<()> {
         self.session.send_close_notify();
-        match self.flush_out() {
-            // The alert is best-effort: a peer that has already gone away
-            // cannot be told anything, and that is not this program's failure.
-            Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(()),
-            other => other,
-        }
+        self.flush_out()
     }
 }
 
@@ -416,16 +429,26 @@ impl VM {
             .map_err(|_| TlsFail::InvalidServerName)?;
         let session = ClientConnection::new(config, name).map_err(TlsFail::Session)?;
 
-        // Take the cleartext entry out WITHOUT going through `evict_connection`:
-        // the fd survives into the TLS entry, so its poller registration is
-        // rebuilt under the new id rather than torn down and lost.
-        let Some(conn) = self.connections.remove(&id) else {
+        // Retire the cleartext id WITHOUT going through `evict_connection`: the
+        // fd survives into the TLS entry, so its poller registration is rebuilt
+        // under the new id rather than torn down and lost. The ID does not
+        // survive, though, and `retire_socket_id` is what makes those two facts
+        // separate — it fails every park on the id as it removes the entry. A
+        // sibling already parked in `socket.read` when a STARTTLS or a proxied
+        // `CONNECT` upgrades under it is woken here onto the gone-socket error;
+        // left behind, nothing could ever reach it and the program would never
+        // end.
+        let Some(conn) = self.retire_socket_id(id) else {
             return Err(TlsFail::Io(stale_socket()));
         };
         let owner = conn.owner;
         let ConnIo::Tcp(tcp) = conn.io else {
             // Put it back: a port is not something to secure, and losing the
-            // entry would leak the child.
+            // entry would leak the child. Any waiter the retire just woke
+            // re-runs, finds the entry where it left it and parks again — one
+            // wasted slice on a path a Scarlet program cannot reach anyway,
+            // since `tls.handshake` takes a `Socket` and a port handle carries
+            // `SocketKind::Port`.
             self.connections.insert(id, conn);
             return Err(TlsFail::Io(io::Error::other(
                 "tls.handshake applied to a port, not a TCP connection",
@@ -449,21 +472,39 @@ impl VM {
     /// `Op::TlsClose`: `[tls_socket] -> Result(Nil, TlsError)`. Sends
     /// `close_notify`, then evicts the connection exactly as `socket.close`
     /// does.
+    ///
+    /// **The connection closes either way, and the result says whether the peer
+    /// was told.** Those are two questions and this op answers the second,
+    /// because the first has no other answer: the fd is gone by the time this
+    /// returns and no retry can reach it. `Err` therefore means the alert did
+    /// not make it out, so the peer sees a stream that simply stops — byte for
+    /// byte what a truncation looks like, which is the one thing this op exists
+    /// to rule out. Swallowing that is what makes the `Err` arm of
+    /// `Result(Nil, TlsError)` unreachable and the signature a promise the body
+    /// never keeps.
+    ///
+    /// A handle the table no longer holds is still `Ok`: closing a connection
+    /// that is already closed is not a failure, and whatever the peer was told
+    /// was settled at the close that actually happened.
     pub(super) fn tls_close(&mut self, reds: &mut i32) -> VmResult<()> {
         *reds -= IO_REDUCTION_COST;
         let sock_val = self.pop()?;
         let sv = stream_handle(&sock_val, "tls.close")?;
-        if let Some(conn) = self.connections.get_mut(&sv.id)
-            && let ConnIo::Tls(tls) = &mut conn.io
-        {
-            // Best effort: the connection is going away regardless, and a peer
-            // that has already left cannot be told about it.
-            let _ = tls.send_close_notify();
-        }
+        let alert = match self.connections.get_mut(&sv.id).map(|c| &mut c.io) {
+            Some(ConnIo::Tls(tls)) => tls.send_close_notify(),
+            // Nothing to tell anyone: the id is stale, or it names an entry
+            // that was never a TLS session and so owes no alert.
+            _ => Ok(()),
+        };
         drop(self.evict_connection(sv.id));
-        let nil = self.make_nil()?;
-        let v = self.make_ok(nil)?;
-        self.stack.push(v);
+        match alert {
+            Ok(()) => {
+                let nil = self.make_nil()?;
+                let v = self.make_ok(nil)?;
+                self.stack.push(v);
+            }
+            Err(e) => self.push_tls_transport(e)?,
+        }
         Ok(())
     }
 
@@ -636,4 +677,343 @@ fn stream_handle(v: &Value, op: &'static str) -> VmResult<SocketValue> {
         return Ok(s);
     }
     Err(VmError::type_mismatch(op, "Socket", v))
+}
+
+#[cfg(test)]
+mod tests {
+    //! The write path's flush step, which is the whole of `tls.write`'s
+    //! documented guarantee that a returned `Ok` means the ciphertext is with
+    //! the kernel.
+    //!
+    //! It needs a peer that has stopped reading, so nothing above this file can
+    //! reach it: a Scarlet program cannot ask for a full socket, and every
+    //! other TLS test moves a few hundred bytes over loopback where the flush
+    //! always completes on its first try. Left uncovered, deleting the flush
+    //! arm outright kept all six of them green.
+    //!
+    //! The verdict is the returned [`Drain`] itself rather than anything timed
+    //! or counted, so a host whose socket buffers are too large to fill turns
+    //! this RED — the case where the mechanism under test is a no-op is not one
+    //! this can pass through.
+
+    use std::io::Read as _;
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use rustls::{ServerConfig, ServerConnection};
+    use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+
+    use super::super::io::{Drain, drain_and_flush};
+    use super::*;
+
+    /// One chunk of plaintext per `drain_and_flush` call. Under rustls's 64 KiB
+    /// send-buffer default, so a chunk is always accepted WHOLE while the
+    /// session's buffer starts empty — which makes `Drain::Park` unreachable
+    /// here, and every non-`Done` outcome attributable to the flush alone.
+    const CHUNK: usize = 60 * 1024;
+
+    /// Give up after this much plaintext. The peer never reads until told, so
+    /// the socket must fill long before it; not filling is a broken test, not a
+    /// passing one.
+    const CHUNKS: usize = 256;
+
+    /// The far end: it completes the handshake, then reads NOTHING until `go`
+    /// is dropped or sent to, and finally drains to EOF and reports what it
+    /// received.
+    struct Peer {
+        addr: SocketAddr,
+        go: mpsc::Sender<()>,
+        got: mpsc::Receiver<Vec<u8>>,
+    }
+
+    /// A self-signed leaf for `localhost` and the root a client trusts it by.
+    fn mint() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .expect("certificate parameters");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "localhost");
+        let key = rcgen::KeyPair::generate().expect("leaf key");
+        let cert = params.self_signed(&key).expect("self-sign leaf");
+        (
+            cert.der().clone(),
+            PrivateKeyDer::try_from(key.serialize_der()).expect("leaf key der"),
+        )
+    }
+
+    fn provider() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        });
+    }
+
+    fn start_peer(leaf: CertificateDer<'static>, key: PrivateKeyDer<'static>) -> Peer {
+        let config = Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![leaf], key)
+                .expect("server config"),
+        );
+
+        // A small receive buffer on the LISTENER, inherited by the accepted
+        // socket, so the writer's window stays small and the fill is quick and
+        // bounded. Without it loopback autotuning can grow the pair past
+        // anything this test is willing to write.
+        let sock = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )
+        .expect("listener socket");
+        let _ = sock.set_recv_buffer_size(4096);
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("loopback address");
+        sock.bind(&addr.into()).expect("bind");
+        sock.listen(8).expect("listen");
+        let listener: TcpListener = sock.into();
+        let addr = listener.local_addr().expect("local_addr");
+
+        let (go, go_rx) = mpsc::channel::<()>();
+        let (got_tx, got) = mpsc::channel::<Vec<u8>>();
+        thread::spawn(move || {
+            let Ok((mut sock, _)) = listener.accept() else {
+                return;
+            };
+            let Ok(mut conn) = ServerConnection::new(config) else {
+                return;
+            };
+            if conn.complete_io(&mut sock).is_err() {
+                return;
+            }
+            // Hold the stream unread. Every byte the client sends from here on
+            // stops in the kernel's buffers.
+            let _ = go_rx.recv();
+            // Spelled out rather than run through `rustls::Stream`, which folds
+            // "the socket ended" and "there is decrypted plaintext left" into
+            // one `Result` and drops the second when the first is an error. The
+            // count below is the assertion, so the peer must not lose a byte
+            // for reasons of its own.
+            let mut all = Vec::new();
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut drain = |conn: &mut ServerConnection, all: &mut Vec<u8>| {
+                while let Ok(n) = conn.reader().read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    all.extend_from_slice(&buf[..n]);
+                }
+            };
+            loop {
+                drain(&mut conn, &mut all);
+                match conn.read_tls(&mut sock) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if conn.process_new_packets().is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            drain(&mut conn, &mut all);
+            let _ = got_tx.send(all);
+        });
+
+        Peer { addr, go, got }
+    }
+
+    /// An established TLS connection to `peer`, non-blocking, in the shape the
+    /// VM holds one.
+    fn connect(peer: &Peer, root: CertificateDer<'static>) -> ConnIo {
+        let mut roots = RootCertStore::empty();
+        roots.add(root).expect("trust the leaf");
+        let config = Arc::new(
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        );
+        let name = ServerName::try_from("localhost").expect("server name");
+        let mut session = ClientConnection::new(config, name).expect("client session");
+        let mut tcp = TcpStream::connect(peer.addr).expect("connect");
+        // The handshake is not what is under test, so it runs blocking. The
+        // socket goes non-blocking straight afterwards, which is the state the
+        // VM's write path is written against.
+        session.complete_io(&mut tcp).expect("client handshake");
+        tcp.set_nonblocking(true).expect("non-blocking");
+        ConnIo::Tls(TlsIo {
+            tcp,
+            session: Box::new(session),
+        })
+    }
+
+    /// Write 60 KiB chunks at the stalled peer until the socket refuses one,
+    /// and return how much plaintext the session accepted before that.
+    ///
+    /// Every chunk is either wholly accepted and wholly flushed (`Done`) or
+    /// wholly accepted and left owing ciphertext (`Flushing`); the second is
+    /// what this is looking for, and reaching it leaves the connection with a
+    /// full socket underneath, which is the state both tests below need.
+    fn fill_until_flushing(conn: &mut ConnIo) -> usize {
+        let chunk = vec![0x5au8; CHUNK];
+        let mut sent = 0usize;
+        for _ in 0..CHUNKS {
+            match drain_and_flush(conn, std::slice::from_ref(&chunk)).expect("write") {
+                Drain::Done => sent += CHUNK,
+                Drain::Flushing => return sent + CHUNK,
+                Drain::Park { idx, offset } => panic!(
+                    "a chunk under rustls's send-buffer limit is accepted whole, \
+                     so `drain_write` cannot park; parking at ({idx}, {offset}) \
+                     after {sent} bytes means the session's buffer was left full \
+                     from the previous call — which is what happens when the \
+                     write path stops flushing"
+                ),
+            }
+        }
+        panic!(
+            "{} bytes went to a peer that is not reading without the socket ever \
+             filling: this host's buffers are too large for this test to \
+             exercise the flush at all",
+            CHUNKS * CHUNK
+        )
+    }
+
+    /// A write whose plaintext the session accepted whole, but whose ciphertext
+    /// the socket would not take, reports `Flushing` and NOT `Done` — and
+    /// `Flushing` is a park, so `tls.write` has not returned `Ok` yet.
+    ///
+    /// This is the difference between the documented guarantee and a lie: under
+    /// `Done` the caller is told the bytes are with the kernel while the
+    /// session is still holding them, and the only thing that would ever push
+    /// them is a later call the caller has no reason to make.
+    #[test]
+    fn a_write_the_socket_cannot_take_reports_flushing_not_done() {
+        provider();
+        let (leaf, key) = mint();
+        let peer = start_peer(leaf.clone(), key);
+        let mut conn = connect(&peer, leaf);
+
+        let total = fill_until_flushing(&mut conn);
+
+        let ConnIo::Tls(tls) = &conn else {
+            panic!("the connection under test is a TLS one");
+        };
+        assert!(
+            tls.session.wants_write(),
+            "`Flushing` means ciphertext is still owed; a session with nothing \
+             left to write should have come back `Done`"
+        );
+
+        // The resume path: the peer drains, and the re-run carries an EMPTY
+        // remainder — there is no plaintext left to send, so re-sending any
+        // would duplicate it — and only finishes the flush.
+        peer.go.send(()).expect("release the peer");
+        let empty: [&[u8]; 0] = [];
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match drain_and_flush(&mut conn, &empty).expect("flush") {
+                Drain::Done => break,
+                _ => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the flush never completed against a draining peer"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+
+        // End the stream with `close_notify` and a half-close, and collect the
+        // peer's count BEFORE dropping the socket.
+        //
+        // A bare `close(2)` here loses a deterministic 44 KiB of what was
+        // already on the wire, and none of it is about the flush: a rustls
+        // server sends session tickets straight after the handshake, this test
+        // never reads them, and Linux answers a close with unread data in the
+        // receive queue by sending RST — which discards the peer's queue along
+        // with it. `shutdown(Write)` sends FIN instead, so everything ahead of
+        // it is delivered.
+        let ConnIo::Tls(tls) = &mut conn else {
+            panic!("the connection under test is a TLS one");
+        };
+        tls.tcp
+            .set_nonblocking(false)
+            .expect("blocking for the alert");
+        tls.send_close_notify().expect("close_notify");
+        tls.tcp
+            .shutdown(std::net::Shutdown::Write)
+            .expect("half-close");
+        let got = peer
+            .got
+            .recv_timeout(Duration::from_secs(30))
+            .expect("peer");
+        drop(conn);
+        assert_eq!(
+            got.len(),
+            total,
+            "the flush completed, so every byte of every accepted write must \
+             have reached the peer before the socket closed"
+        );
+        assert!(
+            got.iter().all(|&b| b == 0x5a),
+            "the plaintext must arrive unaltered"
+        );
+    }
+
+    /// `tls.close` over a socket too full to take the alert reports `Err`, and
+    /// closes anyway.
+    ///
+    /// This is the input the `Err` arm of `Result(Nil, TlsError)` had never
+    /// had. `send_close_notify` used to map `WouldBlock` to `Ok` as "best
+    /// effort", and the very next line closed the fd — so the alert was not
+    /// merely delayed, it was never sent, while the caller was told the
+    /// shutdown was orderly. From the peer's side that is byte for byte a
+    /// truncation, which is the one thing `close_notify` exists to rule out.
+    ///
+    /// Both halves are asserted, because they are separate promises: the result
+    /// is `Err`, AND the connection is gone from the table regardless. A close
+    /// that reported a failure by not closing would be worse than the bug.
+    #[test]
+    fn a_close_notify_the_socket_refuses_is_reported_and_still_closes() {
+        use super::super::halt_test_vm;
+        use super::super::inspect::inspect;
+
+        provider();
+        let (leaf, key) = mint();
+        let peer = start_peer(leaf.clone(), key);
+        let mut conn = connect(&peer, leaf);
+        fill_until_flushing(&mut conn);
+
+        let mut vm = halt_test_vm();
+        let id = vm.alloc_socket_id();
+        assert!(
+            vm.track_connection(id, conn, 0).is_ok(),
+            "the poller must accept the connection"
+        );
+        vm.stack.push(Value::socket(SocketValue {
+            id,
+            kind: SocketKind::Tls,
+        }));
+
+        let mut reds = 0;
+        vm.tls_close(&mut reds)
+            .expect("tls.close must not halt the VM");
+
+        let result = vm.stack.last().expect("tls.close pushes a result").clone();
+        let rendered = inspect(&result, &vm.program);
+        // `inspect` wraps a nested variant across lines, so the shape is
+        // checked in two pieces rather than as one prefix.
+        assert!(
+            rendered.starts_with("Err(") && rendered.contains("Transport("),
+            "an alert the socket refused must be reported as the transport \
+             failure it is, not swallowed; got {rendered}"
+        );
+        assert!(
+            !vm.connections.contains_key(&id),
+            "the connection must be gone whatever the alert did — the result \
+             reports whether the peer was told, not whether the fd closed"
+        );
+        drop(peer);
+    }
 }
