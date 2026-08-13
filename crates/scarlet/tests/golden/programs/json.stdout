@@ -109,3 +109,10 @@ quoted double decode error: <root>: expected a quoted integer, found the string 
 quoted sign   decode error: <root>: expected a quoted integer, found the string "-"
 quoted empty  decode error: <root>: expected a quoted integer, found the string ""
 quoted words  decode error: <root>: expected a quoted integer, found the string "five"
+
+-- alternatives --
+alt plain     5
+alt quoted    5
+alt neither   decode error: <root>: expected an integer, found a boolean
+<root>: expected a quoted integer, found a boolean
+alt sole      decode error: <root>: expected an integer, found a boolean

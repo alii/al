@@ -385,3 +385,22 @@ reject_case! {
         "Unknown type 'http.Method'",
     ),
 }
+
+// Two `scarlet/json/decode` shapes the type system holds shut. Both are pinned
+// here rather than in `tests/programs/json.scrl` because neither program gets
+// far enough to print anything — the golden run can only witness decoders that
+// compile.
+reject_case! {
+    /// `Failure.found` is a `Found` and not free text, so a decoder cannot put
+    /// a sentence where the document's shape belongs.
+    decode_failure_found_rejects_free_text: (
+        "import scarlet/json/decode\n\ndecode.Failure([], 'a thing', 'a string')\n",
+        "expected 'Found', got 'String'",
+    ),
+    /// `one_of` takes its first alternative separately, so a union with nothing
+    /// to try is not a decoder that can be built.
+    decode_one_of_rejects_no_alternatives: (
+        "import scarlet/json/decode\n\ndecode.one_of([])\n",
+        "Expected 2 argument(s), got 1",
+    ),
+}

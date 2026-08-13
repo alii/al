@@ -28,11 +28,28 @@ pub type Segment {
 	At(index Int)
 }
 
+// What the document held where a failure happened.
+//
+// A closed set rather than a free string, so "the member was absent" is a
+// value a consumer can branch on rather than a sentence `field` happened to
+// write, and so every failure renders in one place instead of at each site
+// that builds one.
+pub type Found {
+	FoundKind(kind json.Kind)
+	FoundAbsent
+	// The right kind, the wrong content — a quoted integer that is not one.
+	FoundText(text String)
+}
+
 // One thing that was wrong, and where.
+//
+// `expected` stays a `String`: it describes the decoder, not the document, and
+// a caller's own decoder wants "a positive integer" — so giving it a closed
+// type would only add an escape hatch every caller-written decoder takes.
 pub type Failure {
 	path Array(Segment)
 	expected String
-	found String
+	found Found
 }
 
 // Reads a `Doc`, or says what was wrong with it. Opaque so the path-threading
@@ -73,7 +90,7 @@ fn segment_to_string(s Segment) String {
 // One line per failure: where, what was wanted, what was there.
 pub fn failure_to_string(f Failure) String {
 	Failure(path, expected, found) = f
-	'${path_to_string(path)}: expected ${expected}, found ${found}'
+	'${path_to_string(path)}: expected ${expected}, found ${found_to_string(found)}'
 }
 
 // Every failure, one per line.
@@ -87,9 +104,17 @@ pub fn failures_to_string(fs Array(Failure)) String {
 	}
 }
 
+pub fn found_to_string(f Found) String {
+	match f {
+		FoundKind(k) -> kind_to_string(k)
+		FoundAbsent -> 'no such member'
+		FoundText(t) -> t
+	}
+}
+
 // The name of what a `Doc` actually holds, for the `found` half of a failure.
-fn describe(d json.Doc) String {
-	match json.kind(d) {
+fn kind_to_string(k json.Kind) String {
+	match k {
 		json.NullKind -> 'null'
 		json.BoolKind -> 'a boolean'
 		json.IntKind -> 'an integer'
@@ -101,7 +126,7 @@ fn describe(d json.Doc) String {
 }
 
 fn one_failure(path Array(Segment), expected String, d json.Doc) Array(Failure) {
-	[Failure(path, expected, describe(d))]
+	[Failure(path, expected, FoundKind(json.kind(d)))]
 }
 
 // A decoder that ignores the document and succeeds.
@@ -154,7 +179,7 @@ pub fn int_string() Decoder(Int) {
 		None -> Err(one_failure(path, 'a quoted integer', doc))
 		Some(s) -> match parse_signed(s) {
 			Ok(n) -> Ok(n)
-			Err(Nil) -> Err([Failure(path, 'a quoted integer', 'the string "${s}"')])
+			Err(Nil) -> Err([Failure(path, 'a quoted integer', FoundText('the string "${s}"'))])
 		}
 	})
 }
@@ -269,7 +294,7 @@ pub fn field(name String, inner Decoder(a)) Decoder(a) {
 		match member(here, doc, name) {
 			Err(e) -> Err(e)
 			Ok(Some(child)) -> step(here, child)
-			Ok(None) -> Err([Failure(here, 'a member named "${name}"', 'no such member')])
+			Ok(None) -> Err([Failure(here, 'a member named "${name}"', FoundAbsent)])
 		}
 	})
 }
@@ -294,7 +319,7 @@ fn member(
 		Some(child) -> Ok(Some(child))
 		None -> match json.kind(doc) {
 			json.ObjectKind -> Ok(None)
-			_ -> Err([Failure(path, 'a member named "${name}"', describe(doc))])
+			_ -> Err([Failure(path, 'a member named "${name}"', FoundKind(json.kind(doc)))])
 		}
 	}
 }
@@ -394,8 +419,17 @@ fn collect_dict(
 
 // The first decoder that succeeds. If all of them fail, every failure is
 // reported — a union that matched nothing should say what each arm wanted.
-pub fn one_of(decoders Array(Decoder(a))) Decoder(a) {
-	Decoder(fn(path, doc) try_each(decoders, path, doc, []))
+//
+// The first alternative is a parameter of its own so that "no alternatives" is
+// not something this can be run with. `one_of([])` used to type-check and then
+// fail at decode time with a failure describing the decoder rather than the
+// document, which is not a `Found` at all.
+pub fn one_of(first Decoder(a), rest Array(Decoder(a))) Decoder(a) {
+	Decoder(step) = first
+	Decoder(fn(path, doc) match step(path, doc) {
+		Ok(v) -> Ok(v)
+		Err(e) -> try_each(rest, path, doc, e)
+	})
 }
 
 fn try_each(
@@ -405,10 +439,7 @@ fn try_each(
 	errs Array(Failure),
 ) Result(a, Array(Failure)) {
 	match decoders {
-		[] -> match errs {
-			[] -> Err([Failure(path, 'any of no decoders', 'nothing to try')])
-			_ -> Err(errs)
-		}
+		[] -> Err(errs)
 		[head, ..tail] -> {
 			Decoder(step) = head
 			match step(path, doc) {
@@ -424,10 +455,7 @@ fn try_each(
 pub fn tagged(tag String, pick fn(String) Result(Decoder(a), Nil)) Decoder(a) {
 	then(field(tag, string_value()), fn(t) match pick(t) {
 		Ok(dec) -> dec
-		Err(Nil) ->
-			Decoder(
-				fn(path, _doc) Err([Failure([..path, Key(tag)], 'a known tag', 'the tag "${t}"')]),
-			)
+		Err(Nil) -> unknown_tag(tag, 'the tag "${t}"')
 	})
 }
 
@@ -435,11 +463,12 @@ pub fn tagged(tag String, pick fn(String) Result(Decoder(a), Nil)) Decoder(a) {
 pub fn tagged_int(tag String, pick fn(Int) Result(Decoder(a), Nil)) Decoder(a) {
 	then(field(tag, int()), fn(t) match pick(t) {
 		Ok(dec) -> dec
-		Err(Nil) ->
-			Decoder(
-				fn(path, _doc) Err([Failure([..path, Key(tag)], 'a known tag', 'the tag ${t}')]),
-			)
+		Err(Nil) -> unknown_tag(tag, 'the tag ${t}')
 	})
+}
+
+fn unknown_tag(tag String, found String) Decoder(a) {
+	Decoder(fn(path, _doc) Err([Failure([..path, Key(tag)], 'a known tag', FoundText(found))]))
 }
 
 // Decode at a path of member names, for reaching one value out of a nested

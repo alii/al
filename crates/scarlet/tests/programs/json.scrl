@@ -449,3 +449,18 @@ line('quoted double ', shown('"--5"', decode.int_string()))
 line('quoted sign   ', shown('"-"', decode.int_string()))
 line('quoted empty  ', shown('""', decode.int_string()))
 line('quoted words  ', shown('"five"', decode.int_string()))
+
+// ------------------------------------------------------------ alternatives --
+
+println('')
+println('-- alternatives --')
+
+// The first alternative is a parameter of its own, so there is no `one_of`
+// with nothing to try. When no arm matches, every arm's failure is reported —
+// a union that matched nothing should say what each arm wanted.
+id_decoder = decode.one_of(decode.int(), [decode.int_string()])
+
+line('alt plain     ', shown('5', id_decoder))
+line('alt quoted    ', shown('"5"', id_decoder))
+line('alt neither   ', shown('true', id_decoder))
+line('alt sole      ', shown('true', decode.one_of(decode.int(), [])))
