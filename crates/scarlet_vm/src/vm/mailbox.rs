@@ -266,7 +266,7 @@ impl Runtime {
     /// Take a slot and install an empty mailbox received on by `owner`.
     /// Shared by both kinds of subject: who closes it is the caller's
     /// business — the owning box for `subject()`, the tree for an address.
-    pub(super) fn alloc_mailbox(&self, owner: u64) -> u64 {
+    fn alloc_mailbox(&self, owner: u64) -> u64 {
         let index = match lock(&self.mailboxes.free).pop_front() {
             Some(i) => i,
             None => {

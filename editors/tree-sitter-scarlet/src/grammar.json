@@ -3335,7 +3335,7 @@
       "type": "TOKEN",
       "content": {
         "type": "PATTERN",
-        "value": "\\d+(\\.\\d+)?"
+        "value": "\\d+(_\\d+)*(\\.\\d+(_\\d+)*)?"
       }
     },
     "line_comment": {
