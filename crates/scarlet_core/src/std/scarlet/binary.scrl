@@ -1,4 +1,5 @@
 import scarlet/array
+import scarlet/int
 
 @vm(binary__from_string)
 pub fn from_string(s String) Binary
@@ -138,3 +139,23 @@ pub fn to_ascii_lower(b Binary) Binary
 
 @vm(binary__from_int_ascii)
 pub fn from_int_ascii(n Int, radix Radix) Binary
+
+// Two uppercase hex digits of the low 8 bits of `n`. Always exactly two
+// bytes: `hex_byte(13)` is `<<'0D'>>`, `hex_byte(255)` is `<<'FF'>>`.
+// `from_int_ascii(_, Hex)` is lowercase and drops the leading zero of a
+// value under 16, so a `%XX` encoder cannot use it. RFC 3986 §2.1 and
+// RFC 7230 both prefer uppercase.
+pub fn hex_byte(n Int) Binary {
+	b = int.bitwise_and(n, 255)
+	<<hex_digit(int.bitwise_shift_right(b, 4)):8, hex_digit(int.bitwise_and(b, 15)):8>>
+}
+
+fn hex_digit(n Int) Int {
+	if n < 10 {
+		// '0' is 48.
+		48 + n
+	} else {
+		// 'A' is 65, and this range starts at 10.
+		55 + n
+	}
+}

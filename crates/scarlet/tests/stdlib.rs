@@ -784,6 +784,27 @@ fn stdlib_binary_ascii_builtins() {
     );
 }
 
+// Uppercase, zero-padded two-digit hex of the low 8 bits. from_int_ascii
+// is lowercase and drops the leading zero of a value under 16, so %0D%0A
+// is unreachable from it (T-197). The last line is the control: that
+// existing spelling must stay as it is.
+#[test]
+fn stdlib_binary_hex_byte() {
+    run_outputs(
+        "import scarlet/binary.{Hex}\n\
+         pub fn main() {\n\
+         \tprintln(binary.to_string(binary.hex_byte(10)))\n\
+         \tprintln(binary.to_string(binary.hex_byte(13)))\n\
+         \tprintln(binary.to_string(binary.hex_byte(255)))\n\
+         \tprintln(binary.to_string(binary.hex_byte(0)))\n\
+         \tprintln(binary.to_string(binary.hex_byte(256)))\n\
+         \tprintln(binary.to_string(binary.hex_byte(0 - 1)))\n\
+         \tprintln(binary.to_string(binary.from_int_ascii(13, Hex)))\n\
+         }\n",
+        "Ok(0A)\nOk(0D)\nOk(FF)\nOk(00)\nOk(00)\nOk(FF)\nOk(d)\n",
+    );
+}
+
 #[test]
 fn stdlib_float() {
     run_outputs(
