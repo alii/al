@@ -155,9 +155,9 @@ fn a_big_int_constant_is_pooled_once() {
     // 600 over a 520-entry stdlib, and `scarlet/http/url` + `scarlet/http/client`
     // added 84 between them and tripped it while dedup was working perfectly.
     //
-    // 712 entries as measured when the ceiling was last moved. This number
-    // tracks how big the stdlib is and will need moving again; it is not a
-    // budget anyone should be optimizing against.
+    // 714 entries as measured. This number tracks how big the stdlib is and
+    // will need moving again; it is not a budget anyone should be optimizing
+    // against.
     assert!(
         p.constants.len() < 1000,
         "pool regressed to per-use-site duplicates: {} entries",

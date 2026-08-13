@@ -110,11 +110,28 @@ pub fn authority(u Url) Binary {
 pub fn parse(text String) Result(Url, UrlError) {
 	b = binary.from_string(text)
 	sep <- result.then(scheme_sep(b))
-	scheme <- result.then(scheme_of(binary.slice_bytes(b, 0, sep)))
+	// `index_of` answered `sep` as a byte index inside `b` with `://` still to
+	// follow, so `0..sep` is in range and the Err arm cannot fire. That is an
+	// argument in a comment rather than a type — T-286. The fallback is loud
+	// anyway: `scheme_of(EMPTY)` is `UnsupportedScheme`, not a default scheme.
+	scheme_text = match binary.slice_bytes(b, 0, sep) {
+		Ok(s) -> s
+		Err(Nil) -> EMPTY
+	}
+	scheme <- result.then(scheme_of(scheme_text))
 	authority_start = sep + 3
 	size = binary.byte_size(b)
 	authority_end = first_of(b, authority_start, size)
-	authority = binary.slice_bytes(b, authority_start, authority_end - authority_start)
+	// `first_of` is a `min` of positions each of which is either an `index_of`
+	// hit at or after `authority_start` or `size` itself, so
+	// `authority_start <= authority_end <= size`; and `b` came from
+	// `from_string`, so `size` bytes is the whole of it. The Err arm cannot
+	// fire — again an argument in a comment, T-286. The fallback is loud:
+	// an empty authority is `EmptyHost`.
+	authority = match binary.slice_bytes(b, authority_start, authority_end - authority_start) {
+		Ok(a) -> a
+		Err(Nil) -> EMPTY
+	}
 	pair <- result.then(split_host_port(authority))
 	port <- result.then(port_of(pair.port_text, scheme))
 	host <- result.then(host_of(pair.host))
@@ -184,8 +201,15 @@ fn split_bracketed(authority Binary) Result(HostPort, UrlError) {
 	match binary.index_of(authority, RBRACKET, 0) {
 		None -> Err(UnclosedIpv6)
 		Some(close) -> {
-			inside = binary.slice_bytes(authority, 1, close - 1)
-			rest = binary.slice_bytes(authority, close + 1, binary.byte_size(authority) - close - 1)
+			// `split_bracketed` is only reached when `authority` starts with
+			// `[`, so the first `]` is at `close >= 1` and `1..close` is
+			// inside it. The Err arm cannot fire — an argument in a comment
+			// rather than a type, T-286; the fallback reports `EmptyHost`.
+			inside = match binary.slice_bytes(authority, 1, close - 1) {
+				Ok(v) -> v
+				Err(Nil) -> EMPTY
+			}
+			rest = binary.drop_bytes(authority, close + 1)
 			// After `]` the authority is over: either nothing, or `:port`.
 			// Anything else (`[::1]x`) is a malformed port region, not a host,
 			// so it is reported as one instead of falling through to a
@@ -207,10 +231,16 @@ fn split_bracketed(authority Binary) Result(HostPort, UrlError) {
 fn split_at_colon(authority Binary, colon Option(Int)) HostPort {
 	match colon {
 		None -> HostPort(host: authority, port_text: EMPTY)
+		// `index_of` answered `i` as a byte index inside `authority`, so `0..i`
+		// is in range and the Err arm cannot fire — an argument in a comment
+		// rather than a type, T-286. The fallback reports `EmptyHost`.
 		Some(i) ->
 			HostPort(
-				host: binary.slice_bytes(authority, 0, i),
-				port_text: binary.slice_bytes(authority, i, binary.byte_size(authority) - i),
+				host: match binary.slice_bytes(authority, 0, i) {
+					Ok(h) -> h
+					Err(Nil) -> EMPTY
+				},
+				port_text: binary.drop_bytes(authority, i),
 			)
 	}
 }
@@ -222,7 +252,7 @@ fn port_of(port_text Binary, scheme Scheme) Result(Int, UrlError) {
 	if binary.byte_size(port_text) == 0 {
 		Ok(default_port(scheme))
 	} else {
-		digits = binary.slice_bytes(port_text, 1, binary.byte_size(port_text) - 1)
+		digits = binary.drop_bytes(port_text, 1)
 		// `parse_int` is not enough on its own: the digit run is checked here
 		// so a sign or whitespace it might accept cannot become a port.
 		if binary.byte_size(digits) == 0 || !all_digits(digits, 0, binary.byte_size(digits)) {
@@ -266,7 +296,16 @@ fn host_of(host Binary) Result(String, UrlError) {
 // still has to put a path on the request line.
 fn target_of(b Binary, from Int, size Int) Binary {
 	end = at_or(b, HASH, from, size)
-	raw = binary.slice_bytes(b, from, end - from)
+	// `from` is where the authority ended and `end` is either an `index_of`
+	// hit at or after it or `size`, so `from <= end <= size`; `b` came from
+	// `from_string`, so `size` bytes is the whole of it. The Err arm cannot
+	// fire — an argument in a comment rather than a type, T-286. This is the
+	// one fallback here that is quiet rather than loud: an empty window
+	// becomes `ROOT`, exactly as a genuinely empty path does.
+	raw = match binary.slice_bytes(b, from, end - from) {
+		Ok(v) -> v
+		Err(Nil) -> EMPTY
+	}
 	if binary.byte_size(raw) == 0 {
 		ROOT
 	} else if binary.byte_at(raw, 0) == 63 {

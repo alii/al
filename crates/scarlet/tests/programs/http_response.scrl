@@ -32,6 +32,7 @@ import scarlet/int
 import scarlet/http/url
 import scarlet/net/socket.{Closed, Data, Read}
 import scarlet/process.{Subject}
+import scarlet/result
 import scarlet/string
 
 fn str(b Binary) String {
@@ -52,7 +53,7 @@ fn vis_from(b Binary, i Int, len Int, acc String) String {
 			10 -> '\\n'
 			9 -> '\\t'
 			0 -> '\\0'
-			_ -> binary.to_string(binary.slice_bytes(b, i, 1)) or '?'
+			_ -> result.then(binary.slice_bytes(b, i, 1), binary.to_string) or '?'
 		}
 		vis_from(b, i + 1, len, '${acc}${piece}')
 	}
@@ -157,12 +158,15 @@ fn wire_loop(inbox Subject(Wire), script Binary, written Binary) Nil {
 				process.send(reply, Closed)
 				wire_loop(inbox, script, written)
 			} else {
-				process.send(reply, Data(binary.slice_bytes(script, 0, n)))
-				wire_loop(
-					inbox,
-					binary.slice_bytes(script, n, binary.byte_size(script) - n),
-					written,
-				)
+				// `n = min(max, byte_size(script))` and `n > 0` here, so
+				// `0..n` is inside `script` and the Err arm cannot fire — an
+				// argument in a comment rather than a type, T-286.
+				chunk = match binary.slice_bytes(script, 0, n) {
+					Ok(v) -> v
+					Err(Nil) -> <<>>
+				}
+				process.send(reply, Data(chunk))
+				wire_loop(inbox, binary.drop_bytes(script, n), written)
 			}
 		}
 		Wrote(bytes) -> wire_loop(inbox, script, binary.append(written, bytes))
@@ -326,10 +330,17 @@ pub fn main() {
 	println('== consumed threads to the body ==')
 	framed = <<'HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello-and-then-some'>>
 	match h1.parse_response(framed, 0) {
-		ResponseDone(_, _, _, _, _, consumed) ->
-			println('body starts at ${consumed}: ${q(
-				binary.slice_bytes(framed, consumed, 5),
-			)}')
+		ResponseDone(_, _, _, _, _, consumed) -> {
+			// NOT an argued-unreachable arm. `5` is this case's advertised
+			// Content-Length, so a `consumed` that does not thread to the body
+			// is the exact failure this line exists to catch — it has to print
+			// as an error rather than as an empty window.
+			body = match binary.slice_bytes(framed, consumed, 5) {
+				Ok(v) -> q(v)
+				Err(Nil) -> 'OUT OF RANGE'
+			}
+			println('body starts at ${consumed}: ${body}')
+		}
 		other -> println('unexpected: ${other}')
 	}
 

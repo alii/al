@@ -374,7 +374,7 @@ type Head {
 fn read_head(io Io, buf Binary, max_body Int) Result(Head, ClientError) {
 	match h1.parse_response(buf, 0) {
 		ResponseDone(version, code, reason, hs, flags, consumed) -> {
-			rest = binary.slice_bytes(buf, consumed, binary.byte_size(buf) - consumed)
+			rest = binary.drop_bytes(buf, consumed)
 			if code >= 100 && code < 200 {
 				// An interim response. It has no body and is not the answer,
 				// so it is dropped and the real head is parsed from what
@@ -443,7 +443,16 @@ fn read_body(
 
 fn read_exactly(io Io, buf Binary, n Int, limit Int) Result(Binary, ClientError) {
 	if binary.byte_size(buf) >= n {
-		Ok(binary.slice_bytes(buf, 0, n))
+		// The guard above is one half of the bound and `framing` is the other:
+		// it rejects a negative Content-Length as `Invalid` before it can
+		// become `BodyLength`, so `0 <= n <= byte_size(buf)` and the Err arm
+		// cannot fire. An argument in a comment rather than a type — T-286.
+		// The arm is still an error rather than a truncated body, because the
+		// only way to reach it is a length the framing should have refused.
+		match binary.slice_bytes(buf, 0, n) {
+			Ok(v) -> Ok(v)
+			Err(Nil) -> Err(MalformedResponse(BadFraming))
+		}
 	} else {
 		more <- result.then(read_more(io, buf, limit))
 		read_exactly(io, more, n, limit)
