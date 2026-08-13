@@ -86,21 +86,106 @@ struct RunArgs {
     args: Vec<String>,
 }
 
-#[derive(Args)]
+/// What `al fmt` does with each file it formatted.
+#[derive(Clone, Copy)]
+enum FileAction {
+    /// Rewrite the file, when formatting changed it.
+    WriteBack,
+    /// `--stdout`: print the formatted text and leave the file alone.
+    Print,
+    /// `--check`: name the files that need formatting and exit 1 if any do.
+    Check,
+}
+
+/// What `al fmt` was pointed at, and what to do with it.
+///
+/// The three flags that select these are mutually exclusive, so the parse
+/// boundary is the last place a combination of them can be expressed:
+/// [`FmtArgs::target`] is what `cmd_fmt` reads. `--stdin --stdout` used to
+/// parse and then silently ignore `--stdout`, and `path` was only excluded
+/// alongside `--stdin` by a clap attribute; neither has a spelling here.
+enum FmtTarget {
+    /// `--stdin`: format stdin and print the result. Takes no path.
+    Stdin,
+    /// Walk `path` (default `.`) for `.scrl` files and apply `action` to each.
+    Files {
+        path: Option<String>,
+        action: FileAction,
+    },
+}
+
 struct FmtArgs {
-    path: Option<String>,
-    /// Print formatted output instead of writing to files
-    #[arg(long)]
-    stdout: bool,
-    /// Read input from stdin instead of a file
-    #[arg(long, conflicts_with_all = ["check", "path"])]
-    stdin: bool,
-    /// Check if files are formatted (exit 1 if not)
-    #[arg(long, conflicts_with = "stdout")]
-    check: bool,
-    /// Print debug information about tokens
-    #[arg(long)]
+    target: FmtTarget,
+    /// `--debug`: dump the token stream of each input before formatting it.
     debug: bool,
+}
+
+/// Hand-written because `FmtArgs` holds [`FmtTarget`] rather than one bool per
+/// flag, which no `#[derive(Args)]` spelling produces. The `Command` this
+/// builds is what `--help` and `scarlet man` render, so each arg keeps its
+/// help text.
+impl clap::FromArgMatches for FmtArgs {
+    fn from_arg_matches(m: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        let target = if m.get_flag("stdin") {
+            FmtTarget::Stdin
+        } else {
+            FmtTarget::Files {
+                path: m.get_one::<String>("path").cloned(),
+                action: if m.get_flag("check") {
+                    FileAction::Check
+                } else if m.get_flag("stdout") {
+                    FileAction::Print
+                } else {
+                    FileAction::WriteBack
+                },
+            }
+        };
+        Ok(FmtArgs {
+            target,
+            debug: m.get_flag("debug"),
+        })
+    }
+
+    fn update_from_arg_matches(&mut self, m: &clap::ArgMatches) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(m)?;
+        Ok(())
+    }
+}
+
+impl Args for FmtArgs {
+    fn augment_args(cmd: clap::Command) -> clap::Command {
+        cmd.arg(clap::Arg::new("path").value_name("PATH").index(1))
+            .arg(
+                clap::Arg::new("stdout")
+                    .long("stdout")
+                    .help("Print formatted output instead of writing to files")
+                    .action(clap::ArgAction::SetTrue)
+                    .conflicts_with_all(["check", "stdin"]),
+            )
+            .arg(
+                clap::Arg::new("stdin")
+                    .long("stdin")
+                    .help("Read input from stdin instead of a file")
+                    .action(clap::ArgAction::SetTrue)
+                    .conflicts_with_all(["check", "path", "stdout"]),
+            )
+            .arg(
+                clap::Arg::new("check")
+                    .long("check")
+                    .help("Check if files are formatted (exit 1 if not)")
+                    .action(clap::ArgAction::SetTrue),
+            )
+            .arg(
+                clap::Arg::new("debug")
+                    .long("debug")
+                    .help("Print debug information about tokens")
+                    .action(clap::ArgAction::SetTrue),
+            )
+    }
+
+    fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
+        Self::augment_args(cmd)
+    }
 }
 
 /// Resolve a diagnostic's module provenance to (path, text) so it renders
@@ -329,10 +414,10 @@ fn main() -> process::ExitCode {
         Some(Commands::Build { entrypoint }) => {
             eprintln!("warning: `al build` is deprecated; use `al fmt --stdout <file>`");
             cmd_fmt(FmtArgs {
-                path: Some(entrypoint),
-                stdout: true,
-                stdin: false,
-                check: false,
+                target: FmtTarget::Files {
+                    path: Some(entrypoint),
+                    action: FileAction::Print,
+                },
                 debug: false,
             });
         }
@@ -536,47 +621,53 @@ fn compile_one(
     }
 }
 
-fn cmd_fmt(args: FmtArgs) {
-    if args.stdin {
-        let mut content = String::new();
-        if let Err(e) = io::stdin().read_to_string(&mut content) {
-            die(format!("Error reading stdin: {e}"));
-        }
-        if args.debug {
-            dump_tokens(&content);
-        }
-        match formatter::format(&content) {
-            formatter::FormatResult::Formatted { output } => {
-                print!("{output}");
-                let _ = io::stdout().flush();
-            }
-            formatter::FormatResult::ParseFailed { errors } => {
-                for d in &errors {
-                    eprintln!("{}", render_fmt_diagnostic("stdin", d));
-                }
-                process::exit(1);
-            }
-            formatter::FormatResult::CommentsLost { comment } => {
-                // Pass the input through untouched so no comment is deleted.
-                eprintln!(
-                    "formatter bug: formatting would delete the comment `{comment}`; input left unchanged"
-                );
-                print!("{content}");
-                let _ = io::stdout().flush();
-                process::exit(1);
-            }
-            formatter::FormatResult::OutputInvalid { detail } => {
-                // Pass the input through so valid source is never replaced.
-                eprintln!("formatter bug: {detail}; input left unchanged");
-                print!("{content}");
-                let _ = io::stdout().flush();
-                process::exit(1);
-            }
-        }
-        return;
+/// `al fmt --stdin`: format stdin and print the result. Separate from the file
+/// walk because there is no file to write back to, check, or name in an error.
+fn fmt_stdin(debug: bool) {
+    let mut content = String::new();
+    if let Err(e) = io::stdin().read_to_string(&mut content) {
+        die(format!("Error reading stdin: {e}"));
     }
+    if debug {
+        dump_tokens(&content);
+    }
+    match formatter::format(&content) {
+        formatter::FormatResult::Formatted { output } => {
+            print!("{output}");
+            let _ = io::stdout().flush();
+        }
+        formatter::FormatResult::ParseFailed { errors } => {
+            for d in &errors {
+                eprintln!("{}", render_fmt_diagnostic("stdin", d));
+            }
+            process::exit(1);
+        }
+        formatter::FormatResult::CommentsLost { comment } => {
+            // Pass the input through untouched so no comment is deleted.
+            eprintln!(
+                "formatter bug: formatting would delete the comment `{comment}`; input left unchanged"
+            );
+            print!("{content}");
+            let _ = io::stdout().flush();
+            process::exit(1);
+        }
+        formatter::FormatResult::OutputInvalid { detail } => {
+            // Pass the input through so valid source is never replaced.
+            eprintln!("formatter bug: {detail}; input left unchanged");
+            print!("{content}");
+            let _ = io::stdout().flush();
+            process::exit(1);
+        }
+    }
+}
 
-    let path = args.path.as_deref().unwrap_or(".");
+fn cmd_fmt(args: FmtArgs) {
+    let (path, action) = match args.target {
+        FmtTarget::Stdin => return fmt_stdin(args.debug),
+        FmtTarget::Files { path, action } => (path, action),
+    };
+
+    let path = path.as_deref().unwrap_or(".");
 
     let files = find_scarlet_files(path).unwrap_or_else(|e| die(e));
 
@@ -626,20 +717,24 @@ fn cmd_fmt(args: FmtArgs) {
             }
             formatter::FormatResult::Formatted { output } => {
                 let changed = output != content;
-                if args.check {
-                    if changed {
-                        println!("{} needs formatting", file.display());
-                        needs_formatting = true;
+                match action {
+                    FileAction::Check => {
+                        if changed {
+                            println!("{} needs formatting", file.display());
+                            needs_formatting = true;
+                        }
                     }
-                } else if args.stdout {
-                    print!("{output}");
-                } else if changed {
-                    if let Err(e) = fs::write(file, &output) {
-                        eprintln!("Error writing {}: {e}", file.display());
-                        has_errors = true;
-                        continue;
+                    FileAction::Print => print!("{output}"),
+                    FileAction::WriteBack => {
+                        if changed {
+                            if let Err(e) = fs::write(file, &output) {
+                                eprintln!("Error writing {}: {e}", file.display());
+                                has_errors = true;
+                                continue;
+                            }
+                            println!("Formatted {}", file.display());
+                        }
                     }
-                    println!("Formatted {}", file.display());
                 }
             }
         }
@@ -649,7 +744,7 @@ fn cmd_fmt(args: FmtArgs) {
         process::exit(1);
     }
 
-    if args.check && needs_formatting {
+    if matches!(action, FileAction::Check) && needs_formatting {
         process::exit(1);
     }
 }
