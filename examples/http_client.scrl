@@ -202,7 +202,12 @@ fn read_body(
 		Length(n) -> {
 			avail = binary.byte_size(buf) - consumed
 			buffered = int.min(avail, n)
-			head_bytes = binary.slice_bytes(buf, consumed, buffered)
+			// `buffered <= avail == byte_size(buf) - consumed`, so the window
+			// ends inside `buf` and the Err arm is unreachable.
+			head_bytes = match binary.slice_bytes(buf, consumed, buffered) {
+				Ok(v) -> v
+				Err(Nil) -> <<>>
+			}
 			rest = body.content_length(sock, n - buffered, deadline)
 			match body.collect(rest, MAX_BODY) {
 				Ok(tail) -> Ok(binary.append(head_bytes, tail))

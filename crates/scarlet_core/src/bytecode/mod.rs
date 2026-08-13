@@ -67,7 +67,7 @@ fn builtin_op(name: &str) -> Option<Op> {
         "binary__to_string" => Op::BinToString,
         "binary__bit_size" => Op::BinBitSize,
         "binary__byte_size" => Op::BinByteSize,
-        "binary__slice" => Op::BinSlice,
+        "binary__slice_bits" => Op::BinSlice,
         "binary__append" => Op::BinAppend,
         "binary__index_of" => Op::BinIndexOf,
         "binary__byte_at" => Op::BinByteAt,

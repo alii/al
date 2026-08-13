@@ -51,7 +51,10 @@ field name:           Ok(Content-Length)
 lowercased:           Ok(content-length)
 is content-length:    True
 is content-type:      False
-past the end:         <<>>
+past the end:         Err(Nil)
+one byte over:        Err(Nil)
+drop 36:              <<102, 13, 10>>
+drop 900:             <<>>
 byte_at 0:            67
 byte_at 900:          -1
 parse_int(Dec):       Ok(4210)

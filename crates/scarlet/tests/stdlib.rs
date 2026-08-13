@@ -394,11 +394,11 @@ fn stdlib_binary() {
         "import scarlet/binary\n\
          pub fn main() {\n\
          \tb = binary.from_string('ABC')\n\
-         \tprintln(binary.slice(b, 8, 8))\n\
-         \tprintln(binary.slice(b, 0, 99))\n\
+         \tprintln(binary.slice_bits(b, 8, 8))\n\
+         \tprintln(binary.slice_bits(b, 0, 99))\n\
          \tjoined = binary.append(binary.from_string('AB'), binary.from_string('C'))\n\
          \tprintln(binary.to_string(joined))\n\
-         \tprintln(binary.bit_size(binary.slice(b, 0, 5) or binary.from_string('')))\n\
+         \tprintln(binary.bit_size(binary.slice_bits(b, 0, 5) or binary.from_string('')))\n\
          }\n",
         "Ok(<<66>>)\nErr(Nil)\nOk(ABC)\n5\n",
     );
@@ -447,7 +447,7 @@ fn stdlib_binary() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary.slice(binary.from_string('ABC'), 0 - 1, 8))\n\
+         \tprintln(binary.slice_bits(binary.from_string('ABC'), 0 - 1, 8))\n\
          }\n",
         "Err(Nil)\n",
     );
@@ -455,6 +455,89 @@ fn stdlib_binary() {
         "import scarlet/net/socket.{Socket}\n\
          fn f(c Socket) Nil { socket.write(c, 'nope') or Nil }\n",
         "Type mismatch",
+    );
+}
+
+/// The unit a window is measured in lives in the function's name, and the two
+/// names differ by a factor of eight. Before this, `slice` was bit-indexed and
+/// `byte_size` answered in bytes, so a byte-indexed caller of `slice` read an
+/// eighth of the window it asked for and was told nothing: `slice(b, 0, 2)`
+/// answered `Ok(<<0:size(2)>>)`, a valid binary, rather than the first two
+/// bytes. The old spelling no longer exists, so that call is now a compile
+/// error rather than a wrong answer.
+#[test]
+fn stdlib_binary_slice_units() {
+    // The name `slice` is gone. This is the guard on reintroducing it: a
+    // function of that name could only pick one of the two units, and the
+    // callers meaning the other one would keep compiling.
+    check_rejects(
+        "import scarlet/binary\n\
+         pub fn main() { println(binary.slice(<<1, 2, 3, 4, 5>>, 0, 2)) }\n",
+        // Spelled out: bare `slice` is a substring of `slice_bits`, so the
+        // loose form would pass on a diagnostic about a different name.
+        "has no member 'slice'",
+    );
+    // Both units, over the same measured windows from T-208, side by side.
+    run_outputs(
+        "import scarlet/binary\n\
+         pub fn main() {\n\
+         \tb = <<1, 2, 3, 4, 5>>\n\
+         \tprintln(binary.slice_bytes(b, 0, 2))\n\
+         \tprintln(binary.slice_bits(b, 0, 2))\n\
+         \tprintln(binary.slice_bytes(b, 1, 2))\n\
+         \tprintln(binary.slice_bits(b, 8, 16))\n\
+         \tprintln(binary.slice_bytes(b, 0, 5))\n\
+         \tprintln(binary.slice_bits(b, 0, 40))\n\
+         }\n",
+        "Ok(<<1, 2>>)\nOk(<<0:size(2)>>)\nOk(<<2, 3>>)\nOk(<<2, 3>>)\n\
+         Ok(<<1, 2, 3, 4, 5>>)\nOk(<<1, 2, 3, 4, 5>>)\n",
+    );
+    // T-214: every out-of-range case that used to collapse to `<<>>` — one
+    // byte over, wholly past the end, negative offset, negative length. The
+    // last two are why a Gleam `slice(b, byte_size(b), -n)` cannot be
+    // transliterated: it is an error here, not a backwards window.
+    run_outputs(
+        "import scarlet/binary\n\
+         pub fn main() {\n\
+         \tb = <<1, 2, 3, 4, 5>>\n\
+         \tprintln(binary.slice_bytes(b, 4, 1))\n\
+         \tprintln(binary.slice_bytes(b, 4, 2))\n\
+         \tprintln(binary.slice_bytes(b, 5, 1))\n\
+         \tprintln(binary.slice_bytes(b, 0 - 1, 2))\n\
+         \tprintln(binary.slice_bytes(b, 5, 0 - 4))\n\
+         }\n",
+        "Ok(<<5>>)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\n",
+    );
+    // `byte_size` rounds up, so the last byte of a 12-bit binary is not a
+    // whole byte and is not addressable by slice_bytes. Reaching it is what
+    // slice_bits is for.
+    run_outputs(
+        "import scarlet/binary\n\
+         pub fn main() {\n\
+         \tb = <<1, 2:4>>\n\
+         \tprintln(binary.byte_size(b))\n\
+         \tprintln(binary.slice_bytes(b, 0, 2))\n\
+         \tprintln(binary.slice_bits(b, 8, 4))\n\
+         }\n",
+        "2\nErr(Nil)\nOk(<<2:size(4)>>)\n",
+    );
+    // drop_bytes is total because it is given a position, not a length: there
+    // is no requested size for the answer to fall short of. Past the end the
+    // remainder really is empty, and it reaches the trailing bits that
+    // slice_bytes cannot.
+    run_outputs(
+        "import scarlet/binary\n\
+         import scarlet/string\n\
+         pub fn main() {\n\
+         \tb = <<1, 2, 3, 4, 5>>\n\
+         \tprintln(string.inspect(binary.drop_bytes(b, 0)))\n\
+         \tprintln(string.inspect(binary.drop_bytes(b, 3)))\n\
+         \tprintln(string.inspect(binary.drop_bytes(b, 5)))\n\
+         \tprintln(string.inspect(binary.drop_bytes(b, 900)))\n\
+         \tprintln(string.inspect(binary.drop_bytes(b, 0 - 2)))\n\
+         \tprintln(binary.bit_size(binary.drop_bytes(<<1, 2:4>>, 1)))\n\
+         }\n",
+        "<<1, 2, 3, 4, 5>>\n<<4, 5>>\n<<>>\n<<>>\n<<1, 2, 3, 4, 5>>\n4\n",
     );
 }
 

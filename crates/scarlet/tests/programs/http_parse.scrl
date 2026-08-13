@@ -13,6 +13,7 @@
 // the connection driver against a loopback listener.
 
 import scarlet/binary
+import scarlet/result
 import scarlet/string
 import scarlet/array
 import scarlet/http/h1.{
@@ -55,7 +56,7 @@ fn vis_from(b Binary, i Int, len Int, acc String) String {
 			10 -> '\\n'
 			9 -> '\\t'
 			0 -> '\\0'
-			_ -> binary.to_string(binary.slice_bytes(b, i, 1)) or '?'
+			_ -> result.then(binary.slice_bytes(b, i, 1), binary.to_string) or '?'
 		}
 		vis_from(b, i + 1, len, '${acc}${piece}')
 	}
