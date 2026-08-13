@@ -874,6 +874,7 @@ impl VM {
                 Op::WatchNew => self.watch_new(&mut reds)?,
                 Op::WatchCancel => self.watch_cancel()?,
                 Op::ProcessDemonitor => self.process_demonitor()?,
+                Op::ProcessPanic => self.process_panic()?,
                 Op::SupervisorWorkerOnEach => self.supervisor_worker_on_each(&mut reds)?,
                 Op::FactorySpawn => self.factory_spawn(&mut reds)?,
                 Op::Sleep => park!(self.sleep()),

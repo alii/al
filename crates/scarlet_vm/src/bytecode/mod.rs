@@ -369,6 +369,11 @@ pub enum Op {
     ProcessMonitor,
     /// `[Monitor] -> Nil` — cancel a monitor. (scarlet/process.demonitor)
     ProcessDemonitor,
+    /// `[message Str] -> !` — crash the running process with
+    /// `Crash::Panicked(message)`. The only op whose sole outcome is a crash,
+    /// so it pushes nothing and every path after it is unreachable.
+    /// (scarlet/process.panic)
+    ProcessPanic,
 
     // Supervision (`crate::vm::supervision`). Handles are entry ids as Ints;
     // the stdlib wraps them in its own opaque types, and policies and
@@ -715,6 +720,7 @@ impl Op {
             | Op::ProcessSelf
             | Op::ProcessMonitor
             | Op::ProcessDemonitor
+            | Op::ProcessPanic
             | Op::SupervisorNew
             | Op::SupervisorWorker
             | Op::FactoryNew
@@ -932,6 +938,7 @@ impl Op {
             | Op::ProcessSelf
             | Op::ProcessMonitor
             | Op::ProcessDemonitor
+            | Op::ProcessPanic
             | Op::SupervisorNew
             | Op::SupervisorWorker
             | Op::FactoryNew

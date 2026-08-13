@@ -95,6 +95,7 @@ fn builtin_op(name: &str) -> Option<Op> {
         "process__self" => Op::ProcessSelf,
         "process__monitor" => Op::ProcessMonitor,
         "process__demonitor" => Op::ProcessDemonitor,
+        "process__panic" => Op::ProcessPanic,
         "process__supervisor" => Op::SupervisorNew,
         "process__worker" => Op::SupervisorWorker,
         "process__factory" => Op::FactoryNew,

@@ -120,6 +120,8 @@ pub enum AbiSlot {
     CrashTypeMismatch,
     /// `[why Str]`
     CrashSupervision,
+    /// `[message Str]`
+    CrashPanicked,
 
     /// A port record — `[conn, os_pid Int]`
     Port,
@@ -239,6 +241,7 @@ impl AbiSlot {
             CrashForeignReceive,
             CrashTypeMismatch,
             CrashSupervision,
+            CrashPanicked,
             Port,
             PortExited,
             PortSignaled,
@@ -331,6 +334,7 @@ impl AbiSlot {
             CrashForeignReceive => "CrashForeignReceive",
             CrashTypeMismatch => "CrashTypeMismatch",
             CrashSupervision => "CrashSupervision",
+            CrashPanicked => "CrashPanicked",
             Port => "Port",
             PortExited => "PortExited",
             PortSignaled => "PortSignaled",
@@ -393,9 +397,9 @@ impl AbiSlot {
             | H1BadField | H1BadHeadTooLarge => 0,
             ResultOk | ResultErr | OptionSome | FsEnoent | FsEacces | FsEexist | FsEnotdir
             | FsEisdir | FsErofs | FsEloop | FsEfbig | FsErrnoOther | NetErrnoOther | IpV4
-            | IpV6 | ReadData | ExitCrashed | CrashSupervision | PortExited | PortSignaled
-            | H1ParsedBad | H1FramingLength | H1FramingInvalid | H1ChunkedBad | TlsTransport
-            | H1RespBad => 1,
+            | IpV6 | ReadData | ExitCrashed | CrashSupervision | CrashPanicked | PortExited
+            | PortSignaled | H1ParsedBad | H1FramingLength | H1FramingInvalid | H1ChunkedBad
+            | TlsTransport | H1RespBad => 1,
             JsonParseError => 2,
             JsonDoc => 3,
             SocketAddr | Socket | Monitor | Down | CrashIndexOutOfBounds | Port | H1Header => 2,
@@ -664,6 +668,7 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::CrashForeignReceive,
             S::CrashTypeMismatch,
             S::CrashSupervision,
+            S::CrashPanicked,
         ],
         Op::SubjectReceiveUntil => &[S::ResultOk, S::ResultErr, S::Unit],
         _ => &[],

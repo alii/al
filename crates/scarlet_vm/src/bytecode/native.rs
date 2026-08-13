@@ -251,7 +251,9 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::JsonFloat
         | Op::JsonBool
         | Op::JsonEncode => OpCoverage::Bridge,
-        Op::ArraySlice => OpCoverage::Try,
+        // `ProcessPanic` always raises rather than sometimes, so `Try` covers
+        // it exactly: the caller unwinds on the non-`Done` status every time.
+        Op::ArraySlice | Op::ProcessPanic => OpCoverage::Try,
         Op::FileRead
         | Op::FileWrite
         | Op::TcpAccept

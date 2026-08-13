@@ -249,6 +249,7 @@ pub(crate) mod test_fixture {
             "Supervision",
             &["why"],
         ),
+        (S::CrashPanicked, 4355, 5, "Crash", "Panicked", &["message"]),
         (S::Port, 4608, 0, "Port", "Port", &["conn", "os_pid"]),
         (S::PortExited, 4609, 0, "ExitStatus", "Exited", CODE),
         (

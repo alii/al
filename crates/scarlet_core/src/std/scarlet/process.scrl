@@ -94,6 +94,29 @@ pub fn kill(pid Pid) Nil
 @vm(process__sleep)
 pub fn sleep(ms Int) Nil
 
+// End the calling process now, with `message` as the reason: the one crash a
+// program raises on purpose. It behaves in every way like the crashes the
+// runtime raises — reported to stderr as it happens, seen by a monitor as
+// `Crashed(Panicked(message))`, carried along links — so a panic in the main
+// process, or in anything linked to it, is the program's failing exit status.
+// That is what a test harness wants: `panic` is how a suite reports its own
+// verdict to whatever ran it.
+//
+// For a failure the caller is meant to handle, return a `Result` instead.
+// Panicking is for the case where there is no sensible way to continue and
+// nothing above is expected to recover — the supervision tree is the thing
+// that decides otherwise, and it sees this like any other crash.
+//
+// It never returns, so its result type is whatever the call site needs and it
+// can stand where a value is expected:
+//
+//	port = match env_port() {
+//		Some(p) -> p
+//		None -> process.panic('PORT is not set')
+//	}
+@vm(process__panic)
+pub fn panic(message String) a
+
 // Why a process ended, as reported by a monitor. `NoProcess` is what a
 // monitor placed after the process had already ended reports: the runtime
 // keeps nothing about a finished process, so how it ended is no longer known
@@ -112,9 +135,10 @@ pub type ExitReason {
 	Crashed(crash Crash)
 }
 
-// The runtime errors a process can crash with. Scarlet has no exceptions,
-// and its arithmetic and pattern matching are total, so this list is short
-// and every entry is an out-of-range access of one kind or another.
+// The reasons a process can crash. Scarlet has no exceptions, and its
+// arithmetic and pattern matching are total, so the list is short: what the
+// runtime raises on its own is an out-of-range access or a refused
+// declaration, and the rest is `Panicked`, which a program raises on itself.
 pub type Crash {
 	// `xs[i]` with `i` outside `0..length`.
 	IndexOutOfBounds(index Int, length Int)
@@ -128,6 +152,8 @@ pub type Crash {
 	// A supervision declaration the runtime refused: declaring into a
 	// supervisor or factory this process did not create, or one that is gone.
 	Supervision(why String)
+	// `process.panic(message)` — the process ended itself, deliberately.
+	Panicked(message String)
 }
 
 // The notice a monitor delivers: which process ended, and why.
