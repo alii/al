@@ -48,7 +48,7 @@ fn wire_bug(why: &'static str) -> ! {
 
 /// Index into [`Desc::nodes`]. Only meaningful for the `Desc` that minted it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct NodeIdx(pub u32);
+pub struct NodeIdx(u32);
 
 impl std::fmt::Display for NodeIdx {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -60,8 +60,8 @@ impl std::fmt::Display for NodeIdx {
 /// descriptor of its type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WireField {
-    pub label: StrId,
-    pub node: NodeIdx,
+    label: StrId,
+    node: NodeIdx,
 }
 
 /// One constructor a decoder may build.
@@ -74,9 +74,9 @@ pub struct WireField {
 /// the time anything read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireVariant {
-    pub variant: VariantRef,
+    variant: VariantRef,
     /// Declared order, which is the order a decoder fills the payload in.
-    pub fields: Vec<WireField>,
+    fields: Vec<WireField>,
 }
 
 /// One node of a [`Desc`]. Children are [`NodeIdx`] rather than nested nodes,
@@ -108,25 +108,24 @@ pub struct Desc {
 
 impl Desc {
     /// The node the described type itself is.
-    pub fn root(&self) -> NodeIdx {
+    // Reading a descriptor is what a caller of `build_desc` does, so this has
+    // no reader until that caller exists; only the tests below walk one. The
+    // accessors are marked one at a time rather than on the `impl` block, so
+    // that a method added here later is not silently covered too.
+    #[allow(dead_code)]
+    fn root(&self) -> NodeIdx {
         self.root
     }
 
     /// The node at `i`, or `None` for an index from another `Desc`.
-    pub fn node(&self, i: NodeIdx) -> Option<&Node> {
+    #[allow(dead_code)]
+    fn node(&self, i: NodeIdx) -> Option<&Node> {
         self.nodes.get(i.0 as usize)
     }
 
-    pub fn nodes(&self) -> &[Node] {
-        &self.nodes
-    }
-
-    pub fn len(&self) -> usize {
+    #[allow(dead_code)]
+    fn len(&self) -> usize {
         self.nodes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
     }
 }
 
@@ -147,11 +146,11 @@ pub enum Builtin {
 /// One constructor as declared, before instantiation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CtorDecl {
-    pub variant: VariantRef,
+    variant: VariantRef,
     /// Declared order. Types are **closed** over the owning type's parameters:
     /// `Bound(i)` is the `i`th argument of the `Con` being described, which is
     /// the form `close_body` stores a `VariantField` in.
-    pub fields: Vec<(StrId, RTy)>,
+    fields: Vec<(StrId, RTy)>,
 }
 
 /// What a [`TypeId`] denotes to `wire`.
@@ -183,7 +182,7 @@ pub enum Nominal {
 /// between the two. Same split, and for the same reason, as
 /// [`super::elaborate_pat::PatCtx`]: every type crossing it is an [`RTy`], so
 /// the builder is exercised against hand-built types without an engine.
-pub trait WireCtx {
+trait WireCtx {
     /// What `id` denotes. Field and alias-target types come back closed over
     /// the declaring type's own parameters.
     fn nominal(&mut self, id: TypeId) -> Nominal;
@@ -220,7 +219,9 @@ pub enum Reason {
 impl Reason {
     /// The prose a diagnostic carries. Present tense, naming the property that
     /// fails rather than the syntax that has it.
-    pub fn describe(self) -> &'static str {
+    // No diagnostic quotes this until the elaborator reports a refusal.
+    #[allow(dead_code)]
+    fn describe(self) -> &'static str {
         match self {
             // NOT "a function has no wire representation" — it has several, and
             // Erlang writes one. What fails is reconstruction: a closure is a
@@ -249,10 +250,10 @@ impl Reason {
 pub struct WireRefusal {
     /// The offending sub-type — not the type the call named. Rendering it is
     /// the caller's job; it holds the pool.
-    pub ty: RTy,
-    pub reason: Reason,
+    ty: RTy,
+    reason: Reason,
     /// Outermost first. Empty when the described type is itself the refusal.
-    pub path: Vec<Step>,
+    path: Vec<Step>,
 }
 
 impl WireRefusal {
@@ -262,7 +263,10 @@ impl WireRefusal {
     /// This is the half of the diagnostic that makes it useful: a refusal three
     /// levels down a record that says only "cannot encode" leaves the reader to
     /// find which field it meant.
-    pub fn path_text<C: WireCtx + ?Sized>(&self, cx: &C) -> String {
+    // Same as `Reason::describe`: no diagnostic renders a refusal path yet.
+    // This is also the only caller of `WireCtx::name`.
+    #[allow(dead_code)]
+    fn path_text<C: WireCtx + ?Sized>(&self, cx: &C) -> String {
         self.path
             .iter()
             .map(|s| match *s {
@@ -304,7 +308,11 @@ enum Key {
 /// `pool` is taken mutably because instantiating a variant's field types at the
 /// type's arguments mints nodes — `Option(Int)`'s `Some.value` is an `Int` that
 /// the declared body, which says `Bound(0)`, does not contain.
-pub fn build_desc<C: WireCtx + ?Sized>(
+// The builder has no production caller until the descriptor is wired into
+// elaboration; suppressing it here keeps `Build`, `Key` and `wire_bug` live,
+// since this is the only root they hang from. Delete with the first caller.
+#[allow(dead_code)]
+fn build_desc<C: WireCtx + ?Sized>(
     pool: &mut ResolvedPool,
     cx: &mut C,
     root: RTy,
