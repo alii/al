@@ -423,14 +423,15 @@ fn tm_language() -> String {
                 "patterns": [string_body("'"), string_body("\"")]
             },
             "numbers": {
+                "comment": "Scanner::scan_number. `_` is a digit separator and only valid between two digits, so it is written as a repeated `_\\d+` group rather than folded into the digit class — `1_` and `_1` are not numbers.",
                 "patterns": [
                     {
                         "name": "constant.numeric.float.scrl",
-                        "match": "\\b\\d+\\.\\d+\\b"
+                        "match": "\\b\\d+(?:_\\d+)*\\.\\d+(?:_\\d+)*\\b"
                     },
                     {
                         "name": "constant.numeric.integer.scrl",
-                        "match": "\\b\\d+\\b"
+                        "match": "\\b\\d+(?:_\\d+)*\\b"
                     }
                 ]
             },
@@ -931,8 +932,11 @@ module.exports = {{
   keywords: [{keywords}],
   // token::is_name_start / is_name_continue.
   identifier: /[A-Za-z_][A-Za-z0-9_]*/,
-  // Scanner::scan_number: digits, optionally one '.' followed by digits.
-  number: /\\d+(\\.\\d+)?/,
+  // Scanner::scan_number: digits, optionally one '.' followed by digits, with
+  // `_` accepted anywhere it sits between two digits (`1_000.000_1`). A `_`
+  // with no digit after it ends the token, and so does a '.' with no digit
+  // after it.
+  number: /\\d+(_\\d+)*(\\.\\d+(_\\d+)*)?/,
   // scanner::ESCAPES; anything else after a backslash is an error.
   escape: /\\\\[{escape_class}]/,
   // Contextual identifiers in << >> segment specs (parse_bin_spec).
@@ -946,7 +950,53 @@ module.exports = {{
 
 #[cfg(test)]
 mod tests {
+    use scarlet_syntax::scanner::new_scanner;
+    use scarlet_syntax::token::Kind;
+
     use super::outputs;
+
+    /// Number literals are the one part of the lexical layer written as a
+    /// hand-copied regex rather than derived from a table, so
+    /// `generated_files_are_up_to_date` cannot see it drift: a change to
+    /// `Scanner::scan_number` regenerates byte-identical files. This pins the
+    /// shape the two regexes encode instead. When it fails, the scanner has
+    /// moved and both must move with it — `lexical_js`'s `number` and
+    /// `tm_language`'s `numbers` patterns.
+    ///
+    /// Its own history: `_` digit separators were added to the scanner without
+    /// either regex, and the tree-sitter corpus job went red on two examples.
+    #[test]
+    fn number_regexes_still_describe_the_scanner() {
+        // (source, the LiteralNumber token texts it must yield, in order)
+        let cases: &[(&str, &[&str])] = &[
+            ("1", &["1"]),
+            ("1_000_000", &["1_000_000"]),
+            ("1.5", &["1.5"]),
+            ("1_0.0_1", &["1_0.0_1"]),
+            // A `_` or a `.` with no digit after it ends the token, which is
+            // why neither regex folds `_` into the digit class.
+            ("1_", &["1"]),
+            ("1.", &["1"]),
+            // Range bounds: the scanner must not fuse `0..10` into one token.
+            ("0..10", &["0", "10"]),
+        ];
+        for (source, want) in cases {
+            let (tokens, _) = new_scanner(*source).scan_all();
+            let got: Vec<String> = tokens
+                .iter()
+                .filter_map(|t| match &t.kind {
+                    Kind::LiteralNumber(text) => Some(text.to_string()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                got, *want,
+                "Scanner::scan_number changed on {source:?}; update the `number` \
+                 regex in lexical_js and the `numbers` patterns in tm_language, \
+                 then regenerate with `cargo xtask gen-editor-syntax`"
+            );
+        }
+    }
 
     /// Regenerating must be a no-op against the checked-in files, so CI fails
     /// when the scanner's token tables change without a regeneration.

@@ -473,7 +473,7 @@ impl fmt::Display for Refusal {
 }
 
 /// What the program sees of an entry, before it is turned into values.
-pub(super) struct Info {
+struct Info {
     /// 0 process, 1 worker, 2 supervisor, 3 factory.
     pub kind: i64,
     /// The worker's policy code, or the supervisor's strategy code; a
@@ -1339,7 +1339,7 @@ impl Runtime {
     /// Run `f` under the tree lock, then free what it retired — recipes,
     /// keys, factory indexes — outside it, where a large graph costs nobody
     /// else anything. Every use of the tree goes through here.
-    pub(super) fn with_tree<T>(&self, f: impl FnOnce(&mut Tree) -> T) -> T {
+    fn with_tree<T>(&self, f: impl FnOnce(&mut Tree) -> T) -> T {
         let (result, garbage, retired) = {
             let mut tree = lock(&self.supervision);
             let result = f(&mut tree);
