@@ -160,13 +160,31 @@ jobs:
         env:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: |
+          # --options runtime without entitlements SIGKILLs the JIT the moment it
+          # maps an executable page, so the entitlements file is load-bearing for
+          # every macOS release. Do not add XML comments to it: AMFI's parser
+          # rejects them ("AMFIUnserializeXML: syntax error") even though
+          # `plutil -lint` accepts the file.
           codesign --sign "$CODESIGN_IDENTITY" \
             --options runtime \
+            --entitlements .github/entitlements/macos-jit.plist \
             --timestamp \
             --force \
             ./${{ matrix.asset }}
 
           codesign -vv -d ./${{ matrix.asset }}
+
+          # A successful `codesign --sign` does not prove the grants reached the
+          # signature, and without them the hardened runtime SIGKILLs the JIT.
+          # Assert against the signed binary, not against the flag we passed.
+          entitlements=$(codesign -d --entitlements - --xml ./${{ matrix.asset }} 2>/dev/null)
+          for key in com.apple.security.cs.allow-jit \
+                     com.apple.security.cs.allow-unsigned-executable-memory; do
+            case "$entitlements" in
+              *"$key"*) ;;
+              *) echo "::error::signed binary is missing $key"; exit 1 ;;
+            esac
+          done
 
       - name: Notarize Binary
         if: matrix.platform == 'macos'
