@@ -8,6 +8,17 @@
 //! — never by the formatter, which renders the statement as written. After
 //! this pass no [`Statement::Backpass`] remains anywhere in the tree, so
 //! inference and lowering never see one.
+//!
+//! The lowering is bind-shaped for every backpass, and it must stay that way
+//! here: whether a step's binder is used later is visible from the AST, but
+//! whether running the later step after this one failed is *wanted* is a
+//! property of the callee, and this pass runs before imports resolve. All 19
+//! backpasses in the stdlib are over `result.then`/`result.map`, and 10 bind
+//! `_` — so a syntactic "independent, therefore combine" rule would reorder
+//! exactly the `http.scrl` writes whose comments say the ordering is
+//! load-bearing.
+//! `crates/scarlet/tests/backpass_sequencing.rs` fails if that changes; T-211
+//! carries the argument.
 
 use crate::ast::*;
 
