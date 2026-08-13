@@ -113,9 +113,9 @@ impl VM {
     }
 
     pub(super) fn bin_slice(&mut self) -> VmResult<()> {
-        let take = self.pop_int("binary.slice")?;
-        let at = self.pop_int("binary.slice")?;
-        let bin_v = self.pop_binary("binary.slice")?;
+        let take = self.pop_int("binary.slice_bits")?;
+        let at = self.pop_int("binary.slice_bits")?;
+        let bin_v = self.pop_binary("binary.slice_bits")?;
         let bin = bin_ref(&bin_v);
         let v = if at < 0 || take < 0 || (at as u64) + (take as u64) > bin.bit_len() {
             self.make_err_nil()?

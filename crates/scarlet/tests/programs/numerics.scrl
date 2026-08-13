@@ -31,7 +31,7 @@ fn parse_int(s String) Result(Int, Nil) {
 fn parse_signed(s String) Result(Int, Nil) {
 	b = binary.from_string(s)
 	if binary.byte_size(b) > 0 && binary.byte_at(b, 0) == 45 {
-		rest = binary.slice_bytes(b, 1, binary.byte_size(b) - 1)
+		rest = binary.drop_bytes(b, 1)
 		result.map(binary.parse_int(rest, Dec), fn(n) -n)
 	} else {
 		binary.parse_int(b, Dec)

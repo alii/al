@@ -196,7 +196,7 @@ fn parse_signed(s String) Result(Int, Nil) {
 	b = binary.from_string(s)
 	// 45 is `-`.
 	if binary.byte_at(b, 0) == 45 {
-		match binary.parse_int(binary.slice_bytes(b, 1, binary.byte_size(b) - 1), binary.Dec) {
+		match binary.parse_int(binary.drop_bytes(b, 1), binary.Dec) {
 			Ok(n) -> Ok(0 - n)
 			Err(Nil) -> Err(Nil)
 		}

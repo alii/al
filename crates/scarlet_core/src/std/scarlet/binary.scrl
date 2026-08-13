@@ -10,17 +10,53 @@ pub fn bit_size(b Binary) Int
 @vm(binary__byte_size)
 pub fn byte_size(b Binary) Int
 
-@vm(binary__slice)
-pub fn slice(b Binary, at_bit Int, take_bits Int) Result(Binary, Nil)
+// The window `b[at_bit .. at_bit+take_bits]`, in BITS. O(1): shares `b`'s
+// backing and copies nothing. A negative bound, or one that runs past
+// `bit_size(b)`, is `Err(Nil)` — never a short read.
+//
+// Every offset and length in this module states its unit in its own name,
+// because the two differ by a factor of 8 and a mistaken window is a valid
+// binary rather than a failure. There is deliberately no function called
+// `slice`: it used to mean bits, and a name that changed unit would leave
+// working code silently reading an eighth of what it asked for.
+@vm(binary__slice_bits)
+pub fn slice_bits(b Binary, at_bit Int, take_bits Int) Result(Binary, Nil)
 
-// Byte-oriented slice of `b[start .. start+len]` (offsets and length in bytes;
-// `slice` itself takes bits). O(1): shares `b`'s backing and copies nothing.
-// An out-of-range request yields an empty binary, so a parser can take field
-// views by offset without per-call error handling.
-pub fn slice_bytes(b Binary, start Int, len Int) Binary {
-	match slice(b, start * 8, len * 8) {
-		Ok(v) -> v
-		Err(Nil) -> <<>>
+// The window `b[at .. at+len]`, in BYTES. O(1): shares `b`'s backing and
+// copies nothing. A negative bound, or one that runs past the end, is
+// `Err(Nil)`: a length that came off the wire is exactly the one that must
+// not fail quietly.
+//
+// `byte_size` rounds up, so the last byte of a binary whose bit length is not
+// a multiple of 8 is not addressable here — ask for it with `slice_bits`.
+pub fn slice_bytes(b Binary, at Int, len Int) Result(Binary, Nil) {
+	slice_bits(b, at * 8, len * 8)
+}
+
+// Everything from byte `at` onwards. Total, and honestly so: past the end the
+// remainder really is `<<>>`, and a negative `at` drops nothing — there is no
+// requested length for the answer to fall short of, so nothing is swallowed.
+// Use it instead of `slice_bytes(b, at, byte_size(b) - at)`, which repeats the
+// bound the callee already knows.
+pub fn drop_bytes(b Binary, at Int) Binary {
+	total = bit_size(b)
+	// Clamped before the ×8 so a huge `at` cannot wrap into a negative offset.
+	skip = if at <= 0 {
+		0
+	} else if at >= byte_size(b) {
+		total
+	} else {
+		at * 8
+	}
+	if skip >= total {
+		<<>>
+	} else {
+		match slice_bits(b, skip, total - skip) {
+			Ok(v) -> v
+			// Unreachable: 0 <= skip < total == bit_size(b), so the window is
+			// exactly the tail. The arm exists because Result has two of them.
+			Err(Nil) -> <<>>
+		}
 	}
 }
 

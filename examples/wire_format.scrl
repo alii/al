@@ -5,6 +5,7 @@
 // scanned byte-by-byte without ever building a String.
 
 import scarlet/binary.{Dec, Hex, Radix}
+import scarlet/result
 import scarlet/string
 
 // One frame on the wire:
@@ -64,16 +65,26 @@ fn decode(frame Binary) Result(Sample, String) {
 // The payload is ASCII, so it is parsed as bytes: find the '=' (61) and the
 // ' ' (32) with index_of, take the fields around them with slice_bytes, and
 // read the number straight out of its bytes with parse_int.
+//
+// slice_bytes is fallible, so a window past the end — or the negative length a
+// payload like 'a b=1' produces, where the space precedes the '=' — arrives as
+// Err rather than as a silently empty field. The trailing unit needs no bound
+// at all: drop_bytes takes whatever is left.
 fn parse_payload(payload Binary, flags Int) Result(Sample, String) {
 	match (binary.index_of(payload, <<'='>>, 0), binary.index_of(payload, <<' '>>, 0)) {
-		(Some(eq), Some(sp)) -> {
-			name = binary.slice_bytes(payload, 0, eq)
-			digits = binary.slice_bytes(payload, eq + 1, sp - eq - 1)
-			unit = binary.slice_bytes(payload, sp + 1, binary.byte_size(payload) - sp - 1)
-			match (binary.to_string(name), binary.parse_int(digits, Dec), binary.to_string(unit)) {
+		(Some(eq), Some(sp)) -> match (
+			binary.slice_bytes(payload, 0, eq),
+			binary.slice_bytes(payload, eq + 1, sp - eq - 1),
+		) {
+			(Ok(name), Ok(digits)) -> match (
+				binary.to_string(name),
+				binary.parse_int(digits, Dec),
+				binary.to_string(binary.drop_bytes(payload, sp + 1)),
+			) {
 				(Ok(n), Ok(v), Ok(u)) -> Ok(Sample(n, v, u, flags == GAUGE))
 				_ -> Err('malformed payload')
 			}
+			_ -> Err('malformed payload')
 		}
 		_ -> Err('payload is not name=value unit')
 	}
@@ -239,25 +250,47 @@ pub fn main() {
 	println('index_of "\\r\\n":      ${binary.index_of(headers, <<13, 10>>, 0)}')
 	println('index_of "zz":        ${binary.index_of(headers, <<'zz'>>, 0)}')
 
-	name = binary.slice_bytes(headers, 0, 14)
-	println('field name:           ${string.inspect(binary.to_string(name))}')
-	println(
-		'lowercased:           ${string.inspect(binary.to_string(binary.to_ascii_lower(name)))}',
-	)
-	println('is content-length:    ${binary.eq_ignore_ascii_case(name, <<'content-length'>>)}')
-	println('is content-type:      ${binary.eq_ignore_ascii_case(name, <<'content-type'>>)}')
+	// Every offset and length in the binary module states its unit in its own
+	// name. slice_bytes counts bytes; slice_bits counts bits; there is no
+	// function called `slice`, because the two differ by a factor of eight and
+	// a wrong window is a valid binary rather than a failure.
+	match binary.slice_bytes(headers, 0, 14) {
+		Ok(name) -> {
+			println('field name:           ${string.inspect(binary.to_string(name))}')
+			println(
+				'lowercased:           ${string.inspect(binary.to_string(binary.to_ascii_lower(name)))}',
+			)
+			println('is content-length:    ${binary.eq_ignore_ascii_case(name, <<'content-length'>>)}')
+			println('is content-type:      ${binary.eq_ignore_ascii_case(name, <<'content-type'>>)}')
+		}
+		// This fixture is longer than 14 bytes, so this arm is not taken here.
+		// A parser whose field length came off the wire reaches it instead of
+		// scanning bytes the peer never sent.
+		Err(Nil) -> println('field name:           past the end')
+	}
 
-	// slice_bytes is total: an out-of-range view is empty rather than an error, so
-	// a scanner can take a field by offset without handling a failure per call.
-	println('past the end:         ${string.inspect(binary.slice_bytes(headers, 900, 4))}')
+	// A window that runs past the end is Err(Nil), never a short or empty read:
+	// asking for four bytes at 900 is a question about bytes that do not exist.
+	println('past the end:         ${binary.slice_bytes(headers, 900, 4)}')
+	println('one byte over:        ${binary.slice_bytes(headers, 36, 4)}')
 
-	// byte_at is total too, and returns -1 rather than boxing an Option per probe.
+	// drop_bytes needs no bound, so it cannot fall short: past the end the
+	// remainder really is empty. Contrast the two lines below with the one
+	// above — the same offset, and here the three bytes that are actually
+	// there rather than a failure, because nothing was promised a fourth.
+	println('drop 36:              ${string.inspect(binary.drop_bytes(headers, 36))}')
+	println('drop 900:             ${string.inspect(binary.drop_bytes(headers, 900))}')
+
+	// byte_at is total, and returns -1 rather than boxing an Option per probe.
 	println('byte_at 0:            ${binary.byte_at(headers, 0)}')
 	println('byte_at 900:          ${binary.byte_at(headers, 900)}')
 
 	// Numbers are read straight out of the bytes, in whichever base the protocol
-	// wrote them: decimal for a length, hex for a retry-after cookie.
-	println('parse_int(Dec):       ${binary.parse_int(binary.slice_bytes(headers, 16, 4), Dec)}')
+	// wrote them: decimal for a length, hex for a retry-after cookie. The window
+	// is fallible and the parse is fallible, so they chain.
+	println(
+		'parse_int(Dec):       ${result.then(binary.slice_bytes(headers, 16, 4), fn(b) binary.parse_int(b, Dec))}',
+	)
 	println('"ff" as Dec:          ${binary.parse_int(<<'ff'>>, Dec)}')
 	println('"ff" as Hex:          ${binary.parse_int(<<'ff'>>, Hex)}')
 
@@ -265,8 +298,8 @@ pub fn main() {
 	println('255 to Hex ascii:     ${ascii(255, Hex)}')
 	println('hex ascii round trip: ${binary.parse_int(binary.from_int_ascii(4210, Hex), Hex)}')
 
-	// `slice` is the bit-precise version — offsets and lengths in bits — and it
-	// is the one binary operation that can fail: a view past the end is Err(Nil).
-	println('slice bits 0..4:      ${binary.slice(headers, 0, 4)}')
-	println('slice bits 8000..8:   ${binary.slice(headers, 8000, 8)}')
+	// slice_bits is the bit-precise version — offsets and lengths in bits — and
+	// it is what reaches a field that does not start on a byte boundary.
+	println('slice bits 0..4:      ${binary.slice_bits(headers, 0, 4)}')
+	println('slice bits 8000..8:   ${binary.slice_bits(headers, 8000, 8)}')
 }

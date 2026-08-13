@@ -162,7 +162,12 @@ fn to_method(m Binary) Method {
 // first `?`, or the whole target if there is no query. O(1) zero-copy slice.
 pub fn path(r Request) Binary {
 	match binary.index_of(r.target, QUESTION, 0) {
-		Some(i) -> binary.slice_bytes(r.target, 0, i)
+		// `index_of` answers with a byte index inside `r.target`, so `0..i` is
+		// in range and the Err arm is unreachable.
+		Some(i) -> match binary.slice_bytes(r.target, 0, i) {
+			Ok(p) -> p
+			Err(Nil) -> EMPTY
+		}
 		None -> r.target
 	}
 }
@@ -171,7 +176,7 @@ pub fn path(r Request) Binary {
 // (not including it), or empty if there is no `?`.
 pub fn query(r Request) Binary {
 	match binary.index_of(r.target, QUESTION, 0) {
-		Some(i) -> binary.slice_bytes(r.target, i + 1, binary.byte_size(r.target) - i - 1)
+		Some(i) -> binary.drop_bytes(r.target, i + 1)
 		None -> EMPTY
 	}
 }
@@ -348,11 +353,10 @@ fn flush(sock Socket, pending Array(Binary)) Result(Nil, NetError) {
 // concatenate, so the freshly read bytes ARE the new buffer: taking that exit
 // keeps the read off the copy path entirely.
 fn carry(buf Binary, off Int, more Binary) Binary {
-	rest = binary.byte_size(buf) - off
-	if rest == 0 {
+	if binary.byte_size(buf) - off == 0 {
 		more
 	} else {
-		binary.append(binary.slice_bytes(buf, off, rest), more)
+		binary.append(binary.drop_bytes(buf, off), more)
 	}
 }
 
@@ -421,7 +425,12 @@ fn read_body(
 	_ <- result.then(maybe_continue(sock, head.flags))
 	avail = binary.byte_size(buf) - consumed
 	buffered = int.min(avail, n)
-	head_bytes = binary.slice_bytes(buf, consumed, buffered)
+	// `buffered <= avail == byte_size(buf) - consumed`, so the window ends at
+	// or before the end of `buf` and the Err arm is unreachable.
+	head_bytes = match binary.slice_bytes(buf, consumed, buffered) {
+		Ok(v) -> v
+		Err(Nil) -> <<>>
+	}
 	need = n - buffered
 	tail <- result.then(body.collect(body.content_length(sock, need, deadline), MAX_BODY))
 	// Pending responses were flushed before the body was read, so this

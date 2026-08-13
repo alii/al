@@ -176,10 +176,15 @@ fn scan_pairs(
 		None -> n
 	}
 	match binary.index_of(b, EQ, start) {
-		Some(e) -> if e < end && binary.slice_bytes(b, start, e - start) == key {
-			Some(binary.slice_bytes(b, e + 1, end - e - 1))
-		} else {
-			next_pair(b, end, n, key, sep, skip_sp)
+		// An `=` at or past `end` belongs to the next pair, and gives the value
+		// window a negative length — which slice_bytes reports as Err, so that
+		// case lands in the fallthrough rather than matching an empty value.
+		Some(e) -> match (
+			binary.slice_bytes(b, start, e - start),
+			binary.slice_bytes(b, e + 1, end - e - 1),
+		) {
+			(Ok(k), Ok(v)) if e < end && k == key -> Some(v)
+			_ -> next_pair(b, end, n, key, sep, skip_sp)
 		}
 		None -> None
 	}
@@ -260,10 +265,11 @@ fn verify_session(req Request, t Tables) Option(User) {
 }
 
 fn split_token(token Binary) Option((Binary, Binary)) {
-	n = binary.byte_size(token)
 	match binary.index_of(token, DOT, 0) {
-		Some(i) ->
-			Some((binary.slice_bytes(token, 0, i), binary.slice_bytes(token, i + 1, n - i - 1)))
+		Some(i) -> match binary.slice_bytes(token, 0, i) {
+			Ok(head) -> Some((head, binary.drop_bytes(token, i + 1)))
+			Err(Nil) -> None
+		}
 		None -> None
 	}
 }
@@ -311,8 +317,7 @@ const USERS_PREFIX = <<'/users/'>>
 const USERS_PREFIX_LEN = 7
 
 fn handle_user_by_id(path Binary, t Tables) Response {
-	n = binary.byte_size(path)
-	rest = binary.slice_bytes(path, USERS_PREFIX_LEN, n - USERS_PREFIX_LEN)
+	rest = binary.drop_bytes(path, USERS_PREFIX_LEN)
 	user = match binary.parse_int(rest, Dec) {
 		Ok(id) -> find_by_id(t, id)
 		Err(Nil) -> None
@@ -329,11 +334,10 @@ fn route(req Request, t Tables) Response {
 		Get -> match path {
 			<<'/'>> -> respond(200, VAL_TEXT, 'hello')
 			<<'/me'>> -> handle_me(req, t)
-			_ -> if binary.byte_size(path) > USERS_PREFIX_LEN &&
-			binary.slice_bytes(path, 0, USERS_PREFIX_LEN) == USERS_PREFIX {
-				handle_user_by_id(path, t)
-			} else {
-				json(404, '{"error":"not found"}')
+			_ -> match binary.slice_bytes(path, 0, USERS_PREFIX_LEN) {
+				Ok(prefix) if prefix == USERS_PREFIX &&
+					binary.byte_size(path) > USERS_PREFIX_LEN -> handle_user_by_id(path, t)
+				_ -> json(404, '{"error":"not found"}')
 			}
 		}
 		Post -> match path {

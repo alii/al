@@ -182,6 +182,22 @@ fn has_token(v Binary, token Binary) Bool {
 	value_has_token(v, 0, binary.byte_size(v), token)
 }
 
+// Whether `v[lo..hi]` is `token`, case-insensitively. Empty list elements
+// (`a,,b`, a trailing comma, an empty value) are ignored per RFC 9110 —
+// without the `hi > lo` guard an empty element would "match" an empty token.
+// A window past the end of `v` is likewise not the token; callers pass bounds
+// derived from `byte_size(v)`, so that arm should be unreachable.
+fn element_is(v Binary, lo Int, hi Int, token Binary) Bool {
+	if hi <= lo {
+		False
+	} else {
+		match binary.slice_bytes(v, lo, hi - lo) {
+			Ok(e) -> binary.eq_ignore_ascii_case(e, token)
+			Err(Nil) -> False
+		}
+	}
+}
+
 fn value_has_token(v Binary, from Int, len Int, token Binary) Bool {
 	to = match binary.index_of(v, comma, from) {
 		Some(i) -> i
@@ -189,10 +205,7 @@ fn value_has_token(v Binary, from Int, len Int, token Binary) Bool {
 	}
 	lo = skip_ows(v, from, to)
 	hi = trim_ows(v, lo, to)
-	// Empty list elements (`a,,b`, a trailing comma, an empty value) are
-	// ignored per RFC 9110 — without the hi > lo guard an empty element would
-	// "match" an empty token.
-	if hi > lo && binary.eq_ignore_ascii_case(binary.slice_bytes(v, lo, hi - lo), token) {
+	if element_is(v, lo, hi, token) {
 		True
 	} else if to < len {
 		value_has_token(v, to + 1, len, token)
