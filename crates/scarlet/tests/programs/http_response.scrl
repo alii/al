@@ -195,7 +195,7 @@ fn scripted(script Binary) Subject(Wire) {
 
 fn wire_io(inbox Subject(Wire), chunk Int) Io {
 	Io(
-		read: fn(max) {
+		read: fn(max, _deadline) {
 			reply = process.subject()
 			process.send(inbox, Want(int.min(max, chunk), reply))
 			Ok(process.receive(reply))

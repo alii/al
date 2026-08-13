@@ -522,6 +522,120 @@ pub fn main() {{
     );
 }
 
+/// `client.secure` + `send_until` against a peer that completes the handshake
+/// but never sends an HTTP response must hit `Tls(Transport(TimedOut))`.
+/// The hang is after the handshake: `tls.connect`/`handshake` still have no
+/// deadline of their own, so this test speaks TLS first and then waits.
+#[test]
+fn https_send_until_times_out_against_a_silent_peer() {
+    let ca = make_ca();
+    let leaf = make_leaf(&ca, "localhost", Validity::Current);
+    let port = spawn_stalled_tls_server(leaf, 1, std::time::Duration::from_secs(30));
+
+    let src = format!(
+        r#"import scarlet/http/client.{{Request, Tls}}
+import scarlet/http/url
+import scarlet/net
+import scarlet/net/error.{{TimedOut}}
+import scarlet/net/tls.{{Transport}}
+import scarlet/string
+import scarlet/time
+
+pub fn main() {{
+    match net.connect('127.0.0.1', {port}) {{
+        Ok(sock) -> match tls.handshake(sock, 'localhost') {{
+            Ok(conn) -> match url.parse('https://localhost/') {{
+                Err(e) -> println('url failed: ${{string.inspect(e)}}')
+                Ok(u) -> {{
+                    io = client.secure(conn)
+                    req = Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
+                    match client.send_until(io, req, 1024, time.deadline_in_ms(200)) {{
+                        Err(Tls(Transport(TimedOut))) -> println('https-timeout: Tls(Transport(TimedOut))')
+                        Ok(r) -> println('https-ok: ${{r.status}}')
+                        Err(e) -> println('other: ${{string.inspect(e)}}')
+                    }}
+                    shut = io.close
+                    shut() or Nil
+                }}
+            }}
+            Err(e) -> println('handshake failed: ${{string.inspect(e)}}')
+        }}
+        Err(e) -> println('connect failed: ${{string.inspect(e)}}')
+    }}
+}}
+"#
+    );
+
+    let (code, out) = run_bounded("https_client_hang", &src, Some(&ca.pem), 30);
+    assert_eq!(
+        code,
+        Some(0),
+        "https send_until must return, not hang, got:\n{out}"
+    );
+    assert!(
+        out.contains("https-timeout: Tls(Transport(TimedOut))"),
+        "https send_until must take its Err(Tls(Transport(TimedOut))) arm; got:\n{out}"
+    );
+    assert!(
+        !out.contains("https-ok:"),
+        "https send_until must not return Ok when no response ever arrives:\n{out}"
+    );
+}
+
+/// Control: the same `client.secure` + `send_until` path returns a response
+/// the peer does send. A red hang test next to this is a deadline, not a
+/// broken HTTPS client.
+#[test]
+fn https_send_until_returns_a_response() {
+    let ca = make_ca();
+    let leaf = make_leaf(&ca, "localhost", Validity::Current);
+    let port = spawn_tls_server(leaf, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+
+    let src = format!(
+        r#"import scarlet/http/client.{{Request, Tls}}
+import scarlet/http/url
+import scarlet/net
+import scarlet/net/error.{{TimedOut}}
+import scarlet/net/tls.{{Transport}}
+import scarlet/string
+import scarlet/time
+
+pub fn main() {{
+    match net.connect('127.0.0.1', {port}) {{
+        Ok(sock) -> match tls.handshake(sock, 'localhost') {{
+            Ok(conn) -> match url.parse('https://localhost/') {{
+                Err(e) -> println('url failed: ${{string.inspect(e)}}')
+                Ok(u) -> {{
+                    io = client.secure(conn)
+                    req = Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
+                    match client.send_until(io, req, 1024, time.deadline_in_ms(5000)) {{
+                        Err(Tls(Transport(TimedOut))) -> println('https-timeout: Tls(Transport(TimedOut))')
+                        Ok(r) -> println('https-ok: ${{r.status}}')
+                        Err(e) -> println('other: ${{string.inspect(e)}}')
+                    }}
+                    shut = io.close
+                    shut() or Nil
+                }}
+            }}
+            Err(e) -> println('handshake failed: ${{string.inspect(e)}}')
+        }}
+        Err(e) -> println('connect failed: ${{string.inspect(e)}}')
+    }}
+}}
+"#
+    );
+
+    let out = run_program("https_client_ok", &src, Some(&ca.pem));
+    assert!(
+        out.contains("https-ok: 200"),
+        "https send_until must return the response that arrived; got:\n{out}"
+    );
+    assert!(
+        !out.contains("https-timeout:"),
+        "https send_until must not time out when the peer answered:\n{out}"
+    );
+}
+
 /// `tls.read_within` returns the plaintext that arrives before the deadline.
 #[test]
 fn tls_read_within_returns_data() {
