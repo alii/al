@@ -27,9 +27,14 @@ pub(super) struct H1 {
     pub(super) header: EnumTemplate,
     pub(super) version_http10: Value,
     pub(super) version_http11: Value,
+    pub(super) conn_neither: Value,
+    pub(super) conn_close: Value,
+    pub(super) conn_keep_alive: Value,
+    pub(super) conn_both: Value,
     pub(super) head_flags: EnumTemplate,
-    /// The all-false `HeadFlags`, pre-built so the common parse copies a word
-    /// instead of allocating.
+    /// The `HeadFlags` of a head that carried no `Connection` or `Expect`
+    /// tokens, pre-built so the common parse copies a word instead of
+    /// allocating.
     pub(super) head_flags_none: Value,
     pub(super) parsed_done: EnumTemplate,
     pub(super) parsed_need_more: Value,
@@ -68,15 +73,21 @@ impl Templates {
 
         let h1 = (|| {
             let head_flags = get(AbiSlot::H1HeadFlags)?;
-            let f = Value::bool(false);
-            // Immediates, so the frozen record owns no mortal children.
-            let head_flags_none = head_flags.instantiate(fb, &[f.clone(), f.clone(), f]);
+            let conn_neither = nullary(AbiSlot::H1ConnNeither)?;
+            // A frozen nullary and an immediate, so the frozen record still
+            // owns no mortal children.
+            let head_flags_none =
+                head_flags.instantiate(fb, &[conn_neither.clone(), Value::bool(false)]);
             Some(H1 {
                 some: get(AbiSlot::OptionSome)?,
                 none: nullary(AbiSlot::OptionNone)?,
                 header: get(AbiSlot::H1Header)?,
                 version_http10: nullary(AbiSlot::H1Http10)?,
                 version_http11: nullary(AbiSlot::H1Http11)?,
+                conn_neither,
+                conn_close: nullary(AbiSlot::H1ConnClose)?,
+                conn_keep_alive: nullary(AbiSlot::H1ConnKeepAlive)?,
+                conn_both: nullary(AbiSlot::H1ConnBoth)?,
                 head_flags,
                 head_flags_none,
                 parsed_done: get(AbiSlot::H1ParsedDone)?,
