@@ -141,6 +141,31 @@ pub fn main() {
     assert_eq!(built, checked);
 }
 
+/// A function's code region as `[start, end)`, its trailing `Ret` inside it —
+/// `None` for a `Function` nothing was emitted for.
+///
+/// `Function.code_len` means two different things. `elaborate_body` stores
+/// `end - base - 1`, which stops one instruction short of the body's `Ret`;
+/// `materialize_eta_wrappers` stores `end - body_start`, which covers it. Both
+/// close a region with exactly one `Ret`, so a `Ret` sitting at the stored end
+/// is this function's own and the region runs one further. That reading is
+/// right under either convention, so it also holds once T-167 unifies them,
+/// whichever of the two it picks.
+fn code_region(
+    p: &scarlet::bytecode::Program,
+    f: &scarlet::bytecode::Function,
+) -> Option<(i32, i32)> {
+    if f.code_start < 0 || f.code_len < 0 {
+        return None;
+    }
+    let stored_end = f.code_start + f.code_len;
+    let end = match p.code.get(stored_end as usize) {
+        Some(ins) if matches!(ins.op, scarlet::bytecode::Op::Ret) => stored_end + 1,
+        _ => stored_end,
+    };
+    (end > f.code_start).then_some((f.code_start, end))
+}
+
 /// `base_of[pc]` is the `code_start` the operand at `code[pc]` resolves
 /// against. Jump operands are frame-relative, so a bare `ins.operand` is not a
 /// `program.code` index; this table turns it into one. Code spliced around the
@@ -150,14 +175,35 @@ fn frame_bases(p: &scarlet::bytecode::Program) -> Vec<i32> {
     let len = p.code.len();
     let mut base_of = vec![0i32; len];
     for (i, f) in p.functions.iter().enumerate() {
-        if i == entry || f.code_len <= 0 || f.code_start < 0 {
+        if i == entry {
             continue;
         }
-        let lo = (f.code_start as usize).min(len);
-        let hi = (lo + f.code_len as usize).min(len);
-        base_of[lo..hi].fill(f.code_start);
+        let Some((start, end)) = code_region(p, f) else {
+            continue;
+        };
+        let lo = (start as usize).min(len);
+        let hi = (end as usize).min(len);
+        base_of[lo..hi].fill(start);
     }
     base_of
+}
+
+/// Regions do not overlap. `code_region` reads a `Ret` at a function's stored
+/// end as that function's own, which is wrong if the next region is a lone
+/// `Ret` — the shape `close_empty_deferred` emits — and `frame_bases` would
+/// stamp one body's base over another's. Either way this is what says so.
+fn assert_bodies_are_disjoint(p: &scarlet::bytecode::Program, bodies: &[(usize, i32, i32)]) {
+    let mut by_start = bodies.to_vec();
+    by_start.sort_by_key(|&(_, start, _)| start);
+    for w in by_start.windows(2) {
+        let ((a, _, a_end), (b, b_start, _)) = (w[0], w[1]);
+        assert!(
+            a_end <= b_start,
+            "function {a} ({}) ends at {a_end}, past the start of function {b} ({}) at {b_start}",
+            p.functions[a].name,
+            p.functions[b].name,
+        );
+    }
 }
 
 /// Every function body is a closed region: nothing outside it may jump in. A
@@ -172,11 +218,13 @@ fn assert_no_jump_into_a_foreign_body(p: &scarlet::bytecode::Program) {
         .functions
         .iter()
         .enumerate()
-        // The entry's own body *is* the code the toplevel `Jump base` targets.
-        .filter(|(i, f)| *i != entry && f.code_len > 0)
-        .map(|(i, f)| (i, f.code_start, f.code_start + f.code_len))
+        // The entry's own body *is* the code the toplevel `Jump base` targets,
+        // and its region is the whole stream every other one sits inside.
+        .filter(|(i, _)| *i != entry)
+        .filter_map(|(i, f)| code_region(p, f).map(|(start, end)| (i, start, end)))
         .collect();
     assert!(!bodies.is_empty(), "no bodies to guard");
+    assert_bodies_are_disjoint(p, &bodies);
     let base_of = frame_bases(p);
     // Guards the guard: without at least one jump-over spanning a body the
     // assertion below is trivially true.
@@ -325,6 +373,63 @@ pub fn main() {
 }
 "#,
     ));
+}
+
+/// The blind spot the three tests above cannot reach: a declared body's
+/// `code_len` stops one instruction short of its `Ret`, so a `Jump` landing
+/// exactly on that `Ret` read as outside every body and was waved through —
+/// one instruction per body. Nothing the compiler emits aims there, so the
+/// witness is planted rather than compiled.
+///
+/// The victim must be a *declared* body. An eta wrapper's `code_len` already
+/// spans its `Ret`, so a jump onto one was caught before this was fixed, and
+/// aiming at one would witness nothing.
+#[test]
+#[should_panic(expected = "inside function")]
+fn a_jump_onto_a_foreign_bodys_final_ret_is_caught() {
+    let mut p = layout_of(
+        r#"
+fn a(n) {
+	n + 1
+}
+fn b(n) {
+	a(n) + 1
+}
+pub fn main() {
+	println(b(2))
+}
+"#,
+    );
+    let entry = p.entry as usize;
+    let (start, ret) = p
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != entry)
+        .filter_map(|(_, f)| {
+            // Read off `code_len` directly, not through `code_region`: this has
+            // to pick the same body whether or not the widening is in place, or
+            // the plant stops witnessing anything the moment it is reverted.
+            let ret = f.code_start + f.code_len;
+            let declared = p
+                .code
+                .get(ret as usize)
+                .is_some_and(|ins| matches!(ins.op, scarlet::bytecode::Op::Ret));
+            (f.code_start >= 0 && declared).then_some((f.code_start, ret))
+        })
+        .max_by_key(|&(start, _)| start)
+        .expect("a declared body to aim at");
+    let base_of = frame_bases(&p);
+    let jump = (0..p.code.len())
+        .find(|&pc| {
+            matches!(p.code[pc].op, scarlet::bytecode::Op::Jump)
+                && base_of[pc] == 0
+                && (pc as i32) < start
+        })
+        .expect("a jump-over ahead of the body");
+    // Base 0, so the operand is the absolute target.
+    p.code[jump].operand = ret;
+    assert_no_jump_into_a_foreign_body(&p);
 }
 
 /// The entry point is the entry frame (`__main__`), the last function either
