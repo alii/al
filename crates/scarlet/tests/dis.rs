@@ -23,8 +23,8 @@ fn program_of(src: &str) -> bytecode::Program {
         .program
 }
 
-const FACT: &str =
-    "fn fact(n Int) Int {\n\tif n < 2 { 1 } else { n * fact(n - 1) }\n}\n\nprintln(fact(5))\n";
+const FACT: &str = "fn fact(n Int) Int {\n\tif n < 2 { 1 } else { n * fact(n - 1) }\n}\n\n\
+                    pub fn main() {\n\tprintln(fact(5))\n}\n";
 
 #[test]
 fn a_function_disassembles_with_its_header_and_body() {
@@ -69,9 +69,16 @@ fn a_zero_operand_is_printed_not_hidden() {
 fn every_jump_target_is_inside_its_own_function() {
     for src in [
         FACT,
-        "fn pick(n Int) Int {\n\tm = if n < 2 { 1 } else { 2 }\n\tm + 1\n}\nprintln(pick(5))\n",
-        "import scarlet/array\ntype W {\n\tW(v Int)\n}\nfn go(xs Array(Int)) Int {\n\tws = array.map(xs, W)\n\tif array.length(ws) > 2 { 111 } else { 222 }\n}\nprintln(go([1]))\n",
-        "fn cls(n Int) Int {\n\tmatch n {\n\t\t0 -> 1\n\t\t1 -> 2\n\t\t_ -> 3\n\t}\n}\nprintln(cls(1))\n",
+        "fn pick(n Int) Int {\n\tm = if n < 2 { 1 } else { 2 }\n\tm + 1\n}\n\
+         pub fn main() {\n\tprintln(pick(5))\n}\n",
+        "import scarlet/array\ntype W {\n\tW(v Int)\n}\n\
+         fn go(xs Array(Int)) Int {\n\tws = array.map(xs, W)\n\tif array.length(ws) > 2 { 111 } else { 222 }\n}\n\
+         pub fn main() {\n\tprintln(go([1]))\n}\n",
+        "fn cls(n Int) Int {\n\tmatch n {\n\t\t0 -> 1\n\t\t1 -> 2\n\t\t_ -> 3\n\t}\n}\n\
+         pub fn main() {\n\tprintln(cls(1))\n}\n",
+        // A branch inside `main` itself: `main` is an ordinary function the
+        // entry glue calls by index, so its jumps are relative to its own body.
+        "pub fn main() {\n\tn = 5\n\tprintln(if n < 2 { 1 } else { 2 })\n}\n",
     ] {
         let p = program_of(src);
         for f in &p.functions {
@@ -131,7 +138,9 @@ fn the_full_dump_carries_a_constant_pool() {
 /// program's builder, so those two are acceptably distinct allocations.
 #[test]
 fn a_big_int_constant_is_pooled_once() {
-    let p = program_of("a = 4611686018427387905\nb = 4611686018427387905\nprintln(a == b)\n");
+    let p = program_of(
+        "pub fn main() {\n\ta = 4611686018427387905\n\tb = 4611686018427387905\n\tprintln(a == b)\n}\n",
+    );
     let hits = p
         .constants
         .iter()
@@ -226,8 +235,10 @@ fn an_infallible_match_keeps_the_flat_lowering() {
          \t\t_ -> 'many'\n\
          \t}\n\
          }\n\
-         println(area(Circle(2)) + single((1, 2)))\n\
-         println(lits(1))\n",
+         pub fn main() {\n\
+         \tprintln(area(Circle(2)) + single((1, 2)))\n\
+         \tprintln(lits(1))\n\
+         }\n",
     );
     // Constant-pool indices move with the stdlib; blank them.
     let blanked = |name: &str| {

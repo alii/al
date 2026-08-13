@@ -89,14 +89,16 @@ fn count(n) {
 	}
 }
 
-process.spawn(fn() {
-	_ = count(1000000)
-	println('heavy done')
-})
-process.spawn(fn() {
-	println('light done')
-})
-println('main done')
+pub fn main() {
+	_ = process.spawn(fn() {
+		_ = count(1000000)
+		println('heavy done')
+	})
+	_ = process.spawn(fn() {
+		println('light done')
+	})
+	println('main done')
+}
 "#;
     assert_self_tail(src, "count");
 
@@ -135,12 +137,14 @@ fn sum(n, acc) {{
 	}}
 }}
 
-process.spawn(fn() {{
-	println('heavy ${{sum({heavy_n}, 0)}}')
-}})
-_ = process.spawn(fn() {{
-	println('light ${{sum({light_n}, 0)}}')
-}})
+pub fn main() {{
+	_ = process.spawn(fn() {{
+		println('heavy ${{sum({heavy_n}, 0)}}')
+	}})
+	_ = process.spawn(fn() {{
+		println('light ${{sum({light_n}, 0)}}')
+	}})
+}}
 "#
     );
     assert_self_tail(&src, "sum");

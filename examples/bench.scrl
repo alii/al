@@ -14,5 +14,7 @@ fn count(n, acc) {
 	}
 }
 
-println(fib(26))
-println(count(200000, 0))
+pub fn main() {
+	println(fib(26))
+	println(count(200000, 0))
+}

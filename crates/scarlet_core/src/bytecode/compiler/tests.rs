@@ -13,12 +13,27 @@ fn parse_ok(src: &str) -> crate::ast::BlockExpression {
     pr.ast
 }
 
+/// Compile a snippet with codegen on, as a script: these tests are about
+/// what the compiler does with the code, and a script is the shortest way
+/// to hand it some (it is also exactly what the REPL submits).
+fn compile_script(src: &str) -> super::CompileResult {
+    super::compile_with(
+        &crate::ast::Expression::BlockExpression(parse_ok(src)),
+        super::CompileOptions {
+            module_scope: super::ModuleScope::Script,
+            ..super::CompileOptions::default()
+        },
+    )
+}
+
 /// Compile `src` as the entry module on the LSP path, with
-/// `collect_hover_facts` on so occurrence collection fires.
+/// `collect_hover_facts` on so occurrence collection fires. A script, for
+/// the reason `compile_script` is.
 fn collect(src: &str) -> super::Compiler {
     let block = parse_ok(src);
     let mut c = super::new_compiler(None, true);
     c.collect_hover_facts = true;
+    c.module_scope = super::ModuleScope::Script;
     c.register_prelude();
     assert!(
         !crate::diagnostic::has_errors(&c.engine.diagnostics),
@@ -139,12 +154,10 @@ mod local_binders_as_definitions {
 /// Perceus drop/reuse assertions on the `lower → perceus → emit` output.
 mod perceus_drop {
     use super::super::*;
-    use super::parse_ok;
 
     /// Compile `src` with codegen on and return the emitted instructions.
     fn emitted(src: &str) -> Vec<crate::bytecode::Instruction> {
-        let block = parse_ok(src);
-        let r = compile(&ast::Expression::BlockExpression(block), None, None);
+        let r = super::compile_script(src);
         assert!(
             !crate::diagnostic::has_errors(&r.diagnostics),
             "snippet failed to compile: {:?}",
@@ -268,8 +281,7 @@ mod clean_module_gate {
     use crate::scanner::new_scanner;
 
     fn diagnose(src: &str) -> Vec<Diagnostic> {
-        let block = parse_ok(src);
-        compile(&ast::Expression::BlockExpression(block), None, None).diagnostics
+        super::compile_script(src).diagnostics
     }
 
     fn codes(ds: &[Diagnostic]) -> Vec<DiagnosticCode> {
@@ -320,7 +332,7 @@ mod clean_module_gate {
     /// cannot surface as a compiler bug from the elaborator.
     #[test]
     fn an_error_node_denies_the_proof() {
-        let mut s = new_scanner("x = 1 +\n".to_string());
+        let mut s = new_scanner("pub fn main() {\n  x = 1 +\n}\n".to_string());
         let pr = new_parser(&mut s).parse_program();
         assert!(
             crate::diagnostic::has_errors(&pr.diagnostics),
@@ -338,7 +350,7 @@ mod clean_module_gate {
     /// And the clean module still elaborates: the gate is not a mute button.
     #[test]
     fn a_clean_module_reaches_the_core_pipeline() {
-        let block = parse_ok("fn f(x Int) Int { x + 1 }\nf(1)\n");
+        let block = parse_ok("fn f(x Int) Int { x + 1 }\npub fn main() { f(1) }\n");
         let r = compile(&ast::Expression::BlockExpression(block), None, None);
         assert!(r.success(), "{:#?}", r.diagnostics);
         let emitted = r.into_runnable().expect("a non-check compile emits");
@@ -512,7 +524,7 @@ mod stdlib_native_gate_probe {
         let bodies: Rc<RefCell<Captured>> = Rc::default();
         let sink = Rc::clone(&bodies);
         let mut c = new_compiler(None, false);
-        c.native_hook = Some(Box::new(move |idx, f, _pool| {
+        c.native_hook = Some(Box::new(move |idx, f, _pool, _counts| {
             sink.borrow_mut()
                 .push((idx, format!("{f}"), crate::core_ir::codec::encode_fn(f)));
         }));
@@ -552,8 +564,8 @@ mod stdlib_native_gate_probe {
         let probes: Rc<RefCell<Vec<Probe>>> = Rc::default();
         let sink = Rc::clone(&probes);
         let mut c = new_compiler(None, false);
-        c.native_hook = Some(Box::new(move |idx, f, pool| {
-            let plan = clif::plan(idx, f, pool, &prelude);
+        c.native_hook = Some(Box::new(move |idx, f, pool, counts| {
+            let plan = clif::plan(idx, f, pool, &prelude, counts);
             sink.borrow_mut().push(Probe { idx, plan });
         }));
 
@@ -628,7 +640,9 @@ mod runnable_programs {
 
     use super::parse_ok;
     use crate::ast;
-    use crate::bytecode::{CompileOptions, Op, UnusedBindings, check, compile, compile_with};
+    use crate::bytecode::{
+        CompileOptions, ModuleScope, Op, UnusedBindings, check, compile, compile_with,
+    };
 
     fn entry(src: &str) -> ast::Expression {
         ast::Expression::BlockExpression(parse_ok(src))
@@ -636,7 +650,7 @@ mod runnable_programs {
 
     #[test]
     fn an_unused_binding_is_reported_in_a_file() {
-        let result = compile(&entry("x = 5\n42\n"), None, None);
+        let result = compile(&entry("pub fn main() {\n  x = 5\n  42\n}\n"), None, None);
         assert!(
             !result.success(),
             "a file's unused binding must be an error"
@@ -650,7 +664,7 @@ mod runnable_programs {
     /// answer, not the diagnostics'.
     #[test]
     fn a_rejected_compile_stays_unrunnable_even_with_its_diagnostics_removed() {
-        let mut result = compile(&entry("x = 5\n42\n"), None, None);
+        let mut result = compile(&entry("pub fn main() {\n  x = 5\n  42\n}\n"), None, None);
         assert!(!result.success(), "an unused binding rejects a file");
         result.diagnostics.clear();
         assert!(result.success(), "the filtered result looks clean");
@@ -661,27 +675,108 @@ mod runnable_programs {
     }
 
     /// A check builds the function table but splices no toplevel: analysis,
-    /// never a run.
+    /// never a run. It also does not need a `main`: a library file checks.
     #[test]
     fn a_check_has_artifacts_but_nothing_to_run() {
-        let src = entry("const x = 1\nx\n");
+        let src = entry("pub const x = 1\n");
+        let checked = check(&src, None, None);
+        assert!(checked.success(), "{:?}", checked.diagnostics);
         assert!(check(&src, None, None).into_runnable().is_none());
         assert!(check(&src, None, None).into_artifacts().is_some());
     }
 
+    /// The last three instructions of a program's entry frame after the
+    /// declarations have been initialised.
+    fn entry_tail(src: &str) -> Vec<Op> {
+        let result = compile(&entry(src), None, None);
+        assert!(result.success(), "{:?}", result.diagnostics);
+        let emitted = result.into_runnable().expect("a successful compile emits");
+        let mut ops: Vec<Op> = emitted
+            .program
+            .code
+            .iter()
+            .rev()
+            .take(3)
+            .map(|i| i.op)
+            .collect();
+        ops.reverse();
+        ops
+    }
+
+    /// A program is entered at `main`: the toplevel's own Nil is popped and
+    /// `main` is called by index, so its result is what `Halt` sees.
     #[test]
-    fn a_repl_entry_with_an_unused_binding_still_runs() {
+    fn a_program_starts_at_main() {
+        assert_eq!(
+            entry_tail("pub fn main() {\n  42\n}\n"),
+            vec![Op::Pop, Op::CallKnown, Op::Halt]
+        );
+    }
+
+    fn messages(src: &str) -> Vec<String> {
+        compile(&entry(src), None, None)
+            .diagnostics
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
+    }
+
+    #[test]
+    fn a_program_without_main_does_not_run_but_checks() {
+        let src = "fn helper() Int {\n  1\n}\n\npub fn exported() Int {\n  helper()\n}\n";
+        assert!(
+            messages(src)
+                .iter()
+                .any(|m| m.starts_with("No `main` function")),
+            "{:?}",
+            messages(src)
+        );
+        assert!(check(&entry(src), None, None).success());
+    }
+
+    #[test]
+    fn main_must_be_public_and_take_nothing() {
+        let private = messages("fn main() {\n  1\n}\n");
+        assert!(
+            private.iter().any(|m| m.contains("`main` must be public")),
+            "{private:?}"
+        );
+        let with_args = messages("pub fn main(x Int) Int {\n  x\n}\n");
+        assert!(
+            with_args.iter().any(|m| m.contains("takes no parameters")),
+            "{with_args:?}"
+        );
+        // Both are reported by `check` too: a malformed entry point is a
+        // fact about the file, not about running it.
+        let checked = check(&entry("fn main() {\n  1\n}\n"), None, None);
+        assert!(!checked.success());
+    }
+
+    #[test]
+    fn statements_at_module_scope_are_rejected_in_a_program() {
+        let ms = messages("println(1)\n\npub fn main() {\n  2\n}\n");
+        assert!(
+            ms.iter()
+                .any(|m| m.starts_with("Statements are not allowed at module scope")),
+            "{ms:?}"
+        );
+    }
+
+    /// The REPL's mode: statements are the input, bindings persist as
+    /// module-scope binds, and the entry's value is its tail expression,
+    /// left on the stack for the `Halt` the REPL reads — no `main` involved.
+    #[test]
+    fn a_script_entry_runs_its_statements_and_leaves_the_tail() {
         let result = compile_with(
             &entry("x = 5\n42\n"),
             CompileOptions {
                 unused_bindings: UnusedBindings::Ignore,
+                module_scope: ModuleScope::Script,
                 ..CompileOptions::default()
             },
         );
         assert!(result.success(), "{:?}", result.diagnostics);
         let emitted = result.into_runnable().expect("a successful compile emits");
-        // The entry's value is its tail expression, left on the stack for the
-        // `Halt` the REPL reads. A skipped toplevel ends `PushNil, Pop, Halt`.
         let ops: Vec<Op> = emitted
             .program
             .code

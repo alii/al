@@ -87,32 +87,34 @@ fn label(e Entry) String {
 	}
 }
 
-root = Dir(
-	name: 'project',
-	entries: [
-		File(name: 'README.md', size: 1024),
-		Dir(
-			name: 'src',
-			entries: [File(name: 'main.al', size: 2048), File(name: 'lib.al', size: 512)],
-		),
-		Dir(name: 'tests', entries: [File(name: 'golden.al', size: 256)]),
-	],
-)
+pub fn main() {
+	root = Dir(
+		name: 'project',
+		entries: [
+			File(name: 'README.md', size: 1024),
+			Dir(
+				name: 'src',
+				entries: [File(name: 'main.al', size: 2048), File(name: 'lib.al', size: 512)],
+			),
+			Dir(name: 'tests', entries: [File(name: 'golden.al', size: 256)]),
+		],
+	)
 
-render(root, '')
+	render(root, '')
 
-// A single-constructor type also destructures in a binding position.
-Stat(files, dirs, bytes) = walk(root)
-println('${files} files, ${dirs} dirs, ${bytes} bytes')
+	// A single-constructor type also destructures in a binding position.
+	Stat(files, dirs, bytes) = walk(root)
+	println('${files} files, ${dirs} dirs, ${bytes} bytes')
 
-// Interpolation stringifies any value, enums and records included.
-println(string.inspect(walk(root)))
+	// Interpolation stringifies any value, enums and records included.
+	println(string.inspect(walk(root)))
 
-println(match find(root, 'lib.al') {
-	Some(e) -> label(e)
-	None -> 'not found'
-})
-println(match find(root, 'missing.al') {
-	Some(e) -> label(e)
-	None -> 'not found'
-})
+	println(match find(root, 'lib.al') {
+		Some(e) -> label(e)
+		None -> 'not found'
+	})
+	println(match find(root, 'missing.al') {
+		Some(e) -> label(e)
+		None -> 'not found'
+	})
+}

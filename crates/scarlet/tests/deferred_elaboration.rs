@@ -25,8 +25,10 @@ fn recursive_local_lambda_shadowing_a_module_fn_loads_itself() {
          \x20   foo = fn(n) { if n == 0 { 100 } else { apply(foo, n - 1) } }\n\
          \x20   foo(3)\n\
          }\n\
-         println(outer())\n\
-         println(foo(1))\n",
+         pub fn main() {\n\
+         \x20   println(outer())\n\
+         \x20   println(foo(1))\n\
+         }\n",
         "100\n1001\n",
     );
 }
@@ -45,7 +47,9 @@ fn nested_recursive_lambda_shadowing_resolves_through_the_whole_chain() {
          \x20   }\n\
          \x20   mid(k)\n\
          }\n\
-         println(outer(7))\n",
+         pub fn main() {\n\
+         \x20   println(outer(7))\n\
+         }\n",
         "7\n",
     );
 }
@@ -60,9 +64,11 @@ fn mutually_recursive_scc_jumps_over_every_parked_body() {
          fn is_odd(n Int) Bool { if n == 0 { False } else { is_even(n - 1) } }\n\
          fn ping(n Int) Int { if n == 0 { 0 } else { 1 + pong(n - 1) } }\n\
          fn pong(n Int) Int { if n == 0 { 0 } else { 1 + ping(n - 1) } }\n\
-         println(is_even(10))\n\
-         println(is_odd(10))\n\
-         println(ping(9))\n",
+         pub fn main() {\n\
+         \x20   println(is_even(10))\n\
+         \x20   println(is_odd(10))\n\
+         \x20   println(ping(9))\n\
+         }\n",
         "True\nFalse\n9\n",
     );
 }
@@ -78,53 +84,49 @@ fn closure_inside_a_mutual_scc_is_skipped_by_the_enclosing_stream() {
          \x20   if n == 0 { 0 } else { apply(bump, b(n - 1)) }\n\
          }\n\
          fn b(n Int) Int { if n == 0 { 0 } else { a(n - 1) } }\n\
-         println(a(4))\n",
+         pub fn main() {\n\
+         \x20   println(a(4))\n\
+         }\n",
         "2\n",
     );
 }
 
-/// Declared bodies elaborate *after* the toplevel `let` walk, and
-/// `TypeEnv::define` overwrites in place, so a toplevel bind of a prelude name
-/// is visible by the time `g`'s body lowers. Without restoring the env the decl
-/// walk saw, `println` stops routing as a builtin and `g` calls itself.
+/// Every body of the module is walked, and later elaborated, in sequence
+/// against one shared value env, and `TypeEnv::define` overwrites in place.
+/// A bind of a prelude name inside the body walked first must therefore be
+/// gone again by the time `g` is walked and lowered; if it leaked, `println`
+/// would stop routing as a builtin inside `g`.
 #[test]
-fn toplevel_bind_shadowing_a_builtin_does_not_repoint_a_decl_body() {
+fn a_bind_shadowing_a_builtin_in_one_body_does_not_repoint_a_sibling_body() {
     run_outputs(
-        "fn g(x Int) Nil { println(x) }\n\
-         println = 5\n\
-         g(2)\n\
-         g(println + 1)\n",
+        "fn shadow() Int {\n\
+         \x20   println = 5\n\
+         \x20   println + 1\n\
+         }\n\
+         fn g(x Int) Nil { println(x) }\n\
+         pub fn main() {\n\
+         \x20   g(2)\n\
+         \x20   g(shadow())\n\
+         }\n",
         "2\n6\n",
     );
 }
 
-/// The same rebinding one step milder: the toplevel bind flips the declared
-/// `fn` `h` to a local. `k`'s call must still reach the function, not the Int.
+/// The same leak one step milder: the bind flips the declared `fn` `h` to an
+/// Int local. `k`, walked afterwards, must still call the function.
 #[test]
-fn toplevel_bind_shadowing_a_decl_fn_does_not_repoint_a_sibling_body() {
+fn a_bind_shadowing_a_decl_fn_in_one_body_does_not_repoint_a_sibling_body() {
     run_outputs(
         "fn h(x Int) Int { x + 1 }\n\
-         fn k(y Int) Int { h(y) * 2 }\n\
-         h = 100\n\
-         println(k(3))\n\
-         println(h)\n",
-        "8\n100\n",
-    );
-}
-
-/// The other half: a lambda parked by the toplevel `let` walk legitimately
-/// needs those binds. `a` resolves to a global rather than a capture, so it is
-/// reachable at elaboration time only through the live env.
-#[test]
-fn toplevel_lambda_still_sees_earlier_toplevel_binds() {
-    run_outputs(
-        "a = 7\n\
-         b = 3\n\
-         g = fn(n Int) {\n\
-         \x20   inner = fn(m Int) { m + a + b }\n\
-         \x20   inner(n)\n\
+         fn shadow() Int {\n\
+         \x20   h = 100\n\
+         \x20   h\n\
          }\n\
-         println(g(1))\n",
-        "11\n",
+         fn k(y Int) Int { h(y) * 2 }\n\
+         pub fn main() {\n\
+         \x20   println(shadow())\n\
+         \x20   println(k(3))\n\
+         }\n",
+        "100\n8\n",
     );
 }

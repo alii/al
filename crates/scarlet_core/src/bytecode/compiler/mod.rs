@@ -54,7 +54,7 @@ use std::rc::Rc;
 
 use super::peephole::fuse;
 use super::session::{RawRef, Watermark};
-use super::{Function, Op, PreludeBindings, Program, TypeRef, Value, op, op_arg};
+use super::{Function, Op, PreludeBindings, Program, TypeRef, Value, op, op_ab, op_arg};
 use crate::ast;
 use crate::core_ir::CoreFn;
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
@@ -211,6 +211,21 @@ pub enum UnusedBindings {
     #[default]
     Report,
     Ignore,
+}
+
+/// What a module's top level may contain.
+///
+/// A program is declarations — `import`, `fn`, `type`, `const` — and starts
+/// at `pub fn main()`; statements at module scope are rejected, in the entry
+/// file exactly as in an imported module. The REPL is the one place code is
+/// entered a statement at a time, and its bindings have to persist from one
+/// entry to the next, which is what module-scope binds are; so it compiles
+/// in [`Script`](ModuleScope::Script) mode, and nothing else does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModuleScope {
+    #[default]
+    DeclarationsOnly,
+    Script,
 }
 
 pub struct CompileResult {
@@ -535,6 +550,9 @@ pub struct Compiler {
     /// Whether `pop_unused_scope` reports what it finds. See
     /// [`UnusedBindings`].
     pub(super) unused_bindings: UnusedBindings,
+    /// Whether module-scope statements are accepted in the entry. See
+    /// [`ModuleScope`]; imported modules never accept them.
+    pub(super) module_scope: ModuleScope,
     /// Memo for [`Compiler::restricted_generalization_cons`]: the TypeIds
     /// whose parameters must not generalize at a value binding. Stdlib type
     /// ids are stable across `reset_to` (the watermark sits past the static
@@ -761,7 +779,9 @@ struct LoweredBody {
 /// [`NativeTable`](super::NativeTable) after [`compile_with_native`] returns.
 /// This compiler stays backend-agnostic: it hands over `(FuncIdx, CoreFn,
 /// pool)` and never learns what a backend is.
-pub type NativeHook = Box<dyn FnMut(crate::core_ir::FuncIdx, &CoreFn, &ResolvedPool)>;
+pub type NativeHook = Box<
+    dyn FnMut(crate::core_ir::FuncIdx, &CoreFn, &ResolvedPool, crate::core_ir::SwitchCounts<'_>),
+>;
 
 /// The value a [`Compiler::walk_tys`] slot holds between its reservation (on
 /// entering an expression) and its fill (on leaving it). No `Ty` ever takes this
@@ -1020,9 +1040,15 @@ impl CtorLookup {
 /// imported module's. They differ only in what happens to the toplevel's tail
 /// value and Core body.
 enum TopKind {
-    /// `__main__`: the tail value stays on the stack for `Halt`, and the Core
-    /// body is kept on `self.core` for consumers of the entry program's IR.
-    Entry,
+    /// `__main__`: the Core body is kept on `self.core` for consumers of the
+    /// entry program's IR, and then the program starts. For a program that
+    /// is `entered` at a `main` function, the toplevel's own tail (the Nil of
+    /// a declarations-only module) is popped and `main` is called, leaving
+    /// its result — which the program discards — for `Halt`; a script (the
+    /// REPL) leaves its tail value there instead, which is what it prints.
+    Entry {
+        entered: Option<crate::core_ir::FuncIdx>,
+    },
     /// An imported module: its toplevel runs for effect, so the tail is popped.
     Module,
 }
@@ -1089,6 +1115,9 @@ pub struct CompileOptions<'a> {
     pub native_hook: Option<NativeHook>,
     /// Whether bindings nothing reads are reported. See [`UnusedBindings`].
     pub unused_bindings: UnusedBindings,
+    /// Whether the entry may contain module-scope statements. See
+    /// [`ModuleScope`].
+    pub module_scope: ModuleScope,
 }
 
 impl<'a> CompileOptions<'a> {
@@ -1208,6 +1237,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         check_only,
         collect_hover_facts: false,
         unused_bindings: UnusedBindings::Report,
+        module_scope: ModuleScope::default(),
         restricted_gen_cons: None,
         module_table: ModuleTable::new(),
         module_display: HashMap::new(),
@@ -1285,6 +1315,7 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         as_module,
         native_hook,
         unused_bindings,
+        module_scope,
     } = options;
 
     // Backpass sugar is rewritten away here, before any typing pass, so
@@ -1296,6 +1327,7 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
     let mut c = new_compiler(base_dir, check_only);
     c.native_hook = native_hook;
     c.unused_bindings = unused_bindings;
+    c.module_scope = module_scope;
     if let Some(m) = as_module.clone() {
         // `as_module` is always a stdlib path (see `check_as_module`), whose
         // written form is its canonical identity.
@@ -1344,6 +1376,9 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
     let code_mark;
     let slot_base;
     let top_ty;
+    // The `main` a program starts at; `None` for a check, a script, a
+    // module, or a program with no usable `main` (which is then not clean).
+    let mut entered = None;
     if let ast::Expression::BlockExpression(block) = expr {
         c.process_imports(block);
         c.bump_type_ids_past_reserved();
@@ -1363,6 +1398,9 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         c.env.push_scope();
         c.analyse_module(block, None);
         top_ty = c.ty_nil();
+        if as_module.is_none() && module_scope == ModuleScope::DeclarationsOnly {
+            entered = c.program_entry(block, check_only, expr.span());
+        }
     } else {
         code_mark = c.program.code.len();
         slot_base = c.local_count;
@@ -1434,7 +1472,8 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         // `frame_closures` in this compile is done with it.
         c.frame_closures.clear();
         if !check_only {
-            entry = c.append_toplevel_init(lowered, code_mark, slot_base, TopKind::Entry);
+            entry =
+                c.append_toplevel_init(lowered, code_mark, slot_base, TopKind::Entry { entered });
             c.core.consts = c.program.constants.clone();
         }
     }
@@ -3100,6 +3139,69 @@ impl Compiler {
     ///
     /// See [`TopKind`] for how the two callers differ in their handling of the
     /// toplevel's tail value.
+    /// The function a program starts at. Validates the entry file's `main`
+    /// — `pub`, no parameters — whenever there is one, so `check` reports a
+    /// malformed entry point too, and requires one when the program is going
+    /// to be run. Returns its `FuncIdx` in that case; a program with no
+    /// usable `main` gets a diagnostic, which is what keeps it from running.
+    fn program_entry(
+        &mut self,
+        block: &ast::BlockExpression,
+        check_only: bool,
+        module_span: Span,
+    ) -> Option<crate::core_ir::FuncIdx> {
+        let main = block.body.iter().enumerate().find_map(|(node, n)| match n {
+            ast::Node::Statement(s) => match s.as_ref() {
+                ast::Statement::Declaration { decl, public } => match decl.as_ref() {
+                    ast::Declaration::Function(fd) if fd.identifier.name == "main" => {
+                        Some((node, fd, *public))
+                    }
+                    ast::Declaration::Function(_)
+                    | ast::Declaration::Type(_)
+                    | ast::Declaration::Const(_) => None,
+                },
+                ast::Statement::ImportDeclaration(_)
+                | ast::Statement::TupleDestructuringBinding(_)
+                | ast::Statement::TypedDiscard(_)
+                | ast::Statement::CtorDestructuringBinding(_)
+                | ast::Statement::VariableBinding(_)
+                | ast::Statement::Backpass(_) => None,
+            },
+            ast::Node::Expression(_) => None,
+        });
+        let Some((node, fd, public)) = main else {
+            if !check_only {
+                self.error(
+                    "No `main` function: a program starts at `pub fn main()`".to_string(),
+                    Span::point(module_span.start_line, module_span.start_column),
+                );
+            }
+            return None;
+        };
+        let mut usable = true;
+        if !public {
+            self.error(
+                "`main` must be public: a program starts at `pub fn main()`".to_string(),
+                fd.identifier.span,
+            );
+            usable = false;
+        }
+        if !fd.params.is_empty() {
+            self.error(
+                "`main` takes no parameters (arguments are read with `os.argv()`)".to_string(),
+                fd.identifier.span,
+            );
+            usable = false;
+        }
+        if check_only || !usable {
+            return None;
+        }
+        // Compiled by `analyse_module` unless its body failed, in which case
+        // the module is not clean and nothing runs anyway.
+        let slot = self.toplevel_decls.iter().find(|d| d.node == node)?.slot;
+        self.global_to_func.get(&slot).copied()
+    }
+
     /// Splice a lowered toplevel into the code. Returns the [`EntryToplevel`]
     /// witness for `TopKind::Entry` — the one place it is minted, so it
     /// cannot outrun the splice it stands for.
@@ -3147,8 +3249,14 @@ impl Compiler {
                 self.program.code.push(op(Op::Pop));
                 None
             }
-            TopKind::Entry => {
+            TopKind::Entry { entered } => {
                 self.core.toplevel = top.body;
+                if let Some(main) = entered {
+                    self.program.code.push(op(Op::Pop));
+                    self.program
+                        .code
+                        .push(op_ab(Op::CallKnown, 0, 0, main.to_operand()));
+                }
                 Some(EntryToplevel { _priv: () })
             }
         }
@@ -4677,10 +4785,11 @@ impl Compiler {
             // wrappers.
             let wrapper_idx = crate::core_ir::FuncIdx::from_usize(base + i);
             if !self.check_only
-                && let Some(hook) = self.native_hook.as_mut()
+                && let Some(mut hook) = self.native_hook.take()
             {
                 let native_t0 = std::time::Instant::now();
-                hook(wrapper_idx, &w, pool);
+                hook(wrapper_idx, &w, pool, &|tid| self.switch_variant_count(tid));
+                self.native_hook = Some(hook);
                 self.native_stats.record(native_t0.elapsed());
                 super::native::log_selected(wrapper_idx, self.engine.str(w.name));
             }
@@ -4750,9 +4859,13 @@ impl Compiler {
         // the same Core IR (Drops, reuse tokens and all) that `emit` consumes.
         // The hook time feeds
         // the whole-unit budget summary.
-        if let Some(hook) = self.native_hook.as_mut() {
+        // Taken out for the call so the oracle can borrow the type table.
+        if let Some(mut hook) = self.native_hook.take() {
             let native_t0 = std::time::Instant::now();
-            hook(func_idx, &core, &pool);
+            hook(func_idx, &core, &pool, &|tid| {
+                self.switch_variant_count(tid)
+            });
+            self.native_hook = Some(hook);
             self.native_stats.record(native_t0.elapsed());
             super::native::log_selected(func_idx, self.engine.str(name));
         }

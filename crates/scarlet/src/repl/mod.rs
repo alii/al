@@ -21,7 +21,7 @@ use rustyline::{Cmd, Config, Editor, EventHandler, KeyCode, KeyEvent, Modifiers}
 
 use crate::ast;
 use crate::bytecode;
-use crate::bytecode::{CompileOptions, IncrementalSession, UnusedBindings, ValueView};
+use crate::bytecode::{CompileOptions, IncrementalSession, ModuleScope, UnusedBindings, ValueView};
 use crate::diagnostic;
 use crate::term::Palette;
 use crate::vm;
@@ -207,6 +207,7 @@ impl Session {
     fn compile_options(&self) -> CompileOptions<'_> {
         CompileOptions {
             unused_bindings: UnusedBindings::Ignore,
+            module_scope: ModuleScope::Script,
             ..CompileOptions::new(self.base_dir.as_deref(), Some(&crate::STDLIB))
         }
     }
@@ -297,7 +298,7 @@ impl Session {
         }
 
         let mut session = IncrementalSession::new(&crate::STDLIB);
-        session.ignore_unused_bindings();
+        session.as_repl();
         let result = session.check(
             &ast::Expression::BlockExpression(probe.ast),
             self.base_dir.as_deref(),

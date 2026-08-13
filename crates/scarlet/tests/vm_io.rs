@@ -8,20 +8,24 @@ mod common;
 use common::net::spawn_al_server;
 use common::{Project, run_outputs, wait_or_kill};
 
-/// Scarlet source that binds `127.0.0.1:0`, prints the `listening <addr>` line
-/// `spawn_al_server` waits for, then runs `body` with `server` in scope.
+/// A Scarlet program whose `main` binds `127.0.0.1:0`, prints the `listening
+/// <addr>` line `spawn_al_server` waits for, then runs `body` with `server`
+/// in scope.
 fn listening_src(extra_imports: &str, body: &str) -> String {
     format!(
         "import scarlet/net
 import scarlet/net/address
 import scarlet/result
 {extra_imports}
-match net.listen('127.0.0.1', 0) {{
-	Ok(server) -> {{
-		println('listening ${{result.map(net.local_addr(server), address.to_string) or '?'}}')
+
+pub fn main() {{
+	match net.listen('127.0.0.1', 0) {{
+		Ok(server) -> {{
+			println('listening ${{result.map(net.local_addr(server), address.to_string) or '?'}}')
 {body}
+		}}
+		Err(e) -> println('listen-failed: ${{e}}')
 	}}
-	Err(e) -> println('listen-failed: ${{e}}')
 }}
 "
     )
@@ -35,12 +39,14 @@ fn file_write_then_read_roundtrips() {
     let data = proj.dir.join("out.txt");
     let src = r#"import scarlet/io
 
-path = '__PATH__'
-match io.write_text(path, 'hello-io') {
-	Err(e) -> println('WRITE-FAILED: ${e}')
-	Ok(Nil) -> match io.read_text(path) {
-		Ok(s) -> println('roundtrip: ${s}')
-		Err(e) -> println('READ-FAILED: ${e}')
+pub fn main() {
+	path = '__PATH__'
+	match io.write_text(path, 'hello-io') {
+		Err(e) -> println('WRITE-FAILED: ${e}')
+		Ok(Nil) -> match io.read_text(path) {
+			Ok(s) -> println('roundtrip: ${s}')
+			Err(e) -> println('READ-FAILED: ${e}')
+		}
 	}
 }
 "#
@@ -133,45 +139,47 @@ import scarlet/net
 import scarlet/net/socket
 import scarlet/binary
 
-match net.listen('127.0.0.1', 0) {
-	Ok(server) -> match net.local_addr(server) {
-		Ok(addr) -> {
-			_ = process.spawn(fn() {
-				match net.accept(server) {
-					Ok(Some(sock)) -> match socket.read_exact(sock, 5) {
-						Ok(first) -> match socket.read_exact(sock, 6) {
-							Ok(second) -> {
-								socket.write_parts(sock, [first, second]) or Nil
-								socket.close(sock) or Nil
+pub fn main() {
+	match net.listen('127.0.0.1', 0) {
+		Ok(server) -> match net.local_addr(server) {
+			Ok(addr) -> {
+				_ = process.spawn(fn() {
+					match net.accept(server) {
+						Ok(Some(sock)) -> match socket.read_exact(sock, 5) {
+							Ok(first) -> match socket.read_exact(sock, 6) {
+								Ok(second) -> {
+									socket.write_parts(sock, [first, second]) or Nil
+									socket.close(sock) or Nil
+								}
+								Err(e) -> println('server read2 failed: ${e}')
 							}
-							Err(e) -> println('server read2 failed: ${e}')
+							Err(e) -> println('server read1 failed: ${e}')
 						}
-						Err(e) -> println('server read1 failed: ${e}')
+						Ok(None) -> println('server accept closed')
+						Err(e) -> println('server accept failed: ${e}')
 					}
-					Ok(None) -> println('server accept closed')
-					Err(e) -> println('server accept failed: ${e}')
-				}
-			})
+				})
 
-			match net.connect('127.0.0.1', addr.port) {
-				Ok(conn) -> {
-					socket.write(conn, binary.from_string('hello')) or Nil
-					socket.write(conn, binary.from_string(' world')) or Nil
-					match socket.read_exact(conn, 11) {
-						Ok(data) -> match binary.to_string(data) {
-							Ok(text) -> println('echoed: ${text}')
-							Err(Nil) -> println('not utf8')
+				match net.connect('127.0.0.1', addr.port) {
+					Ok(conn) -> {
+						socket.write(conn, binary.from_string('hello')) or Nil
+						socket.write(conn, binary.from_string(' world')) or Nil
+						match socket.read_exact(conn, 11) {
+							Ok(data) -> match binary.to_string(data) {
+								Ok(text) -> println('echoed: ${text}')
+								Err(Nil) -> println('not utf8')
+							}
+							Err(e) -> println('client read failed: ${e}')
 						}
-						Err(e) -> println('client read failed: ${e}')
+						socket.close(conn) or Nil
 					}
-					socket.close(conn) or Nil
+					Err(e) -> println('connect failed: ${e}')
 				}
-				Err(e) -> println('connect failed: ${e}')
 			}
+			Err(e) -> println('local_addr failed: ${e}')
 		}
-		Err(e) -> println('local_addr failed: ${e}')
+		Err(e) -> println('listen failed: ${e}')
 	}
-	Err(e) -> println('listen failed: ${e}')
 }
 "#;
     let out = proj.run(src);
@@ -259,10 +267,13 @@ fn file_write_unaligned_binary_errors() {
     let proj = Project::new("io_unaligned");
     let data = proj.dir.join("out.bin");
     let src = r#"import scarlet/io.{UnalignedBinary}
-match io.write_file('__PATH__', <<1:4>>) {
-	Err(UnalignedBinary) -> println('rejected')
-	Err(_) -> println('wrong-error')
-	Ok(Nil) -> println('wrote')
+
+pub fn main() {
+	match io.write_file('__PATH__', <<1:4>>) {
+		Err(UnalignedBinary) -> println('rejected')
+		Err(_) -> println('wrong-error')
+		Ok(Nil) -> println('wrote')
+	}
 }
 "#
     .replace("__PATH__", &data.display().to_string());
@@ -288,10 +299,13 @@ fn file_read_missing_path_errors() {
     let proj = Project::new("io_missing");
     let missing = proj.dir.join("does_not_exist.txt");
     let src = r#"import scarlet/io.{NotFound}
-match io.read_text('__PATH__') {
-	Ok(_) -> println('read-ok')
-	Err(NotFound(p)) -> println('missing: ${p}')
-	Err(_) -> println('wrong-error')
+
+pub fn main() {
+	match io.read_text('__PATH__') {
+		Ok(_) -> println('read-ok')
+		Err(NotFound(p)) -> println('missing: ${p}')
+		Err(_) -> println('wrong-error')
+	}
 }
 "#
     .replace("__PATH__", &missing.display().to_string());
@@ -323,10 +337,13 @@ fn connect_refused_is_typed() {
     let proj = Project::new("net_refused");
     let src = r#"import scarlet/net
 import scarlet/net/error.{ConnectionRefused}
-match net.connect('127.0.0.1', __PORT__) {
-	Err(ConnectionRefused) -> println('refused')
-	Err(_) -> println('other-error')
-	Ok(_) -> println('connected')
+
+pub fn main() {
+	match net.connect('127.0.0.1', __PORT__) {
+		Err(ConnectionRefused) -> println('refused')
+		Err(_) -> println('other-error')
+		Ok(_) -> println('connected')
+	}
 }
 "#
     .replace("__PORT__", &port.to_string());
@@ -359,12 +376,14 @@ fn reader() fn() Nil {
 	}
 }
 
-process.spawn(reader())
-process.spawn(reader())
-process.spawn(reader())
-match io.read_text('__PATH__') {
-	Ok(_) -> println('ok')
-	Err(_) -> println('err')
+pub fn main() {
+	_ = process.spawn(reader())
+	_ = process.spawn(reader())
+	_ = process.spawn(reader())
+	match io.read_text('__PATH__') {
+		Ok(_) -> println('ok')
+		Err(_) -> println('err')
+	}
 }
 "#
     .replace("__PATH__", &data.display().to_string());
@@ -388,10 +407,12 @@ fn dns_resolve_runs_on_pool() {
     let src = r#"import scarlet/net
 import scarlet/process
 
-process.spawn(fn() Nil)
-match net.resolve('localhost') {
-	Ok(_) -> println('resolved')
-	Err(_) -> println('err')
+pub fn main() {
+	_ = process.spawn(fn() Nil)
+	match net.resolve('localhost') {
+		Ok(_) -> println('resolved')
+		Err(_) -> println('err')
+	}
 }
 "#;
     let out = proj.run(src);
@@ -665,24 +686,30 @@ import scarlet/net/socket
 import scarlet/http/body
 import scarlet/binary
 import scarlet/time
-outcome = fn(collected) match collected {
-	Ok(b) -> if binary.byte_size(b) == 0 { 'empty' } else { 'bytes' }
-	Err(_) -> 'error'
+
+fn outcome(collected) {
+	match collected {
+		Ok(b) -> if binary.byte_size(b) == 0 { 'empty' } else { 'bytes' }
+		Err(_) -> 'error'
+	}
 }
-match net.listen('127.0.0.1', 0) {
-	Err(_) -> println('listen failed')
-	Ok(server) -> match net.local_addr(server) {
-		Err(_) -> println('local_addr failed')
-		Ok(addr) -> match net.connect_addr(addr) {
-			Err(_) -> println('connect failed')
-			Ok(_client) -> match net.accept(server) {
-				Err(_) -> println('accept failed')
-				Ok(None) -> println('accept closed')
-				Ok(Some(conn)) -> {
-					deadline = time.add_ms(time.monotonic(), 250)
-					zero = outcome(body.collect(body.content_length(conn, 0, deadline), 16))
-					neg = outcome(body.collect(body.content_length(conn, 0 - 1, deadline), 16))
-					println('${zero} ${neg}')
+
+pub fn main() {
+	match net.listen('127.0.0.1', 0) {
+		Err(_) -> println('listen failed')
+		Ok(server) -> match net.local_addr(server) {
+			Err(_) -> println('local_addr failed')
+			Ok(addr) -> match net.connect_addr(addr) {
+				Err(_) -> println('connect failed')
+				Ok(_client) -> match net.accept(server) {
+					Err(_) -> println('accept failed')
+					Ok(None) -> println('accept closed')
+					Ok(Some(conn)) -> {
+						deadline = time.add_ms(time.monotonic(), 250)
+						zero = outcome(body.collect(body.content_length(conn, 0, deadline), 16))
+						neg = outcome(body.collect(body.content_length(conn, 0 - 1, deadline), 16))
+						println('${zero} ${neg}')
+					}
 				}
 			}
 		}
@@ -822,31 +849,33 @@ fn burn(n Int) Int {
 	}
 }
 
-match net.listen('127.0.0.1', 0) {
-	Ok(server) -> match net.local_addr(server) {
-		Ok(addr) -> {
-			_ = process.spawn(fn() {
-				match net.accept(server) {
-					Ok(Some(c)) -> {
-						socket.write(c, binary.from_string('pong')) or Nil
-						socket.close(c) or Nil
+pub fn main() {
+	match net.listen('127.0.0.1', 0) {
+		Ok(server) -> match net.local_addr(server) {
+			Ok(addr) -> {
+				_ = process.spawn(fn() {
+					match net.accept(server) {
+						Ok(Some(c)) -> {
+							socket.write(c, binary.from_string('pong')) or Nil
+							socket.close(c) or Nil
+						}
+						Ok(None) -> println('accept closed')
+						Err(e) -> println('accept failed: ${e}')
 					}
-					Ok(None) -> println('accept closed')
-					Err(e) -> println('accept failed: ${e}')
+				})
+				println('warm ${burn(25)}')
+				match net.connect('127.0.0.1', addr.port) {
+					Ok(c) -> match socket.read_exact(c, 4) {
+						Ok(_) -> println('got pong')
+						Err(e) -> println('read failed: ${e}')
+					}
+					Err(e) -> println('connect failed: ${e}')
 				}
-			})
-			println('warm ${burn(25)}')
-			match net.connect('127.0.0.1', addr.port) {
-				Ok(c) -> match socket.read_exact(c, 4) {
-					Ok(_) -> println('got pong')
-					Err(e) -> println('read failed: ${e}')
-				}
-				Err(e) -> println('connect failed: ${e}')
 			}
+			Err(e) -> println('addr failed: ${e}')
 		}
-		Err(e) -> println('addr failed: ${e}')
+		Err(e) -> println('listen failed: ${e}')
 	}
-	Err(e) -> println('listen failed: ${e}')
 }
 "#;
     for schedulers in [2u32, 4, 8] {
@@ -878,20 +907,22 @@ fn burn(n Int) Int {
 	}
 }
 
-match net.listen('127.0.0.1', 0) {
-	Ok(server) -> {
-		_ = process.spawn(fn() {
-			match net.accept(server) {
-				Ok(Some(_)) -> println('unexpected accept')
-				Ok(None) -> println('accept ended')
-				Err(e) -> println('accept failed: ${e}')
-			}
-		})
-		println('warm ${burn(25)}')
-		net.close(server) or Nil
-		println('closed')
+pub fn main() {
+	match net.listen('127.0.0.1', 0) {
+		Ok(server) -> {
+			_ = process.spawn(fn() {
+				match net.accept(server) {
+					Ok(Some(_)) -> println('unexpected accept')
+					Ok(None) -> println('accept ended')
+					Err(e) -> println('accept failed: ${e}')
+				}
+			})
+			println('warm ${burn(25)}')
+			net.close(server) or Nil
+			println('closed')
+		}
+		Err(e) -> println('listen failed: ${e}')
 	}
-	Err(e) -> println('listen failed: ${e}')
 }
 "#;
     let (code, out) = run_with_schedulers("close_foreign", src, 2, 25);
@@ -915,27 +946,29 @@ fn a_connection_closes_when_its_owner_ends() {
 import scarlet/net
 import scarlet/net/socket
 
-match net.listen('127.0.0.1', 0) {
-	Ok(server) -> match net.local_addr(server) {
-		Ok(addr) -> {
-			_ = process.spawn(fn() {
-				match net.connect('127.0.0.1', addr.port) {
-					Ok(_) -> println('child connected')
-					Err(e) -> println('connect failed: ${e}')
+pub fn main() {
+	match net.listen('127.0.0.1', 0) {
+		Ok(server) -> match net.local_addr(server) {
+			Ok(addr) -> {
+				_ = process.spawn(fn() {
+					match net.connect('127.0.0.1', addr.port) {
+						Ok(_) -> println('child connected')
+						Err(e) -> println('connect failed: ${e}')
+					}
+				})
+				match net.accept(server) {
+					Ok(Some(peer)) -> match socket.read_exact(peer, 1) {
+						Ok(_) -> println('unexpected data')
+						Err(_) -> println('peer closed')
+					}
+					Ok(None) -> println('accept closed')
+					Err(e) -> println('accept failed: ${e}')
 				}
-			})
-			match net.accept(server) {
-				Ok(Some(peer)) -> match socket.read_exact(peer, 1) {
-					Ok(_) -> println('unexpected data')
-					Err(_) -> println('peer closed')
-				}
-				Ok(None) -> println('accept closed')
-				Err(e) -> println('accept failed: ${e}')
 			}
+			Err(e) -> println('addr failed: ${e}')
 		}
-		Err(e) -> println('addr failed: ${e}')
+		Err(e) -> println('listen failed: ${e}')
 	}
-	Err(e) -> println('listen failed: ${e}')
 }
 "#;
     let (code, out) = run_with_schedulers("owner_death", src, 1, 25);
@@ -955,33 +988,35 @@ fn closing_a_connection_wakes_a_parked_reader() {
 import scarlet/net
 import scarlet/net/socket
 
-match net.listen('127.0.0.1', 0) {
-	Ok(server) -> match net.local_addr(server) {
-		Ok(addr) -> {
-			_ = process.spawn(fn() {
-				match net.accept(server) {
-					Ok(_) -> Nil
-					Err(_) -> Nil
+pub fn main() {
+	match net.listen('127.0.0.1', 0) {
+		Ok(server) -> match net.local_addr(server) {
+			Ok(addr) -> {
+				_ = process.spawn(fn() {
+					match net.accept(server) {
+						Ok(_) -> Nil
+						Err(_) -> Nil
+					}
+				})
+				match net.connect('127.0.0.1', addr.port) {
+					Ok(conn) -> {
+						_ = process.spawn(fn() {
+							match socket.read_exact(conn, 1) {
+								Ok(_) -> println('unexpected data')
+								Err(_) -> println('reader failed')
+							}
+						})
+						process.sleep(50)
+						socket.close(conn) or Nil
+						println('closed')
+					}
+					Err(e) -> println('connect failed: ${e}')
 				}
-			})
-			match net.connect('127.0.0.1', addr.port) {
-				Ok(conn) -> {
-					_ = process.spawn(fn() {
-						match socket.read_exact(conn, 1) {
-							Ok(_) -> println('unexpected data')
-							Err(_) -> println('reader failed')
-						}
-					})
-					process.sleep(50)
-					socket.close(conn) or Nil
-					println('closed')
-				}
-				Err(e) -> println('connect failed: ${e}')
 			}
+			Err(e) -> println('addr failed: ${e}')
 		}
-		Err(e) -> println('addr failed: ${e}')
+		Err(e) -> println('listen failed: ${e}')
 	}
-	Err(e) -> println('listen failed: ${e}')
 }
 "#;
     let (code, out) = run_with_schedulers("close_reader", src, 1, 25);
@@ -1006,36 +1041,38 @@ import scarlet/net
 import scarlet/net/socket
 import scarlet/binary
 
-match net.listen('127.0.0.1', 0) {
-	Ok(server) -> match net.local_addr(server) {
-		Ok(addr) -> {
-			_ = process.spawn(fn() {
-				match net.accept(server) {
-					Ok(Some(peer)) -> {
-						process.sleep(150)
-						socket.write(peer, binary.from_string('x')) or Nil
+pub fn main() {
+	match net.listen('127.0.0.1', 0) {
+		Ok(server) -> match net.local_addr(server) {
+			Ok(addr) -> {
+				_ = process.spawn(fn() {
+					match net.accept(server) {
+						Ok(Some(peer)) -> {
+							process.sleep(150)
+							socket.write(peer, binary.from_string('x')) or Nil
+						}
+						Ok(None) -> Nil
+						Err(_) -> Nil
 					}
-					Ok(None) -> Nil
-					Err(_) -> Nil
-				}
-			})
-			match net.connect('127.0.0.1', addr.port) {
-				Ok(conn) -> {
-					_ = process.spawn(fn() {
-						socket.write(conn, binary.from_string('w')) or Nil
-						println('writer done')
-					})
-					match socket.read_exact(conn, 1) {
-						Ok(_) -> println('reader got byte')
-						Err(e) -> println('reader failed: ${e}')
+				})
+				match net.connect('127.0.0.1', addr.port) {
+					Ok(conn) -> {
+						_ = process.spawn(fn() {
+							socket.write(conn, binary.from_string('w')) or Nil
+							println('writer done')
+						})
+						match socket.read_exact(conn, 1) {
+							Ok(_) -> println('reader got byte')
+							Err(e) -> println('reader failed: ${e}')
+						}
 					}
+					Err(e) -> println('connect failed: ${e}')
 				}
-				Err(e) -> println('connect failed: ${e}')
 			}
+			Err(e) -> println('addr failed: ${e}')
 		}
-		Err(e) -> println('addr failed: ${e}')
+		Err(e) -> println('listen failed: ${e}')
 	}
-	Err(e) -> println('listen failed: ${e}')
 }
 "#;
     let (code, out) = run_with_schedulers("sibling_exit", src, 1, 25);
@@ -1061,17 +1098,19 @@ fn the_accept_loop_closes_a_forgetful_handlers_socket() {
 import scarlet/net/socket
 import scarlet/binary
 
-match net.listen('127.0.0.1', 0) {
-	Ok(server) -> match net.local_addr(server) {
-		Ok(addr) -> {
-			println('listening ${addr.port}')
-			net.serve_on(server, fn(sock) {
-				socket.write(sock, binary.from_string('hi')) or Nil
-			})
+pub fn main() {
+	match net.listen('127.0.0.1', 0) {
+		Ok(server) -> match net.local_addr(server) {
+			Ok(addr) -> {
+				println('listening ${addr.port}')
+				_ = net.serve_on(server, fn(sock) {
+					socket.write(sock, binary.from_string('hi')) or Nil
+				})
+			}
+			Err(e) -> println('addr failed: ${e}')
 		}
-		Err(e) -> println('addr failed: ${e}')
+		Err(e) -> println('listen failed: ${e}')
 	}
-	Err(e) -> println('listen failed: ${e}')
 }
 "#,
     );

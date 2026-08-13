@@ -21,8 +21,10 @@ fn area(s Shape) Float {
 	}
 }
 
-shapes = [Circle(r: 2.0), Rect(w: 3.0, h: 4.0), Circle(r: 1.0)]
-println('total area: ${array.fold(shapes, 0.0, fn(acc, s) acc + area(s))}')
+pub fn main() {
+	shapes = [Circle(r: 2.0), Rect(w: 3.0, h: 4.0), Circle(r: 1.0)]
+	println('total area: ${array.fold(shapes, 0.0, fn(acc, s) acc + area(s))}')
+}
 ```
 
 ```

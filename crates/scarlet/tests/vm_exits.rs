@@ -44,20 +44,22 @@ fn third(xs Array(Int)) Int {
 	}
 }
 
-downs = process.subject()
-xs = [1, 2, 3]
-worker = process.spawn_unlinked(fn() {
-	// An out-of-range slice is the simplest way to crash on purpose.
-	_ = xs[0..9]
-	Nil
-})
-_ = process.monitor(worker, downs, fn(d) d)
-match process.receive(downs).reason {
-	Crashed(SliceOutOfBounds(from, to, length)) -> println('crashed: slice ${from}..${to} of ${length}')
-	Crashed(_) -> println('crashed some other way')
-	_ -> println('did not crash')
+pub fn main() {
+	downs = process.subject()
+	xs = [1, 2, 3]
+	worker = process.spawn_unlinked(fn() {
+		// An out-of-range slice is the simplest way to crash on purpose.
+		_ = xs[0..9]
+		Nil
+	})
+	_ = process.monitor(worker, downs, fn(d) d)
+	match process.receive(downs).reason {
+		Crashed(SliceOutOfBounds(from, to, length)) -> println('crashed: slice ${from}..${to} of ${length}')
+		Crashed(_) -> println('crashed some other way')
+		_ -> println('did not crash')
+	}
+	println('spawner still running: ${third(xs)}')
 }
-println('spawner still running: ${third(xs)}')
 "#,
     );
     assert!(
@@ -82,10 +84,13 @@ println('spawner still running: ${third(xs)}')
 fn a_main_crash_fails_the_run_and_is_reported_once() {
     let out = run(
         "main_crash",
-        "xs = [1, 2, 3]\n\
-         println('before')\n\
-         _ = xs[1..7]\n\
-         println('after')\n",
+        r#"pub fn main() {
+	xs = [1, 2, 3]
+	println('before')
+	_ = xs[1..7]
+	println('after')
+}
+"#,
     );
     assert_failed_with(&out, "[1..7]");
     assert_eq!(out.stdout, "before\n");
@@ -106,14 +111,16 @@ fn a_linked_childs_crash_kills_main() {
         "linked_crash",
         r#"import scarlet/process
 
-xs = [1, 2, 3]
-_ = process.spawn(fn() {
-	_ = xs[2..8]
-	Nil
-})
-// Blocked for ever: only the link can end this process.
-process.receive(process.subject())
-println('unreachable')
+pub fn main() {
+	xs = [1, 2, 3]
+	_ = process.spawn(fn() {
+		_ = xs[2..8]
+		Nil
+	})
+	// Blocked for ever: only the link can end this process.
+	_ = process.receive(process.subject())
+	println('unreachable')
+}
 "#,
     );
     assert_failed_with(&out, "[2..8]");
@@ -134,10 +141,12 @@ fn a_main_crash_kills_linked_workers() {
         "main_crash_cascade",
         r#"import scarlet/process
 
-// Linked to main; would otherwise keep the program alive for a minute.
-_ = process.spawn(fn() process.sleep(60000))
-xs = [1]
-_ = xs[0..5]
+pub fn main() {
+	// Linked to main; would otherwise keep the program alive for a minute.
+	_ = process.spawn(fn() process.sleep(60000))
+	xs = [1]
+	_ = xs[0..5]
+}
 "#,
     );
     assert_failed_with(&out, "[0..5]");
@@ -157,22 +166,24 @@ fn a_cascade_stops_at_an_unlinked_process() {
         r#"import scarlet/process
 import scarlet/process.{Killed}
 
-downs = process.subject()
-xs = [1, 2]
-middle = process.spawn_unlinked(fn() {
-	// Linked to middle: its crash kills middle, and stops there.
-	_ = process.spawn(fn() {
-		_ = xs[0..3]
-		Nil
+pub fn main() {
+	downs = process.subject()
+	xs = [1, 2]
+	middle = process.spawn_unlinked(fn() {
+		// Linked to middle: its crash kills middle, and stops there.
+		_ = process.spawn(fn() {
+			_ = xs[0..3]
+			Nil
+		})
+		process.receive(process.subject())
 	})
-	process.receive(process.subject())
-})
-_ = process.monitor(middle, downs, fn(d) d)
-match process.receive(downs).reason {
-	Killed -> println('middle was killed by its child')
-	_ -> println('unexpected reason')
+	_ = process.monitor(middle, downs, fn(d) d)
+	match process.receive(downs).reason {
+		Killed -> println('middle was killed by its child')
+		_ -> println('unexpected reason')
+	}
+	println('main survived')
 }
-println('main survived')
 "#,
     );
     assert!(
@@ -202,31 +213,33 @@ import scarlet/net/socket
 import scarlet/net/socket.{Data, Closed}
 import scarlet/process
 
-xs = [1, 2, 3]
-match net.listen('127.0.0.1', 0) {
-	Ok(server) -> match net.local_addr(server) {
-		Ok(addr) -> {
-			net.serve_on(server, fn(sock) {
-				match socket.read(sock, 16) {
-					Ok(Data(b)) -> {
-						if b == <<'crash'>> {
-							_ = xs[0..9]
-							Nil
-						} else {
-							socket.write(sock, <<'served'>>) or Nil
+pub fn main() {
+	xs = [1, 2, 3]
+	match net.listen('127.0.0.1', 0) {
+		Ok(server) -> match net.local_addr(server) {
+			Ok(addr) -> {
+				_ = net.serve_on(server, fn(sock) {
+					match socket.read(sock, 16) {
+						Ok(Data(b)) -> {
+							if b == <<'crash'>> {
+								_ = xs[0..9]
+								Nil
+							} else {
+								socket.write(sock, <<'served'>>) or Nil
+							}
 						}
+						Ok(Closed) -> Nil
+						Err(_) -> Nil
 					}
-					Ok(Closed) -> Nil
-					Err(_) -> Nil
-				}
-			})
-			println('listening ${address.to_string(addr)}')
-			// Keep serving until told to stop; the test drives connections.
-			process.sleep(20000)
+				})
+				println('listening ${address.to_string(addr)}')
+				// Keep serving until told to stop; the test drives connections.
+				process.sleep(20000)
+			}
+			Err(_) -> println('no addr')
 		}
-		Err(_) -> println('no addr')
+		Err(_) -> println('no listen')
 	}
-	Err(_) -> println('no listen')
 }
 "#;
     let srv = common::net::spawn_al_server(&proj, src);

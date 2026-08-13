@@ -285,9 +285,14 @@ fn main() -> process::ExitCode {
                         e,
                         base,
                         pre,
-                        Box::new(move |idx, f, pool| {
-                            sink.borrow_mut()
-                                .push(clif::plan(idx, f, pool, STDLIB.prelude));
+                        Box::new(move |idx, f, pool, counts| {
+                            sink.borrow_mut().push(clif::plan(
+                                idx,
+                                f,
+                                pool,
+                                STDLIB.prelude,
+                                counts,
+                            ));
                         }),
                     )
                 });
@@ -370,9 +375,9 @@ fn cmd_run(args: RunArgs) {
             e,
             base,
             pre,
-            Box::new(move |idx, f, pool| {
+            Box::new(move |idx, f, pool, counts| {
                 sink.borrow_mut()
-                    .push(clif::plan(idx, f, pool, STDLIB.prelude));
+                    .push(clif::plan(idx, f, pool, STDLIB.prelude, counts));
             }),
         )
     });
@@ -390,11 +395,9 @@ fn cmd_run(args: RunArgs) {
     argv.extend(args.args.iter().cloned());
 
     let mut v = vm::new_vm_with_argv(emitted.program, argv).unwrap_or_else(|e| die(e));
-    let run_result = v.run().unwrap_or_else(|e| die(e));
-
-    if !matches!(run_result.as_enum(), Some(e) if e.type_id() == scarlet::STDLIB.prelude.nil().id) {
-        println!("{}", vm::inspect(&run_result, v.program()));
-    }
+    // `main`'s return value is discarded: a program says what it has to say
+    // through its effects, and its exit status is the run's outcome.
+    drop(v.run().unwrap_or_else(|e| die(e)));
 }
 
 /// Park the hook-captured plans behind the program's

@@ -79,11 +79,17 @@ fn s0(%0:t0) -> :t1
       else
         goto j0
 
+fn s1() -> :t1
+  let %0:t4 = c8
+  let %1:t5 = BinFromString(%0)
+  ret call fn#0(%1)
+
 toplevel:
-  let %0:t4@g0 = closure fn#0()
-  let %1:t5 = c8
-  let %2:t6 = BinFromString(%1)
-  ret call %0(%2)
+  let %0:t6@g0 = closure fn#0()
+  drop %0
+  let %1:t7@g1 = closure fn#1()
+  drop %1
+  ret PushNil()
 where
   c0 = Int(0)
   c1 = Binary(48 bits)

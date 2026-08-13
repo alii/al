@@ -74,11 +74,13 @@ fn route(req Request) Response {
 	http.with_header(response, NAME_SERVER, VAL_AL)
 }
 
-// serve binds the port and runs an acceptor on every core, all draining the
-// one listener. It returns as soon as the acceptors are running; they keep the
-// program alive. examples/http_client.al is the other half of this: a client,
-// and a server it drives to completion, in one process.
-match http.serve('0.0.0.0', 8080, route) {
-	Ok(_) -> println('Listening on http://localhost:8080')
-	Err(e) -> println('serve failed: ${e}')
+pub fn main() {
+	// serve binds the port and runs an acceptor on every core, all draining the
+	// one listener. It returns as soon as the acceptors are running; they keep the
+	// program alive. examples/http_client.al is the other half of this: a client,
+	// and a server it drives to completion, in one process.
+	match http.serve('0.0.0.0', 8080, route) {
+		Ok(_) -> println('Listening on http://localhost:8080')
+		Err(e) -> println('serve failed: ${e}')
+	}
 }

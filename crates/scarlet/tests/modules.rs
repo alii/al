@@ -12,7 +12,10 @@ const UTIL_SRC: &str =
 fn relative_qualified() {
     let proj = Project::new("rel_qual");
     proj.write("util.scrl", UTIL_SRC);
-    proj.write("main.scrl", "import ./util\nprintln(util.quote('hi'))\n");
+    proj.write(
+        "main.scrl",
+        "import ./util\n\npub fn main() {\n\tprintln(util.quote('hi'))\n}\n",
+    );
     run_project_outputs(&proj, "run", "main.scrl", "\"hi\"\n");
 }
 
@@ -22,7 +25,7 @@ fn relative_selective_and_alias() {
     proj.write("util.scrl", UTIL_SRC);
     proj.write(
         "main.scrl",
-        "import ./util as u\nimport ./util.{quote as q, empty}\nprintln(u.empty())\nprintln(q('x'))\nprintln(empty())\n",
+        "import ./util as u\nimport ./util.{quote as q, empty}\n\npub fn main() {\n\tprintln(u.empty())\n\tprintln(q('x'))\n\tprintln(empty())\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "\n\"x\"\n\n");
 }
@@ -36,7 +39,7 @@ fn aliased_type_import_unifies_with_canonical() {
     proj.write("lib.scrl", "pub type Color {\n\tRed\n\tGreen\n\tBlue\n}\n");
     proj.write(
         "main.scrl",
-        "import ./lib.{Color as C, Red}\nfn id(c C) C { c }\nprintln(id(Red))\n",
+        "import ./lib.{Color as C, Red}\n\nfn id(c C) C { c }\n\npub fn main() {\n\tprintln(id(Red))\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "Red\n");
 }
@@ -45,7 +48,10 @@ fn aliased_type_import_unifies_with_canonical() {
 fn relative_import() {
     let proj = Project::new("rel_imp");
     proj.write("helper.scrl", "pub fn greet() String { 'hello' }\n");
-    proj.write("main.scrl", "import ./helper\nprintln(helper.greet())\n");
+    proj.write(
+        "main.scrl",
+        "import ./helper\n\npub fn main() {\n\tprintln(helper.greet())\n}\n",
+    );
     run_project_outputs(&proj, "run", "main.scrl", "hello\n");
 }
 
@@ -56,13 +62,13 @@ fn private_is_not_importable() {
 
     proj.write(
         "main_sel.scrl",
-        "import ./helper.{secret}\nprintln(secret())\n",
+        "import ./helper.{secret}\n\npub fn main() {\n\tprintln(secret())\n}\n",
     );
     project_rejects(&proj, "run", "main_sel.scrl", &["private"]);
 
     proj.write(
         "main_qual.scrl",
-        "import ./helper\nprintln(helper.secret())\n",
+        "import ./helper\n\npub fn main() {\n\tprintln(helper.secret())\n}\n",
     );
     project_rejects(&proj, "run", "main_qual.scrl", &["private"]);
 }
@@ -81,14 +87,22 @@ fn opaque_type_hides_constructors() {
         "ok.scrl",
         "import ./id.{Id, make, get}\n\
          fn use(i Id) Int { get(i) }\n\
-         println(use(make(42)))\n",
+         pub fn main() {\n\
+         \tprintln(use(make(42)))\n\
+         }\n",
     );
     run_project_outputs(&proj, "run", "ok.scrl", "42\n");
 
-    proj.write("bad_sel.scrl", "import ./id.{Id}\nx = Id(1)\n");
+    proj.write(
+        "bad_sel.scrl",
+        "import ./id.{Id}\n\npub fn main() {\n\t_ = Id(1)\n}\n",
+    );
     project_rejects(&proj, "check", "bad_sel.scrl", &["private", "opaque"]);
 
-    proj.write("bad_qual.scrl", "import ./id\nx = id.Id(1)\n");
+    proj.write(
+        "bad_qual.scrl",
+        "import ./id\n\npub fn main() {\n\t_ = id.Id(1)\n}\n",
+    );
     project_rejects(&proj, "check", "bad_qual.scrl", &["private", "opaque"]);
 }
 
@@ -118,7 +132,7 @@ fn unknown_module() {
 
 run_case! {
     stdlib_net_socket_type: (
-        "import scarlet/net/socket.{Socket}\nfn id(s Socket) Socket { s }\nprintln('ok')\n",
+        "import scarlet/net/socket.{Socket}\n\nfn id(s Socket) Socket { s }\n\npub fn main() {\n\tprintln('ok')\n}\n",
         "ok\n",
     ),
 }
@@ -135,7 +149,7 @@ fn cycle_detection() {
 fn query_api_cross_module_goto_def_and_symbols() {
     let proj = Project::new("qapi_xmod");
     proj.write("util.scrl", UTIL_SRC);
-    let entry = "import ./util\nprintln(util.quote('hi'))\n";
+    let entry = "import ./util\n\npub fn main() {\n\tprintln(util.quote('hi'))\n}\n";
     proj.write("main.scrl", entry);
     let s = checked_with(&proj, entry);
 
@@ -175,8 +189,7 @@ fn query_api_cross_module_goto_def_and_symbols() {
 fn query_api_alias_and_selective_imports_resolve() {
     let proj = Project::new("qapi_alias");
     proj.write("util.scrl", UTIL_SRC);
-    let entry =
-        "import ./util as u\nimport ./util.{quote as q}\nprintln(u.empty())\nprintln(q('x'))\n";
+    let entry = "import ./util as u\nimport ./util.{quote as q}\n\npub fn main() {\n\tprintln(u.empty())\n\tprintln(q('x'))\n}\n";
     proj.write("main.scrl", entry);
     let s = checked_with(&proj, entry);
 
@@ -204,13 +217,17 @@ fn query_api_alias_and_selective_imports_resolve() {
     );
 }
 
-// An imported module's top level may contain only declarations. The entry's
-// own top-level `println` is fine; only the import is rejected.
+// An imported module's top level may contain only declarations, and says so
+// in the module's own words rather than the entry file's `pub fn main()` hint.
+// The entry is a well-formed program; only the import is rejected.
 #[test]
 fn module_top_level_executable_code_is_error() {
     let proj = Project::new("mod_toplevel_exec");
     proj.write("lib.scrl", "pub fn ok() Int { 1 }\nprintln(99)\n");
-    proj.write("main.scrl", "import ./lib\nprintln(lib.ok())\n");
+    proj.write(
+        "main.scrl",
+        "import ./lib\n\npub fn main() {\n\tprintln(lib.ok())\n}\n",
+    );
     project_rejects(
         &proj,
         "run",
@@ -224,7 +241,10 @@ fn module_top_level_executable_code_is_error() {
 fn selective_import_unknown_member_is_error() {
     let proj = Project::new("mod_sel_unknown");
     proj.write("lib.scrl", "pub fn ok() Int { 1 }\n");
-    proj.write("main.scrl", "import ./lib.{nope}\nprintln(99)\n");
+    proj.write(
+        "main.scrl",
+        "import ./lib.{nope}\n\npub fn main() {\n\tprintln(99)\n}\n",
+    );
     project_rejects(
         &proj,
         "run",
@@ -239,7 +259,10 @@ fn selective_import_unknown_member_is_error() {
 fn qualified_import_unknown_member_is_error() {
     let proj = Project::new("mod_qual_unknown");
     proj.write("lib.scrl", "pub fn ok() Int { 1 }\n");
-    proj.write("main.scrl", "import ./lib\nlib.nope()\n");
+    proj.write(
+        "main.scrl",
+        "import ./lib\n\npub fn main() {\n\tlib.nope()\n}\n",
+    );
     project_rejects(
         &proj,
         "run",
@@ -249,16 +272,16 @@ fn qualified_import_unknown_member_is_error() {
 }
 
 /// A lambda's body is walked while the import qualifier is in scope but
-/// elaborated after a same-named top-level `let` entered the value env. An
-/// elaborator that re-probed the live env would read `util.empty()` as a field
-/// access, enter an expression the walk never entered, and abort.
+/// elaborated after a same-named `let` later in the block entered the value
+/// env. An elaborator that re-probed the live env would read `util.empty()` as
+/// a field access, enter an expression the walk never entered, and abort.
 #[test]
 fn lambda_body_keeps_the_walks_qualifier_verdict() {
     let proj = Project::new("qual_pinned");
     proj.write("util.scrl", "pub fn empty() String { 'E' }\n");
     proj.write(
         "main.scrl",
-        "import ./util\nf = fn() { util.empty() }\nutil = 5\nprintln(f())\nprintln(util)\n",
+        "import ./util\n\npub fn main() {\n\tf = fn() { util.empty() }\n\tutil = 5\n\tprintln(f())\n\tprintln(util)\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "E\n5\n");
 }
@@ -272,7 +295,7 @@ fn shadowed_qualifier_is_a_field_read_only_after_the_bind() {
     proj.write("one.scrl", "pub const go = 7\n");
     proj.write(
         "main.scrl",
-        "import ./one\ntype Box {\n\tgo Int\n}\ng = fn() { one.go }\none = Box(9)\nprintln(g())\nprintln(one.go)\n",
+        "import ./one\n\ntype Box {\n\tgo Int\n}\n\npub fn main() {\n\tg = fn() { one.go }\n\tone = Box(9)\n\tprintln(g())\n\tprintln(one.go)\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "7\n9\n");
 }
@@ -294,7 +317,7 @@ fn same_named_modules_in_different_directories_are_distinct() {
     );
     proj.write(
         "main.scrl",
-        "import ./b\nimport ./sub/mid\n\nprintln(b.who())\nprintln(mid.go())\n",
+        "import ./b\nimport ./sub/mid\n\npub fn main() {\n\tprintln(b.who())\n\tprintln(mid.go())\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "ROOT\nSUB\n");
 }
@@ -312,7 +335,7 @@ fn one_file_reached_two_ways_is_one_module() {
     );
     proj.write(
         "main.scrl",
-        "import ./b\nimport ./sub/mid\n\nprintln(b.who())\nprintln(mid.go())\n",
+        "import ./b\nimport ./sub/mid\n\npub fn main() {\n\tprintln(b.who())\n\tprintln(mid.go())\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "ROOT\nROOT\n");
 }
@@ -325,7 +348,10 @@ fn a_module_in_another_directory_does_not_satisfy_a_relative_import() {
     std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
     proj.write("sub/b.scrl", "pub fn who() String {\n\t'SUB'\n}\n");
     // `./b` from the root: `sub/b.scrl` must NOT satisfy it.
-    proj.write("main.scrl", "import ./b\n\nprintln(b.who())\n");
+    proj.write(
+        "main.scrl",
+        "import ./b\n\npub fn main() {\n\tprintln(b.who())\n}\n",
+    );
     project_rejects(&proj, "check", "main.scrl", &["file not found"]);
 }
 
@@ -349,7 +375,7 @@ fn same_named_modules_do_not_share_types() {
     );
     proj.write(
         "main.scrl",
-        "import ./b\nimport ./sub/mid\n\nprintln(b.get(b.make()))\nprintln(mid.go())\n",
+        "import ./b\nimport ./sub/mid\n\npub fn main() {\n\tprintln(b.get(b.make()))\n\tprintln(mid.go())\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "1\nx\n");
 }
@@ -366,7 +392,7 @@ fn a_qualified_constructor_pattern_matches() {
     proj.write("color.scrl", COLOR_SRC);
     proj.write(
         "main.scrl",
-        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t\tcolor.Green(s) -> s\n\t}\n}\nprintln(v(color.Green(3)))\nprintln(v(color.Red))\n",
+        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t\tcolor.Green(s) -> s\n\t}\n}\n\npub fn main() {\n\tprintln(v(color.Green(3)))\n\tprintln(v(color.Red))\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "3\n0\n");
 }
@@ -379,7 +405,7 @@ fn qualified_and_imported_constructors_are_the_same_constructor() {
     proj.write("color.scrl", COLOR_SRC);
     proj.write(
         "main.scrl",
-        "import ./color.{Red}\nimport ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tRed -> 0\n\t\tcolor.Green(s) -> s\n\t}\n}\nprintln(v(color.Green(9)))\n",
+        "import ./color.{Red}\nimport ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tRed -> 0\n\t\tcolor.Green(s) -> s\n\t}\n}\n\npub fn main() {\n\tprintln(v(color.Green(9)))\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "9\n");
 }
@@ -392,7 +418,7 @@ fn a_qualified_pattern_is_seen_by_exhaustiveness() {
     proj.write("color.scrl", COLOR_SRC);
     proj.write(
         "main.scrl",
-        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t}\n}\nprintln(v(color.Red))\n",
+        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t}\n}\n\npub fn main() {\n\tprintln(v(color.Red))\n}\n",
     );
     project_rejects(&proj, "check", "main.scrl", &["not exhaustive", "Green"]);
 }
@@ -408,7 +434,7 @@ fn an_aliased_constructor_import_covers_its_variant() {
     proj.write("color.scrl", COLOR_SRC);
     proj.write(
         "main.scrl",
-        "import ./color.{Color, Red as R, Green as G}\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tR -> 0\n\t\tG(s) -> s\n\t}\n}\nprintln(v(G(9)))\n",
+        "import ./color.{Color, Red as R, Green as G}\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tR -> 0\n\t\tG(s) -> s\n\t}\n}\n\npub fn main() {\n\tprintln(v(G(9)))\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "9\n");
 }
@@ -422,7 +448,7 @@ fn swapped_constructor_aliases_keep_their_own_variants() {
     proj.write("color.scrl", COLOR_SRC);
     proj.write(
         "main.scrl",
-        "import ./color.{Color, Red as Green, Green as Red}\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tGreen -> 0\n\t\tRed(s) -> s\n\t}\n}\nprintln(v(Red(9)))\n",
+        "import ./color.{Color, Red as Green, Green as Red}\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tGreen -> 0\n\t\tRed(s) -> s\n\t}\n}\n\npub fn main() {\n\tprintln(v(Red(9)))\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "9\n");
 }
@@ -435,7 +461,7 @@ fn an_aliased_constructor_destructures_irrefutably() {
     proj.write("pair.scrl", "pub type Pair {\n\tPair(a Int, b Int)\n}\n");
     proj.write(
         "main.scrl",
-        "import ./pair.{Pair as P}\n\nP(a, b) = P(1, 2)\nprintln(a + b)\n",
+        "import ./pair.{Pair as P}\n\npub fn main() {\n\tP(a, b) = P(1, 2)\n\tprintln(a + b)\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "3\n");
 }
@@ -448,7 +474,7 @@ fn an_aliased_arm_still_leaves_the_other_variant_missing() {
     proj.write("color.scrl", COLOR_SRC);
     proj.write(
         "main.scrl",
-        "import ./color.{Color, Red as R}\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tR -> 0\n\t}\n}\nprintln(v(R))\n",
+        "import ./color.{Color, Red as R}\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tR -> 0\n\t}\n}\n\npub fn main() {\n\tprintln(v(R))\n}\n",
     );
     project_rejects(&proj, "check", "main.scrl", &["not exhaustive", "Green"]);
 }
@@ -478,7 +504,7 @@ fn an_aliased_arm_matches_beside_a_catch_all() {
     proj.write("color.scrl", COLOR_MAKE_SRC);
     proj.write(
         "main.scrl",
-        "import ./color\nimport ./color.{Green as G}\n\nx = color.make(9)\nmatch x {\n\tG(s) -> println(s)\n\t_ -> println(0)\n}\n",
+        "import ./color\nimport ./color.{Green as G}\n\npub fn main() {\n\tx = color.make(9)\n\tmatch x {\n\t\tG(s) -> println(s)\n\t\t_ -> println(0)\n\t}\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "9\n");
 }
@@ -491,7 +517,7 @@ fn an_aliased_arm_matches_beside_a_bare_binding_catch_all() {
     proj.write("color.scrl", COLOR_MAKE_SRC);
     proj.write(
         "main.scrl",
-        "import ./color\nimport ./color.{Green as G}\n\nx = color.make(7)\nmatch x {\n\tG(s) -> println(s)\n\tother -> println(other)\n}\n",
+        "import ./color\nimport ./color.{Green as G}\n\npub fn main() {\n\tx = color.make(7)\n\tmatch x {\n\t\tG(s) -> println(s)\n\t\tother -> println(other)\n\t}\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "7\n");
 }
@@ -504,7 +530,7 @@ fn an_aliased_arm_matches_a_qualified_scrutinee_beside_a_catch_all() {
     proj.write("color.scrl", COLOR_MAKE_SRC);
     proj.write(
         "main.scrl",
-        "import ./color\nimport ./color.{Green as G}\n\nx = color.Green(4)\nmatch x {\n\tG(s) -> println(s)\n\t_ -> println(0)\n}\n",
+        "import ./color\nimport ./color.{Green as G}\n\npub fn main() {\n\tx = color.Green(4)\n\tmatch x {\n\t\tG(s) -> println(s)\n\t\t_ -> println(0)\n\t}\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "4\n");
 }
@@ -517,7 +543,7 @@ fn an_aliased_head_matches_nested_beside_a_catch_all() {
     proj.write("hue.scrl", HUE_SRC);
     proj.write(
         "main.scrl",
-        "import ./hue\nimport ./hue.{Green as G}\n\nn = (hue.make(9), 1)\nmatch n {\n\t(G(s), 1) -> println(s)\n\t_ -> println(0)\n}\n",
+        "import ./hue\nimport ./hue.{Green as G}\n\npub fn main() {\n\tn = (hue.make(9), 1)\n\tmatch n {\n\t\t(G(s), 1) -> println(s)\n\t\t_ -> println(0)\n\t}\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "9\n");
 }
@@ -530,7 +556,7 @@ fn an_aliased_head_matches_in_an_or_pattern_beside_a_catch_all() {
     proj.write("hue.scrl", HUE_SRC);
     proj.write(
         "main.scrl",
-        "import ./hue\nimport ./hue.{Green as G}\n\no = hue.make(4)\nmatch o {\n\tG(_s) | hue.Red -> println(1)\n\t_ -> println(0)\n}\n",
+        "import ./hue\nimport ./hue.{Green as G}\n\npub fn main() {\n\to = hue.make(4)\n\tmatch o {\n\t\tG(_s) | hue.Red -> println(1)\n\t\t_ -> println(0)\n\t}\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "1\n");
 }
@@ -546,7 +572,7 @@ fn an_aliased_destructure_takes_a_value_from_the_declaring_module() {
     );
     proj.write(
         "main.scrl",
-        "import ./pair\nimport ./pair.{Pair as P}\n\nP(a, b) = pair.make(1, 2)\nprintln(a + b)\n",
+        "import ./pair\nimport ./pair.{Pair as P}\n\npub fn main() {\n\tP(a, b) = pair.make(1, 2)\n\tprintln(a + b)\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "3\n");
 }
@@ -559,7 +585,7 @@ fn a_catch_all_before_an_aliased_arm_is_still_unreachable() {
     proj.write("hue.scrl", HUE_SRC);
     proj.write(
         "main.scrl",
-        "import ./hue\nimport ./hue.{Green as G}\n\nc = hue.make(3)\nmatch c {\n\t_ -> println(0)\n\tG(_s) -> println(1)\n}\n",
+        "import ./hue\nimport ./hue.{Green as G}\n\npub fn main() {\n\tc = hue.make(3)\n\tmatch c {\n\t\t_ -> println(0)\n\t\tG(_s) -> println(1)\n\t}\n}\n",
     );
     project_rejects(&proj, "check", "main.scrl", &["unreachable"]);
 }
@@ -574,7 +600,7 @@ fn an_alias_does_not_change_a_constructed_value_identity() {
     proj.write("color.scrl", COLOR_MAKE_SRC);
     proj.write(
         "main.scrl",
-        "import ./color\nimport ./color.{Green as G}\n\nprintln(G(9))\nprintln(G(9) == color.Green(9))\nprintln(G(9) == color.make(9))\n",
+        "import ./color\nimport ./color.{Green as G}\n\npub fn main() {\n\tprintln(G(9))\n\tprintln(G(9) == color.Green(9))\n\tprintln(G(9) == color.make(9))\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "Green(9)\nTrue\nTrue\n");
 }
@@ -594,7 +620,7 @@ fn an_alias_colliding_with_a_real_variant_does_not_capture_it() {
     proj.write("color.scrl", COLOR_MAKE_SRC);
     proj.write(
         "main.scrl",
-        "import ./color\nimport ./color.{Green as Red}\n\nprintln(Red(5))\nmatch color.make(5) {\n\tRed(_s) -> println(1)\n\t_ -> println(0)\n}\nmatch color.Red {\n\tRed(_s) -> println(1)\n\t_ -> println(0)\n}\n",
+        "import ./color\nimport ./color.{Green as Red}\n\npub fn main() {\n\tprintln(Red(5))\n\tmatch color.make(5) {\n\t\tRed(_s) -> println(1)\n\t\t_ -> println(0)\n\t}\n\tmatch color.Red {\n\t\tRed(_s) -> println(1)\n\t\t_ -> println(0)\n\t}\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "Green(5)\n1\n0\n");
 }
@@ -612,7 +638,7 @@ fn an_aliased_stdlib_constructor_reaches_a_vm_builtin() {
     let proj = Project::new("alias_ctor_stdlib");
     proj.write(
         "main.scrl",
-        "import scarlet/binary\nimport scarlet/binary.{Hex as H}\n\nprintln(binary.from_int_ascii(255, H))\n",
+        "import scarlet/binary\nimport scarlet/binary.{Hex as H}\n\npub fn main() {\n\tprintln(binary.from_int_ascii(255, H))\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "<<102, 102>>\n");
 }
@@ -624,12 +650,12 @@ fn a_qualified_pattern_takes_labels_and_rest() {
     proj.write("color.scrl", COLOR_SRC);
     proj.write(
         "lab.scrl",
-        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t\tcolor.Green(shade: s) -> s\n\t}\n}\nprintln(v(color.Green(5)))\n",
+        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t\tcolor.Green(shade: s) -> s\n\t}\n}\n\npub fn main() {\n\tprintln(v(color.Green(5)))\n}\n",
     );
     run_project_outputs(&proj, "run", "lab.scrl", "5\n");
     proj.write(
         "rest.scrl",
-        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t\tcolor.Green(..) -> 1\n\t}\n}\nprintln(v(color.Green(5)))\n",
+        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t\tcolor.Green(..) -> 1\n\t}\n}\n\npub fn main() {\n\tprintln(v(color.Green(5)))\n}\n",
     );
     run_project_outputs(&proj, "run", "rest.scrl", "1\n");
 }
@@ -645,7 +671,7 @@ fn a_qualified_pattern_cannot_reach_an_opaque_constructor() {
     );
     proj.write(
         "main.scrl",
-        "import ./id\n\nfn get(i Id) Int {\n\tmatch i {\n\t\tid.Id(n) -> n\n\t}\n}\nprintln(get(id.make(7)))\n",
+        "import ./id\n\nfn get(i Id) Int {\n\tmatch i {\n\t\tid.Id(n) -> n\n\t}\n}\n\npub fn main() {\n\tprintln(get(id.make(7)))\n}\n",
     );
     project_rejects(&proj, "check", "main.scrl", &["private"]);
 }
@@ -659,7 +685,7 @@ fn a_bad_qualified_pattern_is_a_diagnostic_not_a_crash() {
     proj.write("color.scrl", COLOR_SRC);
     proj.write(
         "unknown_qual.scrl",
-        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tnope.Red -> 0\n\t\t_ -> 1\n\t}\n}\nprintln(v(color.Red))\n",
+        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tnope.Red -> 0\n\t\t_ -> 1\n\t}\n}\n\npub fn main() {\n\tprintln(v(color.Red))\n}\n",
     );
     project_rejects(
         &proj,
@@ -670,7 +696,7 @@ fn a_bad_qualified_pattern_is_a_diagnostic_not_a_crash() {
 
     proj.write(
         "unknown_member.scrl",
-        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tcolor.Purple -> 0\n\t\t_ -> 1\n\t}\n}\nprintln(v(color.Red))\n",
+        "import ./color\n\nfn v(c color.Color) Int {\n\tmatch c {\n\t\tcolor.Purple -> 0\n\t\t_ -> 1\n\t}\n}\n\npub fn main() {\n\tprintln(v(color.Red))\n}\n",
     );
     project_rejects(
         &proj,

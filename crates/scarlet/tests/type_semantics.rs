@@ -10,9 +10,11 @@ use common::{check_ok, check_rejects, run_outputs};
 run_case! {
     type_keyword_single_variant: (
         "type User { User(name String, age Int) }\n\
-         u = User(name: 'al', age: 18)\n\
-         println(u.name)\n\
-         println(u.age)\n",
+         pub fn main() {\n\
+         \tu = User(name: 'al', age: 18)\n\
+         \tprintln(u.name)\n\
+         \tprintln(u.age)\n\
+         }\n",
         "al\n18\n",
     ),
 
@@ -24,29 +26,40 @@ run_case! {
          \t\tRect(w, h) -> w * h\n\
          \t}\n\
          }\n\
-         println(area(Circle(10)))\n\
-         println(area(Rect(4, 5)))\n",
+         pub fn main() {\n\
+         \tprintln(area(Circle(10)))\n\
+         \tprintln(area(Rect(4, 5)))\n\
+         }\n",
         "300\n20\n",
     ),
 
     type_alias_is_transparent: (
         "type Id = Int\n\
          fn next(i Id) Id { i + 1 }\n\
-         println(next(41))\n",
+         pub fn main() {\n\
+         \tprintln(next(41))\n\
+         }\n",
         "42\n",
     ),
 }
 
 reject_case! {
     /// Every field in a type definition must carry a label.
-    unlabeled_field_in_def_is_rejected:
-        ("type Wrap { Wrap(Int) }\nx = Wrap(1)\n", "constructor fields must be labeled"),
+    unlabeled_field_in_def_is_rejected: (
+        "type Wrap { Wrap(Int) }\n\
+         pub fn main() {\n\
+         \t_ = Wrap(1)\n\
+         }\n",
+        "constructor fields must be labeled",
+    ),
 }
 
 run_case! {
     some_call_is_ordinary_call: (
-        "x = Some(5)\n\
-         println(x or 0)\n",
+        "pub fn main() {\n\
+         \tx = Some(5)\n\
+         \tprintln(x or 0)\n\
+         }\n",
         "5\n",
     ),
 
@@ -57,44 +70,79 @@ run_case! {
          \t\t[h, ..t] -> [f(h), ..map(f, t)]\n\
          \t}\n\
          }\n\
-         ys = map(Some, [1, 2, 3])\n\
-         println(ys[0] or None)\n\
-         println(ys[2] or None)\n",
+         pub fn main() {\n\
+         \tys = map(Some, [1, 2, 3])\n\
+         \tprintln(ys[0] or None)\n\
+         \tprintln(ys[2] or None)\n\
+         }\n",
         "Some(1)\nSome(3)\n",
     ),
 
     nullary_constructor_is_value: (
-        "x = None\n\
-         println(x or 7)\n",
+        "pub fn main() {\n\
+         \tx = None\n\
+         \tprintln(x or 7)\n\
+         }\n",
         "7\n",
     ),
 }
 
 reject_case! {
     // `if` requires `else`
-    if_without_else_is_error: ("x = if True { 1 }\nprintln(x)\n", "else"),
+    if_without_else_is_error: (
+        "pub fn main() {\n\
+         \tx = if True { 1 }\n\
+         \tprintln(x)\n\
+         }\n",
+        "else",
+    ),
     // Parentheses are tuples-only
-    empty_parens_is_parse_error: ("x = ()\nprintln(x)\n", "tuples need 2+ elements"),
-    single_parens_is_parse_error: ("x = (5)\nprintln(x)\n", "single-element parens not allowed"),
+    empty_parens_is_parse_error: (
+        "pub fn main() {\n\
+         \tx = ()\n\
+         \tprintln(x)\n\
+         }\n",
+        "tuples need 2+ elements",
+    ),
+    single_parens_is_parse_error: (
+        "pub fn main() {\n\
+         \tx = (5)\n\
+         \tprintln(x)\n\
+         }\n",
+        "single-element parens not allowed",
+    ),
 }
 
 run_case! {
-    block_is_grouping: ("println({1 + 2} * 3)\n", "9\n"),
+    block_is_grouping: (
+        "pub fn main() {\n\
+         \tprintln({1 + 2} * 3)\n\
+         }\n",
+        "9\n",
+    ),
 }
 
 run_case! {
     index_returns_option: (
-        "xs = [10, 20, 30]\n\
-         println(xs[0] or -1)\n\
-         println(xs[9] or -1)\n",
+        "pub fn main() {\n\
+         \txs = [10, 20, 30]\n\
+         \tprintln(xs[0] or -1)\n\
+         \tprintln(xs[9] or -1)\n\
+         }\n",
         "10\n-1\n",
     ),
 }
 
 reject_case! {
     /// `xs[0] + 1` should be rejected because `xs[0]` is `Option(Int)`, not `Int`.
-    index_without_unwrap_is_option_typed:
-        ("xs = [10, 20, 30]\ny = xs[0] + 1\nprintln(y)\n", "got 'Option(Int)'"),
+    index_without_unwrap_is_option_typed: (
+        "pub fn main() {\n\
+         \txs = [10, 20, 30]\n\
+         \ty = xs[0] + 1\n\
+         \tprintln(y)\n\
+         }\n",
+        "got 'Option(Int)'",
+    ),
 }
 
 #[test]
@@ -102,10 +150,12 @@ fn index_negative_returns_none() {
     // A negative index is rejected by `Op::Index`'s own `idx >= 0` guard, a
     // different path from the out-of-bounds `arr.get` returning `None`.
     run_outputs(
-        "xs = [10, 20, 30]\n\
-         println(xs[-1])\n\
-         println(xs[-100] or -1)\n\
-         println(xs[0])\n",
+        "pub fn main() {\n\
+         \txs = [10, 20, 30]\n\
+         \tprintln(xs[-1])\n\
+         \tprintln(xs[-100] or -1)\n\
+         \tprintln(xs[0])\n\
+         }\n",
         "None\n-1\nSome(10)\n",
     );
 }
@@ -114,12 +164,14 @@ fn index_negative_returns_none() {
 fn slice_in_bounds_returns_subarray() {
     // A slice is an `Array(Int)`, not an `Option`.
     run_outputs(
-        "xs = [10, 20, 30, 40, 50]\n\
-         s = xs[1..4]\n\
-         println(s)\n\
-         println(s[0] or -1)\n\
-         println(s[2] or -1)\n\
-         println(s[3] or -1)\n",
+        "pub fn main() {\n\
+         \txs = [10, 20, 30, 40, 50]\n\
+         \ts = xs[1..4]\n\
+         \tprintln(s)\n\
+         \tprintln(s[0] or -1)\n\
+         \tprintln(s[2] or -1)\n\
+         \tprintln(s[3] or -1)\n\
+         }\n",
         "[20, 30, 40]\n20\n40\n-1\n",
     );
 }
@@ -129,9 +181,11 @@ fn range_as_value_materializes() {
     // A bare `start..end` is a first-class `Array(Int)`. A reversed range
     // saturates to length 0 rather than a negative length or a crash.
     run_outputs(
-        "println(0..5)\n\
-         println(3..3)\n\
-         println(5..2)\n",
+        "pub fn main() {\n\
+         \tprintln(0..5)\n\
+         \tprintln(3..3)\n\
+         \tprintln(5..2)\n\
+         }\n",
         "[0, 1, 2, 3, 4]\n[]\n[]\n",
     );
 }
@@ -140,8 +194,10 @@ run_case! {
     field_access_total_across_variants: (
         "type Named {\n\tPerson(name String, age Int)\n\tOrg(name String, size Int)\n}\n\
          fn name_of(n Named) String { n.name }\n\
-         println(name_of(Person(name: 'al', age: 18)))\n\
-         println(name_of(Org(name: 'anthropic', size: 1000)))\n",
+         pub fn main() {\n\
+         \tprintln(name_of(Person(name: 'al', age: 18)))\n\
+         \tprintln(name_of(Org(name: 'anthropic', size: 1000)))\n\
+         }\n",
         "al\nanthropic\n",
     ),
 }
@@ -149,8 +205,10 @@ run_case! {
 ok_case! {
     recursive_type_compiles: (
         "type Tree(a) {\n\tLeaf\n\tNode(l Tree(a), v a, r Tree(a))\n}\n\
-         t Tree(Int) = Node(l: Leaf, v: 1, r: Leaf)\n\
-         t\n",
+         pub fn main() {\n\
+         \tt Tree(Int) = Node(l: Leaf, v: 1, r: Leaf)\n\
+         \tt\n\
+         }\n",
     ),
 }
 
@@ -163,33 +221,39 @@ run_case! {
          \t\tNode(l, _, r) -> 1 + size(l) + size(r)\n\
          \t}\n\
          }\n\
-         t = Node(l: Node(l: Leaf, v: 1, r: Leaf), v: 2, r: Leaf)\n\
-         println(size(t))\n",
+         pub fn main() {\n\
+         \tt = Node(l: Node(l: Leaf, v: 1, r: Leaf), v: 2, r: Leaf)\n\
+         \tprintln(size(t))\n\
+         }\n",
         "2\n",
     ),
 }
 
 ok_case! {
     nested_option_match_is_exhaustive: (
-        "x = Some(Some(5))\n\
-         r = match x {\n\
-         \tSome(Some(n)) -> 'ss ${n}'\n\
-         \tSome(None) -> 'sn'\n\
-         \tNone -> 'n'\n\
-         }\n\
-         println(r)\n",
+        "pub fn main() {\n\
+         \tx = Some(Some(5))\n\
+         \tr = match x {\n\
+         \t\tSome(Some(n)) -> 'ss ${n}'\n\
+         \t\tSome(None) -> 'sn'\n\
+         \t\tNone -> 'n'\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
     ),
 }
 
 run_case! {
     nested_option_match_runs: (
-        "x = Some(Some(5))\n\
-         r = match x {\n\
-         \tSome(Some(n)) -> 'ss ${n}'\n\
-         \tSome(None) -> 'sn'\n\
-         \tNone -> 'n'\n\
-         }\n\
-         println(r)\n",
+        "pub fn main() {\n\
+         \tx = Some(Some(5))\n\
+         \tr = match x {\n\
+         \t\tSome(Some(n)) -> 'ss ${n}'\n\
+         \t\tSome(None) -> 'sn'\n\
+         \t\tNone -> 'n'\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
         "ss 5\n",
     ),
 }
@@ -203,32 +267,38 @@ ok_case! {
          \t\tErr(e) -> 'err ${e}'\n\
          \t}\n\
          }\n\
-         println(classify(Ok(Ok(1))))\n",
+         pub fn main() {\n\
+         \tprintln(classify(Ok(Ok(1))))\n\
+         }\n",
     ),
 }
 
 reject_case! {
     /// The witness names the missing inner variant, not just `Some(_)`.
     nested_option_missing_inner_arm_reports_precise_witness: (
-        "x = Some(Some(5))\n\
-         r = match x {\n\
-         \tSome(Some(n)) -> 'ss ${n}'\n\
-         \tNone -> 'n'\n\
-         }\n\
-         println(r)\n",
+        "pub fn main() {\n\
+         \tx = Some(Some(5))\n\
+         \tr = match x {\n\
+         \t\tSome(Some(n)) -> 'ss ${n}'\n\
+         \t\tNone -> 'n'\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
         "Some(None)",
     ),
     /// The explicit inner arms already cover `Some(_)`, so the wildcard is
     /// dead code.
     nested_option_redundant_wildcard_is_rejected: (
-        "x = Some(Some(5))\n\
-         r = match x {\n\
-         \tSome(Some(n)) -> 'ss ${n}'\n\
-         \tSome(None) -> 'sn'\n\
-         \tSome(_) -> 'other'\n\
-         \tNone -> 'n'\n\
-         }\n\
-         println(r)\n",
+        "pub fn main() {\n\
+         \tx = Some(Some(5))\n\
+         \tr = match x {\n\
+         \t\tSome(Some(n)) -> 'ss ${n}'\n\
+         \t\tSome(None) -> 'sn'\n\
+         \t\tSome(_) -> 'other'\n\
+         \t\tNone -> 'n'\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
         "unreachable",
     ),
 }
@@ -246,7 +316,9 @@ fn non_uniform_recursive_type_resolution_terminates() {
          \t\tDone -> 0\n\
          \t}\n\
          }\n\
-         println('${f(Done)}')\n",
+         pub fn main() {\n\
+         \tprintln('${f(Done)}')\n\
+         }\n",
     );
 }
 
@@ -258,8 +330,10 @@ run_case! {
          fn is_odd(n Int) Bool {\n\
          \tif n == 0 { False } else { is_even(n - 1) }\n\
          }\n\
-         println(is_even(10))\n\
-         println(is_odd(7))\n",
+         pub fn main() {\n\
+         \tprintln(is_even(10))\n\
+         \tprintln(is_odd(7))\n\
+         }\n",
         "True\nTrue\n",
     ),
 }
@@ -273,7 +347,9 @@ reject_case! {
          \t\tTrue -> 3\n\
          \t}\n\
          }\n\
-         f(True)\n",
+         pub fn main() {\n\
+         \tprintln(f(True))\n\
+         }\n",
         "unreachable",
     ),
     ctor_pattern_missing_fields_without_spread_is_error: (
@@ -283,7 +359,9 @@ reject_case! {
          \t\tUser(name: n) -> n\n\
          \t}\n\
          }\n\
-         f(User(name: 'a', age: 1, email: 'e'))\n",
+         pub fn main() {\n\
+         \tprintln(f(User(name: 'a', age: 1, email: 'e')))\n\
+         }\n",
         "missing field(s): age, email",
     ),
 }
@@ -296,14 +374,21 @@ run_case! {
          \t\tUser(name: n, ..) -> n\n\
          \t}\n\
          }\n\
-         println(f(User(name: 'alice', age: 30, email: 'a@b')))\n",
+         pub fn main() {\n\
+         \tprintln(f(User(name: 'alice', age: 30, email: 'a@b')))\n\
+         }\n",
         "alice\n",
     ),
 }
 
 reject_case! {
-    or_on_non_option_result_is_rejected:
-        ("x = 5 or 0\nprintln(x)\n", "'or' requires the left side to be Option(_) or Result(_, _)"),
+    or_on_non_option_result_is_rejected: (
+        "pub fn main() {\n\
+         \tx = 5 or 0\n\
+         \tprintln(x)\n\
+         }\n",
+        "'or' requires the left side to be Option(_) or Result(_, _)",
+    ),
 }
 
 run_case! {
@@ -311,25 +396,39 @@ run_case! {
         "fn f(b Bool) Result(Int, String) {\n\
          \tif b { Ok(42) } else { Err('nope') }\n\
          }\n\
-         println(f(True) or -1)\n\
-         println(f(False) or -1)\n",
+         pub fn main() {\n\
+         \tprintln(f(True) or -1)\n\
+         \tprintln(f(False) or -1)\n\
+         }\n",
         "42\n-1\n",
     ),
 }
 
 reject_case! {
     /// Body returns concrete `Int` where signature promised `a`.
-    rigid_tyvar_body_mismatch_is_rejected:
-        ("fn bad(x a) a { 1 }\nprintln(bad('s'))\n", "Type mismatch: expected 'a', got 'Int'"),
+    rigid_tyvar_body_mismatch_is_rejected: (
+        "fn bad(x a) a { 1 }\n\
+         pub fn main() {\n\
+         \tprintln(bad('s'))\n\
+         }\n",
+        "Type mismatch: expected 'a', got 'Int'",
+    ),
     /// `f` declares both params as `a`, so `f(1, 's')` must be rejected.
-    rigid_tyvar_same_var_unifies_args:
-        ("fn f(x a, y a) a { x }\nprintln(f(1, 's'))\n", "Type mismatch: expected 'Int', got 'String'"),
+    rigid_tyvar_same_var_unifies_args: (
+        "fn f(x a, y a) a { x }\n\
+         pub fn main() {\n\
+         \tprintln(f(1, 's'))\n\
+         }\n",
+        "Type mismatch: expected 'Int', got 'String'",
+    ),
 }
 
 run_case! {
     rigid_tyvar_same_var_accepts_same_type: (
         "fn f(x a, _y a) a { x }\n\
-         println(f(1, 2))\n",
+         pub fn main() {\n\
+         \tprintln(f(1, 2))\n\
+         }\n",
         "1\n",
     ),
 }
@@ -337,16 +436,20 @@ run_case! {
 run_case! {
     positional_construction: (
         "type Pair { Pair(fst Int, snd Int) }\n\
-         p = Pair(1, 2)\n\
-         println(p.fst + p.snd)\n",
+         pub fn main() {\n\
+         \tp = Pair(1, 2)\n\
+         \tprintln(p.fst + p.snd)\n\
+         }\n",
         "3\n",
     ),
 
     labeled_construction_reordered: (
         "type Pair { Pair(fst Int, snd Int) }\n\
-         p = Pair(snd: 2, fst: 1)\n\
-         println(p.fst)\n\
-         println(p.snd)\n",
+         pub fn main() {\n\
+         \tp = Pair(snd: 2, fst: 1)\n\
+         \tprintln(p.fst)\n\
+         \tprintln(p.snd)\n\
+         }\n",
         "1\n2\n",
     ),
 }
@@ -356,11 +459,13 @@ fn ctor_record_update_overrides_and_projects() {
     // Record-update builds a fresh value: `base` is left untouched.
     run_outputs(
         "type P { P(name String, age Int) }\n\
-         base = P(name: 'al', age: 18)\n\
-         older = P(..base, age: 19)\n\
-         println(older.name)\n\
-         println(older.age)\n\
-         println(base.age)\n",
+         pub fn main() {\n\
+         \tbase = P(name: 'al', age: 18)\n\
+         \tolder = P(..base, age: 19)\n\
+         \tprintln(older.name)\n\
+         \tprintln(older.age)\n\
+         \tprintln(base.age)\n\
+         }\n",
         "al\n19\n18\n",
     );
 }
@@ -369,19 +474,27 @@ reject_case! {
     /// A record-update accepts only one `..base`.
     ctor_record_update_at_most_one_spread: (
         "type P { P(name String, age Int) }\n\
-         base = P(name: 'al', age: 18)\n\
-         older = P(..base, ..base)\n\
-         println(older.age)\n",
+         pub fn main() {\n\
+         \tbase = P(name: 'al', age: 18)\n\
+         \tolder = P(..base, ..base)\n\
+         \tprintln(older.age)\n\
+         }\n",
         "Constructor call may have at most one spread",
     ),
     /// A spread in an ordinary call is a placement error.
     spread_arg_in_plain_call_rejected: (
-        "fn f(a Int) Int { a }\nprintln(f(..[1]))\n",
+        "fn f(a Int) Int { a }\n\
+         pub fn main() {\n\
+         \tprintln(f(..[1]))\n\
+         }\n",
         "Spread arguments are only allowed in constructor record-update calls",
     ),
     /// Labelled arguments are constructor-only.
     labelled_arg_in_plain_call_rejected: (
-        "fn f(a Int) Int { a }\nprintln(f(a: 1))\n",
+        "fn f(a Int) Int { a }\n\
+         pub fn main() {\n\
+         \tprintln(f(a: 1))\n\
+         }\n",
         "Labelled arguments are only allowed in constructor calls",
     ),
 }
@@ -396,10 +509,12 @@ run_case! {
          \t\t_ -> 'big'\n\
          \t}\n\
          }\n\
-         println(classify(-5))\n\
-         println(classify(0))\n\
-         println(classify(3))\n\
-         println(classify(99))\n",
+         pub fn main() {\n\
+         \tprintln(classify(-5))\n\
+         \tprintln(classify(0))\n\
+         \tprintln(classify(3))\n\
+         \tprintln(classify(99))\n\
+         }\n",
         "neg\nzero\nsmall\nbig\n",
     ),
 
@@ -411,9 +526,11 @@ run_case! {
          \t\tNone -> 0\n\
          \t}\n\
          }\n\
-         println(pos(Some(5)))\n\
-         println(pos(Some(-3)))\n\
-         println(pos(None))\n",
+         pub fn main() {\n\
+         \tprintln(pos(Some(5)))\n\
+         \tprintln(pos(Some(-3)))\n\
+         \tprintln(pos(None))\n\
+         }\n",
         "5\n0\n0\n",
     ),
 }
@@ -448,8 +565,10 @@ fn or_pattern_binding_after_or_in_tuple() {
          \t\t(x, y) -> x + y\n\
          \t}\n\
          }\n\
-         println(f((1, 5)))\n\
-         println(f((9, 5)))\n",
+         pub fn main() {\n\
+         \tprintln(f((1, 5)))\n\
+         \tprintln(f((9, 5)))\n\
+         }\n",
         "5\n14\n",
     );
 }
@@ -464,8 +583,10 @@ fn or_pattern_binding_before_or_in_tuple() {
          \t\t(x, y) -> x + y\n\
          \t}\n\
          }\n\
-         println(g((5, 1)))\n\
-         println(g((5, 9)))\n",
+         pub fn main() {\n\
+         \tprintln(g((5, 1)))\n\
+         \tprintln(g((5, 9)))\n\
+         }\n",
         "5\n14\n",
     );
 }
@@ -479,7 +600,9 @@ reject_case! {
          \t\tGood(x) | Bad(z) -> 0\n\
          \t}\n\
          }\n\
-         println(h(Good(1)))\n",
+         pub fn main() {\n\
+         \tprintln(h(Good(1)))\n\
+         }\n",
         "every alternative",
     ),
 }
@@ -495,35 +618,51 @@ fn or_pattern_nested_in_non_first_alternative() {
          \t\t_ -> 99\n\
          \t}\n\
          }\n\
-         println(f((0, (10, 0))))\n\
-         println(f((1, (20, 1))))\n\
-         println(f((1, (30, 2))))\n\
-         println(f((1, (40, 5))))\n",
+         pub fn main() {\n\
+         \tprintln(f((0, (10, 0))))\n\
+         \tprintln(f((1, (20, 1))))\n\
+         \tprintln(f((1, (30, 2))))\n\
+         \tprintln(f((1, (40, 5))))\n\
+         }\n",
         "10\n20\n30\n99\n",
     );
 }
 
 run_case! {
     array_spread_literal: (
-        "xs = [1, 2]\n\
-         ys = [4, 5]\n\
-         zs = [..xs, 3, ..ys, 6]\n\
-         println(zs)\n",
+        "pub fn main() {\n\
+         \txs = [1, 2]\n\
+         \tys = [4, 5]\n\
+         \tzs = [..xs, 3, ..ys, 6]\n\
+         \tprintln(zs)\n\
+         }\n",
         "[1, 2, 3, 4, 5, 6]\n",
     ),
 }
 
 reject_case! {
-    array_concat_operator_removed: ("xs = [1] ++ [2]\nprintln(xs)\n", "Unexpected '++'"),
+    array_concat_operator_removed: (
+        "pub fn main() {\n\
+         \txs = [1] ++ [2]\n\
+         \tprintln(xs)\n\
+         }\n",
+        "Unexpected '++'",
+    ),
 }
 
 #[test]
 fn nested_ctor_pattern_exhaustive() {
     // `resolve_icon`'s cycle guard must not leak across sibling type-args.
-    check_ok("match Ok(Nil) { Ok(Nil) -> println('y') Err(e) -> println(e) }\n");
+    check_ok(
+        "pub fn main() {\n\
+         \tmatch Ok(Nil) { Ok(Nil) -> println('y') Err(e) -> println(e) }\n\
+         }\n",
+    );
     check_ok(
         "type T {\n\tA\n\tB\n}\n\
-         match Ok(A) { Ok(A) -> println('a') Ok(B) -> println('b') Err(e) -> println(e) }\n",
+         pub fn main() {\n\
+         \tmatch Ok(A) { Ok(A) -> println('a') Ok(B) -> println('b') Err(e) -> println(e) }\n\
+         }\n",
     );
 }
 
@@ -531,17 +670,23 @@ fn nested_ctor_pattern_exhaustive() {
 fn module_builtins_qualified_and_destructured() {
     check_ok(
         "import scarlet/net\n\
-         match net.listen('0.0.0.0', 8080) { Ok(s) -> println(s) Err(e) -> println(e) }\n",
+         pub fn main() {\n\
+         \tmatch net.listen('0.0.0.0', 8080) { Ok(s) -> println(s) Err(e) -> println(e) }\n\
+         }\n",
     );
     check_ok(
         "import scarlet/net.{listen, Server}\n\
          fn go(s Server) Nil { println(s) }\n\
-         match listen('0.0.0.0', 8080) { Ok(s) -> go(s) Err(e) -> println(e) }\n",
+         pub fn main() {\n\
+         \tmatch listen('0.0.0.0', 8080) { Ok(s) -> go(s) Err(e) -> println(e) }\n\
+         }\n",
     );
     check_ok(
         "import scarlet/io\n\
-         x = io.read_text('a') or ''\n\
-         println(x)\n",
+         pub fn main() {\n\
+         \tx = io.read_text('a') or ''\n\
+         \tprintln(x)\n\
+         }\n",
     );
 }
 
@@ -557,16 +702,26 @@ fn vm_attribute_stdlib_only() {
 #[test]
 fn bool_is_a_normal_two_ctor_type() {
     run_outputs(
-        "println(True)\nprintln(False)\nprintln(!True)\n",
+        "pub fn main() {\n\
+         \tprintln(True)\n\
+         \tprintln(False)\n\
+         \tprintln(!True)\n\
+         }\n",
         "True\nFalse\nFalse\n",
     );
     run_outputs(
         "fn show(b Bool) String { match b { True -> 'yes'\nFalse -> 'no' } }\n\
-         println(show(True))\nprintln(show(1 == 2))\n",
+         pub fn main() {\n\
+         \tprintln(show(True))\n\
+         \tprintln(show(1 == 2))\n\
+         }\n",
         "yes\nno\n",
     );
     check_rejects(
-        "fn f(b Bool) Int { match b { True -> 1 } }\nprintln(f(True))\n",
+        "fn f(b Bool) Int { match b { True -> 1 } }\n\
+         pub fn main() {\n\
+         \tprintln(f(True))\n\
+         }\n",
         "not exhaustive",
     );
     check_rejects(
@@ -576,7 +731,13 @@ fn bool_is_a_normal_two_ctor_type() {
 }
 
 reject_case! {
-    lowercase_true_is_just_an_identifier: ("x = true\n", "Unknown identifier"),
+    lowercase_true_is_just_an_identifier: (
+        "pub fn main() {\n\
+         \tx = true\n\
+         \tprintln(x)\n\
+         }\n",
+        "Unknown identifier",
+    ),
 }
 
 #[test]
@@ -587,7 +748,13 @@ fn reserved_set_derived_from_prelude_iface() {
         "is defined in the prelude and cannot be redefined",
     );
     // ...but `@vm` functions are not.
-    run_outputs("fn println(x Int) Int { x + 1 }\n_ = println(41)\n", "");
+    run_outputs(
+        "fn println(x Int) Int { x + 1 }\n\
+         pub fn main() {\n\
+         \t_ = println(41)\n\
+         }\n",
+        "",
+    );
 }
 
 #[test]
@@ -596,21 +763,25 @@ fn binary_string_literal_patterns() {
     // (Op::BinMatchPrefix); the rest binding is a zero-copy view.
     run_outputs(
         "import scarlet/binary\n\
-         r = match binary.from_string('GET /index.html') {\n\
-         \t<<'GET ', ..rest>> -> binary.to_string(rest)\n\
-         \t_ -> Err(Nil)\n\
-         }\n\
-         println(r)\n",
+         pub fn main() {\n\
+         \tr = match binary.from_string('GET /index.html') {\n\
+         \t\t<<'GET ', ..rest>> -> binary.to_string(rest)\n\
+         \t\t_ -> Err(Nil)\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
         "Ok(/index.html)\n",
     );
     // Explicit `:utf8` on a string literal is the same pattern.
     run_outputs(
         "import scarlet/binary\n\
-         r = match binary.from_string('POST /x') {\n\
-         \t<<'POST ':utf8, ..>> -> 1\n\
-         \t_ -> 0\n\
-         }\n\
-         println(r)\n",
+         pub fn main() {\n\
+         \tr = match binary.from_string('POST /x') {\n\
+         \t\t<<'POST ':utf8, ..>> -> 1\n\
+         \t\t_ -> 0\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
         "1\n",
     );
     // Without `..rest` the whole binary must be consumed.
@@ -622,81 +793,97 @@ fn binary_string_literal_patterns() {
          \t\t_ -> False\n\
          \t}\n\
          }\n\
-         println(is_get(binary.from_string('GET')))\n\
-         println(is_get(binary.from_string('GETX')))\n\
-         println(is_get(binary.from_string('GE')))\n",
+         pub fn main() {\n\
+         \tprintln(is_get(binary.from_string('GET')))\n\
+         \tprintln(is_get(binary.from_string('GETX')))\n\
+         \tprintln(is_get(binary.from_string('GE')))\n\
+         }\n",
         "True\nFalse\nFalse\n",
     );
     // A prefix longer than the scrutinee fails without reading past the end.
     run_outputs(
         "import scarlet/binary\n\
-         r = match binary.from_string('DELETE /v') {\n\
-         \t<<'GET ', ..>> -> 'get'\n\
-         \t<<'DELETE /very/long/path/that/overruns', ..>> -> 'overrun'\n\
-         \t<<'DELETE ', ..>> -> 'delete'\n\
-         \t_ -> 'other'\n\
-         }\n\
-         println(r)\n",
+         pub fn main() {\n\
+         \tr = match binary.from_string('DELETE /v') {\n\
+         \t\t<<'GET ', ..>> -> 'get'\n\
+         \t\t<<'DELETE /very/long/path/that/overruns', ..>> -> 'overrun'\n\
+         \t\t<<'DELETE ', ..>> -> 'delete'\n\
+         \t\t_ -> 'other'\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
         "delete\n",
     );
     // A literal prefix can be followed by destructuring segments.
     run_outputs(
         "import scarlet/binary\n\
-         r = match binary.from_string('HTTP/1.1') {\n\
-         \t<<'HTTP/1.', minor>> -> minor - 48\n\
-         \t_ -> 0 - 1\n\
-         }\n\
-         println(r)\n",
+         pub fn main() {\n\
+         \tr = match binary.from_string('HTTP/1.1') {\n\
+         \t\t<<'HTTP/1.', minor>> -> minor - 48\n\
+         \t\t_ -> 0 - 1\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
         "1\n",
     );
     // Multi-byte UTF-8 literals keep byte-accurate offsets for the rest.
     run_outputs(
         "import scarlet/binary\n\
-         r = match binary.from_string('héllo world') {\n\
-         \t<<'héllo ', ..rest>> -> binary.to_string(rest)\n\
-         \t_ -> Err(Nil)\n\
-         }\n\
-         println(r)\n",
+         pub fn main() {\n\
+         \tr = match binary.from_string('héllo world') {\n\
+         \t\t<<'héllo ', ..rest>> -> binary.to_string(rest)\n\
+         \t\t_ -> Err(Nil)\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
         "Ok(world)\n",
     );
     // Consecutive integer literals coalesce into one prefix compare.
     run_outputs(
         "import scarlet/binary\n\
-         r = match binary.from_string('\\r\\nrest') {\n\
-         \t<<13, 10, ..rest>> -> binary.byte_size(rest)\n\
-         \t_ -> 0 - 1\n\
-         }\n\
-         println(r)\n",
+         pub fn main() {\n\
+         \tr = match binary.from_string('\\r\\nrest') {\n\
+         \t\t<<13, 10, ..rest>> -> binary.byte_size(rest)\n\
+         \t\t_ -> 0 - 1\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
         "4\n",
     );
     // Mixed and sub-byte literal runs coalesce too; the compile-time
     // encoding must match Op::BinFromInt's MSB-first layout.
     run_outputs(
         "import scarlet/binary\n\
-         packet = <<1:4, 2:4, 'AB', 7>>\n\
-         r = match packet {\n\
-         \t<<1:4, 2:4, 'AB', n>> -> n\n\
-         \t_ -> 0 - 1\n\
-         }\n\
-         println(r)\n",
+         pub fn main() {\n\
+         \tpacket = <<1:4, 2:4, 'AB', 7>>\n\
+         \tr = match packet {\n\
+         \t\t<<1:4, 2:4, 'AB', n>> -> n\n\
+         \t\t_ -> 0 - 1\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
         "7\n",
     );
     // String-literal segments in expressions fold to the same UTF-8 bytes.
     run_outputs(
         "import scarlet/binary\n\
-         println(<<'hi there'>> == binary.from_string('hi there'))\n\
-         println(<<'AB', 67, 'D'>> == binary.from_string('ABCD'))\n\
-         println(binary.bit_size(<<''>>))\n",
+         pub fn main() {\n\
+         \tprintln(<<'hi there'>> == binary.from_string('hi there'))\n\
+         \tprintln(<<'AB', 67, 'D'>> == binary.from_string('ABCD'))\n\
+         \tprintln(binary.bit_size(<<''>>))\n\
+         }\n",
         "True\nTrue\n0\n",
     );
     // The Utf8 default applies only to bare string segments.
     check_rejects(
         "import scarlet/binary\n\
-         r = match binary.from_string('AB') {\n\
-         \t<<'AB':16>> -> 1\n\
-         \t_ -> 0\n\
-         }\n\
-         println(r)\n",
+         pub fn main() {\n\
+         \tr = match binary.from_string('AB') {\n\
+         \t\t<<'AB':16>> -> 1\n\
+         \t\t_ -> 0\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
         "Type mismatch",
     );
 }
@@ -706,17 +893,21 @@ fn binary_literal_and_pattern_e2e() {
     // <<a, b>> pattern: scan→parse→compile→VM. 'A'=65, 'B'=66, sum=131.
     run_outputs(
         "import scarlet/binary\n\
-         r = match binary.from_string('AB') {\n\
-         \t<<a, b>> -> a + b\n\
-         \t_ -> 0\n\
-         }\n\
-         println(r)\n",
+         pub fn main() {\n\
+         \tr = match binary.from_string('AB') {\n\
+         \t\t<<a, b>> -> a + b\n\
+         \t\t_ -> 0\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
         "131\n",
     );
     // <<1:4, 2:4>> literal: 0001_0010 = 18, inspect emits whole-byte form.
     run_outputs(
         "import scarlet/string\n\
-         println(string.inspect(<<1:4, 2:4>>))\n",
+         pub fn main() {\n\
+         \tprintln(string.inspect(<<1:4, 2:4>>))\n\
+         }\n",
         "<<18>>\n",
     );
 }
@@ -724,52 +915,90 @@ fn binary_literal_and_pattern_e2e() {
 run_case! {
     ctor_destructure_single_variant_ok: (
         "type Box { Box(value Int) }\n\
-         Box(n) = Box(42)\n\
-         println(n)\n",
+         pub fn main() {\n\
+         \tBox(n) = Box(42)\n\
+         \tprintln(n)\n\
+         }\n",
         "42\n",
     ),
 
     ctor_destructure_multi_field_ok: (
         "type Pair { Pair(a Int, b String) }\n\
-         Pair(x, y) = Pair(7, 'hi')\n\
-         println(x)\n\
-         println(y)\n",
+         pub fn main() {\n\
+         \tPair(x, y) = Pair(7, 'hi')\n\
+         \tprintln(x)\n\
+         \tprintln(y)\n\
+         }\n",
         "7\nhi\n",
     ),
 
     // Labels bind by declared field order, not by argument position.
     ctor_destructure_labeled_out_of_order: (
         "type Point { Point(x Int, y Int) }\n\
-         Point(y: b, x: a) = Point(1, 2)\n\
-         println(a)\n\
-         println(b)\n",
+         pub fn main() {\n\
+         \tPoint(y: b, x: a) = Point(1, 2)\n\
+         \tprintln(a)\n\
+         \tprintln(b)\n\
+         }\n",
         "1\n2\n",
     ),
 
     ctor_destructure_labeled_with_rest: (
         "type T { T(a Int, b Int, c Int) }\n\
-         T(c: z, ..) = T(10, 20, 30)\n\
-         println(z)\n",
+         pub fn main() {\n\
+         \tT(c: z, ..) = T(10, 20, 30)\n\
+         \tprintln(z)\n\
+         }\n",
         "30\n",
     ),
 }
 
 reject_case! {
-    ctor_destructure_refutable_rejected: ("Some(x) = Some(1)\nprintln(x)\n", "refutable"),
+    ctor_destructure_refutable_rejected: (
+        "pub fn main() {\n\
+         \tSome(x) = Some(1)\n\
+         \tprintln(x)\n\
+         }\n",
+        "refutable",
+    ),
     ctor_destructure_nested_refutable_rejected: (
-        "type Box { Box(value Option(Int)) }\nBox(Some(n)) = Box(Some(1))\nprintln(n)\n",
+        "type Box { Box(value Option(Int)) }\n\
+         pub fn main() {\n\
+         \tBox(Some(n)) = Box(Some(1))\n\
+         \tprintln(n)\n\
+         }\n",
         "refutable",
     ),
 }
 
 run_case! {
-    typed_discard_nil_println_ok: ("Nil = println('x')\n", "x\n"),
+    typed_discard_nil_println_ok: (
+        "pub fn main() {\n\
+         \tNil = println('x')\n\
+         }\n",
+        "x\n",
+    ),
 }
 
 reject_case! {
-    typed_discard_string_int_mismatch: ("String = 5\n", "Type mismatch: expected 'String', got 'Int'"),
-    typed_discard_int_string_mismatch: ("Int = 'a'\n", "Type mismatch: expected 'Int', got 'String'"),
-    typed_discard_constructor_is_not_a_type: ("Some = 1\n", "'Some' is not a type"),
+    typed_discard_string_int_mismatch: (
+        "pub fn main() {\n\
+         \tString = 5\n\
+         }\n",
+        "Type mismatch: expected 'String', got 'Int'",
+    ),
+    typed_discard_int_string_mismatch: (
+        "pub fn main() {\n\
+         \tInt = 'a'\n\
+         }\n",
+        "Type mismatch: expected 'Int', got 'String'",
+    ),
+    typed_discard_constructor_is_not_a_type: (
+        "pub fn main() {\n\
+         \tSome = 1\n\
+         }\n",
+        "'Some' is not a type",
+    ),
 }
 
 // A constructor used as a value makes `lower` synthesise an eta-wrapper into
@@ -783,8 +1012,10 @@ fn a_branch_after_an_eta_wrapper_jumps_to_the_right_place() {
                \tws = array.map(xs, W)\n\
                \tif array.length(ws) > 2 { 111 } else { 222 }\n\
                }\n\
-               println(pick([1]))\n\
-               println(pick([1, 2, 3]))\n";
+               pub fn main() {\n\
+               \tprintln(pick([1]))\n\
+               \tprintln(pick([1, 2, 3]))\n\
+               }\n";
     run_outputs(src, "222\n111\n");
 }
 
@@ -797,7 +1028,9 @@ fn field_access_through_a_constructor_inferred_scrutinee() {
                \t\tSome(u) -> u.id\n\
                \t}\n\
                }\n\
-               println(f())\n";
+               pub fn main() {\n\
+               \tprintln(f())\n\
+               }\n";
     check_ok(src);
     run_outputs(src, "7\n");
 }
@@ -812,7 +1045,9 @@ fn field_access_through_a_module_fn_inferred_scrutinee() {
                \t\tSome(u) -> u.id\n\
                \t}\n\
                }\n\
-               println(f(map.set(map.new(), <<'a'>>, User(7, 'al'))))\n";
+               pub fn main() {\n\
+               \tprintln(f(map.set(map.new(), <<'a'>>, User(7, 'al'))))\n\
+               }\n";
     check_ok(src);
     run_outputs(src, "7\n");
 }
@@ -833,7 +1068,9 @@ fn inferred_scrutinee_with_a_heap_payload_runs() {
                \t\t}\n\
                \t}\n\
                }\n\
-               println(f())\n";
+               pub fn main() {\n\
+               \tprintln(f())\n\
+               }\n";
     run_outputs(src, "4\n");
 }
 
@@ -844,7 +1081,9 @@ fn or_receiver_binds_a_heap_error_payload() {
     let src = "type Boxed { Boxed(n Int) }\n\
                fn bad() Result(Int, Boxed) { Err(Boxed(9)) }\n\
                fn f() Int { bad() or e -> e.n }\n\
-               println(f())\n";
+               pub fn main() {\n\
+               \tprintln(f())\n\
+               }\n";
     check_ok(src);
     run_outputs(src, "9\n");
 }

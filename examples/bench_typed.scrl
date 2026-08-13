@@ -57,7 +57,9 @@ fn dot_loop(n Int, acc Int) Int {
 	}
 }
 
-t = build(20)
-println(sum(t))
-println(is_even(500000))
-println(dot_loop(1000000, 0))
+pub fn main() {
+	t = build(20)
+	println(sum(t))
+	println(is_even(500000))
+	println(dot_loop(1000000, 0))
+}

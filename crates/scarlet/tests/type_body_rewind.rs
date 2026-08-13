@@ -22,8 +22,8 @@ fn cached_module_type_bodies_survive_rewinds() {
             "import ./lib.{{Box, Pair, Mk, wrap}}\n\n\
              fn get(b Box(Int)) Int {{\n\tmatch b {{\n\t\tMk(v) -> v\n\t}}\n}}\n\
              fn first(p Pair(Int)) Int {{ p.0 }}\n\
-             fn peek(b Box(Int)) Int {{ b.v }}\n\
-             println(get(wrap({k})) + first((2, 3)) + peek(wrap({k})))\n"
+             fn peek(b Box(Int)) Int {{ b.v }}\n\n\
+             pub fn main() {{\n\tprintln(get(wrap({k})) + first((2, 3)) + peek(wrap({k})))\n}}\n"
         )
     };
 

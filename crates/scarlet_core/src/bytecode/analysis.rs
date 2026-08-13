@@ -190,7 +190,9 @@ struct FnSig {
 }
 
 impl Compiler {
-    /// Keep a non-declaration node, erroring first when inside an imported module.
+    /// Keep a non-declaration node, erroring first unless this is a script
+    /// (the REPL's entry; see [`super::ModuleScope`]). The node is kept even
+    /// when rejected so the rest of the file is still analysed and reported.
     fn push_non_decl<'a>(
         &mut self,
         node: &'a ast::Node,
@@ -200,6 +202,12 @@ impl Compiler {
         if in_module {
             self.error(
                 "Modules may only contain declarations at the top level".to_string(),
+                node.span(),
+            );
+        } else if self.module_scope == super::ModuleScope::DeclarationsOnly {
+            self.error(
+                "Statements are not allowed at module scope: a program's code goes inside `pub fn main()`"
+                    .to_string(),
                 node.span(),
             );
         }

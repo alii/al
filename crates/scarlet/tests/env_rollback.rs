@@ -10,10 +10,13 @@ fn shadowing_import_does_not_corrupt_prelude_across_checks() {
     // Narrower than the prelude's `fn(a) Nil`: Int only.
     p.write("lib.scrl", "pub fn println(_x Int) Nil { Nil }\n");
 
-    let mut s = checked_with(&p, "import ./lib.{println}\nprintln(1)\n");
+    let mut s = checked_with(
+        &p,
+        "import ./lib.{println}\npub fn main() {\n\tprintln(1)\n}\n",
+    );
 
     // No import this time, so this must resolve to the prelude `println`.
-    let r2 = recheck(&mut s, &p, "println(\"hello\")\n");
+    let r2 = recheck(&mut s, &p, "pub fn main() {\n\tprintln(\"hello\")\n}\n");
     assert!(
         r2.success(),
         "prelude `println` must accept a String after a prior shadowing import \

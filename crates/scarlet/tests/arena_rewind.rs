@@ -28,7 +28,9 @@ fn double(x Int) Int { x * 2 }
 
 fn apply_all(xs Array(Int)) Array(Int) { array.map(xs, double) }
 
-println(apply_all([1, 2, 3]))
+pub fn main() {
+\tprintln(apply_all([1, 2, 3]))
+}
 ";
     let r = scarlet::bytecode::compile(&parse(src), None, Some(&scarlet::STDLIB));
     assert!(r.success(), "compile failed: {:?}", r.diagnostics);
@@ -44,7 +46,7 @@ println(apply_all([1, 2, 3]))
     let lowered = r.core.fns.len();
     assert!(
         (2..10).contains(&lowered),
-        "expected only the 2 user fn bodies to reach `lower`, saw {lowered}; if a \
+        "expected only the 3 user fn bodies to reach `lower`, saw {lowered}; if a \
          stdlib body is being lowered at runtime the resolved-type pool is no \
          longer compile-local and the blob must serialise it"
     );
@@ -62,7 +64,9 @@ fn stdlib_prefix_survives_repeated_rewinds() {
 import ./lib
 import scarlet/array
 
-println(array.map([lib.one()], fn(x Int) x + 1))
+pub fn main() {
+\tprintln(array.map([lib.one()], fn(x Int) x + 1))
+}
 ";
 
     let mut s = IncrementalSession::new(&scarlet::STDLIB);
@@ -87,7 +91,7 @@ println(array.map([lib.one()], fn(x Int) x + 1))
 fn hover_is_stable_across_many_rewinds() {
     let p = Project::new("arena_rewind_hover");
     p.write("lib.scrl", "pub fn one() Int { 1 }\n");
-    let entry = "import ./lib\nconst v = lib.one()\nprintln(v)\n";
+    let entry = "import ./lib\nconst v = lib.one()\npub fn main() {\n\tprintln(v)\n}\n";
 
     let mut s = IncrementalSession::new(&scarlet::STDLIB);
     let mut seen: Option<String> = None;
@@ -120,8 +124,11 @@ fn closures_survive_an_invalidation_cascade() {
     let entry = "\
 import ./lib
 const k = 10
-g = fn(y Int) y * k
-println(g(lib.go(2)))
+
+pub fn main() {
+\tg = fn(y Int) y * k
+\tprintln(g(lib.go(2)))
+}
 ";
 
     let mut s = IncrementalSession::new(&scarlet::STDLIB);
@@ -154,7 +161,7 @@ fn edit_and_revert_returns_to_the_same_arena_state() {
         "lib.scrl",
         "pub type Pair = (Int, Int)\npub fn mk() Pair { (1, 2) }\n",
     );
-    let entry = "import ./lib\nprintln(lib.mk())\n";
+    let entry = "import ./lib\npub fn main() {\n\tprintln(lib.mk())\n}\n";
 
     let mut s = IncrementalSession::new(&scarlet::STDLIB);
     assert!(s.check(&parse(entry), Some(&p.dir)).success());

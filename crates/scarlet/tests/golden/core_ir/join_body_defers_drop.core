@@ -24,12 +24,18 @@ fn s1(%0:t1) -> :t2
   let %8:t2 = c1
   ret AddInt(%8, %7)
 
+fn s2() -> :t1
+  let %0:t5 = ctor 261.0()
+  ret call fn#1(%0)
+
 toplevel:
   let %0:t4@g0 = closure fn#0()
   drop %0
-  let %1:t5@g1 = closure fn#1()
-  let %2:t3 = ctor 261.0()
-  ret call %1(%2)
+  let %1:t6@g1 = closure fn#1()
+  drop %1
+  let %2:t3@g2 = closure fn#2()
+  drop %2
+  ret PushNil()
 where
   c0 = Int(0)
   c1 = Int(1)

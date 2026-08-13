@@ -35,14 +35,7 @@ impl crate::core_ir::emit::EmitCtx for Compiler {
         self.add_constant(v)
     }
     fn switch_variant_count(&self, tid: TypeId) -> Option<u8> {
-        let n = self.env.lookup_type_info_by_id(tid)?.variants()?.len;
-        // `Bool` is unboxed, so its scrutinee has no tag word; past 255
-        // variants the `SwitchTag.a` byte overflows.
-        if self.prelude.bool().is(tid) || n > 255 {
-            None
-        } else {
-            Some(n as u8)
-        }
+        Compiler::switch_variant_count(self, tid)
     }
     fn bool_variant(&self, tid: TypeId, variant_idx: u16) -> Option<bool> {
         if !self.prelude.bool().is(tid) {
@@ -62,6 +55,23 @@ fn labels_of_variantless_type(tid: TypeId) -> ! {
         "internal compiler error: emit asked for labels of a type with no variants: {tid:?}. \
          Report this as a compiler bug."
     )
+}
+
+impl Compiler {
+    /// The variant count a `SwitchTag` over `tid` dispatches on, or `None`
+    /// when the type never switches: the bytecode emitter's rule, and — via
+    /// [`crate::core_ir::SwitchCounts`] — the native planner's, so the two
+    /// backends ladder and switch the same matches. `Bool` is unboxed, so
+    /// its scrutinee has no tag word; past 255 variants the `SwitchTag.a`
+    /// byte overflows.
+    pub(super) fn switch_variant_count(&self, tid: TypeId) -> Option<u8> {
+        let n = self.env.lookup_type_info_by_id(tid)?.variants()?.len;
+        if self.prelude.bool().is(tid) || n > 255 {
+            None
+        } else {
+            Some(n as u8)
+        }
+    }
 }
 
 impl PreludeTys for Compiler {

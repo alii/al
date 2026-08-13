@@ -51,10 +51,12 @@ fn use_resource() Nil {
 	println('use ${r}')
 }
 
-println(describe(5))
-println(describe(-3))
-println(nested())
-println(digits())
-println(discard_example())
-use_resource()
-println('done')
+pub fn main() {
+	println(describe(5))
+	println(describe(-3))
+	println(nested())
+	println(digits())
+	println(discard_example())
+	use_resource()
+	println('done')
+}

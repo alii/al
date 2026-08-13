@@ -98,7 +98,9 @@ fn outer(n Int) Int {
 \tmiddle(n) + leaf(n) + middle(n + 1)
 }
 
-println(outer(6))
+pub fn main() {
+\tprintln(outer(6))
+}
 ";
     // leaf(8) + leaf(6) + leaf(9) = 40320 + 720 + 362880
     assert_prints("sandwich", src, None, "403920\n");
@@ -128,7 +130,9 @@ fn drive(i Int, acc Int) Int {
 \tif i == 0 { acc } else { drive(i - 1, acc + caller(i)) }
 }
 
-println(drive(24, 0))
+pub fn main() {
+\tprintln(drive(24, 0))
+}
 ";
     // caller(i) = 2*(1000i + 7) + 1 + i = 2001i + 15;
     // sum over i = 1..=24: 2001*300 + 15*24 = 600660.
@@ -152,12 +156,14 @@ fn kick(n Int) Int {
 \tif n == 0 { 0 } else { spin(1, 0) + kick(n - 1) }
 }
 
-_ = process.spawn(fn() {
-\tprintln(kick(10) + spin(20000000, 0))
-})
-_ = process.spawn(fn() {
-\tprintln('sibling progressed')
-})
+pub fn main() {
+\t_ = process.spawn(fn() {
+\t\tprintln(kick(10) + spin(20000000, 0))
+\t})
+\t_ = process.spawn(fn() {
+\t\tprintln('sibling progressed')
+\t})
+}
 ";
     assert_prints(
         "native_fairness",
@@ -174,10 +180,12 @@ _ = process.spawn(fn() {
 #[test]
 fn single_call_loop_warms_and_flips_mid_run() {
     let src = "fn spin(n Int, acc Int) Int {
-	if n == 0 { acc } else { spin(n - 1, acc + 1) }
+\tif n == 0 { acc } else { spin(n - 1, acc + 1) }
 }
 
-println(spin(3000000, 0))
+pub fn main() {
+\tprintln(spin(3000000, 0))
+}
 ";
     let proj = Project::new("midloop_warm");
     let path = proj.dir.join("prog.scrl");
@@ -221,7 +229,9 @@ fn drive(i Int, acc Int) Int {
 	if i == 0 { acc } else { drive(i - 1, acc + hit(color.make(i))) }
 }
 
-println(drive(20000, 0))
+pub fn main() {
+	println(drive(20000, 0))
+}
 ";
     let proj = Project::new("alias_warm");
     proj.write(
@@ -258,13 +268,15 @@ fn fib_iter(n Int, a Int, b Int) Int {
 \tif n == 0 { a } else { fib_iter(n - 1, b, a + b) }
 }
 
-println(fact(20, 1))
-println(fact(30, 1))
-println(fib_iter(90, 0, 1))
-println(fib_iter(100, 0, 1))
-println(140737488355327 + 1)
-println({0 - 140737488355328} - 1)
-println(12345678901 * 987654321)
+pub fn main() {
+\tprintln(fact(20, 1))
+\tprintln(fact(30, 1))
+\tprintln(fib_iter(90, 0, 1))
+\tprintln(fib_iter(100, 0, 1))
+\tprintln(140737488355327 + 1)
+\tprintln({0 - 140737488355328} - 1)
+\tprintln(12345678901 * 987654321)
+}
 ";
     assert_prints(
         "native_spill",
@@ -387,8 +399,10 @@ fn mixer(n Int, acc Int) Int {
 \tif n == 0 { acc } else { mixer(n - 1, next) }
 }
 
-println(rotor(ROUNDS, 12345))
-println(mixer(ROUNDS, 0 - 42))
+pub fn main() {
+\tprintln(rotor(ROUNDS, 12345))
+\tprintln(mixer(ROUNDS, 0 - 42))
+}
 ";
     // One source of truth for the count: the Rust fold below must run exactly
     // as many steps as the program does.
@@ -891,9 +905,9 @@ fn render_fn(idx: usize, body: &[Expr]) -> String {
 }
 
 /// One whole program plus its expected stdout: the preamble, 2-3 chained
-/// functions, prints of the last at random arguments, and one print composing
-/// every preamble shape so no program skips that coverage when the
-/// per-statement dice miss it.
+/// functions, and a `main` printing the last at random arguments plus one
+/// print composing every preamble shape, so no program skips that coverage
+/// when the per-statement dice miss it.
 fn gen_program(r: &mut Rng) -> (String, String) {
     let nfns = 2 + r.below(2) as usize;
     let mut fns = Vec::with_capacity(nfns);
@@ -938,10 +952,12 @@ fn gen_program(r: &mut Rng) -> (String, String) {
         src.push('\n');
     }
     let mut expected = String::new();
+    src.push_str("pub fn main() {\n");
     for p in &prints {
-        src.push_str(&format!("println({})\n", p.render()));
+        src.push_str(&format!("\tprintln({})\n", p.render()));
         expected.push_str(&format!("{}\n", p.eval(0, 0, &[], &fns)));
     }
+    src.push_str("}\n");
     (src, expected)
 }
 
@@ -981,7 +997,8 @@ fn dis_native_prints_clif_for_fib() {
     let path = proj.dir.join("fib.scrl");
     std::fs::write(
         &path,
-        "fn fib(n Int) Int {\n\tif n < 2 { n } else { fib(n - 1) + fib(n - 2) }\n}\n\nprintln(fib(10))\n",
+        "fn fib(n Int) Int {\n\tif n < 2 { n } else { fib(n - 1) + fib(n - 2) }\n}\n\n\
+         pub fn main() {\n\tprintln(fib(10))\n}\n",
     )
     .unwrap();
     let path = path.to_string_lossy().into_owned();

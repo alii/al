@@ -193,7 +193,6 @@ fn beat(gateway Subject(Request), left Int, ok Int) Int {
 	}
 }
 
-
 fn call_one(gateway Subject(Request), ack Subject(Nil), i Int) Nil {
 	tag = 'job-${int.to_string(i)}'
 	_ = ask(gateway, fn(v) Ok('${tag}:${int.to_string(v)}'))
@@ -222,8 +221,10 @@ fn rounds(gateway Subject(Request), ack Subject(Nil), r Int, n Int) Nil {
 	}
 }
 
-a = start()
-ack = process.subject()
-rounds(a, ack, 1, 10)
-stop(a)
-println('survived every round')
+pub fn main() {
+	a = start()
+	ack = process.subject()
+	rounds(a, ack, 1, 10)
+	stop(a)
+	println('survived every round')
+}

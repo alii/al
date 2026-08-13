@@ -8,7 +8,7 @@ use scarlet::reference::EntityKind;
 mod common;
 use common::{Project, SessionQueryExt, cursor, module_key, parse};
 
-const A_SRC: &str = "import ./b\nprintln(b.b())\n";
+const A_SRC: &str = "import ./b\npub fn main() {\n\tprintln(b.b())\n}\n";
 const B_SRC: &str = "import ./c\npub fn b() Int { c.val() + 1 }\n";
 const C_SRC: &str = "pub fn val() Int { 1 }\n";
 
@@ -139,7 +139,7 @@ fn unrelated_module_keeps_type_id_base() {
     let p = Project::new("idbase");
     p.write("x.scrl", "pub type X { X }\npub fn f() X { X }\n");
     p.write("y.scrl", "pub type Y { Y }\npub fn g() Y { Y }\n");
-    let entry = "import ./x\nimport ./y\n_a = x.f()\n_b = y.g()\n";
+    let entry = "import ./x\nimport ./y\npub fn main() {\n\t_ = x.f()\n\t_ = y.g()\n}\n";
 
     let mut s = IncrementalSession::new(&scarlet::STDLIB);
     let r = s.check(&parse(entry), Some(&p.dir));
@@ -238,7 +238,7 @@ fn edit_b_keeps_refs_then_invalidation_drops_reverse_edges() {
     );
 
     // B no longer declares `b`: the rebuilt graph must retain no stale edge.
-    let entry2 = "import ./b\nprintln(b.gone())\n";
+    let entry2 = "import ./b\npub fn main() {\n\tprintln(b.gone())\n}\n";
     p.write("b.scrl", "import ./c\npub fn gone() Int { c.val() }\n");
     p.write("a.scrl", entry2);
     let r = s.check(&parse(entry2), Some(&p.dir));
@@ -288,7 +288,7 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
     let p = Project::new("idoverflow");
     p.write("big.scrl", &big_module_src(SMALL_TYPE_COUNT, 1));
     p.write("y.scrl", "pub type Y { Y }\npub fn g() Y { Y }\n");
-    let entry = "import ./big\nimport ./y\n_a = big.f()\n_b = y.g()\n";
+    let entry = "import ./big\nimport ./y\npub fn main() {\n\t_ = big.f()\n\t_ = y.g()\n}\n";
 
     let mut s = IncrementalSession::new(&scarlet::STDLIB);
 

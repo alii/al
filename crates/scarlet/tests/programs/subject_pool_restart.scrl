@@ -189,12 +189,14 @@ fn beat(gateway Subject(Request), left Int, ok Int) Int {
 	}
 }
 
-a = start()
-_ = ask(a, fn(v) Ok(v))
-_ = ask(a, fn(v) Ok(v))
-stop(a)
-println('first pool stopped')
-b = start()
-println('second pool: ${ask(b, fn(v) Ok(v))}')
-stop(b)
-println('done')
+pub fn main() {
+	a = start()
+	_ = ask(a, fn(v) Ok(v))
+	_ = ask(a, fn(v) Ok(v))
+	stop(a)
+	println('first pool stopped')
+	b = start()
+	println('second pool: ${ask(b, fn(v) Ok(v))}')
+	stop(b)
+	println('done')
+}

@@ -525,11 +525,14 @@ impl IncrementalSession {
         }
     }
 
-    /// Check entries the way a REPL submits them: one fragment at a time, so
+    /// Check entries the way a REPL submits them: a script of statements,
+    /// one fragment at a time, so module-scope statements are the point and
     /// a binding whose use has not been typed yet is not an error. See
+    /// [`ModuleScope`](crate::bytecode::ModuleScope) and
     /// [`UnusedBindings`](crate::bytecode::UnusedBindings).
-    pub fn ignore_unused_bindings(&mut self) {
+    pub fn as_repl(&mut self) {
         self.c.unused_bindings = crate::bytecode::UnusedBindings::Ignore;
+        self.c.module_scope = crate::bytecode::ModuleScope::Script;
     }
 
     pub fn compile_count(&self) -> u32 {

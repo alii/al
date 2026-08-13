@@ -80,116 +80,121 @@ fn line_total(i Item) Usd {
 	times(i.price, i.qty)
 }
 
-// The classic float trap, avoided. (examples/numbers.al shows the float side.)
-println('0.1 + 0.2 = ${decimal.to_string(decimal.add(d('0.1'), d('0.2')))}')
-println('')
+pub fn main() {
+	// The classic float trap, avoided. (examples/numbers.al shows the float side.)
+	println('0.1 + 0.2 = ${decimal.to_string(decimal.add(d('0.1'), d('0.2')))}')
+	println('')
 
-items = [
-	Item(name: 'coffee', price: cents(450), qty: 2),
-	Item(name: 'bagel', price: cents(325), qty: 1),
-	Item(name: 'orange juice', price: cents(599), qty: 3),
-]
+	items = [
+		Item(name: 'coffee', price: cents(450), qty: 2),
+		Item(name: 'bagel', price: cents(325), qty: 1),
+		Item(name: 'orange juice', price: cents(599), qty: 3),
+	]
 
-array.each(items, fn(i) println('${i.qty} x ${i.name} @ ${show(i.price)} = ${show(line_total(i))}'))
+	array.each(
+		items,
+		fn(i) println('${i.qty} x ${i.name} @ ${show(i.price)} = ${show(line_total(i))}'),
+	)
 
-subtotal = array.fold(items, cents(0), fn(acc, i) add(acc, line_total(i)))
-sales_tax = tax(subtotal, d('0.08875'))
-total = add(subtotal, sales_tax)
+	subtotal = array.fold(items, cents(0), fn(acc, i) add(acc, line_total(i)))
+	sales_tax = tax(subtotal, d('0.08875'))
+	total = add(subtotal, sales_tax)
 
-println('')
-println('subtotal ${show(subtotal)}')
-println('tax      ${show(sales_tax)}')
-println('total    ${show(total)}')
+	println('')
+	println('subtotal ${show(subtotal)}')
+	println('tax      ${show(sales_tax)}')
+	println('total    ${show(total)}')
 
-println('')
-println('split 3 ways:')
-array.each(split(total, 3), fn(share) println('  ${show(share)}'))
-check = array.fold(split(total, 3), cents(0), fn(acc, s) add(acc, s))
-println('shares sum back to ${show(check)}')
-println('')
+	println('')
+	println('split 3 ways:')
+	array.each(split(total, 3), fn(share) println('  ${show(share)}'))
+	check = array.fold(split(total, 3), cents(0), fn(acc, s) add(acc, s))
+	println('shares sum back to ${show(check)}')
+	println('')
 
-// == compares the *representation* — units and scale — so 1.50 and 1.5 look
-// different to it even though they are the same number. Compare Decimals with
-// decimal.eq or decimal.compare, never with ==.
-println('1.50 == 1.5      ${d('1.50') == d('1.5')}')
-println('decimal.eq       ${decimal.eq(d('1.50'), d('1.5'))}')
-println('decimal.compare  ${decimal.compare(d('1.50'), d('1.5'))}')
-println('')
+	// == compares the *representation* — units and scale — so 1.50 and 1.5 look
+	// different to it even though they are the same number. Compare Decimals with
+	// decimal.eq or decimal.compare, never with ==.
+	println('1.50 == 1.5      ${d('1.50') == d('1.5')}')
+	println('decimal.eq       ${decimal.eq(d('1.50'), d('1.5'))}')
+	println('decimal.compare  ${decimal.compare(d('1.50'), d('1.5'))}')
+	println('')
 
-// The rest of the comparison suite is numeric across scales too.
-a = d('19.99')
-b = d('5.00')
-str = decimal.to_string
-println('lt lte           ${decimal.lt(a, b)} ${decimal.lte(a, b)}')
-println('gt gte           ${decimal.gt(a, b)} ${decimal.gte(a, b)}')
-println('min max          ${str(decimal.min(a, b))} ${str(decimal.max(a, b))}')
-println('neg abs          ${str(decimal.neg(a))} ${str(decimal.abs(decimal.neg(a)))}')
+	// The rest of the comparison suite is numeric across scales too.
+	a = d('19.99')
+	b = d('5.00')
+	str = decimal.to_string
+	println('lt lte           ${decimal.lt(a, b)} ${decimal.lte(a, b)}')
+	println('gt gte           ${decimal.gt(a, b)} ${decimal.gte(a, b)}')
+	println('min max          ${str(decimal.min(a, b))} ${str(decimal.max(a, b))}')
+	println('neg abs          ${str(decimal.neg(a))} ${str(decimal.abs(decimal.neg(a)))}')
 
-// Each predicate is shown on both sides so you can see it answer False too.
-zero = decimal.new(0, 2)
-println('is_zero          ${decimal.is_zero(zero)} ${decimal.is_zero(a)}')
-println('is_negative      ${decimal.is_negative(decimal.neg(a))} ${decimal.is_negative(a)}')
-println('is_positive      ${decimal.is_positive(a)} ${decimal.is_positive(decimal.neg(a))}')
-println('')
+	// Each predicate is shown on both sides so you can see it answer False too.
+	zero = decimal.new(0, 2)
+	println('is_zero          ${decimal.is_zero(zero)} ${decimal.is_zero(a)}')
+	println('is_negative      ${decimal.is_negative(decimal.neg(a))} ${decimal.is_negative(a)}')
+	println('is_positive      ${decimal.is_positive(a)} ${decimal.is_positive(decimal.neg(a))}')
+	println('')
 
-// units and scale are the lossless serialization: store the pair, rebuild it
-// with new. normalize drops trailing zeros when the stored scale means nothing.
-stored = d('12.3400')
-println('units, scale     ${decimal.units(stored)} @ ${decimal.scale(stored)}')
-rebuilt = decimal.new(decimal.units(stored), decimal.scale(stored))
-println('rebuilt          ${str(rebuilt)}')
-println('normalize        ${str(decimal.normalize(stored))}')
+	// units and scale are the lossless serialization: store the pair, rebuild it
+	// with new. normalize drops trailing zeros when the stored scale means nothing.
+	stored = d('12.3400')
+	println('units, scale     ${decimal.units(stored)} @ ${decimal.scale(stored)}')
+	rebuilt = decimal.new(decimal.units(stored), decimal.scale(stored))
+	println('rebuilt          ${str(rebuilt)}')
+	println('normalize        ${str(decimal.normalize(stored))}')
 
-// A negative scale multiplies out: new(5, -3) is 5000.
-println('new(5, -3)       ${str(decimal.new(5, -3))}')
-println('from_int         ${str(decimal.from_int(7))}')
-println('')
+	// A negative scale multiplies out: new(5, -3) is 5000.
+	println('new(5, -3)       ${str(decimal.new(5, -3))}')
+	println('from_int         ${str(decimal.from_int(7))}')
+	println('')
 
-// Floats are the lossy boundary, and crossing it is explicit in both
-// directions. from_float can fail — the type is telling you this is an
-// approximation you have to accept.
-approx = decimal.from_float(0.1 + 0.2, 2) or zero
-println('to_float         ${decimal.to_float(d('19.99'))}')
-println('from_float       ${str(approx)}')
-println('from_float 20dp  ${result.is_err(decimal.from_float(1.5, 20))}')
-println('')
+	// Floats are the lossy boundary, and crossing it is explicit in both
+	// directions. from_float can fail — the type is telling you this is an
+	// approximation you have to accept.
+	approx = decimal.from_float(0.1 + 0.2, 2) or zero
+	println('to_float         ${decimal.to_float(d('19.99'))}')
+	println('from_float       ${str(approx)}')
+	println('from_float 20dp  ${result.is_err(decimal.from_float(1.5, 20))}')
+	println('')
 
-// div needs a target scale, because an exact quotient need not exist at any.
-// Both ways it can fail live in the error type instead of in a crash.
-third = decimal.div(d('10'), d('3'), 4) or zero
-println('10 / 3 @ 4       ${str(third)}')
+	// div needs a target scale, because an exact quotient need not exist at any.
+	// Both ways it can fail live in the error type instead of in a crash.
+	third = decimal.div(d('10'), d('3'), 4) or zero
+	println('10 / 3 @ 4       ${str(third)}')
 
-match decimal.div(d('10'), zero, 2) {
-	Ok(q) -> println('divided by zero? ${decimal.to_string(q)}')
-	Err(e) -> println('div by zero      ${e}')
-}
-
-match decimal.div(d('10'), d('3'), 19) {
-	Ok(q) -> println('19 places?       ${decimal.to_string(q)}')
-	Err(e) -> println('places > 18      ${e}')
-}
-
-println('')
-
-// Every rounding mode on the same tie, 2.345 rounded to 2 places. HalfEven is
-// the default (ties go to the even neighbour, so repeated rounding does not
-// drift); HalfUp is schoolbook; Down/Up truncate toward/away from zero;
-// Floor/Ceiling go toward negative/positive infinity — which is where the sign
-// of the input changes the answer.
-tie = d('2.345')
-modes = [
-	('HalfEven', HalfEven),
-	('HalfUp', HalfUp),
-	('Down', Down),
-	('Up', Up),
-	('Floor', Floor),
-	('Ceiling', Ceiling),
-]
-
-array.each(modes, fn(m) match m {
-	(name, mode) -> {
-		up = decimal.to_string(decimal.round_with(tie, 2, mode))
-		down = decimal.to_string(decimal.round_with(decimal.neg(tie), 2, mode))
-		println('${name}\t 2.345 -> ${up}\t-2.345 -> ${down}')
+	match decimal.div(d('10'), zero, 2) {
+		Ok(q) -> println('divided by zero? ${decimal.to_string(q)}')
+		Err(e) -> println('div by zero      ${e}')
 	}
-})
+
+	match decimal.div(d('10'), d('3'), 19) {
+		Ok(q) -> println('19 places?       ${decimal.to_string(q)}')
+		Err(e) -> println('places > 18      ${e}')
+	}
+
+	println('')
+
+	// Every rounding mode on the same tie, 2.345 rounded to 2 places. HalfEven is
+	// the default (ties go to the even neighbour, so repeated rounding does not
+	// drift); HalfUp is schoolbook; Down/Up truncate toward/away from zero;
+	// Floor/Ceiling go toward negative/positive infinity — which is where the sign
+	// of the input changes the answer.
+	tie = d('2.345')
+	modes = [
+		('HalfEven', HalfEven),
+		('HalfUp', HalfUp),
+		('Down', Down),
+		('Up', Up),
+		('Floor', Floor),
+		('Ceiling', Ceiling),
+	]
+
+	array.each(modes, fn(m) match m {
+		(name, mode) -> {
+			up = decimal.to_string(decimal.round_with(tie, 2, mode))
+			down = decimal.to_string(decimal.round_with(decimal.neg(tie), 2, mode))
+			println('${name}\t 2.345 -> ${up}\t-2.345 -> ${down}')
+		}
+	})
+}

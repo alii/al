@@ -26,31 +26,6 @@ fn worker(id Int, work_ms Int) Nil {
 	println('worker ${id} finished after ${work_ms}ms')
 }
 
-// The four workers report in sleep order, not spawn order.
-println('spawning four workers')
-
-process.spawn(fn() worker(1, 40))
-process.spawn(fn() worker(2, 10))
-process.spawn(fn() worker(3, 30))
-process.spawn(fn() worker(4, 20))
-
-// spawn returns the child's Pid: its identity, distinct from every other
-// process's for the life of the program. A process learns its own from
-// process.self(). A Pid is a name, not a mailbox — sending goes through
-// Subjects (see tests/programs/messages.scrl) — so what it is for is telling
-// processes apart: keying a map of workers, naming which one an event was
-// about, monitoring it, or killing it.
-//
-// Every process spawned here is linked to this one: if one of them crashed
-// (say, an out-of-range slice), the crash would end it, be reported, and end
-// this process too — the program would exit with a failure instead of
-// running on with a piece missing. A process whose failure should be handled
-// rather than fatal is started with process.spawn_unlinked and watched with
-// process.monitor; tests/programs/monitors.scrl and exits.scrl show both.
-child = process.spawn(fn() println('child sees itself as ${process.self()}'))
-println('parent spawned ${child}; the parent itself is ${process.self()}')
-println('a pid equals only itself: ${child == child} ${child == process.self()}')
-
 // time.monotonic is a clock that only moves forward, so a duration measured
 // across a sleep survives a wall-clock adjustment mid-nap.
 fn timed(label String) Nil {
@@ -60,6 +35,33 @@ fn timed(label String) Nil {
 	println('${label}: slept at least 5ms: ${elapsed >= 5}')
 }
 
-process.spawn(fn() timed('sleeper'))
+pub fn main() {
+	// The four workers report in sleep order, not spawn order.
+	println('spawning four workers')
 
-println('main process done — the program stays up until the others finish')
+	_ = process.spawn(fn() worker(1, 40))
+	_ = process.spawn(fn() worker(2, 10))
+	_ = process.spawn(fn() worker(3, 30))
+	_ = process.spawn(fn() worker(4, 20))
+
+	// spawn returns the child's Pid: its identity, distinct from every other
+	// process's for the life of the program. A process learns its own from
+	// process.self(). A Pid is a name, not a mailbox — sending goes through
+	// Subjects (see tests/programs/messages.scrl) — so what it is for is telling
+	// processes apart: keying a map of workers, naming which one an event was
+	// about, monitoring it, or killing it.
+	//
+	// Every process spawned here is linked to this one: if one of them crashed
+	// (say, an out-of-range slice), the crash would end it, be reported, and end
+	// this process too — the program would exit with a failure instead of
+	// running on with a piece missing. A process whose failure should be handled
+	// rather than fatal is started with process.spawn_unlinked and watched with
+	// process.monitor; tests/programs/monitors.scrl and exits.scrl show both.
+	child = process.spawn(fn() println('child sees itself as ${process.self()}'))
+	println('parent spawned ${child}; the parent itself is ${process.self()}')
+	println('a pid equals only itself: ${child == child} ${child == process.self()}')
+
+	_ = process.spawn(fn() timed('sleeper'))
+
+	println('main process done — the program stays up until the others finish')
+}

@@ -86,7 +86,8 @@ use super::native_frame::{
 };
 use super::native_rc::{self, RcGate, emit_drop, emit_dup};
 use super::{
-    Atom, Callee, CoreBind, CoreExpr, CoreFn, CorePat, FuncIdx, Imm, JoinId, LocalId, VariantRef,
+    Atom, Callee, CoreBind, CoreExpr, CoreFn, CorePat, FuncIdx, Imm, JoinId, LocalId, SwitchCounts,
+    VariantRef,
 };
 use crate::bytecode::value::{
     ENUM_FIELDS_WORD, NATIVE_HOLLOW_FOR_REUSE_SYMBOL, NATIVE_MORTAL_HEAP_BITS, NATIVE_PTR_MASK,
@@ -141,10 +142,12 @@ pub struct NativePlan {
     reprs: TiVec<LocalId, Repr>,
     /// Nominal proofs the emitter uses to pick the unchecked lowering.
     proofs: TiVec<LocalId, TyProof>,
-    /// The plan-time stand-in for `EmitCtx::switch_variant_count`, recovered
-    /// from the match shape itself (see [`Gate::switch_shape`]). Both the
-    /// layout re-emission and codegen answer the `SwitchTag`-vs-ladder
-    /// question from this map, so they cannot disagree.
+    /// `EmitCtx::switch_variant_count`'s answers for every type this body
+    /// matches over by constructor, captured through the [`SwitchCounts`]
+    /// oracle while the type table was alive. Both the layout re-emission
+    /// and codegen answer the `SwitchTag`-vs-ladder question from this map,
+    /// so they cannot disagree with each other — or, since the oracle is the
+    /// bytecode emitter's own rule, with the interpreter.
     switch_counts: HashMap<TypeId, u8>,
 }
 
@@ -287,10 +290,12 @@ pub fn plan(
     f: &CoreFn,
     pool: &ResolvedPool,
     prelude: &PreludeBindings,
+    counts: SwitchCounts<'_>,
 ) -> NativePlan {
     let bools = BoolCtors::of(prelude);
     let mut walk = PlanWalk {
         pool,
+        counts,
         bools,
         tys: ReprTys::of(prelude),
         reprs: TiVec::new(),
@@ -398,6 +403,7 @@ fn nop_of(op: Op) -> Option<(NOp, bool)> {
 
 struct PlanWalk<'a> {
     pool: &'a ResolvedPool,
+    counts: SwitchCounts<'a>,
     bools: BoolCtors,
     tys: ReprTys,
     reprs: TiVec<LocalId, Repr>,
@@ -417,19 +423,13 @@ impl PlanWalk<'_> {
     /// The plan-time half of emit's `switch_plan`: does this match compile to
     /// a `SwitchTag`, and over how many variants?
     ///
-    /// Without the compiler's type table the variant count comes from the
-    /// match itself. An all-constructor match with every variant distinct is
-    /// exhaustive, so its arm count *is* the type's variant count, which is
-    /// what `EmitCtx::switch_variant_count` returns. `Bool` never switches
-    /// (immediate scrutinee, no tag word) and >255 variants overflow
-    /// `SwitchTag.a` on both sides. Any other all-constructor shape ladders
-    /// under the real context too, so omitting it here cannot diverge.
-    fn switch_shape(&self, arms: &[(CorePat, CoreExpr)]) -> Option<(TypeId, u8)> {
-        if arms.is_empty() || arms.len() > 255 {
-            return None;
-        }
+    /// The type a match dispatches on by constructor, if every arm is a
+    /// constructor of one (non-`Bool`) type — the precondition `emit`'s
+    /// `switch_plan` shares — so its variant count is worth asking for.
+    /// Whether the match then switches or ladders is decided later, by both
+    /// backends alike, from the arm count against that answer.
+    fn switched_type(&self, arms: &[(CorePat, CoreExpr)]) -> Option<TypeId> {
         let mut tid: Option<TypeId> = None;
-        let mut seen = vec![false; arms.len()];
         for (pat, _) in arms {
             let CorePat::Ctor { variant, .. } = pat else {
                 return None;
@@ -440,15 +440,10 @@ impl PlanWalk<'_> {
             match tid {
                 None => tid = Some(variant.type_id),
                 Some(t) if t != variant.type_id => return None,
-                _ => {}
+                Some(_) => {}
             }
-            let i = variant.variant_idx as usize;
-            if i >= arms.len() || seen[i] {
-                return None;
-            }
-            seen[i] = true;
         }
-        Some((tid?, arms.len() as u8))
+        tid
     }
 
     /// Walk the body recording the per-local facts the emitter needs after the
@@ -477,18 +472,10 @@ impl PlanWalk<'_> {
                     e = els;
                 }
                 CoreExpr::Match { arms, .. } => {
-                    if let Some((tid, count)) = self.switch_shape(arms) {
-                        // Two exhaustive matches over one type must agree on
-                        // its variant count. Disagreement means a
-                        // non-exhaustive match reached codegen, which is a
-                        // checker bug, not something to paper over with a
-                        // slower lowering.
-                        let seen = *self.switch_counts.entry(tid).or_insert(count);
-                        if seen != count {
-                            unsupported_node(
-                                "match arm count disagreeing with an earlier match on the same type",
-                            );
-                        }
+                    if let Some(tid) = self.switched_type(arms)
+                        && let Some(count) = (self.counts)(tid)
+                    {
+                        self.switch_counts.insert(tid, count);
                     }
                     for (pat, body) in arms {
                         match pat {
@@ -3584,6 +3571,13 @@ mod tests {
         PreludeBindings::test_bool_binary(BOOL_TID, BIN_TID)
     }
 
+    /// The type table's stand-in for [`SwitchCounts`]: the one enum the
+    /// tests match over by constructor has two variants; nothing else
+    /// switches.
+    fn test_counts(tid: TypeId) -> Option<u8> {
+        (tid == ENUM_TID).then_some(2)
+    }
+
     fn local(i: u32) -> LocalId {
         LocalId(i)
     }
@@ -4191,7 +4185,7 @@ mod tests {
         let mut clifs = Vec::new();
         let prelude = test_prelude();
         for (i, f) in fns.iter().enumerate() {
-            let p = plan(FuncIdx::from_usize(i), f, pool, &prelude);
+            let p = plan(FuncIdx::from_usize(i), f, pool, &prelude, &test_counts);
             // The layout comes from the emission that built `program`, the
             // way the real pipeline hands emit's output to the backend.
             let layout = layouts
@@ -4470,13 +4464,13 @@ mod tests {
     fn gate_accepts_the_a0_shapes_and_rejects_the_rest() {
         let (pool, int) = int_pool();
         let pre = test_prelude();
-        let _ = plan(FuncIdx(0), &fib_fn(int), &pool, &pre);
-        let _ = plan(FuncIdx(0), &count_fn(int), &pool, &pre);
+        let _ = plan(FuncIdx(0), &fib_fn(int), &pool, &pre, &test_counts);
+        let _ = plan(FuncIdx(0), &count_fn(int), &pool, &pre, &test_counts);
 
         // A non-Bool constructor allocates through the enum-ctor path:
         // covered.
         let f = testkit::func(vec![], CoreExpr::Tail(testkit::ctor(&[])), int);
-        let _ = plan(FuncIdx(0), &f, &pool, &pre);
+        let _ = plan(FuncIdx(0), &f, &pool, &pre, &test_counts);
 
         // Bool's heads are immediates: covered.
         let f = testkit::func(
@@ -4488,7 +4482,7 @@ mod tests {
             }),
             int,
         );
-        let _ = plan(FuncIdx(0), &f, &pool, &pre);
+        let _ = plan(FuncIdx(0), &f, &pool, &pre, &test_counts);
 
         // A closure allocates through the MakeClosure shim: covered.
         let f = testkit::func(
@@ -4499,7 +4493,7 @@ mod tests {
             }),
             int,
         );
-        let _ = plan(FuncIdx(0), &f, &pool, &pre);
+        let _ = plan(FuncIdx(0), &f, &pool, &pre, &test_counts);
 
         // A dynamic call through a closure-valued local: covered.
         let f = testkit::func(
@@ -4510,7 +4504,7 @@ mod tests {
             }),
             int,
         );
-        let _ = plan(FuncIdx(0), &f, &pool, &pre);
+        let _ = plan(FuncIdx(0), &f, &pool, &pre, &test_counts);
 
         // A capture *read* stays uncovered: the body needs the frame's
         // `PushCapture` reads the running closure through a shim, so a body
@@ -4520,7 +4514,7 @@ mod tests {
             CoreExpr::Tail(Atom::prim(Op::PushCapture, vec![])),
             int,
         );
-        let _ = plan(FuncIdx(0), &f, &pool, &pre);
+        let _ = plan(FuncIdx(0), &f, &pool, &pre, &test_counts);
 
         // A polymorphic comparison needs the pool's Int proof.
         let mut pool2 = ResolvedPool::new(PrimIds {
@@ -4541,8 +4535,8 @@ mod tests {
         // A polymorphic compare is covered either way: proven-Int operands
         // lower to an inline `icmp`, anything else runs the interpreter's own
         // comparison through the bridge.
-        let _ = plan(FuncIdx(0), &poly_eq(bound), &pool2, &pre);
-        let _ = plan(FuncIdx(0), &poly_eq(intt), &pool2, &pre);
+        let _ = plan(FuncIdx(0), &poly_eq(bound), &pool2, &pre, &test_counts);
+        let _ = plan(FuncIdx(0), &poly_eq(intt), &pool2, &pre, &test_counts);
     }
 
     /// A `Program` whose constant pool holds a *mortal* heap value is
@@ -4553,7 +4547,7 @@ mod tests {
     fn compile_aborts_on_a_mortal_heap_constant() {
         let (pool, int) = int_pool();
         let f = testkit::func(vec![], CoreExpr::Tail(Atom::Const(ConstId(0))), int);
-        let p = plan(FuncIdx(0), &f, &pool, &test_prelude());
+        let p = plan(FuncIdx(0), &f, &pool, &test_prelude(), &test_counts);
         let mut module = test_module();
 
         let mut heap = ProcHeap::new();
@@ -4570,7 +4564,7 @@ mod tests {
     fn compile_embeds_an_immediate_constant() {
         let (pool, int) = int_pool();
         let f = testkit::func(vec![], CoreExpr::Tail(Atom::Const(ConstId(0))), int);
-        let p = plan(FuncIdx(0), &f, &pool, &test_prelude());
+        let p = plan(FuncIdx(0), &f, &pool, &test_prelude(), &test_counts);
         let mut module = test_module();
         let ok_program = crate::bytecode::Program {
             constants: vec![Value::small_int(7)],
@@ -5064,7 +5058,7 @@ mod tests {
         let f = unwrap_fn(et, int);
         // The gate recovered the variant count from the exhaustive
         // all-constructor shape.
-        let p = plan(FuncIdx(0), &f, &pool, &test_prelude());
+        let p = plan(FuncIdx(0), &f, &pool, &test_prelude(), &test_counts);
         assert_eq!(p.switch_counts.get(&ENUM_TID), Some(&2));
 
         let j = jit(&[f], &pool, &test_consts());
@@ -5133,7 +5127,7 @@ mod tests {
             },
             int,
         );
-        let p = plan(FuncIdx(0), &f, &pool, &test_prelude());
+        let p = plan(FuncIdx(0), &f, &pool, &test_prelude(), &test_counts);
         assert!(p.switch_counts.is_empty());
 
         let j = jit(&[f], &pool, &test_consts());
@@ -5189,7 +5183,7 @@ mod tests {
         // An out-of-range index is malformed IR the checker cannot produce.
         // Planning no longer screens it: the site loses its tuple proof and
         // lowers through the checking bridge, which reports the bad index.
-        let _ = plan(FuncIdx(0), &f, &pool, &test_prelude());
+        let _ = plan(FuncIdx(0), &f, &pool, &test_prelude(), &test_counts);
     }
 
     #[test]

@@ -45,10 +45,13 @@ fn is_odd(n Int) Bool {
 	}
 }
 
-println(sum_to(1000000, 0))
+pub fn main() {
+	println(sum_to(1000000, 0))
 
-// Two frames: the top-level one, plus the single live frame of depth_after.
-println('depth after 1 hop: ${depth_after(1)}')
-println('depth after 1000000 hops: ${depth_after(1000000)}')
+	// Three frames: the entry frame, main, and the single live frame of
+	// depth_after — however many hops it has made.
+	println('depth after 1 hop: ${depth_after(1)}')
+	println('depth after 1000000 hops: ${depth_after(1000000)}')
 
-println('1000001 is even: ${is_even(1000001)}')
+	println('1000001 is even: ${is_even(1000001)}')
+}

@@ -14,5 +14,7 @@ fn count(n Int, acc Int) Int {
 	}
 }
 
-println(fib(33))
-println(count(10000000, 0))
+pub fn main() {
+	println(fib(33))
+	println(count(10000000, 0))
+}

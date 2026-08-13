@@ -5,9 +5,11 @@ reject_case! {
     /// U1: `x = x` self-reference infers ⊥ and generalizes to ∀A.A. Pre-define
     /// is gated to lambda inits, so the init `x` is unbound.
     u1_self_reference_is_rejected: (
-        "x = x\n\
-         n Int = x\n\
-         println(n + 1)\n",
+        "pub fn main() {\n\
+         \tx = x\n\
+         \tn Int = x\n\
+         \tprintln(n + 1)\n\
+         }\n",
         "Unknown identifier 'x'",
     ),
 
@@ -15,8 +17,10 @@ reject_case! {
     /// String into an Int through `Option(T)` widening.
     u2_if_no_else_is_rejected: (
         "fn smuggle() Option(Int) { if True { 'hello' } }\n\
-         n = smuggle() or 0\n\
-         println(n + 1)\n",
+         pub fn main() {\n\
+         \tn = smuggle() or 0\n\
+         \tprintln(n + 1)\n\
+         }\n",
         "'if' requires an 'else' branch",
     ),
 
@@ -25,8 +29,10 @@ reject_case! {
     u5_generic_type_missing_args_is_rejected: (
         "type Box(t) { Box(value t) }\n\
          type Holder { Holder(box Box) }\n\
-         h = Holder(box: Box(value: 'hello'))\n\
-         println(h.box.value + 100)\n",
+         pub fn main() {\n\
+         \th = Holder(box: Box(value: 'hello'))\n\
+         \tprintln(h.box.value + 100)\n\
+         }\n",
         "Type 'Box' expects 1 type argument",
     ),
 
@@ -39,30 +45,36 @@ reject_case! {
          \t\t_ -> 0\n\
          \t}\n\
          }\n\
-         println(f(1))\n",
+         pub fn main() {\n\
+         \tprintln(f(1))\n\
+         }\n",
         "not bound in the first alternative",
     ),
 
     /// U8: range pattern bounds not unified with Int let `true..'z'` typecheck
     /// and crash the VM comparator.
     u8_range_pattern_bounds_must_be_int: (
-        "r = match 5 {\n\
-         \ttrue..'z' -> 'huh'\n\
-         \t_ -> 'ok'\n\
-         }\n\
-         println(r)\n",
+        "pub fn main() {\n\
+         \tr = match 5 {\n\
+         \t\ttrue..'z' -> 'huh'\n\
+         \t\t_ -> 'ok'\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
         "Range pattern bounds must be number literals",
     ),
 
     /// U9: a spread that is not the final element of an array pattern corrupts
     /// the stack at runtime.
     u9_array_pattern_non_tail_spread_is_rejected: (
-        "xs = [1, 2, 3]\n\
-         r = match xs {\n\
-         \t[a, ..mid, z] -> a + z\n\
-         \t_ -> 0\n\
-         }\n\
-         println(r)\n",
+        "pub fn main() {\n\
+         \txs = [1, 2, 3]\n\
+         \tr = match xs {\n\
+         \t\t[a, ..mid, z] -> a + z\n\
+         \t\t_ -> 0\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
         "Spread in array pattern must be the last element",
     ),
 
@@ -76,25 +88,31 @@ reject_case! {
          \t\t[] -> 3\n\
          \t}\n\
          }\n\
-         println(f([True]))\n",
+         pub fn main() {\n\
+         \tprintln(f([True]))\n\
+         }\n",
         "not exhaustive",
     ),
 
     /// U12: a duplicate binding name in one pattern silently shadows, so
     /// `(x, x)` binds the second element only.
     u12_duplicate_pattern_binding_is_rejected: (
-        "r = match (1, 2) {\n\
-         \t(x, x) -> x\n\
-         }\n\
-         println(r)\n",
+        "pub fn main() {\n\
+         \tr = match (1, 2) {\n\
+         \t\t(x, x) -> x\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
         "bound more than once in this pattern",
     ),
 
     /// U13: `Socket` is an opaque builtin with no constructors, so referencing
     /// it as a value is an unknown identifier.
     u13_socket_literal_is_rejected: (
-        "s = Socket\n\
-         println(s)\n",
+        "pub fn main() {\n\
+         \ts = Socket\n\
+         \tprintln(s)\n\
+         }\n",
         "Unknown identifier 'Socket'",
     ),
 
@@ -111,7 +129,7 @@ reject_case! {
     /// U18: the type-decl twin of U16. Duplicate `type` declarations desync the
     /// name-keyed Pass-1 maps against the positional `type_decls` Vec.
     u18_duplicate_type_is_rejected_without_panic: (
-        "type T = Int\ntype T = String\nx = 1\nprintln(x)\n",
+        "type T = Int\ntype T = String\npub fn main() {\n\tx = 1\n\tprintln(x)\n}\n",
         "already defined",
     ),
 }
@@ -124,21 +142,25 @@ run_case! {
          fn f() Result(Int, E) {\n\
          \tErr(E(msg: 'boom'))\n\
          }\n\
-         r = f() or _e -> 99\n\
-         println(r)\n",
+         pub fn main() {\n\
+         \tr = f() or _e -> 99\n\
+         \tprintln(r)\n\
+         }\n",
         "99\n",
     ),
 
     // U4: a block-scoped type env with a function-scoped slot map lets an inner
     // `x = 'hi'` overwrite the outer slot while the outer type stays Int.
     u4_block_scope_preserves_outer_slot: (
-        "x = 1\n\
-         r = {\n\
-         \tx = 'hi'\n\
-         \tx\n\
-         }\n\
-         println(r)\n\
-         println(x + 100)\n",
+        "pub fn main() {\n\
+         \tx = 1\n\
+         \tr = {\n\
+         \t\tx = 'hi'\n\
+         \t\tx\n\
+         \t}\n\
+         \tprintln(r)\n\
+         \tprintln(x + 100)\n\
+         }\n",
         "hi\n101\n",
     ),
 
@@ -152,7 +174,9 @@ run_case! {
          \t\tB -> 2\n\
          \t}\n\
          }\n\
-         println(f(B))\n",
+         pub fn main() {\n\
+         \tprintln(f(B))\n\
+         }\n",
         "2\n",
     ),
 
@@ -167,9 +191,11 @@ run_case! {
          \t\tNothing -> 3\n\
          \t}\n\
          }\n\
-         println(f(Just(True)))\n\
-         println(f(Just(False)))\n\
-         println(f(Nothing))\n",
+         pub fn main() {\n\
+         \tprintln(f(Just(True)))\n\
+         \tprintln(f(Just(False)))\n\
+         \tprintln(f(Nothing))\n\
+         }\n",
         "1\n2\n3\n",
     ),
 
@@ -177,8 +203,10 @@ run_case! {
     // or `t.0.name` lexes as `t` `.` `0.` `name`.
     u15_tuple_index_then_field_access: (
         "type P { P(name String) }\n\
-         t = (P(name: 'hi'), 5)\n\
-         println(t.0.name)\n",
+         pub fn main() {\n\
+         \tt = (P(name: 'hi'), 5)\n\
+         \tprintln(t.0.name)\n\
+         }\n",
         "hi\n",
     ),
 }
@@ -188,11 +216,11 @@ run_case! {
 // too deep" rejection, never an uncatchable SIGSEGV.
 #[test]
 fn u19_deep_else_if_chain_is_rejected_without_overflow() {
-    let mut source = String::from("x = if 1 < 2 { 0 }");
+    let mut source = String::from("pub fn main() {\n\tx = if 1 < 2 { 0 }");
     for _ in 0..60_000 {
         source.push_str(" else if 1 < 2 { 0 }");
     }
-    source.push_str(" else { 0 }\nprintln(x)\n");
+    source.push_str(" else { 0 }\n\tprintln(x)\n}\n");
     check_rejects(&source, "too deep");
 }
 
@@ -200,56 +228,64 @@ fn u19_deep_else_if_chain_is_rejected_without_overflow() {
 // float results collapse to 0.0. No panic, no abort, no non-zero exit.
 #[test]
 fn u20_arithmetic_is_total_vm_never_exits() {
+    // (expression, what `println` of it prints)
     let exact = [
-        ("println(1 / 0)\n", "0\n"),
-        ("println(5 % 0)\n", "5\n"),
-        ("println(1.0 / 0.0)\n", "0.0\n"),
-        ("println(0.0 / 0.0)\n", "0.0\n"),
+        ("1 / 0", "0\n"),
+        ("5 % 0", "5\n"),
+        ("1.0 / 0.0", "0.0\n"),
+        ("0.0 / 0.0", "0.0\n"),
         // Float `%` is total like int `%`: the remainder takes the sign of the
         // dividend, and `x % 0.0 = x`.
-        ("println(7.5 % 2.0)\n", "1.5\n"),
-        ("println(7.5 % 0.0)\n", "7.5\n"),
-        ("println({0.0 - 7.5} % 2.0)\n", "-1.5\n"),
+        ("7.5 % 2.0", "1.5\n"),
+        ("7.5 % 0.0", "7.5\n"),
+        ("{0.0 - 7.5} % 2.0", "-1.5\n"),
         // Integer overflow wraps two's-complement, never traps.
-        (
-            "println(9223372036854775807 + 1)\n",
-            "-9223372036854775808\n",
-        ),
-        ("println(9223372036854775807 * 2)\n", "-2\n"),
+        ("9223372036854775807 + 1", "-9223372036854775808\n"),
+        ("9223372036854775807 * 2", "-2\n"),
         // Signed division truncates toward zero; the remainder takes the sign
         // of the dividend. Grouping is `{expr}`, so `{0 - 7}` is the dividend.
-        ("println({0 - 7} / 2)\n", "-3\n"),
-        ("println({0 - 7} % 2)\n", "-1\n"),
-        ("println(7 % {0 - 2})\n", "1\n"),
-        // Negating i64::MIN wraps back to itself; `int.abs` saturates to Int
-        // max. The literal exceeds the lexer's magnitude range, so reach
-        // i64::MIN via the wrapped `MAX + 1`.
-        (
-            "m = 9223372036854775807 + 1\n\
-             println(0 - m)\n",
-            "-9223372036854775808\n",
-        ),
-        (
-            "import scarlet/int\n\
-             m = 9223372036854775807 + 1\n\
-             println(int.abs(m))\n",
-            "9223372036854775807\n",
-        ),
-        // Scarlet's value space has no Inf/NaN, so float overflow collapses to 0.0.
-        // e-notation does not lex, so reach Inf by repeated squaring.
-        (
-            "fn sq(x Float, n Int) Float { if n == 0 { x } else { sq(x * x, n - 1) } }\n\
-             println(sq(10.0, 12))\n",
-            "0.0\n",
-        ),
+        ("{0 - 7} / 2", "-3\n"),
+        ("{0 - 7} % 2", "-1\n"),
+        ("7 % {0 - 2}", "1\n"),
     ];
-    for (src, want) in exact {
-        run_outputs(src, want);
+    for (expr, want) in exact {
+        run_outputs(&format!("pub fn main() {{\n\tprintln({expr})\n}}\n"), want);
     }
+
+    // Negating i64::MIN wraps back to itself; `int.abs` saturates to Int max.
+    // The literal exceeds the lexer's magnitude range, so reach i64::MIN via
+    // the wrapped `MAX + 1`.
+    run_outputs(
+        "pub fn main() {\n\
+         \tm = 9223372036854775807 + 1\n\
+         \tprintln(0 - m)\n\
+         }\n",
+        "-9223372036854775808\n",
+    );
+    run_outputs(
+        "import scarlet/int\n\
+         pub fn main() {\n\
+         \tm = 9223372036854775807 + 1\n\
+         \tprintln(int.abs(m))\n\
+         }\n",
+        "9223372036854775807\n",
+    );
+    // Scarlet's value space has no Inf/NaN, so float overflow collapses to 0.0.
+    // e-notation does not lex, so reach Inf by repeated squaring.
+    run_outputs(
+        "fn sq(x Float, n Int) Float { if n == 0 { x } else { sq(x * x, n - 1) } }\n\
+         pub fn main() {\n\
+         \tprintln(sq(10.0, 12))\n\
+         }\n",
+        "0.0\n",
+    );
 
     // 25! reduced mod 2^64 and reinterpreted as a signed i64.
     run_outputs(
-        "fn f(n Int) Int { if n == 0 { 1 } else { n * f(n - 1) } }\nprintln(f(25))\n",
+        "fn f(n Int) Int { if n == 0 { 1 } else { n * f(n - 1) } }\n\
+         pub fn main() {\n\
+         \tprintln(f(25))\n\
+         }\n",
         "7034535277573963776\n",
     );
 }
@@ -269,27 +305,29 @@ run_case! {
          fn greater(a, b) { a > b }\n\
          fn at_most(a, b) { a <= b }\n\
          fn at_least(a, b) { a >= b }\n\
-         println(subtract(10, 3))\n\
-         println(subtract(2.5, 1.0))\n\
-         println(multiply(6, 7))\n\
-         println(multiply(1.5, 2.0))\n\
-         println(divide(7, 2))\n\
-         println(divide(7.0, 2.0))\n\
-         println(divide(10, 0))\n\
-         println(divide(10.0, 0.0))\n\
-         println(add(1, 2))\n\
-         println(add(1.5, 2.5))\n\
-         println(add(9223372036854775807, 1))\n\
-         println(modulo(17, 5))\n\
-         println(modulo(7, 0))\n\
-         println(smaller(1, 2))\n\
-         println(smaller(2.5, 1.0))\n\
-         println(greater(5, 3))\n\
-         println(greater(1.0, 9.0))\n\
-         println(at_most(2, 2))\n\
-         println(at_most(3.0, 2.0))\n\
-         println(at_least(2, 5))\n\
-         println(at_least(5.0, 5.0))\n",
+         pub fn main() {\n\
+         \tprintln(subtract(10, 3))\n\
+         \tprintln(subtract(2.5, 1.0))\n\
+         \tprintln(multiply(6, 7))\n\
+         \tprintln(multiply(1.5, 2.0))\n\
+         \tprintln(divide(7, 2))\n\
+         \tprintln(divide(7.0, 2.0))\n\
+         \tprintln(divide(10, 0))\n\
+         \tprintln(divide(10.0, 0.0))\n\
+         \tprintln(add(1, 2))\n\
+         \tprintln(add(1.5, 2.5))\n\
+         \tprintln(add(9223372036854775807, 1))\n\
+         \tprintln(modulo(17, 5))\n\
+         \tprintln(modulo(7, 0))\n\
+         \tprintln(smaller(1, 2))\n\
+         \tprintln(smaller(2.5, 1.0))\n\
+         \tprintln(greater(5, 3))\n\
+         \tprintln(greater(1.0, 9.0))\n\
+         \tprintln(at_most(2, 2))\n\
+         \tprintln(at_most(3.0, 2.0))\n\
+         \tprintln(at_least(2, 5))\n\
+         \tprintln(at_least(5.0, 5.0))\n\
+         }\n",
         "7\n1.5\n42\n3.0\n3\n3.5\n0\n0.0\n3\n4.0\n-9223372036854775808\n2\n7\n\
          True\nFalse\nTrue\nFalse\nTrue\nFalse\nFalse\nTrue\n",
     ),
@@ -312,7 +350,9 @@ fn u21_exhaustiveness_respects_field_labels() {
          \t\tPair(a: False, ..) -> 2\n\
          \t}\n\
          }\n\
-         println(f(Pair(a: True, b: False)))\n",
+         pub fn main() {\n\
+         \tprintln(f(Pair(a: True, b: False)))\n\
+         }\n",
         "not exhaustive",
     );
 
@@ -328,48 +368,55 @@ fn u21_exhaustiveness_respects_field_labels() {
          \t\tPair(a: False, b: False) -> 4\n\
          \t}\n\
          }\n\
-         println(f(Pair(a: False, b: True)))\n",
+         pub fn main() {\n\
+         \tprintln(f(Pair(a: False, b: True)))\n\
+         }\n",
         "3\n",
     );
 }
 
-// U22: the module-scope twin of U4. A captured top-level binding resolves to
-// `Global(slot)`, read from the entry frame at call time. Scarlet is
-// immutable-with-shadowing, so a module-scope re-binding must allocate a
-// fresh slot; reusing it corrupts every closure that captured the old one.
+// U22: the same-scope twin of U4. Scarlet is immutable-with-shadowing, so
+// re-binding a name in the scope that already binds it must allocate a fresh
+// slot; reusing the slot corrupts every closure that captured the old one.
 #[test]
-fn u22_module_shadow_preserves_closure_capture() {
+fn u22_same_scope_shadow_preserves_closure_capture() {
     // Each closure captures the binding live at its definition; later shadows
     // must not retroactively change what an earlier closure sees.
     run_outputs(
-        "x = 10\n\
-         f = fn() x\n\
-         x = 20\n\
-         g = fn() x\n\
-         x = 30\n\
-         println(f())\n\
-         println(g())\n\
-         println(x)\n",
+        "pub fn main() {\n\
+         \tx = 10\n\
+         \tf = fn() x\n\
+         \tx = 20\n\
+         \tg = fn() x\n\
+         \tx = 30\n\
+         \tprintln(f())\n\
+         \tprintln(g())\n\
+         \tprintln(x)\n\
+         }\n",
         "10\n20\n30\n",
     );
 
     // The fresh slot is allocated only after the initializer is compiled, so
     // `x = x + 1` observes the old `x`, not the new uninitialised slot.
     run_outputs(
-        "x = 10\n\
-         x = x + 1\n\
-         println(x)\n",
+        "pub fn main() {\n\
+         \tx = 10\n\
+         \tx = x + 1\n\
+         \tprintln(x)\n\
+         }\n",
         "11\n",
     );
 
     // Type-unsoundness direction: reusing the slot would let the String shadow
     // flow out of `f()` as an Int.
     run_outputs(
-        "n = 1\n\
-         f = fn() n + 100\n\
-         n = 'hello'\n\
-         println(f())\n\
-         println(n)\n",
+        "pub fn main() {\n\
+         \tn = 1\n\
+         \tf = fn() n + 100\n\
+         \tn = 'hello'\n\
+         \tprintln(f())\n\
+         \tprintln(n)\n\
+         }\n",
         "101\nhello\n",
     );
 }
@@ -381,24 +428,13 @@ reject_case! {
     /// variable weak, so the first send pins it and the second is an
     /// ordinary mismatch. (An empty `Map` stays polymorphic: it is
     /// immutable, so reuse at two types is sound.)
-    u24_toplevel_subject_binding_does_not_generalize: (
+    u24_subject_binding_does_not_generalize: (
         "import scarlet/process\n\
-         s = process.subject()\n\
-         process.send(s, 1)\n\
-         process.send(s, 'text')\n",
-        "Type mismatch: expected 'Int', got 'String'",
-    ),
-
-    /// U24, the local-let form: block bindings generalize through the same
-    /// path and must be guarded the same way.
-    u24_local_subject_binding_does_not_generalize: (
-        "import scarlet/process\n\
-         fn f() Nil {\n\
+         pub fn main() {\n\
          \ts = process.subject()\n\
          \tprocess.send(s, 1)\n\
          \tprocess.send(s, 'text')\n\
-         }\n\
-         f()\n",
+         }\n",
         "Type mismatch: expected 'Int', got 'String'",
     ),
 }
@@ -409,12 +445,14 @@ reject_case! {
 fn u25_foreign_receive_is_a_clean_error() {
     run_rejects(
         "import scarlet/process\n\
-         mine = process.subject()\n\
-         process.spawn(fn() {\n\
-         \tprintln(process.receive(mine))\n\
-         })\n\
-         process.sleep(50)\n\
-         process.send(mine, 1)\n",
+         pub fn main() {\n\
+         \tmine = process.subject()\n\
+         \t_ = process.spawn(fn() {\n\
+         \t\tprintln(process.receive(mine))\n\
+         \t})\n\
+         \tprocess.sleep(50)\n\
+         \tprocess.send(mine, 1)\n\
+         }\n",
         "only the process that created a subject may receive on it",
     );
 }
@@ -423,17 +461,18 @@ fn u25_foreign_receive_is_a_clean_error() {
 // runtime error: non-zero exit with a diagnostic, never a panic or abort.
 #[test]
 fn u23_oob_and_reversed_slice_are_clean_errors() {
+    // (slice expression, the runtime error printing it must exit with)
     let cases = [
         (
-            "println([1, 2, 3][0..10])\n",
+            "[1, 2, 3][0..10]",
             "Slice indices out of bounds: [0..10] (length 3)",
         ),
         (
-            "println([1, 2, 3][2..1])\n",
+            "[1, 2, 3][2..1]",
             "Slice indices out of bounds: [2..1] (length 3)",
         ),
     ];
-    for (src, want) in cases {
-        run_rejects(src, want);
+    for (expr, want) in cases {
+        run_rejects(&format!("pub fn main() {{\n\tprintln({expr})\n}}\n"), want);
     }
 }

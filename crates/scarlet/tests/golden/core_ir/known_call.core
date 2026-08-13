@@ -6,13 +6,19 @@ fn s1(%0:t1, %1:t2) -> :t0
   let %3:t0 = call fn#0(%1)
   ret AddInt(%2, %3)
 
+fn s2() -> :t0
+  let %0:t3 = c0
+  let %1:t3 = c1
+  ret call fn#1(%0, %1)
+
 toplevel:
   let %0:t2@g0 = closure fn#0()
   drop %0
-  let %1:t3@g1 = closure fn#1()
-  let %2:t4 = c0
-  let %3:t4 = c1
-  ret call %1(%2, %3)
+  let %1:t4@g1 = closure fn#1()
+  drop %1
+  let %2:t5@g2 = closure fn#2()
+  drop %2
+  ret PushNil()
 where
   c0 = Int(3)
   c1 = Int(4)

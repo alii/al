@@ -327,15 +327,17 @@ fn connect_program(name: &str, port: u16) -> String {
 import scarlet/net/tls
 import scarlet/string
 
-match net.connect('127.0.0.1', {port}) {{
-    Ok(sock) -> match tls.handshake(sock, '{name}') {{
-        Ok(conn) -> {{
-            println('connected')
-            tls.close(conn) or Nil
+pub fn main() {{
+    match net.connect('127.0.0.1', {port}) {{
+        Ok(sock) -> match tls.handshake(sock, '{name}') {{
+            Ok(conn) -> {{
+                println('connected')
+                tls.close(conn) or Nil
+            }}
+            Err(e) -> println('failed: ${{string.inspect(e)}}')
         }}
-        Err(e) -> println('failed: ${{string.inspect(e)}}')
+        Err(e) -> println('connect failed: ${{string.inspect(e)}}')
     }}
-    Err(e) -> println('connect failed: ${{string.inspect(e)}}')
 }}
 "#
     )
@@ -433,20 +435,22 @@ import scarlet/net/socket.{{Data, Closed}}
 import scarlet/binary
 import scarlet/string
 
-match net.connect('127.0.0.1', {port}) {{
-    Ok(sock) -> match tls.handshake(sock, 'localhost') {{
-        Ok(conn) -> {{
-            tls.write(conn, <<'ping'>>) or Nil
-            match tls.read(conn, 1024) {{
-                Ok(Data(b)) -> println('read: ${{binary.to_string(b) or "<not utf-8>"}}')
-                Ok(Closed) -> println('closed')
-                Err(e) -> println('read failed: ${{string.inspect(e)}}')
+pub fn main() {{
+    match net.connect('127.0.0.1', {port}) {{
+        Ok(sock) -> match tls.handshake(sock, 'localhost') {{
+            Ok(conn) -> {{
+                tls.write(conn, <<'ping'>>) or Nil
+                match tls.read(conn, 1024) {{
+                    Ok(Data(b)) -> println('read: ${{binary.to_string(b) or "<not utf-8>"}}')
+                    Ok(Closed) -> println('closed')
+                    Err(e) -> println('read failed: ${{string.inspect(e)}}')
+                }}
+                tls.close(conn) or Nil
             }}
-            tls.close(conn) or Nil
+            Err(e) -> println('failed: ${{string.inspect(e)}}')
         }}
-        Err(e) -> println('failed: ${{string.inspect(e)}}')
+        Err(e) -> println('connect failed: ${{string.inspect(e)}}')
     }}
-    Err(e) -> println('connect failed: ${{string.inspect(e)}}')
 }}
 "#
     );
@@ -478,20 +482,22 @@ import scarlet/net/tls
 import scarlet/net/socket
 import scarlet/string
 
-match net.connect('127.0.0.1', {port}) {{
-    Ok(plain) -> match tls.handshake(plain, 'localhost') {{
-        Ok(secure) -> {{
-            // The same connection, named by the handle that predates the
-            // upgrade. It must not reach the wire.
-            match socket.write(plain, <<'cleartext'>>) {{
-                Ok(Nil) -> println('LEAKED: cleartext write succeeded')
-                Err(e) -> println('cleartext refused: ${{string.inspect(e)}}')
+pub fn main() {{
+    match net.connect('127.0.0.1', {port}) {{
+        Ok(plain) -> match tls.handshake(plain, 'localhost') {{
+            Ok(secure) -> {{
+                // The same connection, named by the handle that predates the
+                // upgrade. It must not reach the wire.
+                match socket.write(plain, <<'cleartext'>>) {{
+                    Ok(Nil) -> println('LEAKED: cleartext write succeeded')
+                    Err(e) -> println('cleartext refused: ${{string.inspect(e)}}')
+                }}
+                tls.close(secure) or Nil
             }}
-            tls.close(secure) or Nil
+            Err(e) -> println('handshake failed: ${{string.inspect(e)}}')
         }}
-        Err(e) -> println('handshake failed: ${{string.inspect(e)}}')
+        Err(e) -> println('connect failed: ${{string.inspect(e)}}')
     }}
-    Err(e) -> println('connect failed: ${{string.inspect(e)}}')
 }}
 "#
     );
@@ -597,22 +603,24 @@ fn shake_n(n Int, acc Int) Int {{
     }}
 }}
 
-println('handshakes refused ${{shake_n({REPS}, 0)}}')
+pub fn main() {{
+    println('handshakes refused ${{shake_n({REPS}, 0)}}')
 
-match net.connect('127.0.0.1', {port}) {{
-    Ok(sock) -> match tls.handshake(sock, 'localhost') {{
-        Ok(conn) -> {{
-            match send_n(conn, <<'{PATTERN}'>>, {REPS}) {{
-                Ok(Nil) -> println('wrote {REPS}')
-                Err(e) -> println('write failed: ${{string.inspect(e)}}')
+    match net.connect('127.0.0.1', {port}) {{
+        Ok(sock) -> match tls.handshake(sock, 'localhost') {{
+            Ok(conn) -> {{
+                match send_n(conn, <<'{PATTERN}'>>, {REPS}) {{
+                    Ok(Nil) -> println('wrote {REPS}')
+                    Err(e) -> println('write failed: ${{string.inspect(e)}}')
+                }}
+                println('read back ${{recv_n(conn, {REPS}, 0)}}')
+                close_n(conn, {REPS})
+                println('closed {REPS}')
             }}
-            println('read back ${{recv_n(conn, {REPS}, 0)}}')
-            close_n(conn, {REPS})
-            println('closed {REPS}')
+            Err(e) -> println('handshake failed: ${{string.inspect(e)}}')
         }}
-        Err(e) -> println('handshake failed: ${{string.inspect(e)}}')
+        Err(e) -> println('connect failed: ${{string.inspect(e)}}')
     }}
-    Err(e) -> println('connect failed: ${{string.inspect(e)}}')
 }}
 "#
     );
@@ -705,25 +713,27 @@ fn send_n(c TlsSocket, b Binary, n Int) Result(Nil, TlsError) {{
     }}
 }}
 
-payload = grow(<<'{PATTERN}'>>, {DOUBLINGS})
+pub fn main() {{
+    payload = grow(<<'{PATTERN}'>>, {DOUBLINGS})
 
-match net.connect('127.0.0.1', {port}) {{
-    Ok(sock) -> match tls.handshake(sock, 'localhost') {{
-        Ok(conn) -> {{
-            println('sending ${{binary.byte_size(payload)}} x {WRITES}')
-            match send_n(conn, payload, {WRITES}) {{
-                Ok(Nil) -> match tls.read(conn, 1024) {{
-                    Ok(Data(b)) -> println('reply: ${{binary.to_string(b) or "<not utf-8>"}}')
-                    Ok(Closed) -> println('reply: closed')
-                    Err(e) -> println('read failed: ${{string.inspect(e)}}')
+    match net.connect('127.0.0.1', {port}) {{
+        Ok(sock) -> match tls.handshake(sock, 'localhost') {{
+            Ok(conn) -> {{
+                println('sending ${{binary.byte_size(payload)}} x {WRITES}')
+                match send_n(conn, payload, {WRITES}) {{
+                    Ok(Nil) -> match tls.read(conn, 1024) {{
+                        Ok(Data(b)) -> println('reply: ${{binary.to_string(b) or "<not utf-8>"}}')
+                        Ok(Closed) -> println('reply: closed')
+                        Err(e) -> println('read failed: ${{string.inspect(e)}}')
+                    }}
+                    Err(e) -> println('write failed: ${{string.inspect(e)}}')
                 }}
-                Err(e) -> println('write failed: ${{string.inspect(e)}}')
+                tls.close(conn) or Nil
             }}
-            tls.close(conn) or Nil
+            Err(e) -> println('handshake failed: ${{string.inspect(e)}}')
         }}
-        Err(e) -> println('handshake failed: ${{string.inspect(e)}}')
+        Err(e) -> println('connect failed: ${{string.inspect(e)}}')
     }}
-    Err(e) -> println('connect failed: ${{string.inspect(e)}}')
 }}
 "#
     );
@@ -781,29 +791,31 @@ import scarlet/net/socket
 import scarlet/process
 import scarlet/string
 
-match net.connect('127.0.0.1', {port}) {{
-    Ok(sock) -> {{
-        _ = process.spawn(fn() {{
-            println('sibling: parking in socket.read')
-            match socket.read(sock, 16) {{
-                Ok(r) -> println('sibling: read ${{string.inspect(r)}}')
-                Err(e) -> println('sibling: err ${{string.inspect(e)}}')
+pub fn main() {{
+    match net.connect('127.0.0.1', {port}) {{
+        Ok(sock) -> {{
+            _ = process.spawn(fn() {{
+                println('sibling: parking in socket.read')
+                match socket.read(sock, 16) {{
+                    Ok(r) -> println('sibling: read ${{string.inspect(r)}}')
+                    Err(e) -> println('sibling: err ${{string.inspect(e)}}')
+                }}
+            }})
+            // Nothing is on the wire until the ClientHello, so the sibling has
+            // nothing to read and is parked well before the upgrade re-keys it.
+            process.sleep(500)
+            println('parent: upgrading')
+            match tls.handshake(sock, 'localhost') {{
+                Ok(conn) -> {{
+                    println('parent: handshake ok')
+                    tls.close(conn) or Nil
+                }}
+                Err(e) -> println('parent: handshake err ${{string.inspect(e)}}')
             }}
-        }})
-        // Nothing is on the wire until the ClientHello, so the sibling has
-        // nothing to read and is parked well before the upgrade re-keys it.
-        process.sleep(500)
-        println('parent: upgrading')
-        match tls.handshake(sock, 'localhost') {{
-            Ok(conn) -> {{
-                println('parent: handshake ok')
-                tls.close(conn) or Nil
-            }}
-            Err(e) -> println('parent: handshake err ${{string.inspect(e)}}')
+            println('parent: done')
         }}
-        println('parent: done')
+        Err(e) -> println('connect failed: ${{string.inspect(e)}}')
     }}
-    Err(e) -> println('connect failed: ${{string.inspect(e)}}')
 }}
 "#
     );

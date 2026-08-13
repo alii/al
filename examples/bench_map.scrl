@@ -41,6 +41,8 @@ fn repeat_lookups(m Map(Int, Int), rounds Int, acc Int) Int {
 	}
 }
 
-m = fill(map.new(), 50000)
-println(repeat_lookups(m, 100, 0))
-println(churn(m, 2000000))
+pub fn main() {
+	m = fill(map.new(), 50000)
+	println(repeat_lookups(m, 100, 0))
+	println(churn(m, 2000000))
+}

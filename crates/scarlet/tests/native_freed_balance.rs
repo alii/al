@@ -37,9 +37,9 @@ fn compile_with_backend(src: &str) -> (bytecode::Program, Vec<String>) {
     let ast = common::parse(src);
     let plans: Rc<RefCell<Vec<clif::NativePlan>>> = Rc::default();
     let sink = Rc::clone(&plans);
-    let hook: bytecode::NativeHook = Box::new(move |idx, f, pool| {
+    let hook: bytecode::NativeHook = Box::new(move |idx, f, pool, counts| {
         sink.borrow_mut()
-            .push(clif::plan(idx, f, pool, scarlet::STDLIB.prelude));
+            .push(clif::plan(idx, f, pool, scarlet::STDLIB.prelude, counts));
     });
     let r = bytecode::compile_with_native(&ast, None, Some(&scarlet::STDLIB), hook);
     assert!(
@@ -78,8 +78,11 @@ fn compile_with_backend(src: &str) -> (bytecode::Program, Vec<String>) {
 }
 
 /// Run `src` to completion and assert both the Int result and that allocs
-/// equal frees. `src` must return an immediate and bind nothing at toplevel,
-/// or something heap-allocated legitimately outlives the VM.
+/// equal frees. The result is what `main` returns: the entry frame leaves it
+/// for `Halt`, and running in-process reads it where the CLI would discard
+/// it. `main` must return an immediate and the module must declare no
+/// heap-valued `const`, or something heap-allocated legitimately outlives
+/// the VM.
 fn run_balanced(tag: &str, src: &str, expect: i64) -> Vec<String> {
     let _g = BALANCE_LOCK.lock().unwrap();
     let (program, native_fns) = compile_with_backend(src);
@@ -107,8 +110,8 @@ fn run_balanced(tag: &str, src: &str, expect: i64) -> Vec<String> {
 }
 
 /// `examples/bench_typed.scrl`'s function set, plus `fact` so at least one body
-/// is guaranteed native under the A0 gate. The toplevel is a single
-/// expression: no globals survive, so the ledger must close exactly.
+/// is guaranteed native under the A0 gate. `main` is a single expression:
+/// nothing survives its return, so the ledger must close exactly.
 const BENCH_TYPED_SHAPE: &str = "\
 type Tree {\n\
 \tLeaf(value Int)\n\
@@ -153,7 +156,9 @@ fn dot_loop(n Int, acc Int) Int {\n\
 fn fact(n Int) Int {\n\
 \tif n < 2 { 1 } else { n * fact(n - 1) }\n\
 }\n\
-sum(build(8)) + dot_loop(500, 0) + fact(12) + { if is_even(1000) { 1 } else { 0 } }\n";
+pub fn main() Int {\n\
+\tsum(build(8)) + dot_loop(500, 0) + fact(12) + { if is_even(1000) { 1 } else { 0 } }\n\
+}\n";
 
 #[test]
 fn freed_objects_balance_on_bench_typed_shape() {
@@ -204,7 +209,9 @@ fn freed_objects_balance_on_unique_reuse_chain() {
          fn chain(xs List, k Int) List {{\n\
          \tif k == 0 {{ xs }} else {{ chain(lmap(xs, double), k - 1) }}\n\
          }}\n\
-         lsum(chain(build(100), 10))\n"
+         pub fn main() Int {{\n\
+         \tlsum(chain(build(100), 10))\n\
+         }}\n"
     );
     let native_fns = run_balanced("unique_reuse_chain", &src, 5050 * 1024);
     for f in ["build", "lmap"] {
@@ -227,7 +234,9 @@ fn freed_objects_balance_on_shared_fallback() {
          \tys = lmap(xs, double)\n\
          \tlsum(xs) + lsum(ys)\n\
          }}\n\
-         share(100)\n"
+         pub fn main() Int {{\n\
+         \tshare(100)\n\
+         }}\n"
     );
     let native_fns = run_balanced("shared_fallback", &src, 5050 + 10100);
     for f in ["build", "lmap"] {

@@ -21,6 +21,12 @@ fn resolve(key: &module::ModuleKey) -> Option<(PathBuf, String)> {
     }
 }
 
+const LIB_SRC: &str = "pub fn broken() Int {\n  \"not an int\"\n}\n";
+
+/// The entry's second line sits at the same span as lib's error, so a snippet
+/// sliced from the wrong file still looks plausible.
+const ENTRY_SRC: &str = "import ./lib\npub fn probe() Int { lib.broken() }\n";
+
 fn check_project(p: &Project, entry_src: &str) -> bytecode::CompileResult {
     let mut sc = scanner::new_scanner(entry_src.to_string());
     let ps = parser::new_parser(&mut sc);
@@ -37,10 +43,9 @@ fn check_project(p: &Project, entry_src: &str) -> bytecode::CompileResult {
 #[test]
 fn imported_module_type_error_is_stamped_with_that_module() {
     let p = Project::new("diagprov");
-    p.write("lib.scrl", "pub fn broken() Int {\n  \"not an int\"\n}\n");
-    let entry_src = "import ./lib\n_x = lib.broken\n";
+    p.write("lib.scrl", LIB_SRC);
 
-    let result = check_project(&p, entry_src);
+    let result = check_project(&p, ENTRY_SRC);
     assert!(!result.success(), "expected the lib type error to surface");
 
     let lib_key = module_key(&p.dir, "lib.scrl");
@@ -60,13 +65,12 @@ fn imported_module_type_error_is_stamped_with_that_module() {
 #[test]
 fn imported_module_type_error_renders_against_that_modules_text() {
     let p = Project::new("diagprovrender");
-    p.write("lib.scrl", "pub fn broken() Int {\n  \"not an int\"\n}\n");
-    let entry_src = "import ./lib\n_x = lib.broken\n";
+    p.write("lib.scrl", LIB_SRC);
 
-    let result = check_project(&p, entry_src);
+    let result = check_project(&p, ENTRY_SRC);
     assert!(!result.success(), "expected the lib type error to surface");
 
-    let out = diagnostic::render_diagnostics(&result.diagnostics, entry_src, "main.scrl", &resolve);
+    let out = diagnostic::render_diagnostics(&result.diagnostics, ENTRY_SRC, "main.scrl", &resolve);
 
     assert!(
         out.contains("lib.scrl:"),
@@ -76,9 +80,8 @@ fn imported_module_type_error_renders_against_that_modules_text() {
         out.contains("\"not an int\""),
         "snippet not taken from lib.scrl's text:\n{out}"
     );
-    // The entry file's line 2 sits at the same span, so a wrong slice looks plausible.
     assert!(
-        !out.contains("_x = lib.broken"),
+        !out.contains("pub fn probe"),
         "snippet wrongly sliced from the entry file's text:\n{out}"
     );
 }
@@ -86,16 +89,15 @@ fn imported_module_type_error_renders_against_that_modules_text() {
 #[test]
 fn unresolvable_source_prints_location_but_never_a_snippet() {
     let p = Project::new("diagprovgone");
-    p.write("lib.scrl", "pub fn broken() Int {\n  \"not an int\"\n}\n");
-    let entry_src = "import ./lib\n_x = lib.broken\n";
+    p.write("lib.scrl", LIB_SRC);
 
-    let result = check_project(&p, entry_src);
+    let result = check_project(&p, ENTRY_SRC);
     assert!(!result.success(), "expected the lib type error to surface");
 
     let out =
-        diagnostic::render_diagnostics(&result.diagnostics, entry_src, "main.scrl", &|_| None);
+        diagnostic::render_diagnostics(&result.diagnostics, ENTRY_SRC, "main.scrl", &|_| None);
     assert!(
-        !out.contains("_x = lib.broken") && !out.contains("import ./lib"),
+        !out.contains("pub fn probe") && !out.contains("import ./lib"),
         "snippet sliced from the entry file for a foreign diagnostic:\n{out}"
     );
     let lib_key = module_key(&p.dir, "lib.scrl");

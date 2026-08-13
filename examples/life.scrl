@@ -69,4 +69,6 @@ fn run(grid Array(Array(Bool)), gen Int) Nil {
 // same shape reappears, one cell down and one cell to the right.
 const glider = [(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)]
 
-run(make_grid(fn(x, y) array.contains(glider, (x, y))), 0)
+pub fn main() {
+	run(make_grid(fn(x, y) array.contains(glider, (x, y))), 0)
+}

@@ -111,9 +111,14 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), Precompile
     let plans: std::rc::Rc<std::cell::RefCell<Vec<crate::core_ir::clif::NativePlan>>> =
         std::rc::Rc::default();
     let sink = std::rc::Rc::clone(&plans);
-    c.set_native_hook(Box::new(move |idx, f, pool| {
-        sink.borrow_mut()
-            .push(crate::core_ir::clif::plan(idx, f, pool, &prelude_for_hook));
+    c.set_native_hook(Box::new(move |idx, f, pool, counts| {
+        sink.borrow_mut().push(crate::core_ir::clif::plan(
+            idx,
+            f,
+            pool,
+            &prelude_for_hook,
+            counts,
+        ));
     }));
 
     c.register_prelude();

@@ -12,9 +12,11 @@ run_case! {
     // a distinct arm inside `Op::Index` (`range_elem` instead of `Seq::get`).
     // In-bounds yields the element; out-of-bounds yields the recovery value.
     range_index_or_else: (
-        "r = 5..10\n\
-         println(r[2] or -1)\n\
-         println(r[99] or -1)\n",
+        "pub fn main() {\n\
+         \tr = 5..10\n\
+         \tprintln(r[2] or -1)\n\
+         \tprintln(r[99] or -1)\n\
+         }\n",
         "7\n-1\n",
     ),
 
@@ -22,9 +24,11 @@ run_case! {
     // arm must offset from the start (`5 + 2 = 7`), and an out-of-bounds index must
     // read as `None`, not a wrapped value.
     range_index_option: (
-        "r = 5..10\n\
-         println(r[2])\n\
-         println(r[99])\n",
+        "pub fn main() {\n\
+         \tr = 5..10\n\
+         \tprintln(r[2])\n\
+         \tprintln(r[99])\n\
+         }\n",
         "Some(7)\nNone\n",
     ),
 
@@ -32,8 +36,10 @@ run_case! {
     // (`rs+start .. rs+end`) rather than materialising, so the slice of `5..10` at
     // `[1..3]` is `[6, 7]`.
     range_slice: (
-        "r = 5..10\n\
-         println(r[1..3])\n",
+        "pub fn main() {\n\
+         \tr = 5..10\n\
+         \tprintln(r[1..3])\n\
+         }\n",
         "[6, 7]\n",
     ),
 
@@ -41,17 +47,19 @@ run_case! {
     // (head) and `Op::SeqDrop` (tail) on a Range, not an Array. `SeqDrop` on a Range stays
     // O(1) (`s+n .. e`); reconstructing `[h, ..t]` must reproduce the full sequence.
     match_range_with_array_pattern: (
-        "r = 0..5\n\
-         out = match r {\n\
-         \t[h, ..t] -> [h, ..t]\n\
-         \t[] -> []\n\
-         }\n\
-         println(out)\n\
-         empty = match 3..3 {\n\
-         \t[h, ..t] -> [h, ..t]\n\
-         \t[] -> [0 - 1]\n\
-         }\n\
-         println(empty)\n",
+        "pub fn main() {\n\
+         \tr = 0..5\n\
+         \tout = match r {\n\
+         \t\t[h, ..t] -> [h, ..t]\n\
+         \t\t[] -> []\n\
+         \t}\n\
+         \tprintln(out)\n\
+         \tempty = match 3..3 {\n\
+         \t\t[h, ..t] -> [h, ..t]\n\
+         \t\t[] -> [0 - 1]\n\
+         \t}\n\
+         \tprintln(empty)\n\
+         }\n",
         "[0, 1, 2, 3, 4]\n[-1]\n",
     ),
 
@@ -61,9 +69,11 @@ run_case! {
     // preserving the IEEE sign for the float.
     generic_unary_neg_dispatches_on_runtime_tag: (
         "fn n(x) { -x }\n\
-         println(n(5))\n\
-         println(n(0 - 7))\n\
-         println(n(2.5))\n",
+         pub fn main() {\n\
+         \tprintln(n(5))\n\
+         \tprintln(n(0 - 7))\n\
+         \tprintln(n(2.5))\n\
+         }\n",
         "-5\n7\n-2.5\n",
     ),
 
@@ -76,8 +86,10 @@ run_case! {
          \tif n <= 0 { 0 } else { f(n - 1) }\n\
          }\n\
          fn down(n Int) Int { step(down, n) }\n\
-         println(down(5))\n\
-         println(down(0))\n",
+         pub fn main() {\n\
+         \tprintln(down(5))\n\
+         \tprintln(down(0))\n\
+         }\n",
         "0\n0\n",
     ),
 
@@ -86,34 +98,42 @@ run_case! {
     // Trailing/empty fields are preserved, so `'a,,b,'` splits into four parts.
     string_split_nonempty_delimiter: (
         "import scarlet/string\n\
-         println(string.split('a,b,c', ','))\n\
-         println(string.split('a,,b,', ','))\n\
-         println(string.split('nodelim', 'X'))\n",
+         pub fn main() {\n\
+         \tprintln(string.split('a,b,c', ','))\n\
+         \tprintln(string.split('a,,b,', ','))\n\
+         \tprintln(string.split('nodelim', 'X'))\n\
+         }\n",
         "[a, b, c]\n[a, , b, ]\n[nodelim]\n",
     ),
 
     // `values_equal`'s Binary arm: compare structurally, byte for byte.
     binary_value_equality: (
-        "println(<<1, 2, 3>> == <<1, 2, 3>>)\n\
-         println(<<1, 2, 3>> == <<1, 2, 4>>)\n\
-         println(<<1, 2>> != <<1, 2, 3>>)\n",
+        "pub fn main() {\n\
+         \tprintln(<<1, 2, 3>> == <<1, 2, 3>>)\n\
+         \tprintln(<<1, 2, 3>> == <<1, 2, 4>>)\n\
+         \tprintln(<<1, 2>> != <<1, 2, 3>>)\n\
+         }\n",
         "True\nFalse\nTrue\n",
     ),
 
     // `Op::DivFloat` is total: `x / 0.0 == 0.0`, mirroring the integer
     // `x / 0 == 0` convention, rather than Infinity/NaN.
     float_division_is_total: (
-        "println(7.0 / 2.0)\n\
-         println(1.0 / 0.0)\n\
-         println(0.0 - 9.0 / 3.0)\n",
+        "pub fn main() {\n\
+         \tprintln(7.0 / 2.0)\n\
+         \tprintln(1.0 / 0.0)\n\
+         \tprintln(0.0 - 9.0 / 3.0)\n\
+         }\n",
         "3.5\n0.0\n-3.0\n",
     ),
 
     // `Op::Index` yields `Option`: `None` out of bounds, not a wrap or panic.
     array_index_yields_option: (
-        "xs = [10, 20, 30]\n\
-         println(xs[1])\n\
-         println(xs[99])\n",
+        "pub fn main() {\n\
+         \txs = [10, 20, 30]\n\
+         \tprintln(xs[1])\n\
+         \tprintln(xs[99])\n\
+         }\n",
         "Some(20)\nNone\n",
     ),
 
@@ -128,8 +148,10 @@ run_case! {
          \t}\n\
          \thelper(3)\n\
          }\n\
-         println(make(42))\n\
-         println(make(7))\n",
+         pub fn main() {\n\
+         \tprintln(make(42))\n\
+         \tprintln(make(7))\n\
+         }\n",
         "42\n7\n",
     ),
 
@@ -137,19 +159,19 @@ run_case! {
     // unit tests.
     inspect_multiline_structures_e2e: (
         "type Point {\n\tx Int\n\ty Int\n}\n\
-         type Seg {
-         	a Point
-         	b Point
-         }\n\
-         println(Seg(a: Point(x: 1, y: 2), b: Point(x: 3, y: 4)))\n\
-         println([[1, 2], [3, 4]])\n",
+         type Seg {\n\ta Point\n\tb Point\n}\n\
+         pub fn main() {\n\
+         \tprintln(Seg(a: Point(x: 1, y: 2), b: Point(x: 3, y: 4)))\n\
+         \tprintln([[1, 2], [3, 4]])\n\
+         }\n",
         "Seg {\n  a: Point{ x: 1, y: 2 },\n  b: Point{ x: 3, y: 4 }\n}\n[\n  [1, 2],\n  [3, 4]\n]\n",
     ),
 
     // Or-pattern alternatives are one logical binding: every alternative must
-    // store into the same slot the arm body reads. Module scope's
-    // shadow-gets-a-fresh-slot rule is the hazard, so both scopes are pinned,
-    // matching on the first, middle, and last alternative.
+    // store into the same slot the arm body reads. Pinned on the first,
+    // middle, and last alternative, both as a function's tail expression and
+    // as a binding's initialiser in `main`'s body (the two ways an arm's slot
+    // gets allocated).
     or_pattern_binds_same_slot_in_every_alternative: (
         "type Shape {\n\
          \tCircle(r Int)\n\
@@ -161,17 +183,19 @@ run_case! {
          \t\tCircle(r) | Square(r) | Rect(r, _) -> r\n\
          \t}\n\
          }\n\
-         println(size(Circle(3)))\n\
-         println(size(Square(4)))\n\
-         println(size(Rect(5, 9)))\n\
-         first = match Circle(7) {\n\
-         \tCircle(r) | Square(r) | Rect(r, _) -> r\n\
-         }\n\
-         println(first)\n\
-         last = match Rect(8, 1) {\n\
-         \tCircle(r) | Square(r) | Rect(r, _) -> r\n\
-         }\n\
-         println(last)\n",
+         pub fn main() {\n\
+         \tprintln(size(Circle(3)))\n\
+         \tprintln(size(Square(4)))\n\
+         \tprintln(size(Rect(5, 9)))\n\
+         \tfirst = match Circle(7) {\n\
+         \t\tCircle(r) | Square(r) | Rect(r, _) -> r\n\
+         \t}\n\
+         \tprintln(first)\n\
+         \tlast = match Rect(8, 1) {\n\
+         \t\tCircle(r) | Square(r) | Rect(r, _) -> r\n\
+         \t}\n\
+         \tprintln(last)\n\
+         }\n",
         "3\n4\n5\n7\n8\n",
     ),
 
@@ -179,11 +203,13 @@ run_case! {
     // at the clamped start.
     binary_index_of: (
         "import scarlet/binary\n\
-         h = binary.from_string('abcabc')\n\
-         println(binary.index_of(h, binary.from_string('bc'), 0))\n\
-         println(binary.index_of(h, binary.from_string('bc'), 2))\n\
-         println(binary.index_of(h, binary.from_string('xy'), 0))\n\
-         println(binary.index_of(h, binary.from_string(''), 3))\n",
+         pub fn main() {\n\
+         \th = binary.from_string('abcabc')\n\
+         \tprintln(binary.index_of(h, binary.from_string('bc'), 0))\n\
+         \tprintln(binary.index_of(h, binary.from_string('bc'), 2))\n\
+         \tprintln(binary.index_of(h, binary.from_string('xy'), 0))\n\
+         \tprintln(binary.index_of(h, binary.from_string(''), 3))\n\
+         }\n",
         "Some(1)\nSome(4)\nNone\nSome(3)\n",
     ),
 
@@ -192,39 +218,47 @@ run_case! {
     // defense.
     binary_parse_int: (
         "import scarlet/binary.{Dec, Hex}\n\
-         println(binary.parse_int(binary.from_string('255'), Dec))\n\
-         println(binary.parse_int(binary.from_string('ff'), Hex))\n\
-         println(binary.parse_int(binary.from_string('FF'), Hex))\n\
-         println(binary.parse_int(binary.from_string('99999999999999999999'), Dec))\n\
-         println(binary.parse_int(binary.from_string('12x'), Dec))\n\
-         println(binary.parse_int(binary.from_string(''), Dec))\n",
+         pub fn main() {\n\
+         \tprintln(binary.parse_int(binary.from_string('255'), Dec))\n\
+         \tprintln(binary.parse_int(binary.from_string('ff'), Hex))\n\
+         \tprintln(binary.parse_int(binary.from_string('FF'), Hex))\n\
+         \tprintln(binary.parse_int(binary.from_string('99999999999999999999'), Dec))\n\
+         \tprintln(binary.parse_int(binary.from_string('12x'), Dec))\n\
+         \tprintln(binary.parse_int(binary.from_string(''), Dec))\n\
+         }\n",
         "Ok(255)\nOk(255)\nOk(255)\nErr(Nil)\nErr(Nil)\nErr(Nil)\n",
     ),
 
     // Op::BinEqIgnoreAsciiCase: ASCII-case-insensitive header-name matching.
     binary_eq_ignore_ascii_case: (
         "import scarlet/binary\n\
-         a = binary.from_string('Content-Length')\n\
-         println(binary.eq_ignore_ascii_case(a, binary.from_string('content-length')))\n\
-         println(binary.eq_ignore_ascii_case(binary.from_string('abc'), binary.from_string('abd')))\n",
+         pub fn main() {\n\
+         \ta = binary.from_string('Content-Length')\n\
+         \tprintln(binary.eq_ignore_ascii_case(a, binary.from_string('content-length')))\n\
+         \tprintln(binary.eq_ignore_ascii_case(binary.from_string('abc'), binary.from_string('abd')))\n\
+         }\n",
         "True\nFalse\n",
     ),
 
     // Op::BinToAsciiLower: non-letter bytes pass through.
     binary_to_ascii_lower: (
         "import scarlet/binary\n\
-         println(binary.to_string(binary.to_ascii_lower(binary.from_string('AbC-123'))))\n",
+         pub fn main() {\n\
+         \tprintln(binary.to_string(binary.to_ascii_lower(binary.from_string('AbC-123'))))\n\
+         }\n",
         "Ok(abc-123)\n",
     ),
 
     // Op::BinFromIntAscii: radix 10/16, lowercase hex, zero and negatives.
     binary_from_int_ascii: (
         "import scarlet/binary.{Dec, Hex}\n\
-         println(binary.to_string(binary.from_int_ascii(255, Dec)))\n\
-         println(binary.to_string(binary.from_int_ascii(255, Hex)))\n\
-         println(binary.to_string(binary.from_int_ascii(0, Dec)))\n\
-         println(binary.to_string(binary.from_int_ascii(0 - 42, Dec)))\n\
-         println(binary.parse_int(binary.from_int_ascii(4096, Hex), Hex))\n",
+         pub fn main() {\n\
+         \tprintln(binary.to_string(binary.from_int_ascii(255, Dec)))\n\
+         \tprintln(binary.to_string(binary.from_int_ascii(255, Hex)))\n\
+         \tprintln(binary.to_string(binary.from_int_ascii(0, Dec)))\n\
+         \tprintln(binary.to_string(binary.from_int_ascii(0 - 42, Dec)))\n\
+         \tprintln(binary.parse_int(binary.from_int_ascii(4096, Hex), Hex))\n\
+         }\n",
         "Ok(255)\nOk(ff)\nOk(0)\nOk(-42)\nOk(4096)\n",
     ),
 }
@@ -243,10 +277,12 @@ fn closure_captures_enclosing_function_local() {
         "fn make_adder(x Int) fn(Int) Int {\n\
          \tfn(y Int) x + y\n\
          }\n\
-         add5 = make_adder(5)\n\
-         add10 = make_adder(10)\n\
-         println(add5(3))\n\
-         println(add10(3))\n",
+         pub fn main() {\n\
+         \tadd5 = make_adder(5)\n\
+         \tadd10 = make_adder(10)\n\
+         \tprintln(add5(3))\n\
+         \tprintln(add10(3))\n\
+         }\n",
         "8\n13\n",
     );
 }
@@ -259,10 +295,12 @@ fn closure_captures_multiple_enclosing_locals() {
         "fn make_affine(a Int, b Int) fn(Int) Int {\n\
          \tfn(x Int) a * x + b\n\
          }\n\
-         f = make_affine(2, 3)\n\
-         g = make_affine(5, 1)\n\
-         println(f(10))\n\
-         println(g(10))\n",
+         pub fn main() {\n\
+         \tf = make_affine(2, 3)\n\
+         \tg = make_affine(5, 1)\n\
+         \tprintln(f(10))\n\
+         \tprintln(g(10))\n\
+         }\n",
         "23\n51\n",
     );
 }
@@ -275,10 +313,12 @@ fn closure_captures_non_parameter_local() {
          \tbase = start * 100\n\
          \tfn(n Int) base + n\n\
          }\n\
-         p = counter_from(1)\n\
-         q = counter_from(2)\n\
-         println(p(5))\n\
-         println(q(5))\n",
+         pub fn main() {\n\
+         \tp = counter_from(1)\n\
+         \tq = counter_from(2)\n\
+         \tprintln(p(5))\n\
+         \tprintln(q(5))\n\
+         }\n",
         "105\n205\n",
     );
 }
@@ -292,8 +332,10 @@ fn and_or_short_circuit_skips_rhs() {
          \tprintln('evaluated')\n\
          \tb\n\
          }\n\
-         println(False && loud(True))\n\
-         println(True || loud(False))\n",
+         pub fn main() {\n\
+         \tprintln(False && loud(True))\n\
+         \tprintln(True || loud(False))\n\
+         }\n",
         "False\nTrue\n",
     );
 }
@@ -307,8 +349,10 @@ fn and_or_evaluate_rhs_when_lhs_undecided() {
          \tprintln('evaluated')\n\
          \tb\n\
          }\n\
-         println(True && loud(False))\n\
-         println(False || loud(True))\n",
+         pub fn main() {\n\
+         \tprintln(True && loud(False))\n\
+         \tprintln(False || loud(True))\n\
+         }\n",
         "evaluated\nFalse\nevaluated\nTrue\n",
     );
 }
@@ -324,10 +368,12 @@ fn neq_on_int_and_enum() {
     // accidental-`==` lowering flips exactly one line.
     run_outputs(
         "type C {\n\tGood(v String)\n\tBad(v String)\n}\n\
-         println(1 != 2)\n\
-         println(1 != 1)\n\
-         println(Good('x') != Good('y'))\n\
-         println(Good('x') != Good('x'))\n",
+         pub fn main() {\n\
+         \tprintln(1 != 2)\n\
+         \tprintln(1 != 1)\n\
+         \tprintln(Good('x') != Good('y'))\n\
+         \tprintln(Good('x') != Good('x'))\n\
+         }\n",
         "True\nFalse\nTrue\nFalse\n",
     );
 }
@@ -337,12 +383,14 @@ fn eq_on_string_array_tuple() {
     // Generic `Op::Eq` as a value-producing expression over each compound
     // kind, both directions.
     run_outputs(
-        "println('ab' == 'ab')\n\
-         println('ab' == 'ac')\n\
-         println([1, 2] == [1, 2])\n\
-         println([1, 2] == [1, 3])\n\
-         println((1, 'a') == (1, 'a'))\n\
-         println((1, 'a') == (1, 'b'))\n",
+        "pub fn main() {\n\
+         \tprintln('ab' == 'ab')\n\
+         \tprintln('ab' == 'ac')\n\
+         \tprintln([1, 2] == [1, 2])\n\
+         \tprintln([1, 2] == [1, 3])\n\
+         \tprintln((1, 'a') == (1, 'a'))\n\
+         \tprintln((1, 'a') == (1, 'b'))\n\
+         }\n",
         "True\nFalse\nTrue\nFalse\nTrue\nFalse\n",
     );
 }
@@ -357,28 +405,32 @@ run_case! {
     // Both directions per op, so an always-True, always-False, or
     // operand-swapped implementation flips exactly one line.
     typed_int_ordering_compares: (
-        "println(1 < 2)\n\
-         println(2 < 1)\n\
-         println(2 > 1)\n\
-         println(1 > 2)\n\
-         println(2 <= 2)\n\
-         println(3 <= 2)\n\
-         println(2 >= 2)\n\
-         println(1 >= 2)\n",
+        "pub fn main() {\n\
+         \tprintln(1 < 2)\n\
+         \tprintln(2 < 1)\n\
+         \tprintln(2 > 1)\n\
+         \tprintln(1 > 2)\n\
+         \tprintln(2 <= 2)\n\
+         \tprintln(3 <= 2)\n\
+         \tprintln(2 >= 2)\n\
+         \tprintln(1 >= 2)\n\
+         }\n",
         "True\nFalse\nTrue\nFalse\nTrue\nFalse\nTrue\nFalse\n",
     ),
 
     // As above for Float. The `<=`/`>=` lines use equal operands, so a
     // strict-compare mislowering fails them.
     typed_float_ordering_compares: (
-        "println(1.5 < 2.5)\n\
-         println(2.5 < 1.5)\n\
-         println(2.5 > 1.5)\n\
-         println(1.5 > 2.5)\n\
-         println(2.0 <= 2.0)\n\
-         println(3.0 <= 2.0)\n\
-         println(2.0 >= 2.0)\n\
-         println(1.0 >= 2.0)\n",
+        "pub fn main() {\n\
+         \tprintln(1.5 < 2.5)\n\
+         \tprintln(2.5 < 1.5)\n\
+         \tprintln(2.5 > 1.5)\n\
+         \tprintln(1.5 > 2.5)\n\
+         \tprintln(2.0 <= 2.0)\n\
+         \tprintln(3.0 <= 2.0)\n\
+         \tprintln(2.0 >= 2.0)\n\
+         \tprintln(1.0 >= 2.0)\n\
+         }\n",
         "True\nFalse\nTrue\nFalse\nTrue\nFalse\nTrue\nFalse\n",
     ),
 
@@ -390,18 +442,20 @@ run_case! {
          fn gt(a, b) { a > b }\n\
          fn le(a, b) { a <= b }\n\
          fn ge(a, b) { a >= b }\n\
-         println(lt(1, 2))\n\
-         println(lt(2, 1))\n\
-         println(gt(2, 1))\n\
-         println(gt(1, 2))\n\
-         println(le(2, 2))\n\
-         println(le(3, 2))\n\
-         println(ge(2, 2))\n\
-         println(ge(1, 2))\n\
-         println(lt(1.5, 2.5))\n\
-         println(gt(2.5, 1.5))\n\
-         println(le(2.0, 2.0))\n\
-         println(ge(1.0, 2.0))\n",
+         pub fn main() {\n\
+         \tprintln(lt(1, 2))\n\
+         \tprintln(lt(2, 1))\n\
+         \tprintln(gt(2, 1))\n\
+         \tprintln(gt(1, 2))\n\
+         \tprintln(le(2, 2))\n\
+         \tprintln(le(3, 2))\n\
+         \tprintln(ge(2, 2))\n\
+         \tprintln(ge(1, 2))\n\
+         \tprintln(lt(1.5, 2.5))\n\
+         \tprintln(gt(2.5, 1.5))\n\
+         \tprintln(le(2.0, 2.0))\n\
+         \tprintln(ge(1.0, 2.0))\n\
+         }\n",
         "True\nFalse\nTrue\nFalse\nTrue\nFalse\nTrue\nFalse\n\
          True\nTrue\nTrue\nFalse\n",
     ),
@@ -411,8 +465,10 @@ run_case! {
     direct_call_to_known_top_level_fn: (
         "fn inc(x Int) Int { x + 1 }\n\
          fn twice(x Int) Int { inc(inc(x)) }\n\
-         println(twice(5))\n\
-         println(inc(0 - 3))\n",
+         pub fn main() {\n\
+         \tprintln(twice(5))\n\
+         \tprintln(inc(0 - 3))\n\
+         }\n",
         "7\n-2\n",
     ),
 
@@ -421,9 +477,11 @@ run_case! {
     mutual_tail_recursion_between_known_fns: (
         "fn even(n Int) Bool { if n == 0 { True } else { odd(n - 1) } }\n\
          fn odd(n Int) Bool { if n == 0 { False } else { even(n - 1) } }\n\
-         println(even(200000))\n\
-         println(odd(200000))\n\
-         println(even(7))\n",
+         pub fn main() {\n\
+         \tprintln(even(200000))\n\
+         \tprintln(odd(200000))\n\
+         \tprintln(even(7))\n\
+         }\n",
         "True\nFalse\nFalse\n",
     ),
 
@@ -434,8 +492,10 @@ run_case! {
         "fn inc(x Int) Int { x + 1 }\n\
          fn dbl(x Int) Int { x * 2 }\n\
          fn apply(f fn(Int) Int, x Int) Int { f(x) }\n\
-         println(apply(inc, 5))\n\
-         println(apply(dbl, 5))\n",
+         pub fn main() {\n\
+         \tprintln(apply(inc, 5))\n\
+         \tprintln(apply(dbl, 5))\n\
+         }\n",
         "6\n10\n",
     ),
 
@@ -446,7 +506,9 @@ run_case! {
          \tif n == 0 { acc } else { f(acc + 1, n - 1) }\n\
          }\n\
          fn count(acc Int, n Int) Int { hop(count, acc, n) }\n\
-         println(count(0, 200000))\n",
+         pub fn main() {\n\
+         \tprintln(count(0, 200000))\n\
+         }\n",
         "200000\n",
     ),
 
@@ -466,9 +528,11 @@ run_case! {
          \t\tC(x, y) -> x * 100 + y\n\
          \t}\n\
          }\n\
-         println(pick(A(3)))\n\
-         println(pick(B(4)))\n\
-         println(pick(C(5, 6)))\n",
+         pub fn main() {\n\
+         \tprintln(pick(A(3)))\n\
+         \tprintln(pick(B(4)))\n\
+         \tprintln(pick(C(5, 6)))\n\
+         }\n",
         "3\n40\n506\n",
     ),
 
@@ -487,9 +551,11 @@ run_case! {
          \t\tB(x) -> x * 10\n\
          \t}\n\
          }\n\
-         println(pick(A(0)))\n\
-         println(pick(A(3)))\n\
-         println(pick(B(4)))\n",
+         pub fn main() {\n\
+         \tprintln(pick(A(0)))\n\
+         \tprintln(pick(A(3)))\n\
+         \tprintln(pick(B(4)))\n\
+         }\n",
         "999\n3\n40\n",
     ),
 
@@ -498,14 +564,16 @@ run_case! {
     // unnamed fields through the same op.
     record_field_access_unchecked: (
         "type P {\n\tx Int\n\ty Int\n\tz Int\n}\n\
-         p = P(x: 10, y: 20, z: 30)\n\
-         println(p.x)\n\
-         println(p.y)\n\
-         println(p.z)\n\
-         q = P(y: 99, ..p)\n\
-         println(q.x)\n\
-         println(q.y)\n\
-         println(q.z)\n",
+         pub fn main() {\n\
+         \tp = P(x: 10, y: 20, z: 30)\n\
+         \tprintln(p.x)\n\
+         \tprintln(p.y)\n\
+         \tprintln(p.z)\n\
+         \tq = P(y: 99, ..p)\n\
+         \tprintln(q.x)\n\
+         \tprintln(q.y)\n\
+         \tprintln(q.z)\n\
+         }\n",
         "10\n20\n30\n10\n99\n30\n",
     ),
 
@@ -521,9 +589,11 @@ run_case! {
          \tC(v Int, w Int)\n\
          }\n\
          fn sum(s S) Int { s.v + s.w }\n\
-         println(sum(A(1, 2)))\n\
-         println(sum(B(10, 20)))\n\
-         println(sum(C(100, 200)))\n",
+         pub fn main() {\n\
+         \tprintln(sum(A(1, 2)))\n\
+         \tprintln(sum(B(10, 20)))\n\
+         \tprintln(sum(C(100, 200)))\n\
+         }\n",
         "3\n30\n300\n",
     ),
 }
@@ -557,7 +627,9 @@ fn sq(x Int) Int { x * x }\n\
 fn f(n Int) Int {\n\
 \tif n == 0 { 0 } else { sq(n) + n - 1 }\n\
 }\n\
-f(3)\n";
+pub fn main() {\n\
+\tprintln(f(3))\n\
+}\n";
     let ast = common::parse(src);
     let r = bytecode::compile(&ast, None, Some(&scarlet::STDLIB));
     assert!(r.success(), "compile failed: {:?}", r.diagnostics);
@@ -612,7 +684,9 @@ fn f() Int {\n\
 \t\tSome(v) -> v + 1\n\
 \t}\n\
 }\n\
-println(f())\n";
+pub fn main() {\n\
+\tprintln(f())\n\
+}\n";
     let ast = common::parse(src);
     let r = bytecode::compile(&ast, None, Some(&scarlet::STDLIB));
     assert!(r.success(), "compile failed: {:?}", r.diagnostics);
@@ -682,9 +756,9 @@ fn compile_native(src: &str, must_native: &[&str]) -> bytecode::Program {
         &ast,
         None,
         Some(&scarlet::STDLIB),
-        Box::new(move |idx, f, pool| {
+        Box::new(move |idx, f, pool, counts| {
             sink.borrow_mut()
-                .push(clif::plan(idx, f, pool, scarlet::STDLIB.prelude));
+                .push(clif::plan(idx, f, pool, scarlet::STDLIB.prelude, counts));
         }),
     );
     assert!(
@@ -739,7 +813,10 @@ fn compile_native(src: &str, must_native: &[&str]) -> bytecode::Program {
 }
 
 /// Run an already-built `program`, returning `(total ProcHeap allocations
-/// during the run, rendered result value)`. Caller holds `ALLOC_LOCK`.
+/// during the run, rendered value `main` returned)`. `scarlet run` discards
+/// that value, but the entry frame leaves it for `Halt` and the in-process
+/// `Vm::run` hands it back, which is how these tests read a result without
+/// capturing stdout. Caller holds `ALLOC_LOCK`.
 fn count_run(program: bytecode::Program) -> (usize, String) {
     ProcHeap::reset_alloc_count();
     let mut v = vm::new_vm(program).expect("vm init");
@@ -784,7 +861,12 @@ fn index_or_default_allocates_nothing() {
     let _g = ALLOC_LOCK.lock().unwrap();
     let prog = |body: &str| {
         format!(
-            "fn go(a Array(Int), i Int, acc Int) Int {{\n\tif i == 0 {{ acc }} else {{ go(a, i - 1, {body}) }}\n}}\ngo([1, 2, 3], 2000, 0)\n"
+            "fn go(a Array(Int), i Int, acc Int) Int {{\n\
+             \tif i == 0 {{ acc }} else {{ go(a, i - 1, {body}) }}\n\
+             }}\n\
+             pub fn main() {{\n\
+             \tgo([1, 2, 3], 2000, 0)\n\
+             }}\n"
         )
     };
     // `go` sits outside the native coverage gate, so no `must_native` claim;
@@ -805,8 +887,17 @@ fn index_or_default_allocates_nothing() {
 /// *pure* one. A call has an effect and must stay behind the lazy match.
 #[test]
 fn index_or_does_not_evaluate_an_impure_default() {
-    let src = "fn side() Int {\n\tprintln('evaluated')\n\t0\n}\nfn f(a Array(Int)) Int { a[0] or side() }\nprintln(f([42]))\n";
-    run_outputs(src, "42\n");
+    run_outputs(
+        "fn side() Int {\n\
+         \tprintln('evaluated')\n\
+         \t0\n\
+         }\n\
+         fn f(a Array(Int)) Int { a[0] or side() }\n\
+         pub fn main() {\n\
+         \tprintln(f([42]))\n\
+         }\n",
+        "42\n",
+    );
 }
 
 /// Both encodings, plus every boundary: hit, past the end, negative, empty.
@@ -815,11 +906,21 @@ fn index_or_does_not_evaluate_an_impure_default() {
 #[test]
 fn index_or_covers_both_encodings_and_every_boundary() {
     run_outputs(
-        "fn f(a Array(Int), i Int) Int { a[i] or -1 }\nprintln(f([7, 8], 0))\nprintln(f([7, 8], 1))\nprintln(f([7, 8], 5))\nprintln(f([7, 8], 0 - 1))\nprintln(f([], 0))\n",
+        "fn f(a Array(Int), i Int) Int { a[i] or -1 }\n\
+         pub fn main() {\n\
+         \tprintln(f([7, 8], 0))\n\
+         \tprintln(f([7, 8], 1))\n\
+         \tprintln(f([7, 8], 5))\n\
+         \tprintln(f([7, 8], 0 - 1))\n\
+         \tprintln(f([], 0))\n\
+         }\n",
         "7\n8\n-1\n-1\n-1\n",
     );
     run_outputs(
-        "fn g(a Array(Bool)) Bool { a[9] or False }\nprintln(g([True]))\n",
+        "fn g(a Array(Bool)) Bool { a[9] or False }\n\
+         pub fn main() {\n\
+         \tprintln(g([True]))\n\
+         }\n",
         "False\n",
     );
 }
@@ -836,7 +937,9 @@ fn list_map_unique_reuses_in_place() {
              fn chain(xs List, k Int) List {{\n\
              \tif k == 0 {{ xs }} else {{ chain(lmap(xs, double), k - 1) }}\n\
              }}\n\
-             lsum(chain(build(100), {k}))\n"
+             pub fn main() {{\n\
+             \tlsum(chain(build(100), {k}))\n\
+             }}\n"
         )
     };
     // The reuse shapes live in the LIST_SRC fns; `chain` is only the driver,
@@ -860,16 +963,19 @@ fn list_map_unique_reuses_in_place() {
 #[test]
 fn list_map_shared_falls_back_to_alloc() {
     let _g = ALLOC_LOCK.lock().unwrap();
-    // A second name keeps every `Cons` at rc>=2, so `is_unique()` is false at
-    // every drop and the constructor allocates fresh. Varying only `n`
-    // isolates the per-element cost of build+map together.
+    // `alias` stays live across the `lmap` call, so the list reaches it
+    // shared and `is_unique()` is false at every drop down the spine: the
+    // constructor allocates fresh each time. Varying only `n` isolates the
+    // per-element cost of build+map together.
     let prog = |n: u32| {
         format!(
             "{LIST_SRC}\
-             xs = build({n})\n\
-             alias = xs\n\
-             ys = lmap(xs, double)\n\
-             (lsum(alias), lsum(ys))\n"
+             pub fn main() {{\n\
+             \txs = build({n})\n\
+             \talias = xs\n\
+             \tys = lmap(xs, double)\n\
+             \t(lsum(alias), lsum(ys))\n\
+             }}\n"
         )
     };
     let native = &["build", "lmap", "lsum", "double"];
@@ -914,6 +1020,12 @@ fn dot_loop(n Int, acc Int) Int {\n\
 \t}\n\
 }\n";
 
+/// [`DOT_SRC`] plus a `main` that runs `dot_loop` for `n` iterations and
+/// returns the accumulator.
+fn dot_program(n: u64) -> String {
+    format!("{DOT_SRC}pub fn main() {{\n\tdot_loop({n}, 0)\n}}\n")
+}
+
 #[test]
 fn dot_loop_perceus_reuse_gate() {
     let _g = ALLOC_LOCK.lock().unwrap();
@@ -922,10 +1034,7 @@ fn dot_loop_perceus_reuse_gate() {
     // for self-tail-calls, so the end-of-body drops of `p`/`q` pair with the
     // next iteration's constructors across `TailCallSelf`.
     const N: u64 = 10_000;
-    let (allocs, r) = run_counting_allocs(
-        &format!("{DOT_SRC}dot_loop({N}, 0)\n"),
-        &["dot", "dot_loop"],
-    );
+    let (allocs, r) = run_counting_allocs(&dot_program(N), &["dot", "dot_loop"]);
     // ∑ₙ₌₁ᴺ 3n²+15n+14 at N=10_000.
     assert_eq!(r, "1000900220000", "dot_loop correctness at N={N}");
     // N/10 separates reuse (a few fixed allocs) from no reuse (2N) by an
@@ -961,7 +1070,7 @@ fn bench_typed_output_is_pinned() {
 #[test]
 fn dot_loop_emits_paired_reuse() {
     use bytecode::Op;
-    let ast = common::parse(&format!("{DOT_SRC}dot_loop(10, 0)\n"));
+    let ast = common::parse(&dot_program(10));
     let r = bytecode::compile(&ast, None, Some(&scarlet::STDLIB));
     assert!(r.success(), "compile failed: {:?}", r.diagnostics);
     let r = r.into_runnable().expect("a successful compile emits");
@@ -1018,26 +1127,29 @@ fn dot_loop_emits_paired_reuse() {
 }
 
 run_case! {
-    // A closure at module toplevel but inside a nested `if`/`match` scope,
-    // capturing a local of that scope. Such a local is an entry-frame temp,
-    // not a published global, so it must be a by-value `PushCapture`;
-    // `PushGlobal <entry-frame slot>` would read whatever the toplevel emit
-    // parked there. Only single-use nested-scope locals hit this, so each
-    // captured name is read exactly once.
-    toplevel_nested_scope_closure_capture: (
-        "if True {\n\
-        \x20 z = 7\n\
-        \x20 f = fn() { z }\n\
-        \x20 println(f())\n\
-         } else { Nil }\n\
-         \n\
-         match Ok(41) {\n\
-        \x20 Ok(y) -> {\n\
-        \x20   w = y + 1\n\
-        \x20   g = fn() { w }\n\
-        \x20   println(g())\n\
-        \x20 }\n\
-        \x20 Err(_) -> Nil\n\
+    // A closure directly in `main`'s body, inside a nested `if`/`match`
+    // scope, capturing a local of that scope. `main` is an ordinary function
+    // called from the entry frame, so this is a by-value `PushCapture` of a
+    // frame local like any other. The script (REPL) emit path is the hazard:
+    // there such a local was an entry-frame temp and `PushGlobal <slot>` read
+    // whatever the toplevel emit had parked there. This pins that `main`'s
+    // body never takes that path. Only single-use nested-scope locals hit
+    // this, so each captured name is read exactly once.
+    main_nested_scope_closure_capture: (
+        "pub fn main() {\n\
+         \tif True {\n\
+         \t\tz = 7\n\
+         \t\tf = fn() { z }\n\
+         \t\tprintln(f())\n\
+         \t} else { Nil }\n\
+         \tmatch Ok(41) {\n\
+         \t\tOk(y) -> {\n\
+         \t\t\tw = y + 1\n\
+         \t\t\tg = fn() { w }\n\
+         \t\t\tprintln(g())\n\
+         \t\t}\n\
+         \t\tErr(_) -> Nil\n\
+         \t}\n\
          }\n",
         "7\n42\n",
     ),
@@ -1049,22 +1161,28 @@ run_case! {
     // used as a value. Driven through the VM, not just the typechecker.
     builtin_bound_to_a_local_is_callable: (
         "import scarlet/string\n\
-         f = string.length\n\
-         println(f('abc'))\n",
+         pub fn main() {\n\
+         \tf = string.length\n\
+         \tprintln(f('abc'))\n\
+         }\n",
         "3\n",
     ),
     builtin_passed_as_a_function_argument: (
         "import scarlet/array\n\
          import scarlet/string\n\
-         println(array.map(['a', 'bb', 'ccc'], string.length))\n",
+         pub fn main() {\n\
+         \tprintln(array.map(['a', 'bb', 'ccc'], string.length))\n\
+         }\n",
         "[1, 2, 3]\n",
     ),
     // A bare builtin as a value takes the identifier path, not
     // `module.member`.
     bare_builtin_as_value_is_callable: (
         "import scarlet/array\n\
-         each = array.each\n\
-         each([1, 2], println)\n",
+         pub fn main() {\n\
+         \teach = array.each\n\
+         \teach([1, 2], println)\n\
+         }\n",
         "1\n2\n",
     ),
     // The three above name the value at the *toplevel*; these two name it inside
@@ -1081,7 +1199,9 @@ run_case! {
          fn lens(xs Array(String)) Array(Int) {\n\
          \tarray.map(xs, string.length)\n\
          }\n\
-         println(lens(['a', 'bb', 'ccc']))\n",
+         pub fn main() {\n\
+         \tprintln(lens(['a', 'bb', 'ccc']))\n\
+         }\n",
         "[1, 2, 3]\n",
     ),
     ctor_as_a_value_inside_a_function_body: (
@@ -1095,8 +1215,10 @@ run_case! {
          \t\tW(v) -> a + v\n\
          \t})\n\
          }\n\
-         println(array.length(wrap([1, 2, 3])))\n\
-         println(total(wrap([4, 5, 6])))\n",
+         pub fn main() {\n\
+         \tprintln(array.length(wrap([1, 2, 3])))\n\
+         \tprintln(total(wrap([4, 5, 6])))\n\
+         }\n",
         "3\n15\n",
     ),
 }

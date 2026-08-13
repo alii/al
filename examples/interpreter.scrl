@@ -263,4 +263,6 @@ const session = [
 	'x \$ y',
 ]
 
-_ = array.fold(session, map.new(), run_line)
+pub fn main() {
+	_ = array.fold(session, map.new(), run_line)
+}

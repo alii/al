@@ -308,28 +308,30 @@ fn by_hand() Nil {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Both halves, one process tree.
-// ---------------------------------------------------------------------------
+pub fn main() {
+	// ---------------------------------------------------------------------------
+	// Both halves, one process tree.
+	// ---------------------------------------------------------------------------
 
-match net.listen('127.0.0.1', 0) {
-	Ok(server) -> match net.local_addr(server) {
-		Ok(addr) -> {
-			port = address.port(addr)
-			http.serve_on(server, route)
+	match net.listen('127.0.0.1', 0) {
+		Ok(server) -> match net.local_addr(server) {
+			Ok(addr) -> {
+				port = address.port(addr)
+				_ = http.serve_on(server, route)
 
-			show('GET /', request(port, 'GET', '/', ''))
-			show('POST /echo', request(port, 'POST', '/echo', 'hello'))
-			show('GET /stream', request(port, 'GET', '/stream', ''))
-			show('GET /nope', request(port, 'GET', '/nope', ''))
+				show('GET /', request(port, 'GET', '/', ''))
+				show('POST /echo', request(port, 'POST', '/echo', 'hello'))
+				show('GET /stream', request(port, 'GET', '/stream', ''))
+				show('GET /nope', request(port, 'GET', '/nope', ''))
 
-			// Wakes every acceptor with Ok(None), their end-of-stream
-			// signal, so the accept loops return and the program ends.
-			net.close(server) or Nil
+				// Wakes every acceptor with Ok(None), their end-of-stream
+				// signal, so the accept loops return and the program ends.
+				net.close(server) or Nil
+			}
+			Err(e) -> println('local_addr failed: ${e}')
 		}
-		Err(e) -> println('local_addr failed: ${e}')
+		Err(e) -> println('listen failed: ${e}')
 	}
-	Err(e) -> println('listen failed: ${e}')
-}
 
-by_hand()
+	by_hand()
+}

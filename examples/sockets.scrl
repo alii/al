@@ -180,56 +180,58 @@ fn served(bind_addr SocketAddress) Nil {
 	}
 }
 
-// An IpAddress is opaque: it only exists as the output of a parse — or of
-// net.resolve, which is the same thing with DNS behind it and passes IP
-// literals straight through — so a malformed address cannot reach the VM.
-match address.parse('127.0.0.1') {
-	Err(Nil) -> println('not an ip literal')
-	Ok(ip) -> {
-		resolved = net.resolve('127.0.0.1') or ip
-		agrees = address.ip_to_string(resolved) == address.ip_to_string(ip)
-		println('loopback is v6: ${address.is_v6(ip)}, resolve agrees: ${agrees}')
-		println('a constructed address: ${render(ip, 8080)}')
-		println('an impossible one: ${render(ip, 70000)}')
+pub fn main() {
+	// An IpAddress is opaque: it only exists as the output of a parse — or of
+	// net.resolve, which is the same thing with DNS behind it and passes IP
+	// literals straight through — so a malformed address cannot reach the VM.
+	match address.parse('127.0.0.1') {
+		Err(Nil) -> println('not an ip literal')
+		Ok(ip) -> {
+			resolved = net.resolve('127.0.0.1') or ip
+			agrees = address.ip_to_string(resolved) == address.ip_to_string(ip)
+			println('loopback is v6: ${address.is_v6(ip)}, resolve agrees: ${agrees}')
+			println('a constructed address: ${render(ip, 8080)}')
+			println('an impossible one: ${render(ip, 70000)}')
 
-		// The same guard one layer up: net.connect builds the address for you,
-		// and an impossible port comes back as a typed NetError instead of
-		// reaching a syscall.
-		match net.connect('127.0.0.1', 70000) {
-			Ok(_) -> println('connected on a port that cannot exist')
-			Err(InvalidPort) -> println('connect to port 70000: InvalidPort')
-			Err(e) -> println('connect failed: ${string.inspect(e)}')
-		}
+			// The same guard one layer up: net.connect builds the address for you,
+			// and an impossible port comes back as a typed NetError instead of
+			// reaching a syscall.
+			match net.connect('127.0.0.1', 70000) {
+				Ok(_) -> println('connected on a port that cannot exist')
+				Err(InvalidPort) -> println('connect to port 70000: InvalidPort')
+				Err(e) -> println('connect failed: ${string.inspect(e)}')
+			}
 
-		// Port 0: bind to whatever port the kernel has free.
-		match address.socket_address(ip, 0) {
-			Err(Nil) -> println('port out of range')
-			Ok(bind_addr) -> match net.listen_addr(bind_addr) {
-				Err(e) -> println('listen failed: ${string.inspect(e)}')
-				Ok(server) -> match net.local_addr(server) {
-					Err(e) -> println('local_addr failed: ${string.inspect(e)}')
-					Ok(local) -> {
-						// The port is the kernel's pick and differs on every
-						// run, so print a fact about it, not the number.
-						host = address.ip_to_string(address.ip(local))
-						assigned = address.port(local) > 0
-						println('bound ${host}, kernel picked a port: ${assigned}')
+			// Port 0: bind to whatever port the kernel has free.
+			match address.socket_address(ip, 0) {
+				Err(Nil) -> println('port out of range')
+				Ok(bind_addr) -> match net.listen_addr(bind_addr) {
+					Err(e) -> println('listen failed: ${string.inspect(e)}')
+					Ok(server) -> match net.local_addr(server) {
+						Err(e) -> println('local_addr failed: ${string.inspect(e)}')
+						Ok(local) -> {
+							// The port is the kernel's pick and differs on every
+							// run, so print a fact about it, not the number.
+							host = address.ip_to_string(address.ip(local))
+							assigned = address.port(local) > 0
+							println('bound ${host}, kernel picked a port: ${assigned}')
 
-						_ = process.spawn(fn() accept_loop(server))
+							_ = process.spawn(fn() accept_loop(server))
 
-						println(echo_once(local, 'hello'))
-						println(echo_once(local, 'sockets'))
-						past_close(local)
-						timeouts(local)
+							println(echo_once(local, 'hello'))
+							println(echo_once(local, 'sockets'))
+							past_close(local)
+							timeouts(local)
 
-						// The accept loop above, spelled out, is what serve_on
-						// does for you: it runs an acceptor on every core against
-						// a listener that is already bound, and hands each
-						// connection to the handler in its own process. net.serve
-						// is this plus the bind.
-						served(bind_addr)
+							// The accept loop above, spelled out, is what serve_on
+							// does for you: it runs an acceptor on every core against
+							// a listener that is already bound, and hands each
+							// connection to the handler in its own process. net.serve
+							// is this plus the bind.
+							served(bind_addr)
 
-						net.close(server) or Nil
+							net.close(server) or Nil
+						}
 					}
 				}
 			}

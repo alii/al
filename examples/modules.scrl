@@ -11,11 +11,6 @@ import ./lib/report/table
 import ./lib/units as units
 import ./lib/units.{ABSOLUTE_ZERO_C, Celsius, celsius as c}
 
-// The whole module lives behind `units.`, and the second import additionally
-// pulls three names into this file's scope: the type `Celsius`, the exported
-// `pub const`, and `celsius` renamed to `c` so the readings below stay readable.
-readings = [c(-40.0), c(0.0), c(21.5), c(100.0), c(-300.0)]
-
 fn conversions(t Celsius) Array(String) {
 	fahrenheit = units.show_fahrenheit(units.to_fahrenheit(t))
 	// `Kelvin` is an opaque type: `units.Kelvin(degrees: 0.0)` would not compile
@@ -28,7 +23,14 @@ fn conversions(t Celsius) Array(String) {
 	[fahrenheit, kelvin]
 }
 
-println('absolute zero: ${ABSOLUTE_ZERO_C}C')
+pub fn main() {
+	// The whole module lives behind `units.`, and the second import additionally
+	// pulls three names into this file's scope: the type `Celsius`, the exported
+	// `pub const`, and `celsius` renamed to `c` so the readings below stay readable.
+	readings = [c(-40.0), c(0.0), c(21.5), c(100.0), c(-300.0)]
 
-// `units.round1` is not exported, so the caller cannot reach past the API.
-array.each(readings, fn(t) println(table.row(t, conversions(t))))
+	println('absolute zero: ${ABSOLUTE_ZERO_C}C')
+
+	// `units.round1` is not exported, so the caller cannot reach past the API.
+	array.each(readings, fn(t) println(table.row(t, conversions(t))))
+}

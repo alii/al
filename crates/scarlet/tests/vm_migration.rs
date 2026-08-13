@@ -72,10 +72,11 @@ fn fib(n) {
 
 "#;
 
-/// Prepend [`FIB_PREAMBLE`] to `body` and run it in a fresh project.
-fn run_fib_program(tag: &str, schedulers: u32, body: &str) -> String {
+/// Prepend [`FIB_PREAMBLE`] to `decls` (the program's remaining declarations,
+/// `pub fn main()` included) and run it in a fresh project.
+fn run_fib_program(tag: &str, schedulers: u32, decls: &str) -> String {
     let proj = Project::new(tag);
-    run_al_with_schedulers(&proj, &format!("{FIB_PREAMBLE}{body}"), schedulers)
+    run_al_with_schedulers(&proj, &format!("{FIB_PREAMBLE}{decls}"), schedulers)
 }
 
 /// `spawns` workers each compute `fib(base + i % modulo)`. Sized well past
@@ -83,17 +84,19 @@ fn run_fib_program(tag: &str, schedulers: u32, body: &str) -> String {
 /// in a run queue while a sibling runs. Printing the result, not just the id,
 /// is what catches a process corrupted in transit.
 fn cpu_bound_smoke(tag: &str, schedulers: u32, spawns: u64, base: u64, modulo: u64) {
-    let body = format!(
+    let decls = format!(
         r#"fn work(i) {{
 	println('${{i}} done ${{fib({base} + i % {modulo})}}')
 }}
 
-array.each(1..{end}, fn(i) {{ _ = process.spawn(fn() work(i)) }})
-println('main done')
+pub fn main() {{
+	array.each(1..{end}, fn(i) {{ _ = process.spawn(fn() work(i)) }})
+	println('main done')
+}}
 "#,
         end = spawns + 1
     );
-    let stdout = run_fib_program(tag, schedulers, &body);
+    let stdout = run_fib_program(tag, schedulers, &decls);
 
     let mut expected: Vec<String> = (1..=spawns)
         .map(|i| format!("{i} done {}", fib(base + i % modulo)))
@@ -129,8 +132,10 @@ fn deep_recursive_worker_survives_two_schedulers() {
     let stdout = run_fib_program(
         "sched2_deep",
         2,
-        r#"process.spawn(fn() println('deep ${fib(26)}'))
-array.each(1..6, fn(i) { _ = process.spawn(fn() println('light ${i} ${fib(18)}')) })
+        r#"pub fn main() {
+	_ = process.spawn(fn() println('deep ${fib(26)}'))
+	array.each(1..6, fn(i) { _ = process.spawn(fn() println('light ${i} ${fib(18)}')) })
+}
 "#,
     );
 
@@ -150,16 +155,18 @@ fn migrated_process_keeps_loaded_globals_valid() {
     let stdout = run_fib_program(
         "sched2_globals",
         2,
-        r#"fn work(label, tag, i) {
+        r#"const labels = ['alpha', 'beta', 'gamma', 'delta']
+const banner = 'frozen-global'
+
+fn work(label, tag, i) {
 	n = fib(20 + i % 3)
 	println('${label} ${tag} ${i} ${n}')
 }
 
-labels = ['alpha', 'beta', 'gamma', 'delta']
-banner = 'frozen-global'
-
-array.each(1..9, fn(i) { _ = process.spawn(fn() work(labels[i % 4] or '?', banner, i)) })
-println('main done')
+pub fn main() {
+	array.each(1..9, fn(i) { _ = process.spawn(fn() work(labels[i % 4] or '?', banner, i)) })
+	println('main done')
+}
 "#,
     );
 

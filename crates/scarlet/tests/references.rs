@@ -20,10 +20,12 @@ const B_SRC: &str = "import ./c\npub fn bridge() Int { c.shared() + 1 }\n";
 const ENTRY: &str = "import ./b\n\
 import ./c\n\
 import scarlet/array\n\
-x = b.bridge()\n\
-y = c.shared()\n\
-z = array.length([1, 2, 3])\n\
-println(x + y + z)\n";
+pub fn main() {\n\
+\tx = b.bridge()\n\
+\ty = c.shared()\n\
+\tz = array.length([1, 2, 3])\n\
+\tprintln(x + y + z)\n\
+}\n";
 
 fn project() -> Project {
     let p = Project::new("xmod");
@@ -166,7 +168,8 @@ fn stdlib_import_path_is_tracked() {
     // declaration, and the unused-import reachability rule reaches stdlib
     // imports too.
     let p = Project::new("stdlib");
-    let entry = "import scarlet/array\nz = array.length([1, 2, 3])\nprintln(z)\n";
+    let entry =
+        "import scarlet/array\npub fn main() {\n\tz = array.length([1, 2, 3])\n\tprintln(z)\n}\n";
     p.write("a.scrl", entry);
     let s = checked_with(&p, entry);
 
@@ -222,7 +225,7 @@ fn stdlib_import_path_is_tracked() {
 
     // The unused-import rule reaches stdlib imports too.
     let p2 = Project::new("stdlib_unused");
-    let unused = "import scarlet/array\nprintln(1)\n";
+    let unused = "import scarlet/array\npub fn main() {\n\tprintln(1)\n}\n";
     p2.write("a.scrl", unused);
     let s2 = checked_with(&p2, unused);
     assert_msg_eq(&unused_msgs(&s2), "unused import `array`");
@@ -233,7 +236,7 @@ fn unused_import_and_dead_private_def_hints() {
     let p = Project::new("unused");
     p.write("c.scrl", C_SRC);
     // `import ./c` is never used; `deadpriv` is a private, uncalled fn.
-    let entry = "import ./c\nfn deadpriv() Int { 0 }\nprintln(1)\n";
+    let entry = "import ./c\nfn deadpriv() Int { 0 }\npub fn main() {\n\tprintln(1)\n}\n";
     p.write("a.scrl", entry);
 
     let s = checked_with(&p, entry);
@@ -241,8 +244,10 @@ fn unused_import_and_dead_private_def_hints() {
 
     assert_has_msg(&msgs, "unused import `c`");
     assert_msg_eq(&msgs, "unused function `deadpriv`");
-    // `println` is a used builtin and must never be reported.
+    // `println` is a used builtin and must never be reported, and neither is
+    // the entry point, which nothing in the module calls.
     assert_no_msg(&msgs, "println");
+    assert_no_msg(&msgs, "`main`");
 }
 
 #[test]
@@ -291,7 +296,7 @@ fn incremental_edit_b_keeps_refs_then_invalidate_drops_reverse_edges() {
 
     // B drops `bridge`: the graph rebuild must leave no dangling reverse edge.
     p.write("b.scrl", "pub fn other() Int { 7 }\n");
-    let entry2 = "import ./b\nprintln(b.other())\n";
+    let entry2 = "import ./b\npub fn main() {\n\tprintln(b.other())\n}\n";
     p.write("a.scrl", entry2);
     let r = s.check(&parse(entry2), Some(&p.dir));
     assert!(r.success(), "after B invalidation: {:?}", r.diagnostics);
@@ -310,8 +315,8 @@ fn local_bindings_excluded_from_symbol_surfaces_but_stay_resolvable() {
     // Local binders are `EntityKind::Value` so navigation resolves on them,
     // but the symbol surfaces list structural declarations only.
     let p = Project::new("symsurface");
-    let entry =
-        "fn calc(base Int) Int {\n\tscaled = base * 2\n\tscaled + 1\n}\nx = calc(10)\nprintln(x)\n";
+    let entry = "fn calc(base Int) Int {\n\tscaled = base * 2\n\tscaled + 1\n}\n\
+                 pub fn main() {\n\tx = calc(10)\n\tprintln(x)\n}\n";
     p.write("a.scrl", entry);
     let s = checked_with(&p, entry);
 
@@ -354,9 +359,11 @@ fn local_bindings_excluded_from_symbol_surfaces_but_stay_resolvable() {
 
 const ALIAS_LIB: &str = "pub fn original() Int { 42 }\n";
 const ALIAS_MAIN: &str = "import ./lib.{original as alias}\n\
-x = alias()\n\
-y = alias() + 1\n\
-println(x + y)\n";
+pub fn main() {\n\
+\tx = alias()\n\
+\ty = alias() + 1\n\
+\tprintln(x + y)\n\
+}\n";
 
 fn alias_project() -> Project {
     let p = Project::new("alias_rename");
@@ -462,7 +469,7 @@ fn unused_one_of_two_plain_qualified_imports_is_flagged() {
     let p = Project::new("twoimp");
     p.write("c.scrl", "pub fn shared() Int { 42 }\n");
     p.write("d.scrl", "pub fn helper() Int { 7 }\n");
-    let entry = "import ./c\nimport ./d\nx = d.helper()\nprintln(x)\n";
+    let entry = "import ./c\nimport ./d\npub fn main() {\n\tx = d.helper()\n\tprintln(x)\n}\n";
     p.write("a.scrl", entry);
 
     let s = checked_with(&p, entry);
@@ -479,13 +486,15 @@ const NAV_SRC: &str = "type Color {\n\tRed\n\tGreen\n\tBlue\n}\n\
 type Box { label String }\n\
 const LIMIT = 3\n\
 fn pick(c Color) Int { if c == Green { 1 } else { 0 } }\n\
-chosen = Red\n\
-bx = Box(label: 'hi')\n\
-shown = bx.label\n\
-total = LIMIT + 1\n\
-println(pick(chosen))\n\
-println(shown)\n\
-println(total)\n";
+pub fn main() {\n\
+\tchosen = Red\n\
+\tbx = Box(label: 'hi')\n\
+\tshown = bx.label\n\
+\ttotal = LIMIT + 1\n\
+\tprintln(pick(chosen))\n\
+\tprintln(shown)\n\
+\tprintln(total)\n\
+}\n";
 
 /// Drive goto-def + prepare_rename + find-references + rename for one entity
 /// through the session query API. The 1st occurrence of `needle` in `src` is
@@ -586,7 +595,9 @@ fn constructor_in_match_pattern_is_a_graph_reference() {
     let p = Project::new("ctor_pattern_ref");
     let src = "type Side {\n\tLeft\n\tRight\n}\n\
                fn f(x Side) Int { match x { Left -> 1 Right -> 2 } }\n\
-               println(f(Right))\n";
+               pub fn main() {\n\
+               \tprintln(f(Right))\n\
+               }\n";
     p.write("a.scrl", src);
     let s = checked_with(&p, src);
 
@@ -599,12 +610,14 @@ fn constructor_in_match_pattern_is_a_graph_reference() {
 // session hydration of the embedded stdlib blob mangled a declaration.
 const HTTP_ENTRY: &str = "import scarlet/binary\n\
 import scarlet/http/h1.{Done, NeedMore, Bad}\n\
-r = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-\tDone(_, _, _, _, _, consumed) -> consumed\n\
-\tNeedMore -> 0 - 1\n\
-\tBad(s) -> s\n\
-}\n\
-println(r)\n";
+pub fn main() {\n\
+\tr = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
+\t\tDone(_, _, _, _, _, consumed) -> consumed\n\
+\t\tNeedMore -> 0 - 1\n\
+\t\tBad(s) -> s\n\
+\t}\n\
+\tprintln(r)\n\
+}\n";
 
 #[test]
 fn session_checks_http_h1_program_clean() {
@@ -620,7 +633,7 @@ fn session_recheck_keeps_stdlib_types_intact() {
     let p = Project::new("http_session_recheck");
     p.write("a.scrl", HTTP_ENTRY);
 
-    let mut s = checked_with(&p, "println(1)\n");
+    let mut s = checked_with(&p, "pub fn main() {\n\tprintln(1)\n}\n");
     let r2 = s.check(&parse(HTTP_ENTRY), Some(&p.dir));
     assert!(
         r2.success(),
@@ -633,9 +646,11 @@ fn session_recheck_keeps_stdlib_types_intact() {
 // scarlet/http/h1 directly. h1's hydration must still resolve `Parsed` / `Framing` /
 // `Header` to real enum types rather than collapsing them to a builtin.
 const HTTP_HELLO_ENTRY: &str = "import scarlet/http\n\
-match http.serve('127.0.0.1', 8080, fn(_req) http.text('hi')) {\n\
-\tOk(_) -> Nil\n\
-\tErr(e) -> println(e)\n\
+pub fn main() {\n\
+\tmatch http.serve('127.0.0.1', 8080, fn(_req) http.text('hi')) {\n\
+\t\tOk(_) -> Nil\n\
+\t\tErr(e) -> println(e)\n\
+\t}\n\
 }\n";
 
 #[test]
@@ -663,7 +678,9 @@ const SHADOWING_ENTRY: &str = "type Parsed = Result(Int, String)\n\
 fn f(x Int) Parsed {\n\
 \tOk(x)\n\
 }\n\
-println(f(1) or 0)\n";
+pub fn main() {\n\
+\tprintln(f(1) or 0)\n\
+}\n";
 
 #[test]
 fn entry_type_shadowing_stdlib_name_is_undone_on_next_check() {
@@ -699,7 +716,7 @@ fn qualified_member_use_keeps_the_import_live_but_a_bare_import_still_warns() {
     let p = Project::new("qualifier_liveness");
     p.write("c.scrl", C_SRC);
     p.write("d.scrl", C_SRC);
-    let entry = "import ./c\nimport ./d\nprintln(c.shared())\n";
+    let entry = "import ./c\nimport ./d\npub fn main() {\n\tprintln(c.shared())\n}\n";
     p.write("a.scrl", entry);
 
     let msgs = unused_msgs(&checked_with(&p, entry));
@@ -726,7 +743,9 @@ fn a_local_shadows_an_import_qualifier() {
          \tb.x\n\
          }\n\
          \n\
-         println(f(Point(41, 1)) + b.add(1, 0))\n",
+         pub fn main() {\n\
+         \tprintln(f(Point(41, 1)) + b.add(1, 0))\n\
+         }\n",
     );
     // `b.x` reads the parameter's field; `b.add` still reaches the module.
     common::run_project_outputs(&p, "run", "a.scrl", "42\n");
@@ -737,7 +756,8 @@ fn a_local_shadows_an_import_qualifier() {
 #[test]
 fn a_used_constructor_keeps_its_type_alive() {
     let p = Project::new("unused_ctor_type");
-    let entry = "type Config {\n\tname String\n}\n\npub const config = Config(name: 'x')\nprintln(config.name)\n";
+    let entry = "type Config {\n\tname String\n}\n\npub const config = Config(name: 'x')\n\n\
+                 pub fn main() {\n\tprintln(config.name)\n}\n";
     p.write("a.scrl", entry);
     let s = checked_with(&p, entry);
     assert_no_msg(&unused_msgs(&s), "unused type `Config`");
@@ -747,7 +767,7 @@ fn a_used_constructor_keeps_its_type_alive() {
 #[test]
 fn a_type_nobody_constructs_is_still_unused() {
     let p = Project::new("unused_ghost_type");
-    let entry = "type Ghost {\n\tn Int\n}\n\nprintln(1)\n";
+    let entry = "type Ghost {\n\tn Int\n}\n\npub fn main() {\n\tprintln(1)\n}\n";
     p.write("a.scrl", entry);
     let s = checked_with(&p, entry);
     assert_has_msg(&unused_msgs(&s), "unused type `Ghost`");
@@ -757,7 +777,7 @@ fn a_type_nobody_constructs_is_still_unused() {
 #[test]
 fn one_used_constructor_is_enough_to_keep_the_type() {
     let p = Project::new("unused_one_ctor");
-    let entry = "type Color {\n\tRed\n\tGreen\n}\n\nc = Red\nprintln(c)\n";
+    let entry = "type Color {\n\tRed\n\tGreen\n}\n\npub fn main() {\n\tc = Red\n\tprintln(c)\n}\n";
     p.write("a.scrl", entry);
     let s = checked_with(&p, entry);
     assert_no_msg(&unused_msgs(&s), "unused type `Color`");
@@ -770,7 +790,7 @@ fn one_used_constructor_is_enough_to_keep_the_type() {
 fn unused_selective_import_item_binding_token_is_not_a_use() {
     let p = Project::new("selective_unused");
     p.write("lib.scrl", "pub fn helper() Int { 7 }\n");
-    let entry = "import ./lib.{helper}\nprintln(1)\n";
+    let entry = "import ./lib.{helper}\npub fn main() {\n\tprintln(1)\n}\n";
     p.write("a.scrl", entry);
     assert_msg_eq(
         &unused_msgs(&checked_with(&p, entry)),
@@ -779,7 +799,7 @@ fn unused_selective_import_item_binding_token_is_not_a_use() {
 
     let p2 = Project::new("selective_used");
     p2.write("lib.scrl", "pub fn helper() Int { 7 }\n");
-    let used = "import ./lib.{helper}\nprintln(helper())\n";
+    let used = "import ./lib.{helper}\npub fn main() {\n\tprintln(helper())\n}\n";
     p2.write("a.scrl", used);
     assert_no_msg(&unused_msgs(&checked_with(&p2, used)), "unused import");
 }
@@ -791,7 +811,7 @@ fn rename_selective_import_item_rewrites_the_binding_token() {
     let p = Project::new("selective_rename");
     let lib = "pub fn helper() Int { 7 }\n";
     p.write("lib.scrl", lib);
-    let entry = "import ./lib.{helper}\nx = helper()\nprintln(x)\n";
+    let entry = "import ./lib.{helper}\npub fn main() {\n\tx = helper()\n\tprintln(x)\n}\n";
     p.write("a.scrl", entry);
     let s = checked_with(&p, entry);
 

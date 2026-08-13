@@ -48,6 +48,19 @@ newtype_index!(
 // in closures and the native-entry table.
 pub use scarlet_vm::FuncIdx;
 
+/// The one fact about the type table a backend needs while planning a body:
+/// the variant count a `SwitchTag` over a type dispatches on, answered
+/// exactly as [`emit::EmitCtx::switch_variant_count`] answers it for the
+/// bytecode (`None` for `Bool`, for anything past 255 variants, and for
+/// non-enums), so the two backends make the same switch-or-ladder decision
+/// for every match. Handed to the native hook alongside the body, because
+/// the type table — like the body's `ResolvedPool` — is gone by the time
+/// the plan is compiled. It cannot be recovered from the match itself: the
+/// pattern compiler emits matches over the variants still possible at that
+/// point, so one body may legitimately hold a two-arm and a one-arm match
+/// over the same type.
+pub type SwitchCounts<'a> = &'a dyn Fn(crate::type_def::TypeId) -> Option<u8>;
+
 newtype_index!(
     /// A function-relative instruction offset. Jump operands are exactly this;
     /// the VM adds `Function.code_start` back, so the emitter never spells an

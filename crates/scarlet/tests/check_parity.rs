@@ -54,13 +54,18 @@ fn add(a, b) {
 fn twice(x) {
 	add(x, x)
 }
-println(twice(21))
+pub fn main() {
+	println(twice(21))
+}
 "#,
     );
     assert_eq!(built, checked);
     let names: Vec<&str> = built.iter().map(|(n, _, _)| n.as_str()).collect();
     assert!(names.contains(&"add"), "{names:?}");
     assert!(names.contains(&"twice"), "{names:?}");
+    // The program's `main` is a function like any other; only `compile` goes
+    // on to call it from the entry frame.
+    assert!(names.contains(&"main"), "{names:?}");
 }
 
 /// A nested closure's `func_idx` is what `Atom::Closure` carries, so both
@@ -74,8 +79,10 @@ fn adder(n) {
 		x + n
 	}
 }
-add3 = adder(3)
-println(add3(4))
+pub fn main() {
+	add3 = adder(3)
+	println(add3(4))
+}
 "#,
     );
     assert_eq!(built, checked);
@@ -92,9 +99,11 @@ fn check_and_compile_agree_on_eta_wrappers() {
     let (built, checked) = both(
         r#"import scarlet/array
 type W { W(v Int) }
-xs = [1, 2, 3]
-ws = array.map(xs, W)
-println(array.length(ws))
+pub fn main() {
+	xs = [1, 2, 3]
+	ws = array.map(xs, W)
+	println(array.length(ws))
+}
 "#,
     );
     assert_eq!(built, checked);
@@ -124,7 +133,9 @@ fn is_odd(n) {
 		is_even(n - 1)
 	}
 }
-println(is_even(10))
+pub fn main() {
+	println(is_even(10))
+}
 "#,
     );
     assert_eq!(built, checked);
@@ -227,7 +238,9 @@ fn outer(n) {
 	}
 	bump(ping(n))
 }
-println(outer(4))
+pub fn main() {
+	println(outer(4))
+}
 "#,
     );
     let built = scarlet::bytecode::compile(&ast, None, Some(&scarlet::STDLIB));
@@ -261,7 +274,9 @@ type W { W(v Int) }
 fn wrap(xs) {
 	array.map(xs, W)
 }
-println(array.length(wrap([1, 2, 3])))
+pub fn main() {
+	println(array.length(wrap([1, 2, 3])))
+}
 "#,
     ));
 }
@@ -278,15 +293,19 @@ import scarlet/string
 fn lens(xs) {
 	array.map(xs, string.length)
 }
-println(array.length(lens(['ab', 'cde'])))
+pub fn main() {
+	println(array.length(lens(['ab', 'cde'])))
+}
 "#,
     ));
 }
 
 /// The other splice, which the region patch must leave alone: a wrapper the
-/// *toplevel* named is written after the region has drained, ahead of the
-/// toplevel init, so "just past my own `Ret`" names the next wrapper's jump-over
-/// or the init — never a body. That is the `None` arm, and this pins it.
+/// *toplevel* named — which, now that a program's module scope holds only
+/// declarations, means one named by a `const` initializer — is written after
+/// the region has drained, ahead of the toplevel init, so "just past my own
+/// `Ret`" names the next wrapper's jump-over or the init — never a body. That
+/// is the `None` arm, and this pins it.
 ///
 /// It does not witness the jump being *taken*, and neither do the two above: no
 /// jump-over in either splice is reachable, because `append_toplevel_init`
@@ -300,16 +319,20 @@ type W { W(v Int) }
 fn ident(n) {
 	n
 }
-ws = array.map([1, 2, 3], W)
-println(array.length(ws) + ident(1))
+const ws = array.map([1, 2, 3], W)
+pub fn main() {
+	println(array.length(ws) + ident(1))
+}
 "#,
     ));
 }
 
-/// The entry point is the last function either mode registers.
+/// The entry point is the entry frame (`__main__`), the last function either
+/// mode registers — not the program's own `main`, which the entry frame
+/// calls and which is registered like any other declaration.
 #[test]
 fn check_and_compile_agree_on_the_entry_index() {
-    let ast = parse("fn f(x) {\n\tx\n}\nprintln(f(1))\n");
+    let ast = parse("fn f(x) {\n\tx\n}\npub fn main() {\n\tprintln(f(1))\n}\n");
     let built = scarlet::bytecode::compile(&ast, None, Some(&scarlet::STDLIB));
     let checked = scarlet::bytecode::check(&ast, None, Some(&scarlet::STDLIB));
     assert!(built.success() && checked.success());

@@ -2,7 +2,7 @@
 //! `tests/golden/core_ir/<name>.core`.
 //!
 //! Regenerate after an intentional IR change with
-//! `UPDATE_CORE_GOLDEN=1 cargo test -p al --test core_ir`.
+//! `UPDATE_CORE_GOLDEN=1 cargo test -p scarlet --test core_ir`.
 
 use std::path::PathBuf;
 
@@ -187,14 +187,18 @@ macro_rules! core_golden {
 }
 
 // One golden per CoreExpr / Atom shape. Kept import-free so the toplevel
-// snapshot stays small and independent of stdlib churn.
+// snapshot stays small and independent of stdlib churn. Each program's code
+// sits in `pub fn main()`, declared last, so the fn under test keeps the first
+// printed `fn` block and `main` is the last.
 
 // Let-spine of PrimOps.
 core_golden!(
     let_primop,
-    "x = 1 + 2\n\
-     y = x * 3\n\
-     y - x\n"
+    "pub fn main() {\n\
+     \tx = 1 + 2\n\
+     \ty = x * 3\n\
+     \ty - x\n\
+     }\n"
 );
 
 // If: both arms Tail a local.
@@ -203,7 +207,9 @@ core_golden!(
     "fn abs(n Int) Int {\n\
      \tif n < 0 { 0 - n } else { n }\n\
      }\n\
-     abs(0 - 5)\n"
+     pub fn main() {\n\
+     \tabs(0 - 5)\n\
+     }\n"
 );
 
 // Match on Int literals with a wildcard fall-through.
@@ -215,7 +221,9 @@ core_golden!(
      \t\t_ -> 3 * n + 1\n\
      \t}\n\
      }\n\
-     step(7)\n"
+     pub fn main() {\n\
+     \tstep(7)\n\
+     }\n"
 );
 
 // Ctor construction plus Match with Ctor patterns binding fields.
@@ -231,7 +239,9 @@ core_golden!(
      \t\tRect(w, h) -> w * h\n\
      \t}\n\
      }\n\
-     area(Rect(4, 5))\n"
+     pub fn main() {\n\
+     \tarea(Rect(4, 5))\n\
+     }\n"
 );
 
 // Callee::Self_ in tail position — the loop-carried-reuse target shape.
@@ -243,7 +253,9 @@ core_golden!(
      \t\t_ -> count(n - 1, acc + 1)\n\
      \t}\n\
      }\n\
-     count(3, 0)\n"
+     pub fn main() {\n\
+     \tcount(3, 0)\n\
+     }\n"
 );
 
 // Callee::Known — one top-level fn calling another.
@@ -251,15 +263,19 @@ core_golden!(
     known_call,
     "fn sq(x Int) Int { x * x }\n\
      fn hyp2(a Int, b Int) Int { sq(a) + sq(b) }\n\
-     hyp2(3, 4)\n"
+     pub fn main() {\n\
+     \thyp2(3, 4)\n\
+     }\n"
 );
 
 // Product type: Ctor with multiple fields, then field projection.
 core_golden!(
     ctor_fields,
     "type Point {\n\tx Int\n\ty Int\n}\n\
-     p = Point(x: 1, y: 2)\n\
-     p.x + p.y\n"
+     pub fn main() {\n\
+     \tp = Point(x: 1, y: 2)\n\
+     \tp.x + p.y\n\
+     }\n"
 );
 
 // Irrefutable ctor destructuring projects by DECLARED field order, and each
@@ -279,7 +295,9 @@ core_golden!(
      \tP(b: y, a: x) = p\n\
      \tg(x) + g(y)\n\
      }\n\
-     f(P(LNil, LNil))\n"
+     pub fn main() {\n\
+     \tf(P(LNil, LNil))\n\
+     }\n"
 );
 
 // Same for tuple destructuring: element types come from the scrutinee's Tuple
@@ -297,7 +315,9 @@ core_golden!(
      \t(x, y) = p\n\
      \tg(x) + g(y)\n\
      }\n\
-     f((LNil, LNil))\n"
+     pub fn main() {\n\
+     \tf((LNil, LNil))\n\
+     }\n"
 );
 
 // An `If` in operand position becomes a `LetJoin` whose value is heap-typed,
@@ -314,7 +334,9 @@ core_golden!(
      fn f(c Bool) Int {\n\
      \tg(if c { Cons(1, LNil) } else { LNil })\n\
      }\n\
-     f(True)\n"
+     pub fn main() {\n\
+     \tf(True)\n\
+     }\n"
 );
 
 // Perceus inserts no drops inside a join body, so `t` is held to the end of
@@ -338,7 +360,9 @@ core_golden!(
      \t}\n\
      \t1 + n\n\
      }\n\
-     f(True)\n"
+     pub fn main() {\n\
+     \tf(True)\n\
+     }\n"
 );
 
 // A match whose scrutinee's type nothing in the source states: it comes from
@@ -356,7 +380,9 @@ core_golden!(
      \t\t}\n\
      \t}\n\
      }\n\
-     f()\n"
+     pub fn main() {\n\
+     \tf()\n\
+     }\n"
 );
 
 // A fallible multi-arm binary-literal match. Every failure edge jumps to a
@@ -380,7 +406,9 @@ core_golden!(
      \t\t_ -> Other(m)\n\
      \t}\n\
      }\n\
-     to_method(<<'PUT'>>)\n"
+     pub fn main() {\n\
+     \tto_method(<<'PUT'>>)\n\
+     }\n"
 );
 
 // A guard's false edge is a failure edge like any pattern mismatch, so it
@@ -394,7 +422,9 @@ core_golden!(
      \t\tx -> x\n\
      \t}\n\
      }\n\
-     clamp(5, 0, 10)\n"
+     pub fn main() {\n\
+     \tclamp(5, 0, 10)\n\
+     }\n"
 );
 
 // Every alternative of `a | b | c` shares one arm body.
@@ -407,7 +437,9 @@ core_golden!(
      \t\t_ -> 0\n\
      \t}\n\
      }\n\
-     small(3)\n"
+     pub fn main() {\n\
+     \tsmall(3)\n\
+     }\n"
 );
 
 // The goldens above pin the whole IR, so they move when the type arena hands
@@ -449,7 +481,9 @@ fn ctor_destructure_drops_each_heap_field() {
          \tP(b: y, a: x) = p\n\
          \tg(x) + g(y)\n\
          }}\n\
-         f(P(LNil, LNil))\n"
+         pub fn main() {{\n\
+         \tf(P(LNil, LNil))\n\
+         }}\n"
     ));
     let body = fn_body(&core, 1);
     let drops = body
@@ -472,7 +506,9 @@ fn tuple_destructure_drops_each_heap_element() {
          \t(x, y) = p\n\
          \tg(x) + g(y)\n\
          }}\n\
-         f((LNil, LNil))\n"
+         pub fn main() {{\n\
+         \tf((LNil, LNil))\n\
+         }}\n"
     ));
     let body = fn_body(&core, 1);
     let drops = body
@@ -491,7 +527,7 @@ fn tuple_destructure_drops_each_heap_element() {
 fn destructure_binding_matches_match_spelling() {
     let mk = |body: &str| {
         lower(&format!(
-            "{HEAP_PAIR_SRC}fn f(p P) Int {{\n{body}}}\nf(P(LNil, LNil))\n"
+            "{HEAP_PAIR_SRC}fn f(p P) Int {{\n{body}}}\npub fn main() {{\n\tf(P(LNil, LNil))\n}}\n"
         ))
     };
     let binding = mk("\tP(x, y) = p\n\tg(x) + g(y)\n");
@@ -588,7 +624,9 @@ fn binary_match_arm_bodies_lowered_once() {
          \t\t_ -> 606\n\
          \t}\n\
          }\n\
-         code(<<'HEAD'>>)\n",
+         pub fn main() {\n\
+         \tcode(<<'HEAD'>>)\n\
+         }\n",
         &[101, 202, 303, 404, 505, 606],
     );
 }
@@ -605,7 +643,9 @@ fn guarded_match_arm_bodies_lowered_once() {
          \t\t_ -> 303\n\
          \t}\n\
          }\n\
-         band(1, 2)\n",
+         pub fn main() {\n\
+         \tband(1, 2)\n\
+         }\n",
         &[101, 202, 303],
     );
 }
@@ -622,7 +662,9 @@ fn or_pattern_arm_bodies_lowered_once() {
          \t\t_ -> 303\n\
          \t}\n\
          }\n\
-         cls(3)\n",
+         pub fn main() {\n\
+         \tcls(3)\n\
+         }\n",
         &[101, 202, 303],
     );
 }
@@ -638,7 +680,9 @@ fn discarded_alternative_leaves_no_unreachable_continuation() {
          \t\t<<1>> | <<..>> | <<2>> -> 1\n\
          \t}\n\
          }\n\
-         g(<<1>>)\n",
+         pub fn main() {\n\
+         \tg(<<1>>)\n\
+         }\n",
     );
     let body = fn_body(&core, 0);
     let mut declared = Vec::new();
@@ -693,7 +737,9 @@ fn exhaustive_enum_match_stays_flat() {
          \t\tRect(w, h) -> w * h\n\
          \t}\n\
          }\n\
-         area(Circle(2))\n",
+         pub fn main() {\n\
+         \tarea(Circle(2))\n\
+         }\n",
         0,
     );
 }
@@ -707,7 +753,9 @@ fn single_irrefutable_arm_stays_flat() {
          \t\t(a, b) -> a + b\n\
          \t}\n\
          }\n\
-         single((1, 2))\n",
+         pub fn main() {\n\
+         \tsingle((1, 2))\n\
+         }\n",
         0,
     );
 }
@@ -724,7 +772,9 @@ fn literal_ladder_stays_flat() {
          \t\t_ -> 'many'\n\
          \t}\n\
          }\n\
-         lits(1)\n",
+         pub fn main() {\n\
+         \tlits(1)\n\
+         }\n",
         0,
     );
 }
@@ -732,24 +782,44 @@ fn literal_ladder_stays_flat() {
 /// An unlowerable program must be a diagnostic, never a panic.
 ///
 /// The parser never produces an `ErrorNode` without also producing a parse
-/// error, so the node is spliced in by hand to drive the check walk's arm
-/// directly. Both entry points must reject it, with the diagnostic pointing at
-/// the bad form, and neither may panic.
+/// error, so the node is spliced in by hand — as the whole body of an
+/// otherwise well-formed `pub fn main()`, the one place a program's code can
+/// sit — to drive the check walk's arm directly. Both entry points must reject
+/// it, with the diagnostic pointing at the bad form, and neither may panic.
 mod unlowerable {
     use scarlet::diagnostic::{DiagnosticCode, Severity};
     use scarlet::{ast, span::Span};
 
+    const WELL_FORMED: &str = "pub fn main() {\n\tNil\n}\n";
+
     fn program_with_an_error_node() -> (ast::Expression, Span) {
         let at = Span::single_line(2, 5, 9);
-        let node = ast::Node::Expression(ast::Expression::ErrorNode(ast::ErrorNode {
-            message: "spliced".into(),
-            span: at,
-        }));
-        let block = ast::BlockExpression {
-            body: vec![node],
-            span: Span::single_line(1, 1, 1),
+        let mut program = crate::common::parse(WELL_FORMED);
+        let ast::Expression::BlockExpression(module) = &mut program else {
+            unreachable!("parse wraps the module in a block")
         };
-        (ast::Expression::BlockExpression(block), at)
+        let [ast::Node::Statement(stmt)] = module.body.as_mut_slice() else {
+            panic!("{WELL_FORMED:?} declares exactly `main`")
+        };
+        let ast::Statement::Declaration { decl, .. } = stmt.as_mut() else {
+            panic!("`main` is a declaration")
+        };
+        let ast::Declaration::Function(main) = decl.as_mut() else {
+            panic!("`main` is a function")
+        };
+        let ast::FnBody::Block(body) = &mut main.body else {
+            panic!("`main` has a Scarlet body")
+        };
+        *body = ast::Expression::BlockExpression(ast::BlockExpression {
+            body: vec![ast::Node::Expression(ast::Expression::ErrorNode(
+                ast::ErrorNode {
+                    message: "spliced".into(),
+                    span: at,
+                },
+            ))],
+            span: body.span(),
+        });
+        (program, at)
     }
 
     fn assert_rejected(r: &scarlet::bytecode::CompileResult, at: Span, what: &str) {
@@ -782,10 +852,12 @@ mod unlowerable {
     }
 
     /// Rejecting the `ErrorNode` is a gate on the module, not a mute button on
-    /// the pipeline: the same block without it still compiles and runs.
+    /// the pipeline: the same program with a readable `main` body still
+    /// compiles and runs, and `main`'s value is what the entry frame halts
+    /// with.
     #[test]
-    fn the_same_block_without_the_error_node_compiles_and_runs() {
-        let expr = crate::common::parse("1 + 1\n");
+    fn the_same_program_without_the_error_node_compiles_and_runs() {
+        let expr = crate::common::parse("pub fn main() {\n\t1 + 1\n}\n");
         let r = scarlet::bytecode::compile(&expr, None, Some(&scarlet::STDLIB));
         assert!(r.success(), "{:?}", r.diagnostics);
         let program = r

@@ -84,23 +84,25 @@ fn batch(codes Array(Int)) String {
 	}
 }
 
-events = [
-	Click(at: Point(x: 0, y: 0), button: 0),
-	Click(at: Point(x: 3, y: 3), button: 0),
-	Click(at: Point(x: 12, y: 40), button: 1),
-	Key(code: 27, shift: False),
-	Key(code: 65, shift: True),
-	Scroll(dy: 1),
-	Scroll(dy: -30),
-	Quit,
-]
-array.each(events, fn(e) println(describe(e)))
+pub fn main() {
+	events = [
+		Click(at: Point(x: 0, y: 0), button: 0),
+		Click(at: Point(x: 3, y: 3), button: 0),
+		Click(at: Point(x: 12, y: 40), button: 1),
+		Key(code: 27, shift: False),
+		Key(code: 65, shift: True),
+		Scroll(dy: 1),
+		Scroll(dy: -30),
+		Quit,
+	]
+	array.each(events, fn(e) println(describe(e)))
 
-array.each([200, 302, 404, 503, 100], fn(c) println('${c}: ${status_class(c)}'))
-array.each(['GET', 'PATCH', 'DELETE', 'TRACE'], fn(m) println('${m} -> ${effect(m)}'))
+	array.each([200, 302, 404, 503, 100], fn(c) println('${c}: ${status_class(c)}'))
+	array.each(['GET', 'PATCH', 'DELETE', 'TRACE'], fn(m) println('${m} -> ${effect(m)}'))
 
-println(quadrant(Point(x: 4, y: -2)))
-println(batch([]))
-println(batch([204]))
-println(batch([200, 404]))
-println(batch([1, 2, 3, 4]))
+	println(quadrant(Point(x: 4, y: -2)))
+	println(batch([]))
+	println(batch([204]))
+	println(batch([200, 404]))
+	println(batch([1, 2, 3, 4]))
+}

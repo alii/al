@@ -41,10 +41,16 @@ fn s0(%0:t0) -> :t1
         | _ ->
           goto j2
 
+fn s1() -> :t0
+  let %0:t1 = c3
+  ret call fn#0(%0)
+
 toplevel:
   let %0:t2@g0 = closure fn#0()
-  let %1:t1 = c3
-  ret call %0(%1)
+  drop %0
+  let %1:t3@g1 = closure fn#1()
+  drop %1
+  ret PushNil()
 where
   c0 = Int(0)
   c1 = Int(2)

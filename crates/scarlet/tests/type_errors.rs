@@ -2,46 +2,93 @@ mod common;
 use common::check_rejects;
 
 reject_case! {
-    int_plus_string_is_type_error: ("x = 1 + 'a'\n", "Type mismatch"),
-    non_exhaustive_match_is_error:
-        ("f = fn(x) { match x { True -> 1 } }\nf(False)\n", "not exhaustive"),
-    unknown_identifier_is_error: ("x = foo\n", "Unknown identifier"),
-    if_condition_must_be_bool: ("if 1 { 2 } else { 3 }\n", "Type mismatch"),
+    int_plus_string_is_type_error: ("pub fn main() {\n\tx = 1 + 'a'\n}\n", "Type mismatch"),
+    non_exhaustive_match_is_error: (
+        "pub fn main() {\n\tf = fn(x) { match x { True -> 1 } }\n\tprintln(f(False))\n}\n",
+        "not exhaustive",
+    ),
+    unknown_identifier_is_error: ("pub fn main() {\n\tx = foo\n}\n", "Unknown identifier"),
+    if_condition_must_be_bool:
+        ("pub fn main() {\n\tprintln(if 1 { 2 } else { 3 })\n}\n", "Type mismatch"),
 
     // All three numeric-literal compile sites: expression, match pattern, range bound.
     integer_literal_overflow_is_error:
-        ("x = 99999999999999999999999999\n", "out of range for Int"),
-    integer_literal_overflow_in_match_pattern_is_error:
-        ("match 1 { 99999999999999999999999999 -> 0\n _ -> 1 }\n", "out of range for Int"),
-    integer_literal_overflow_in_range_pattern_is_error:
-        ("match 1 { 99999999999999999999999999..0 -> 0\n _ -> 1 }\n", "out of range for Int"),
+        ("pub fn main() {\n\tx = 99999999999999999999999999\n}\n", "out of range for Int"),
+    integer_literal_overflow_in_match_pattern_is_error: (
+        "pub fn main() {\n\tprintln(match 1 {\n\t\t99999999999999999999999999 -> 0\n\t\t_ -> 1\n\t})\n}\n",
+        "out of range for Int",
+    ),
+    integer_literal_overflow_in_range_pattern_is_error: (
+        "pub fn main() {\n\tprintln(match 1 {\n\t\t99999999999999999999999999..0 -> 0\n\t\t_ -> 1\n\t})\n}\n",
+        "out of range for Int",
+    ),
 
-    unused_let_binding_is_error:
-        ("x = 1\nprintln('done')\n", "'x' is unused; prefix with '_' to ignore"),
+    unused_let_binding_is_error: (
+        "pub fn main() {\n\tx = 1\n\tprintln('done')\n}\n",
+        "'x' is unused; prefix with '_' to ignore",
+    ),
     unused_param_is_error: (
-        "fn f(a Int, b Int) Int { a }\nprintln(f(1, 2))\n",
+        "fn f(a Int, b Int) Int { a }\npub fn main() {\n\tprintln(f(1, 2))\n}\n",
         "'b' is unused; prefix with '_' to ignore",
     ),
     unused_match_binding_is_error: (
-        "match Some(1) { Some(x) -> 0\n None -> 0 }\n",
+        "pub fn main() {\n\tprintln(match Some(1) {\n\t\tSome(x) -> 0\n\t\tNone -> 0\n\t})\n}\n",
         "'x' is unused; prefix with '_' to ignore",
     ),
 }
 
 ok_case! {
-    underscore_prefix_suppresses_unused_error: ("_x = 1\nprintln('done')\n"),
+    underscore_prefix_suppresses_unused_error:
+        ("pub fn main() {\n\t_x = 1\n\tprintln('done')\n}\n"),
 
-    used_let_binding_is_ok: ("x = 1\nprintln(x)\n"),
+    used_let_binding_is_ok: ("pub fn main() {\n\tx = 1\n\tprintln(x)\n}\n"),
 
-    closure_capture_counts_as_use: ("x = 1\nf = fn() { x }\nprintln(f())\n"),
+    closure_capture_counts_as_use:
+        ("pub fn main() {\n\tx = 1\n\tf = fn() { x }\n\tprintln(f())\n}\n"),
+}
+
+reject_case! {
+    // A program is declarations plus `pub fn main()`. Each of the entry rule's
+    // diagnostics, as `check` reports them; `check` itself does not need a
+    // `main` (see the library-shaped cases below), `run` does.
+    statement_at_module_scope_is_error: (
+        "println('early')\n\npub fn main() {\n\tprintln('main')\n}\n",
+        "Statements are not allowed at module scope: a program's code goes inside `pub fn main()`",
+    ),
+    binding_at_module_scope_is_error: (
+        "x = 1\n\npub fn main() {\n\tprintln(x)\n}\n",
+        "Statements are not allowed at module scope: a program's code goes inside `pub fn main()`",
+    ),
+    private_main_is_error: (
+        "fn main() {\n\tprintln('hi')\n}\n",
+        "`main` must be public: a program starts at `pub fn main()`",
+    ),
+    main_with_parameters_is_error: (
+        "pub fn main(args Array(String)) {\n\tprintln(args)\n}\n",
+        "`main` takes no parameters (arguments are read with `os.argv()`)",
+    ),
+}
+
+run_reject_case! {
+    program_without_main_does_not_run: (
+        "fn helper() Int { 1 }\npub fn exported() Int { helper() }\n",
+        "No `main` function: a program starts at `pub fn main()`",
+    ),
+}
+
+ok_case! {
+    // A library file has no `main` and still checks.
+    library_without_main_checks: ("fn helper() Int { 1 }\npub fn exported() Int { helper() }\n"),
 }
 
 reject_case! {
     // Call-site mistakes, both from `match_fun_type`.
-    wrong_argument_count_is_error:
-        ("fn f(a Int, b Int) Int { a + b }\nprintln(f(1))\n", "Expected 2 argument(s), got 1"),
+    wrong_argument_count_is_error: (
+        "fn f(a Int, b Int) Int { a + b }\npub fn main() {\n\tprintln(f(1))\n}\n",
+        "Expected 2 argument(s), got 1",
+    ),
     calling_non_function_is_error: (
-        "x = 5\ny = x(3)\nprintln(y)\n",
+        "pub fn main() {\n\tx = 5\n\ty = x(3)\n\tprintln(y)\n}\n",
         "This value of type 'Int' is not a function and cannot be called",
     ),
 
@@ -49,33 +96,36 @@ reject_case! {
     // so a callee whose last param is not a compatible fn is an ordinary
     // call-site type error.
     backpass_into_non_function_param_is_error: (
-        "fn g(a Int, b Int) Int { a + b }\nfn h() Int {\n\tx <- g(1)\n\tx + 0\n}\nprintln(h())\n",
+        "fn g(a Int, b Int) Int { a + b }\nfn h() Int {\n\tx <- g(1)\n\tx + 0\n}\n\
+         pub fn main() {\n\tprintln(h())\n}\n",
         "Type mismatch",
     ),
     backpass_overflows_callee_arity_is_error: (
-        "fn g(a Int, b Int) Int { a + b }\nfn h() Int {\n\tx <- g(1, 2)\n\tx + 0\n}\nprintln(h())\n",
+        "fn g(a Int, b Int) Int { a + b }\nfn h() Int {\n\tx <- g(1, 2)\n\tx + 0\n}\n\
+         pub fn main() {\n\tprintln(h())\n}\n",
         "Expected 2 argument(s), got 3",
     ),
 
     // Construction-site argument diagnostics, all from `slot_ctor_args`.
     ctor_missing_field_is_error: (
-        "type P { P(name String, age Int) }\nP(name: 'a')\n",
+        "type P { P(name String, age Int) }\npub fn main() {\n\tprintln(P(name: 'a'))\n}\n",
         "Constructor 'P' is missing field(s): age",
     ),
     ctor_unknown_field_is_error: (
-        "type P { P(name String, age Int) }\nP(name: 'a', bogus: 1)\n",
+        "type P { P(name String, age Int) }\npub fn main() {\n\tprintln(P(name: 'a', bogus: 1))\n}\n",
         "Constructor 'P' has no field 'bogus'. Available: name, age",
     ),
     ctor_too_many_positional_is_error: (
-        "type P { P(name String, age Int) }\nP('a', 'b', 'c')\n",
+        "type P { P(name String, age Int) }\npub fn main() {\n\tprintln(P('a', 'b', 'c'))\n}\n",
         "Constructor 'P' has 2 field(s) but more were supplied",
     ),
     ctor_nullary_with_args_is_error: (
-        "type C {\n\tRed\n\tGreen\n}\nRed(1)\n",
+        "type C {\n\tRed\n\tGreen\n}\npub fn main() {\n\tprintln(Red(1))\n}\n",
         "Constructor 'Red' has 0 field(s) but more were supplied",
     ),
     ctor_duplicate_field_is_error: (
-        "type P { P(name String, age Int) }\nP(name: 'a', name: 'b', age: 1)\n",
+        "type P { P(name String, age Int) }\n\
+         pub fn main() {\n\tprintln(P(name: 'a', name: 'b', age: 1))\n}\n",
         "Field 'name' is specified more than once",
     ),
 
@@ -83,23 +133,26 @@ reject_case! {
     /// above. Only reachable with a constructor-cased name: the parser routes a
     /// lowercase callee to a different pattern form.
     ctor_unknown_in_pattern_is_error: (
-        "r = match Some(1) { Bogus(x) -> 0\n _ -> 1 }\nprintln(r)\n",
+        "pub fn main() {\n\tr = match Some(1) {\n\t\tBogus(x) -> 0\n\t\t_ -> 1\n\t}\n\tprintln(r)\n}\n",
         "Unknown constructor 'Bogus' in pattern",
     ),
     ctor_nullary_with_args_in_pattern_is_error: (
-        "type C {\n\tRed\n\tGreen\n}\nfn f(c C) Int { match c { Red(x) -> x\n Green -> 0 } }\nprintln(f(Red))\n",
+        "type C {\n\tRed\n\tGreen\n}\nfn f(c C) Int { match c { Red(x) -> x\n Green -> 0 } }\n\
+         pub fn main() {\n\tprintln(f(Red))\n}\n",
         "Constructor 'Red' takes no arguments but 1 were given",
     ),
 
     /// Inside a `{ }` block every non-last statement must be `Nil` or consumed.
-    /// Top-level statements go through a different path and are exempt.
-    unconsumed_block_expr_statement_is_error:
-        ("r = {\n\t1 + 2\n\t9\n}\nprintln(r)\n", "must be consumed"),
+    unconsumed_block_expr_statement_is_error: (
+        "pub fn main() {\n\tr = {\n\t\t1 + 2\n\t\t9\n\t}\n\tprintln(r)\n}\n",
+        "must be consumed",
+    ),
 }
 
 ok_case! {
     // Control for the rule above: pins the `is_nil` guard against over-firing.
-    nil_typed_block_expr_statement_is_ok: ("r = {\n\tprintln(1)\n\t9\n}\nprintln(r)\n"),
+    nil_typed_block_expr_statement_is_ok:
+        ("pub fn main() {\n\tr = {\n\t\tprintln(1)\n\t\t9\n\t}\n\tprintln(r)\n}\n"),
 }
 
 reject_case! {
@@ -140,19 +193,23 @@ ok_case! {
     /// annotations also disable `permit_new`, so keying the rule on that flag
     /// wrongly rejects this.
     fn_type_without_return_in_binding_annotation_is_ok:
-        ("x fn(Int) = fn(a Int) { a }\nprintln(x(1))\n"),
+        ("pub fn main() {\n\tx fn(Int) = fn(a Int) { a }\n\tprintln(x(1))\n}\n"),
 }
 
 /// Runtime counterpart of the case above.
 #[test]
 fn fn_type_without_return_in_binding_annotation_runs() {
-    common::run_outputs("f fn(Int) = fn(x Int) { x * 2 }\nprintln(f(3))\n", "6\n");
+    common::run_outputs(
+        "pub fn main() {\n\tf fn(Int) = fn(x Int) { x * 2 }\n\tprintln(f(3))\n}\n",
+        "6\n",
+    );
 }
 
 // A cycle among some aliases must not stop the acyclic ones from registering.
 #[test]
 fn recursive_type_alias_cycle_does_not_drop_other_aliases() {
-    let src = "type Good = Int\ntype A = B\ntype B = A\nfn f(x Good) Good { x }\nprintln(f(1))\n";
+    let src = "type Good = Int\ntype A = B\ntype B = A\nfn f(x Good) Good { x }\n\
+               pub fn main() {\n\tprintln(f(1))\n}\n";
     let out = check_rejects(src, "Recursive type alias");
     assert!(
         !out.combined().contains("Unknown type"),
@@ -164,7 +221,7 @@ fn recursive_type_alias_cycle_does_not_drop_other_aliases() {
 // fn or const: the first registration survives.
 #[test]
 fn duplicate_constructor_is_dropped_not_double_defined() {
-    let src = "type T {\n\tDup(a Int)\n\tDup\n}\nprintln(Dup(1))\n";
+    let src = "type T {\n\tDup(a Int)\n\tDup\n}\npub fn main() {\n\tprintln(Dup(1))\n}\n";
     let out = check_rejects(src, "'Dup' is already defined");
     let combined = out.combined();
     assert_eq!(
@@ -191,11 +248,13 @@ reject_case! {
     // Field/tuple access diagnostics from `compile_binary` / `compile_field_access`.
 
     tuple_index_out_of_bounds_is_error: (
-        "t = (1, 2)\nprintln(t.5)\n",
+        "pub fn main() {\n\tt = (1, 2)\n\tprintln(t.5)\n}\n",
         "Tuple index 5 out of bounds (tuple has 2 elements)",
     ),
-    numeric_index_on_non_tuple_is_error:
-        ("x = 5\nprintln(x.0)\n", "Cannot index .0 on non-tuple type"),
+    numeric_index_on_non_tuple_is_error: (
+        "pub fn main() {\n\tx = 5\n\tprintln(x.0)\n}\n",
+        "Cannot index .0 on non-tuple type",
+    ),
     /// The runtime variant is not statically known, so a projected label must be
     /// present on every variant.
     field_not_on_every_variant_is_error: (
@@ -205,11 +264,13 @@ reject_case! {
     field_access_partial_is_rejected: (
         "type Named {\n\tPerson(name String, age Int)\n\tOrg(name String, size Int)\n}\n\
          fn age_of(n Named) Int { n.age }\n\
-         println(age_of(Person(name: 'al', age: 18)))\n",
+         pub fn main() {\n\tprintln(age_of(Person(name: 'al', age: 18)))\n}\n",
         "Field 'age' is not present on every variant of 'Named' (missing on 'Org')",
     ),
-    field_access_on_tuple_is_error:
-        ("t = (1, 2)\nt.x\n", "Type '(Int, Int)' has no field 'x'"),
+    field_access_on_tuple_is_error: (
+        "pub fn main() {\n\tt = (1, 2)\n\tprintln(t.x)\n}\n",
+        "Type '(Int, Int)' has no field 'x'",
+    ),
     field_access_on_unknown_type_is_error: (
         "fn g(x) { x.name }\n",
         "Cannot access field 'name' on a value of unknown type — add a type annotation",
@@ -217,22 +278,25 @@ reject_case! {
 
     /// The did-you-mean path in `compile_identifier`. The no-suggestion path is
     /// `unknown_identifier_is_error` above.
-    unknown_identifier_suggests_close_name:
-        ("println = 1\nfoo = prntln\n", "Closest match: 'println'."),
+    unknown_identifier_suggests_close_name: (
+        "pub fn main() {\n\tprintln = 1\n\tfoo = prntln\n}\n",
+        "Closest match: 'println'.",
+    ),
 
     /// The tuple path. The constructor path emits a different message.
     refutable_tuple_destructuring_binding_is_error: (
-        "(x, 1) = (1, 2)\nprintln(x)\n",
+        "pub fn main() {\n\t(x, 1) = (1, 2)\n\tprintln(x)\n}\n",
         "Destructuring binding pattern must be irrefutable",
     ),
 }
 
 ok_case! {
     // Control: the check above fires on refutability, not on tuple destructuring.
-    irrefutable_tuple_destructuring_binding_is_ok: ("(x, y) = (1, 2)\nprintln(x + y)\n"),
+    irrefutable_tuple_destructuring_binding_is_ok:
+        ("pub fn main() {\n\t(x, y) = (1, 2)\n\tprintln(x + y)\n}\n"),
 
     // A builtin in value position gets an eta wrapper (see `typed_ir::eta`).
-    builtin_used_as_value_is_ok: ("f = println\nf('done')\n"),
+    builtin_used_as_value_is_ok: ("pub fn main() {\n\tf = println\n\tf('done')\n}\n"),
 }
 
 reject_case! {
@@ -243,13 +307,16 @@ reject_case! {
     ),
     /// `or` with a receiver binds the failure payload. `Result`'s `Err` carries
     /// one; `Option`'s `None` does not.
-    or_with_receiver_on_option_is_error:
-        ("x = Some(5) or v -> 0\nprintln(x)\n", "'or' on an Option does not bind a value"),
+    or_with_receiver_on_option_is_error: (
+        "pub fn main() {\n\tx = Some(5) or v -> 0\n\tprintln(x)\n}\n",
+        "'or' on an Option does not bind a value",
+    ),
 }
 
 ok_case! {
     // Control: the diagnostic above fires on the receiver, not on `or` over `Option`.
-    or_without_receiver_on_option_is_ok: ("x = Some(5) or 0\nprintln(x)\n"),
+    or_without_receiver_on_option_is_ok:
+        ("pub fn main() {\n\tx = Some(5) or 0\n\tprintln(x)\n}\n"),
 }
 
 reject_case! {
@@ -265,7 +332,9 @@ reject_case! {
          fn f() Parsed {\n\
          \th1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0)\n\
          }\n\
-         println(f())\n",
+         pub fn main() {\n\
+         \tprintln(f())\n\
+         }\n",
         "Type mismatch",
     ),
 }
@@ -285,12 +354,14 @@ ok_case! {
          \t\tLocalOther -> 0\n\
          \t}\n\
          }\n\
-         remote = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-         \tDone(_, _, _, _, _, consumed) -> consumed\n\
-         \tNeedMore -> 0 - 1\n\
-         \tBad(s) -> s\n\
-         }\n\
-         println(remote + local_value(LocalDone(41)))\n",
+         pub fn main() {\n\
+         \tremote = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
+         \t\tDone(_, _, _, _, _, consumed) -> consumed\n\
+         \t\tNeedMore -> 0 - 1\n\
+         \t\tBad(s) -> s\n\
+         \t}\n\
+         \tprintln(remote + local_value(LocalDone(41)))\n\
+         }\n",
     ),
 }
 
@@ -301,14 +372,14 @@ ok_case! {
 fn ctor_arg_diagnostics_come_out_in_declared_field_order() {
     let out = common::run_source(
         "check",
-        "type P {\n\tx Int\n\ty Int\n}\np = P(y: 'why', x: 'ex')\n",
+        "type P {\n\tx Int\n\ty Int\n}\npub fn main() {\n\tprintln(P(y: 'why', x: 'ex'))\n}\n",
     );
     let text = out.combined();
     let x_at = text
-        .find("5:20")
+        .find("6:25")
         .expect("expected a diagnostic on `x: 'ex'`");
     let y_at = text
-        .find("5:10")
+        .find("6:15")
         .expect("expected a diagnostic on `y: 'why'`");
     assert!(
         x_at < y_at,
@@ -322,9 +393,11 @@ fn ctor_arg_diagnostics_come_out_in_declared_field_order() {
 fn ctor_spread_solves_type_params_before_lambda_args_are_hinted() {
     common::run_outputs(
         "type Pair(a) {\n\tfst a\n\tsnd fn(a) a\n}\n\
-         p = Pair(1, fn(x) { x + 1 })\n\
-         q = Pair(snd: fn(x) { x * 2 }, ..p)\n\
-         println(q.snd(q.fst))\n",
+         pub fn main() {\n\
+         \tp = Pair(1, fn(x) { x + 1 })\n\
+         \tq = Pair(snd: fn(x) { x * 2 }, ..p)\n\
+         \tprintln(q.snd(q.fst))\n\
+         }\n",
         "2\n",
     );
 }

@@ -26,42 +26,6 @@ fn parked() (Pid, Subject(Nil)) {
 	(pid, process.receive(boot))
 }
 
-// --- a notice arrives after the process ends -----------------------------------
-// The child is parked, so the monitor is certainly placed before it ends.
-// The notice is a message of the parent's own type: here, just the Down.
-
-downs = process.subject()
-(child, go) = parked()
-_ = process.monitor(child, downs, fn(d) d)
-process.send(go, Nil)
-first = process.receive(downs)
-check('down names the process', first.pid == child)
-check('a returned process ended normally', match first.reason {
-	Normal -> True
-	NoProcess -> False
-	Killed -> False
-	Crashed(_) -> False
-})
-
-// --- monitoring a process that has already ended fires at once -----------------
-// `ended` is sent as the child's last act, and the sleep lets it finish; the
-// monitor is then placed on a pid that no longer exists, and must fire rather
-// than wait for ever.
-
-ended = process.subject()
-gone = process.spawn(fn() process.send(ended, Nil))
-process.receive(ended)
-process.sleep(20)
-_ = process.monitor(gone, downs, fn(d) d)
-late = process.receive(downs)
-check('monitoring an ended pid still delivers', late.pid == gone)
-check('and reports that it was already gone', match late.reason {
-	NoProcess -> True
-	Normal -> False
-	Killed -> False
-	Crashed(_) -> False
-})
-
 // --- the notice is wrapped into the receiver's own message type -----------------
 // The supervisor pattern: one inbox carries ordinary traffic and down
 // notices side by side, and the wrap closure tags each notice with whatever
@@ -71,13 +35,6 @@ type Event {
 	Work(n Int)
 	WorkerDown(slot Int, down Down)
 }
-
-events = process.subject()
-(worker, release) = parked()
-_ = process.monitor(worker, events, fn(d) WorkerDown(7, d))
-process.send(events, Work(1))
-process.send(events, Work(2))
-process.send(release, Nil)
 
 fn drain(inbox Subject(Event), worker Pid, work Int) Int {
 	match process.receive(inbox) {
@@ -89,28 +46,6 @@ fn drain(inbox Subject(Event), worker Pid, work Int) Int {
 		}
 	}
 }
-check('traffic before the down was seen first', drain(events, worker, 0) == 3)
-
-// --- two monitors, two notices ---------------------------------------------------
-
-(twice, hold) = parked()
-_ = process.monitor(twice, downs, fn(d) d)
-_ = process.monitor(twice, downs, fn(d) d)
-process.send(hold, Nil)
-a = process.receive(downs)
-b = process.receive(downs)
-check('each monitor delivers its own notice', a.pid == twice && b.pid == twice)
-
-// --- a released monitor stays silent ---------------------------------------------
-
-(quiet, hold2) = parked()
-m = process.monitor(quiet, downs, fn(d) d)
-process.demonitor(m)
-process.send(hold2, Nil)
-check('demonitor before the end delivers nothing', match process.receive_within(downs, 100) {
-	Ok(_) -> False
-	Err(Nil) -> True
-})
 
 // --- request/reply against a server that may be gone ------------------------------
 // The reply and the down notice share the reply subject and its type, so a
@@ -131,34 +66,102 @@ fn call(server Subject(Subject(Reply)), server_pid Pid) Reply {
 	answer
 }
 
-boot = process.subject()
-server = process.spawn(fn() {
-	requests = process.subject()
-	process.send(boot, requests)
-	process.send(process.receive(requests), Answer(42))
-})
-requests = process.receive(boot)
-check('a live server answers', match call(requests, server) {
-	Answer(n) -> n == 42
-	ServerDown -> False
-})
-check('a dead server is reported as down', match call(requests, server) {
-	Answer(_) -> False
-	ServerDown -> True
-})
+pub fn main() {
+	// --- a notice arrives after the process ends -----------------------------------
+	// The child is parked, so the monitor is certainly placed before it ends.
+	// The notice is a message of the parent's own type: here, just the Down.
 
-// --- a watcher that ends first takes its monitors with it ---------------------------
-// Nothing observable is delivered; what is pinned is that the target's later
-// end, and the program's exit, are clean. `watched` outlives its watcher.
+	downs = process.subject()
+	(child, go) = parked()
+	_ = process.monitor(child, downs, fn(d) d)
+	process.send(go, Nil)
+	first = process.receive(downs)
+	check('down names the process', first.pid == child)
+	check('a returned process ended normally', match first.reason {
+		Normal -> True
+		NoProcess -> False
+		Killed -> False
+		Crashed(_) -> False
+	})
 
-watcher_done = process.subject()
-(watched, let_go) = parked()
-_ = process.spawn(fn() {
-	scratch = process.subject()
-	_ = process.monitor(watched, scratch, fn(d) d)
-	process.send(watcher_done, Nil)
-})
-process.receive(watcher_done)
-process.sleep(20)
-process.send(let_go, Nil)
-println('done')
+	// --- monitoring a process that has already ended fires at once -----------------
+	// `ended` is sent as the child's last act, and the sleep lets it finish; the
+	// monitor is then placed on a pid that no longer exists, and must fire rather
+	// than wait for ever.
+
+	ended = process.subject()
+	gone = process.spawn(fn() process.send(ended, Nil))
+	process.receive(ended)
+	process.sleep(20)
+	_ = process.monitor(gone, downs, fn(d) d)
+	late = process.receive(downs)
+	check('monitoring an ended pid still delivers', late.pid == gone)
+	check('and reports that it was already gone', match late.reason {
+		NoProcess -> True
+		Normal -> False
+		Killed -> False
+		Crashed(_) -> False
+	})
+
+	events = process.subject()
+	(worker, release) = parked()
+	_ = process.monitor(worker, events, fn(d) WorkerDown(7, d))
+	process.send(events, Work(1))
+	process.send(events, Work(2))
+	process.send(release, Nil)
+
+	check('traffic before the down was seen first', drain(events, worker, 0) == 3)
+
+	// --- two monitors, two notices ---------------------------------------------------
+
+	(twice, hold) = parked()
+	_ = process.monitor(twice, downs, fn(d) d)
+	_ = process.monitor(twice, downs, fn(d) d)
+	process.send(hold, Nil)
+	a = process.receive(downs)
+	b = process.receive(downs)
+	check('each monitor delivers its own notice', a.pid == twice && b.pid == twice)
+
+	// --- a released monitor stays silent ---------------------------------------------
+
+	(quiet, hold2) = parked()
+	m = process.monitor(quiet, downs, fn(d) d)
+	process.demonitor(m)
+	process.send(hold2, Nil)
+	check('demonitor before the end delivers nothing', match process.receive_within(downs, 100) {
+		Ok(_) -> False
+		Err(Nil) -> True
+	})
+
+	boot = process.subject()
+	server = process.spawn(fn() {
+		requests = process.subject()
+		process.send(boot, requests)
+		process.send(process.receive(requests), Answer(42))
+	})
+	requests = process.receive(boot)
+	check('a live server answers', match call(requests, server) {
+		Answer(n) -> n == 42
+		ServerDown -> False
+	})
+	check('a dead server is reported as down', match call(requests, server) {
+		Answer(_) -> False
+		ServerDown -> True
+	})
+
+	// --- a watcher that ends first takes its monitors with it ---------------------------
+	// Nothing observable is delivered; what is pinned is that the target's later
+	// end, and the program's exit, are clean. `watched` outlives its watcher.
+
+	watcher_done = process.subject()
+	(watched, let_go) = parked()
+	_ = process.spawn(fn() {
+		scratch = process.subject()
+		_ = process.monitor(watched, scratch, fn(d) d)
+		process.send(watcher_done, Nil)
+	})
+	process.receive(watcher_done)
+	process.sleep(20)
+	process.send(let_go, Nil)
+	println('done')
+}

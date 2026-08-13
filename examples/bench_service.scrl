@@ -352,12 +352,14 @@ fn port_arg() Int {
 	}
 }
 
-tables = build_tables(0, USER_COUNT, Tables(by_name: map.new(), by_id: map.new()))
-port = port_arg()
+pub fn main() {
+	tables = build_tables(0, USER_COUNT, Tables(by_name: map.new(), by_id: map.new()))
+	port = port_arg()
 
-println('bench_service listening on http://127.0.0.1:${port} (${USER_COUNT} users)')
+	println('bench_service listening on http://127.0.0.1:${port} (${USER_COUNT} users)')
 
-match http.serve('127.0.0.1', port, fn(req) route(req, tables)) {
-	Ok(_) -> Nil
-	Err(e) -> println('serve failed: ${e}')
+	match http.serve('127.0.0.1', port, fn(req) route(req, tables)) {
+		Ok(_) -> Nil
+		Err(e) -> println('serve failed: ${e}')
+	}
 }

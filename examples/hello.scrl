@@ -1,7 +1,9 @@
 // Hello world, plus string interpolation with ${}.
 
-println('hello, world')
+pub fn main() {
+	println('hello, world')
 
-name = 'Scarlet'
-println('hello from ${name}')
-println('2 + 2 = ${2 + 2}')
+	name = 'Scarlet'
+	println('hello from ${name}')
+	println('2 + 2 = ${2 + 2}')
+}

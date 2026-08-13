@@ -28,7 +28,7 @@ fn compile_recording(source: &str) -> (scarlet::bytecode::Program, Vec<Seen>) {
     let ast = parse(source);
     let seen = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&seen);
-    let hook: scarlet::bytecode::NativeHook = Box::new(move |idx, f, pool| {
+    let hook: scarlet::bytecode::NativeHook = Box::new(move |idx, f, pool, _counts| {
         sink.borrow_mut().push(Seen {
             idx: idx.index(),
             arity: f.params.len(),
@@ -57,7 +57,9 @@ fn twice(x Int) Int {
     add(x, x)
 }
 
-twice(4)
+pub fn main() {
+    println(twice(4))
+}
 "#;
 
 #[test]
@@ -93,12 +95,19 @@ fn hook_fires_per_body_keyed_by_program_func_idx() {
         .iter()
         .rfind(|s| name_of(s) == "twice")
         .expect("hook saw `twice`");
+    // `main` is a declared function like the other two, so it reaches the
+    // hook as one more body rather than being folded into the entry glue.
+    let main = seen
+        .iter()
+        .rfind(|s| name_of(s) == "main")
+        .expect("hook saw `main`");
 
     // The RTys resolved through the pool the hook was handed.
     assert_eq!(add.param_prims, vec![Some(Prim::Int), Some(Prim::Int)]);
     assert_eq!(add.ret_prim, Some(Prim::Int));
     assert_eq!(twice.param_prims, vec![Some(Prim::Int)]);
     assert_eq!(twice.ret_prim, Some(Prim::Int));
+    assert_eq!(main.param_prims, Vec::<Option<Prim>>::new());
 }
 
 #[test]
@@ -119,8 +128,10 @@ fn installing_the_hook_does_not_perturb_fn_numbering() {
     assert_eq!(shape(&hooked), shape(&plain));
 }
 
+/// The entry frame `__main__` initialises the declarations and calls `main`;
+/// it is not a body of the user's program. `main` itself is (see above).
 #[test]
-fn toplevel_glue_is_never_hooked() {
+fn entry_glue_is_never_hooked() {
     let (program, seen) = compile_recording(SOURCE);
     let entry = program.entry as usize;
     assert_eq!(&*program.functions[entry].name, "__main__");
@@ -142,11 +153,13 @@ import scarlet/string
 
 fn double(x Int) Int { x * 2 }
 
-println(array.length(array.map([1, 2, 3], double)))
-println(string.length('hello'))
+pub fn main() {
+    println(array.length(array.map([1, 2, 3], double)))
+    println(string.length('hello'))
+}
 "#;
     let (program, seen) = compile_recording(src);
-    // The user file lowers `double`, the toplevel, and nothing of the stdlib.
+    // The user file lowers `double`, `main`, and nothing of the stdlib.
     assert!(
         seen.len() < 10,
         "the hook saw {} bodies; the stdlib must come from the seed, not a relower",

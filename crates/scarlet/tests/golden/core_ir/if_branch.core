@@ -7,12 +7,18 @@ fn s0(%0:t0) -> :t1
   else
     ret %0
 
+fn s1() -> :t0
+  let %0:t1 = c0
+  let %1:t1 = c1
+  let %2:t1 = SubInt(%0, %1)
+  ret call fn#0(%2)
+
 toplevel:
   let %0:t3@g0 = closure fn#0()
-  let %1:t1 = c0
-  let %2:t1 = c1
-  let %3:t1 = SubInt(%1, %2)
-  ret call %0(%3)
+  drop %0
+  let %1:t4@g1 = closure fn#1()
+  drop %1
+  ret PushNil()
 where
   c0 = Int(0)
   c1 = Int(5)
