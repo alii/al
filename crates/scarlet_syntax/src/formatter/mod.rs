@@ -1832,4 +1832,45 @@ mod tests {
         let out = fmt(src);
         assert_round_trips(&out);
     }
+
+    /// The T-155 family: a lambda as the last call argument whose body is a
+    /// bare wrapping expression. Same HardLine-then-hug flip as
+    /// `lambda_inside_interpolation_is_idempotent`, no string involved.
+    fn assert_trailing_lambda_wraps_and_is_fixed(src: &str) {
+        let out = fmt(src);
+        assert!(
+            out.contains("fn(\n"),
+            "expected lambda params to wrap, otherwise this is not the trigger:\n{out}"
+        );
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn trailing_lambda_with_wrapping_constructor_is_idempotent() {
+        assert_trailing_lambda_wraps_and_is_fixed(
+            "update_bucket(limiter, key, fn(held) Bucket(remaining: Known(0), reset_at: clock.now(), last_refill: clock.now(), capacity: held.capacity))\n",
+        );
+    }
+
+    #[test]
+    fn trailing_lambda_with_wrapping_or_chain_is_idempotent() {
+        assert_trailing_lambda_wraps_and_is_fixed(
+            "check(limiter, key, fn(held) held.remaining == 0 || held.reset_at < now || held.capacity < wanted || held.tokens < needed)\n",
+        );
+    }
+
+    #[test]
+    fn trailing_lambda_with_wrapping_call_body_is_idempotent() {
+        assert_trailing_lambda_wraps_and_is_fixed(
+            "array.map(data, fn(opcode) expect.is_false(opcode == websocket.Opcode.Continuation || opcode == websocket.Opcode.Text || opcode == websocket.Opcode.Binary))\n",
+        );
+    }
+
+    #[test]
+    fn hugged_trailing_lambda_form_is_idempotent() {
+        // The second-pass form the bug used to emit, starting already hugged.
+        let hugged = "update_bucket(limiter, key, fn(\n\theld,\n) Bucket(\n\tremaining: Known(0),\n\treset_at: clock.now(),\n\tlast_refill: clock.now(),\n\tcapacity: held.capacity,\n))\n";
+        let out = fmt(hugged);
+        assert_round_trips(&out);
+    }
 }
