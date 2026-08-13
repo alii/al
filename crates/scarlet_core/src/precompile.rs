@@ -199,7 +199,7 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), Precompile
 #[allow(clippy::panic)] // build-time only: freezing a placeholder body must fail the build
 fn close_type_info(engine: &mut InferEngine, ti: &mut TypeInfo) {
     match ti.body {
-        TypeBody::Custom { variants } => {
+        TypeBody::Custom { variants, .. } => {
             // Distinct types occupy disjoint `variant_fields` slices, so
             // rewriting `ty` in place is safe.
             for v in variants.range() {

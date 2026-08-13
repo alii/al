@@ -1765,7 +1765,7 @@ impl InferEngine {
             && !path.would_recurse(id, &args_key)
         {
             match info.body {
-                TypeBody::Custom { variants } => {
+                TypeBody::Custom { variants, .. } => {
                     let vs: Vec<Variant> = self.variants_of(variants).to_vec();
                     path.enter(id, args_key);
                     let variants: IndexMap<String, Vec<FieldDef>> = vs
