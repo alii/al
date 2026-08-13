@@ -20,6 +20,8 @@ use scarlet_syntax::scanner::ESCAPES;
 use scarlet_syntax::token::{Keyword, Kind};
 use serde_json::{Value, json};
 
+mod scrl_census;
+
 /// The contextual identifiers accepted as `<< expr:spec >>` segment specs.
 /// They are not keywords; the parser matches them by text in
 /// `parse_bin_spec` (`parser/mod.rs`), which its error message enumerates.
@@ -39,11 +41,56 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("scrl-census") => {
+            let rest = &args[1..];
+            match scrl_census_args(rest) {
+                Ok((roots, min_bools)) => {
+                    let census = scrl_census::run(&roots, min_bools);
+                    print!("{}", scrl_census::report(&census, min_bools));
+                    ExitCode::SUCCESS
+                }
+                Err(message) => {
+                    eprintln!("{message}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         _ => {
-            eprintln!("usage: cargo xtask gen-editor-syntax [--check]");
+            eprintln!(
+                "usage: cargo xtask gen-editor-syntax [--check]\n\
+                        cargo xtask scrl-census [--min-bools N] [path ...]"
+            );
             ExitCode::FAILURE
         }
     }
+}
+
+/// `[--min-bools N] [path ...]`. Paths default to this repo, and are taken as
+/// given so the census can be pointed at the other two `.scrl` corpora
+/// (`madder`, `website`) without the tool knowing they exist.
+fn scrl_census_args(args: &[String]) -> Result<(Vec<PathBuf>, usize), String> {
+    let mut roots = Vec::new();
+    let mut min_bools = scrl_census::DEFAULT_MIN_BOOLS;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg == "--min-bools" {
+            let value = rest.next().ok_or("--min-bools needs a value")?;
+            min_bools = value
+                .parse()
+                .map_err(|_| format!("--min-bools: not a number: {value}"))?;
+            if min_bools < 2 {
+                return Err("--min-bools below 2 is meaningless".to_string());
+            }
+        } else if let Some(flag) = arg.strip_prefix("--") {
+            return Err(format!("unknown flag: --{flag}"));
+        } else {
+            roots.push(PathBuf::from(arg));
+        }
+    }
+    if roots.is_empty() {
+        roots.push(repo_root());
+    }
+    Ok((roots, min_bools))
 }
 
 enum GenError {
