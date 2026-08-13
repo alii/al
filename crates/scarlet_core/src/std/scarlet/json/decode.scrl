@@ -107,26 +107,39 @@ type Recovery(a) {
 	Halt
 }
 
-// Reads a `Doc`, or says what was wrong with it. Opaque so the path-threading
-// and the recovery value stay implementation details: build decoders with the
-// combinators here and run them with `run`.
+// Reads a `Doc`, or says what was wrong with it. Opaque so the path
+// construction and the recovery value stay implementation details: build
+// decoders with the combinators here and run them with `run`.
+//
+// A successful decode never builds a path. Combinators that name a member or
+// index prepend that segment onto failures coming out of the inner decoder,
+// so `Failure.path` exists only when something was actually wrong.
 //
 // `resume` is a thunk because it is only forced on a failure path. Forcing it
 // eagerly would build the whole of the rest of a `take` chain once per member
 // on the success path.
 pub opaque type Decoder(a) {
-	step fn(Array(Segment), json.Doc) Result(a, Array(Failure))
+	step fn(json.Doc) Result(a, Array(Failure))
 	resume fn() Recovery(a)
 }
 
 // Decode a document.
 pub fn run(dec Decoder(a), doc json.Doc) Result(a, Array(Failure)) {
-	run_at(dec, [], doc)
+	run_at(dec, doc)
 }
 
-fn run_at(dec Decoder(a), path Array(Segment), doc json.Doc) Result(a, Array(Failure)) {
+fn run_at(dec Decoder(a), doc json.Doc) Result(a, Array(Failure)) {
 	Decoder(step, _) = dec
-	step(path, doc)
+	step(doc)
+}
+
+// Prepend `seg` onto every failure. Called only after an inner decoder has
+// already failed — a successful field or list element never builds a path.
+fn prefix_path(fs Array(Failure), seg Segment) Array(Failure) {
+	match fs {
+		[] -> []
+		[Failure(path, expected, found), ..tail] -> [Failure([seg, ..path], expected, found), ..prefix_path(tail, seg)]
+	}
 }
 
 fn recovery(dec Decoder(a)) Recovery(a) {
@@ -194,13 +207,13 @@ fn kind_to_string(k json.Kind) String {
 	}
 }
 
-fn one_failure(path Array(Segment), expected String, d json.Doc) Array(Failure) {
-	[Failure(path, expected, FoundKind(json.kind(d)))]
+fn one_failure(expected String, d json.Doc) Array(Failure) {
+	[Failure([], expected, FoundKind(json.kind(d)))]
 }
 
 // A decoder that ignores the document and succeeds.
 pub fn succeed(value a) Decoder(a) {
-	Decoder(step: fn(_path, _doc) Ok(value), resume: fn() Resume(value))
+	Decoder(step: fn(_doc) Ok(value), resume: fn() Resume(value))
 }
 
 // A decoder that always fails, naming what it wanted.
@@ -208,7 +221,7 @@ pub fn succeed(value a) Decoder(a) {
 // No placeholder: `Err` inhabits `Result(a, Array(Failure))` without an `a`,
 // and `Halt` inhabits `Recovery(a)` without one either.
 pub fn fail(expected String) Decoder(a) {
-	Decoder(step: fn(path, doc) Err(one_failure(path, expected, doc)), resume: fn() Halt)
+	Decoder(step: fn(doc) Err(one_failure(expected, doc)), resume: fn() Halt)
 }
 
 // `resume_with` is the one place in the module where a value of the decoded
@@ -217,9 +230,9 @@ pub fn fail(expected String) Decoder(a) {
 // cannot build a `Decoder` except through the combinators here.
 fn scalar(expected String, resume_with a, read fn(json.Doc) Option(a)) Decoder(a) {
 	Decoder(
-		step: fn(path, doc) match read(doc) {
+		step: fn(doc) match read(doc) {
 			Some(v) -> Ok(v)
-			None -> Err(one_failure(path, expected, doc))
+			None -> Err(one_failure(expected, doc))
 		},
 		resume: fn() Resume(resume_with),
 	)
@@ -255,11 +268,11 @@ pub fn bool() Decoder(Bool) {
 // quoted integer is the same integer in quotes.
 pub fn int_string() Decoder(Int) {
 	Decoder(
-		step: fn(path, doc) match json.string(doc) {
-			None -> Err(one_failure(path, 'a quoted integer', doc))
+		step: fn(doc) match json.string(doc) {
+			None -> Err(one_failure('a quoted integer', doc))
 			Some(s) -> match parse_signed(s) {
 				Ok(n) -> Ok(n)
-				Err(Nil) -> Err([Failure(path, 'a quoted integer', FoundText('the string "${s}"'))])
+				Err(Nil) -> Err([Failure([], 'a quoted integer', FoundText('the string "${s}"'))])
 			}
 		},
 		resume: fn() Resume(0),
@@ -290,10 +303,10 @@ fn parse_signed(s String) Result(Int, Nil) {
 // `null`, decoded as a value of your choosing.
 pub fn null_as(value a) Decoder(a) {
 	Decoder(
-		step: fn(path, doc) if json.is_null(doc) {
+		step: fn(doc) if json.is_null(doc) {
 			Ok(value)
 		} else {
-			Err(one_failure(path, 'null', doc))
+			Err(one_failure('null', doc))
 		},
 		resume: fn() Resume(value),
 	)
@@ -303,7 +316,7 @@ pub fn null_as(value a) Decoder(a) {
 pub fn map(dec Decoder(a), f fn(a) b) Decoder(b) {
 	Decoder(step, resume) = dec
 	Decoder(
-		step: fn(path, doc) match step(path, doc) {
+		step: fn(doc) match step(doc) {
 			Ok(v) -> Ok(f(v))
 			Err(e) -> Err(e)
 		},
@@ -324,9 +337,9 @@ pub fn map(dec Decoder(a), f fn(a) b) Decoder(b) {
 pub fn then(dec Decoder(a), f fn(a) Decoder(b)) Decoder(b) {
 	Decoder(step, resume) = dec
 	Decoder(
-		step: fn(path, doc) match step(path, doc) {
+		step: fn(doc) match step(doc) {
 			Err(e) -> Err(e)
-			Ok(v) -> run_at(f(v), path, doc)
+			Ok(v) -> run_at(f(v), doc)
 		},
 		resume: fn() match resume() {
 			Resume(v) -> recovery(f(v))
@@ -351,11 +364,11 @@ pub fn then(dec Decoder(a), f fn(a) Decoder(b)) Decoder(b) {
 pub fn also(dec Decoder(a), k fn(a) Decoder(b)) Decoder(b) {
 	Decoder(step, resume) = dec
 	Decoder(
-		step: fn(path, doc) match step(path, doc) {
-			Ok(v) -> run_at(k(v), path, doc)
+		step: fn(doc) match step(doc) {
+			Ok(v) -> run_at(k(v), doc)
 			Err(e) -> match resume() {
 				Halt -> Err(e)
-				Resume(v) -> match run_at(k(v), path, doc) {
+				Resume(v) -> match run_at(k(v), doc) {
 					Ok(_) -> Err(e)
 					Err(rest) -> Err([..e, ..rest])
 				}
@@ -391,7 +404,7 @@ pub fn map2(d1 Decoder(a), d2 Decoder(b), f fn(a, b) c) Decoder(c) {
 	Decoder(s1, r1) = d1
 	Decoder(s2, r2) = d2
 	Decoder(
-		step: fn(path, doc) match (s1(path, doc), s2(path, doc)) {
+		step: fn(doc) match (s1(doc), s2(doc)) {
 			(Ok(a), Ok(b)) -> Ok(f(a, b))
 			(Err(e1), Err(e2)) -> Err([..e1, ..e2])
 			(Err(e1), Ok(_)) -> Err(e1)
@@ -412,12 +425,12 @@ pub fn map2(d1 Decoder(a), d2 Decoder(b), f fn(a, b) c) Decoder(c) {
 pub fn guard(dec Decoder(a), ok fn(a) Bool, expected String) Decoder(a) {
 	Decoder(step, resume) = dec
 	Decoder(
-		step: fn(path, doc) match step(path, doc) {
+		step: fn(doc) match step(doc) {
 			Err(e) -> Err(e)
 			Ok(v) -> if ok(v) {
 				Ok(v)
 			} else {
-				Err(one_failure(path, expected, doc))
+				Err(one_failure(expected, doc))
 			}
 		},
 		resume: resume,
@@ -430,13 +443,13 @@ pub fn guard(dec Decoder(a), ok fn(a) Bool, expected String) Decoder(a) {
 pub fn field(name String, inner Decoder(a)) Decoder(a) {
 	Decoder(step, resume) = inner
 	Decoder(
-		step: fn(path, doc) {
-			here = [..path, Key(name)]
-			match member(here, doc, name) {
-				Err(e) -> Err(e)
-				Ok(Some(child)) -> step(here, child)
-				Ok(None) -> Err([Failure(here, 'a member named "${name}"', FoundAbsent)])
+		step: fn(doc) match member(doc, name) {
+			Err(e) -> Err(e)
+			Ok(Some(child)) -> match step(child) {
+				Ok(v) -> Ok(v)
+				Err(e) -> Err(prefix_path(e, Key(name)))
 			}
+			Ok(None) -> Err([Failure([Key(name)], 'a member named "${name}"', FoundAbsent)])
 		},
 		resume: resume,
 	)
@@ -453,16 +466,12 @@ pub fn field(name String, inner Decoder(a)) Decoder(a) {
 // held state. An instrument whose job is to report every failure was reporting
 // success for input of entirely the wrong shape. Both go through here now, so
 // the two combinators cannot drift apart again.
-fn member(
-	path Array(Segment),
-	doc json.Doc,
-	name String,
-) Result(Option(json.Doc), Array(Failure)) {
+fn member(doc json.Doc, name String) Result(Option(json.Doc), Array(Failure)) {
 	match json.field(doc, name) {
 		Some(child) -> Ok(Some(child))
 		None -> match json.kind(doc) {
 			json.ObjectKind -> Ok(None)
-			_ -> Err([Failure(path, 'a member named "${name}"', FoundKind(json.kind(doc)))])
+			k -> Err([Failure([Key(name)], 'a member named "${name}"', FoundKind(k))])
 		}
 	}
 }
@@ -484,18 +493,15 @@ fn member(
 pub fn optional_field(name String, inner Decoder(a)) Decoder(presence.Field(a)) {
 	Decoder(step, _) = inner
 	Decoder(
-		step: fn(path, doc) {
-			here = [..path, Key(name)]
-			match member(here, doc, name) {
-				Err(e) -> Err(e)
-				Ok(None) -> Ok(presence.absent())
-				Ok(Some(child)) -> if json.is_null(child) {
-					Ok(presence.null())
-				} else {
-					match step(here, child) {
-						Ok(v) -> Ok(presence.present(v))
-						Err(e) -> Err(e)
-					}
+		step: fn(doc) match member(doc, name) {
+			Err(e) -> Err(e)
+			Ok(None) -> Ok(presence.absent())
+			Ok(Some(child)) -> if json.is_null(child) {
+				Ok(presence.null())
+			} else {
+				match step(child) {
+					Ok(v) -> Ok(presence.present(v))
+					Err(e) -> Err(prefix_path(e, Key(name)))
 				}
 			}
 		},
@@ -506,10 +512,11 @@ pub fn optional_field(name String, inner Decoder(a)) Decoder(presence.Field(a)) 
 // Every element of an array, each decoded with `inner`. Element failures
 // accumulate and carry their index.
 pub fn list(inner Decoder(a)) Decoder(Array(a)) {
+	Decoder(step, _) = inner
 	Decoder(
-		step: fn(path, doc) match json.kind(doc) {
-			json.ArrayKind -> collect_list(inner, path, json.elements(doc), 0, [], [])
-			_ -> Err(one_failure(path, 'an array', doc))
+		step: fn(doc) match json.kind(doc) {
+			json.ArrayKind -> collect_list(step, json.elements(doc), 0, [], [])
+			_ -> Err(one_failure('an array', doc))
 		},
 		// An array of nothing needs nothing of `inner`.
 		resume: fn() Resume([]),
@@ -517,8 +524,7 @@ pub fn list(inner Decoder(a)) Decoder(Array(a)) {
 }
 
 fn collect_list(
-	inner Decoder(a),
-	path Array(Segment),
+	step fn(json.Doc) Result(a, Array(Failure)),
 	items Array(json.Doc),
 	i Int,
 	oks Array(a),
@@ -529,9 +535,9 @@ fn collect_list(
 			[] -> Ok(oks)
 			_ -> Err(errs)
 		}
-		[head, ..tail] -> match run_at(inner, [..path, At(i)], head) {
-			Ok(v) -> collect_list(inner, path, tail, i + 1, [..oks, v], errs)
-			Err(e) -> collect_list(inner, path, tail, i + 1, oks, [..errs, ..e])
+		[head, ..tail] -> match step(head) {
+			Ok(v) -> collect_list(step, tail, i + 1, [..oks, v], errs)
+			Err(e) -> collect_list(step, tail, i + 1, oks, [..errs, ..prefix_path(e, At(i))])
 		}
 	}
 }
@@ -540,18 +546,18 @@ fn collect_list(
 // list rather than a `Map`, because JSON preserves member order and duplicate
 // keys and a map does not.
 pub fn dict(inner Decoder(a)) Decoder(Array((String, a))) {
+	Decoder(step, _) = inner
 	Decoder(
-		step: fn(path, doc) match json.kind(doc) {
-			json.ObjectKind -> collect_dict(inner, path, json.entries(doc), [], [])
-			_ -> Err(one_failure(path, 'an object', doc))
+		step: fn(doc) match json.kind(doc) {
+			json.ObjectKind -> collect_dict(step, json.entries(doc), [], [])
+			_ -> Err(one_failure('an object', doc))
 		},
 		resume: fn() Resume([]),
 	)
 }
 
 fn collect_dict(
-	inner Decoder(a),
-	path Array(Segment),
+	step fn(json.Doc) Result(a, Array(Failure)),
 	items Array((String, json.Doc)),
 	oks Array((String, a)),
 	errs Array(Failure),
@@ -561,9 +567,9 @@ fn collect_dict(
 			[] -> Ok(oks)
 			_ -> Err(errs)
 		}
-		[(k, v), ..tail] -> match run_at(inner, [..path, Key(k)], v) {
-			Ok(decoded) -> collect_dict(inner, path, tail, [..oks, (k, decoded)], errs)
-			Err(e) -> collect_dict(inner, path, tail, oks, [..errs, ..e])
+		[(k, v), ..tail] -> match step(v) {
+			Ok(decoded) -> collect_dict(step, tail, [..oks, (k, decoded)], errs)
+			Err(e) -> collect_dict(step, tail, oks, [..errs, ..prefix_path(e, Key(k))])
 		}
 	}
 }
@@ -577,9 +583,9 @@ fn collect_dict(
 // the document.
 pub fn one_of(first Decoder(a), rest Array(Decoder(a))) Decoder(a) {
 	Decoder(
-		step: fn(path, doc) match run_at(first, path, doc) {
+		step: fn(doc) match run_at(first, doc) {
 			Ok(v) -> Ok(v)
-			Err(e) -> try_each(rest, path, doc, e)
+			Err(e) -> try_each(rest, doc, e)
 		},
 		resume: fn() recovery(first),
 	)
@@ -587,15 +593,14 @@ pub fn one_of(first Decoder(a), rest Array(Decoder(a))) Decoder(a) {
 
 fn try_each(
 	decoders Array(Decoder(a)),
-	path Array(Segment),
 	doc json.Doc,
 	errs Array(Failure),
 ) Result(a, Array(Failure)) {
 	match decoders {
 		[] -> Err(errs)
-		[head, ..tail] -> match run_at(head, path, doc) {
+		[head, ..tail] -> match run_at(head, doc) {
 			Ok(v) -> Ok(v)
-			Err(e) -> try_each(tail, path, doc, [..errs, ..e])
+			Err(e) -> try_each(tail, doc, [..errs, ..e])
 		}
 	}
 }
@@ -619,7 +624,7 @@ pub fn tagged_int(tag String, pick fn(Int) Result(Decoder(a), Nil)) Decoder(a) {
 
 fn unknown_tag(tag String, found String) Decoder(a) {
 	Decoder(
-		step: fn(path, _doc) Err([Failure([..path, Key(tag)], 'a known tag', FoundText(found))]),
+		step: fn(_doc) Err([Failure([Key(tag)], 'a known tag', FoundText(found))]),
 		resume: fn() Halt,
 	)
 }
