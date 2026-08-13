@@ -1,3 +1,5 @@
+import scarlet/array
+
 @vm(binary__from_string)
 pub fn from_string(s String) Binary
 
@@ -93,6 +95,11 @@ pub fn split_at_bytes(b Binary, at Int) (Binary, Binary) {
 
 @vm(binary__append)
 pub fn append(a Binary, b Binary) Binary
+
+// Join `parts` in order. Empty input is `<<>>`.
+pub fn concat(parts Array(Binary)) Binary {
+	array.fold(parts, <<>>, fn(acc, p) append(acc, p))
+}
 
 @vm(binary__index_of)
 pub fn index_of(haystack Binary, needle Binary, from Int) Option(Int)

@@ -569,6 +569,35 @@ fn stdlib_binary_slice_units() {
 }
 
 #[test]
+fn stdlib_binary_concat() {
+    // Empty input is the identity of append; a first-element stub would
+    // pass the singleton and fail the rest.
+    run_outputs(
+        "import scarlet/binary\n\
+         import scarlet/string\n\
+         pub fn main() {\n\
+         \tprintln(string.inspect(binary.concat([])))\n\
+         \tprintln(string.inspect(binary.concat([<<1, 2>>])))\n\
+         \tprintln(string.inspect(binary.concat([<<1, 2>>, <<3>>, <<4, 5>>])))\n\
+         \tprintln(string.inspect(binary.concat([<<>>, <<9>>, <<>>])))\n\
+         }\n",
+        "<<>>\n<<1, 2>>\n<<1, 2, 3, 4, 5>>\n<<9>>\n",
+    );
+    // concat(split_at_bytes(b, at)) == b. A first-only or reverse-fold stub
+    // fails here; the three-part case above already rules out those, and
+    // this pins the identity against a different binary than the literals.
+    run_outputs(
+        "import scarlet/binary\n\
+         pub fn main() {\n\
+         \tb = <<1, 2, 3, 4, 5>>\n\
+         \tpair = binary.split_at_bytes(b, 2)\n\
+         \tprintln(binary.concat([pair.0, pair.1]) == b)\n\
+         }\n",
+        "True\n",
+    );
+}
+
+#[test]
 fn stdlib_binary_byte_at() {
     // byte_at is -1 out of bounds on both sides; a view reads through its
     // offset.
