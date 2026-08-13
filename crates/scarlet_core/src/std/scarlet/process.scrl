@@ -185,8 +185,13 @@ pub fn demonitor(m Monitor) Nil
 // type, or with one subject per kind.
 pub type Subject(msg)
 
-// A new subject owned by the calling process. It dies with its owner: later
-// sends to it are dropped.
+// A new subject owned by the calling process. The mailbox exists for as long
+// as the owner holds the value: it is reclaimed when the owner's last
+// reference to it goes away — a reply subject made for one request is gone
+// as soon as the reply has been received — and, at the latest, when the
+// owner ends. Copies held by other processes (in messages, in spawned
+// closures) do not keep it alive; only the owner can receive, so nobody else
+// needs it to. Sends to a reclaimed subject are dropped.
 @vm(process__subject)
 pub fn subject() Subject(msg)
 

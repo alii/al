@@ -19,7 +19,8 @@
 //! bit 0      header marker, always 1 (objects are 8-byte aligned, so a read
 //!            of a freed or zeroed slot trips the accessors' debug guard)
 //! bits 1-5   HeapTag
-//! bit 6      off-heap: the payload owns an `Arc<[u8]>` backing (Binary)
+//! bit 6      off-heap: the payload owns an `Arc` — a Binary's byte backing,
+//!            or an owning Subject's closer — released when the box is freed
 //! bit 7      immortal: lives in the frozen area, never reference counted
 //! bits 8-63  payload length in words
 //! ```
@@ -38,6 +39,8 @@
 //! - `Seq`:       `[len][shift][head][tree][tail]` — persistent-vector root
 //! - `SeqLeaf`:   `[count][elements…]`, 1..=32 elements
 //! - `SeqBranch`: `[count][shift][cumulative sizes × count][children × count]`
+//! - `Subject`:   `[mailbox_id][closer_arc_ptr]` — the owner's handle on a
+//!   mailbox; freeing it closes the mailbox. Copies are the immediate form.
 //!
 //! # Reference counting
 //!
@@ -54,7 +57,8 @@
 //! The escape hatches for `heap::proc_heap` are `for_each_child_slot` (the one
 //! layout table for tracing; its `&mut` face demands exclusive ownership, so
 //! only the shared [`Value::for_each_child_ref`] may walk immortal objects)
-//! and `binary_clone_backing`/`binary_drop_backing`.
+//! and `binary_clone_backing` (a subject box is never copied: `as_subject`
+//! gives the copier the immediate to use instead).
 
 #![allow(unsafe_code)]
 
@@ -159,7 +163,27 @@ pub enum HeapTag {
     /// HAMT collision bucket — `[hash, count, key, value, …]` for distinct
     /// keys sharing one 64-bit hash. Interior to a `Map`.
     HamtCollision = 13,
+    /// The owning handle of a mailbox — `[id, closer]` — held only by the
+    /// process that created the subject. Reference counting is what decides
+    /// how long the mailbox lives: when the owner's last reference goes, the
+    /// box is freed and its `closer` closes the mailbox, so a reply subject
+    /// made for one request is reclaimed the moment the reply has been
+    /// received, and a dying process's mailboxes close as its heap is
+    /// released. Every other holder of the subject — a message, a spawned
+    /// closure, a frozen constant — gets the immediate form
+    /// ([`ValueView::Subject`] either way), which names the mailbox without
+    /// keeping it alive: only the owner can receive, so nobody else has any
+    /// use for it once the owner has let go. Off-heap link: the closer `Arc`.
+    Subject = 14,
 }
+
+/// What an owning subject box ([`HeapTag::Subject`]) calls, with the mailbox
+/// id, when it is freed. The runtime installs one per scheduler, closing the
+/// mailbox in its registry; the value layer only knows there is something to
+/// call. Held through an `Arc` so a box can outlive the scheduler that made
+/// it (its process may have migrated) and the registry can outlive nothing
+/// that still points at it.
+pub struct SubjectCloser(pub Box<dyn Fn(u64) + Send + Sync>);
 
 /// How a [`HeapTag::Map`] sources its entries. The set is open: a new backing
 /// gets a new discriminant, and the observable type stays `Map(k, v)`.
@@ -226,6 +250,7 @@ fn header_tag(word: u64) -> HeapTag {
         11 => HeapTag::HamtBranch,
         12 => HeapTag::HamtEntry,
         13 => HeapTag::HamtCollision,
+        14 => HeapTag::Subject,
         _ => view_mismatch("heap-tag"),
     }
 }
@@ -1546,12 +1571,36 @@ impl Value {
         Value(HDR_SOCKET | kind | s.id as u32 as u64)
     }
 
-    /// A mailbox handle by its registry id. Ids are minted by a monotonic
-    /// counter, so the 48-bit payload cannot be exhausted in practice.
+    /// A mailbox handle by its registry id: the non-owning form (see
+    /// [`HeapTag::Subject`]), which is what every copy of a subject becomes
+    /// and what a supervised worker's slot-owned address is. Ids are minted
+    /// by a monotonic counter, so the 48-bit payload cannot be exhausted in
+    /// practice.
     #[inline]
     pub(crate) fn subject(id: u64) -> Value {
         debug_assert!(id <= PAYLOAD, "subject id exceeds the 48-bit payload");
         Value(HDR_SUBJECT | (id & PAYLOAD))
+    }
+
+    /// The owning form of a subject (see [`HeapTag::Subject`]): a 2-word box
+    /// holding the id and a count on `closer`, which is invoked with the id
+    /// when the box is freed.
+    pub(crate) fn owned_subject_in<A: Arena + ?Sized>(
+        a: &mut A,
+        id: u64,
+        closer: &Arc<SubjectCloser>,
+    ) -> Value {
+        debug_assert!(id <= PAYLOAD, "subject id exceeds the 48-bit payload");
+        let obj = alloc_obj(a, HeapTag::Subject, 2, true);
+        let closer = Arc::into_raw(Arc::clone(closer)) as usize as u64;
+        // SAFETY: freshly allocated 2-word payload; header written by
+        // `alloc_obj`.
+        unsafe {
+            let p = obj.as_ptr().add(1);
+            p.write(id);
+            p.add(1).write(closer);
+            Value::from_object_ptr(obj)
+        }
     }
 
     /// A process identity. Pids come from a monotonic counter that is never
@@ -1959,10 +2008,22 @@ impl Value {
             None
         }
     }
+    /// The mailbox id of either form of subject.
     #[inline]
     pub(crate) fn as_subject(&self) -> Option<u64> {
         if self.is_subject() {
             Some(self.0 & PAYLOAD)
+        } else if self.is_heap() {
+            let obj = self.heap_obj();
+            // SAFETY: a heap value points at a live object; the payload read
+            // is tag-checked.
+            unsafe {
+                if header_tag(*obj) == HeapTag::Subject {
+                    Some(payload_word(obj, 0))
+                } else {
+                    None
+                }
+            }
         } else {
             None
         }
@@ -2116,6 +2177,7 @@ impl Value {
                     HeapTag::HamtBranch | HeapTag::HamtEntry | HeapTag::HamtCollision => {
                         view_mismatch("kind")
                     }
+                    HeapTag::Subject => ValueView::Subject(payload_word(obj, 0)),
                 }
             }
         } else {
@@ -2488,7 +2550,11 @@ unsafe fn for_each_child_slot<F: FnMut(*mut Value)>(obj: *const u64, f: &mut F) 
             }
         };
         match header_tag(h) {
-            HeapTag::BigInt | HeapTag::Range | HeapTag::Str | HeapTag::Binary => {}
+            HeapTag::BigInt
+            | HeapTag::Range
+            | HeapTag::Str
+            | HeapTag::Binary
+            | HeapTag::Subject => {}
             // `Env` holds no children; `Hamt` points at one root node.
             HeapTag::Map => match map_backing(*p) {
                 MapBacking::Env => {}
@@ -2566,6 +2632,53 @@ pub(crate) unsafe fn binary_clone_backing(obj: *const u64) {
 ///
 /// `obj` must point at a `Binary` box whose Arc words are intact and whose
 /// count has not already been released.
+/// Release whatever a box with the off-heap bit owns outside the arena. The
+/// bit says there is something; the tag says what.
+///
+/// # Safety
+/// `obj` must be a live object whose off-heap words are intact and are
+/// being released exactly once.
+unsafe fn release_off_heap_link(obj: *const u64) {
+    // SAFETY: forwarded from the caller.
+    unsafe {
+        match header_tag(*obj) {
+            HeapTag::Binary => binary_drop_backing(obj),
+            HeapTag::Subject => subject_close_and_drop_closer(obj),
+            HeapTag::BigInt
+            | HeapTag::Range
+            | HeapTag::Str
+            | HeapTag::Tuple
+            | HeapTag::Enum
+            | HeapTag::Closure
+            | HeapTag::Seq
+            | HeapTag::SeqLeaf
+            | HeapTag::SeqBranch
+            | HeapTag::Map
+            | HeapTag::HamtBranch
+            | HeapTag::HamtEntry
+            | HeapTag::HamtCollision => {
+                proof_violation("off-heap bit on a tag that owns nothing off-heap")
+            }
+        }
+    }
+}
+
+/// The owner's last reference to a subject went away: close the mailbox and
+/// give back the count the box held on the closer.
+///
+/// # Safety
+/// `obj` must be a live `Subject` box whose closer word is intact and is
+/// being consumed exactly once.
+unsafe fn subject_close_and_drop_closer(obj: *const u64) {
+    unsafe {
+        debug_assert!(header_tag(*obj) == HeapTag::Subject);
+        let id = payload_word(obj, 0);
+        let closer = Arc::from_raw(payload_word(obj, 1) as usize as *const SubjectCloser);
+        (closer.0)(id);
+        drop(closer);
+    }
+}
+
 unsafe fn binary_drop_backing(obj: *const u64) {
     // No reborrow guard: this is the one place that consumes the box's
     // count, so the reconstructed Arc is dropped for real.
@@ -2641,7 +2754,7 @@ unsafe fn rc_decrement_is_zero(obj: *const u64) -> bool {
 unsafe fn free_object(obj: *mut u64) {
     unsafe {
         if header_has_off_heap_link(*obj) {
-            binary_drop_backing(obj);
+            release_off_heap_link(obj);
         }
         // Poison the block so a use-after-free is loud: a stale header read
         // trips `header_marks_object` and a stale decref underflows.

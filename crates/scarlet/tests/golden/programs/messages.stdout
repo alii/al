@@ -13,3 +13,5 @@ stop -> served 42
 PASS every send arrives
 fresh subjects: 1 text
 send to a dead subject: ok
+PASS a thousand request/replies add up
+PASS and leave no mailboxes behind

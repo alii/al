@@ -32,8 +32,8 @@ pub use native::{
     is_native_try_op,
 };
 pub use value::{
-    Arena, BinaryRef, ClosureRef, EnumRef, HeapTag, MapRef, SeqRef, SocketKind, SocketValue, Value,
-    ValueView, enum_name_prefix_hash, take_freed_objects,
+    Arena, BinaryRef, ClosureRef, EnumRef, HeapTag, MapRef, SeqRef, SocketKind, SocketValue,
+    SubjectCloser, Value, ValueView, enum_name_prefix_hash, take_freed_objects,
 };
 pub(crate) use value::{MapBacking, freed_objects_pending, hash_value, values_equal};
 
@@ -281,6 +281,10 @@ pub enum Op {
     // Misc
     Print,
     StackDepth,
+    /// `[] -> Int` — mailboxes open program-wide right now. Introspection for
+    /// pinning that subjects are reclaimed when their owners let go of them.
+    /// (scarlet/internal.live_subjects)
+    LiveSubjects,
     Halt,
 
     // I/O operations
@@ -420,15 +424,15 @@ pub enum Op {
     /// and wake a parked receiver. Never blocks; a dead subject drops the
     /// message. (scarlet/process.send)
     SubjectSend,
-    /// `[subject] -> msg` — pop the mailbox's oldest message, parking until
-    /// one arrives. Only the owning process may receive.
-    /// (scarlet/process.receive)
-    SubjectReceive,
     /// As `SubjectSend`, but the message goes to the front of the queue: what
     /// a supervisor's `Ask` shutdown sends, so a stop request is not stuck
     /// behind a backlog for its whole grace period — OTP's shutdown is a
     /// signal for the same reason. Not part of the public API. (scarlet/process)
     SubjectSendUrgent,
+    /// `[subject] -> msg` — pop the mailbox's oldest message, parking until
+    /// one arrives. Only the owning process may receive.
+    /// (scarlet/process.receive)
+    SubjectReceive,
     /// `[subject, deadline_ms] -> Result(msg, Nil)` — as `SubjectReceive`,
     /// but `Err(Nil)` once the absolute monotonic-ms deadline passes.
     /// (scarlet/process.receive_until)
@@ -674,6 +678,7 @@ impl Op {
             | Op::FloatToString
             | Op::Print
             | Op::StackDepth
+            | Op::LiveSubjects
             | Op::Halt
             | Op::FileRead
             | Op::FileWrite
@@ -719,12 +724,12 @@ impl Op {
             | Op::Sleep
             | Op::SubjectNew
             | Op::SubjectSend
+            | Op::SubjectSendUrgent
             | Op::SubjectReceive
             | Op::SubjectReceiveUntil
             | Op::Monotonic
             | Op::Argv
             | Op::EnvMap
-            | Op::SubjectSendUrgent
             | Op::MapGet
             | Op::MapHas
             | Op::MapKeys
@@ -889,6 +894,7 @@ impl Op {
             | Op::FloatFromInt
             | Op::FloatToString
             | Op::StackDepth
+            | Op::LiveSubjects
             | Op::Halt
             | Op::FileRead
             | Op::FileWrite
@@ -934,13 +940,13 @@ impl Op {
             | Op::Sleep
             | Op::SubjectNew
             | Op::SubjectSend
+            | Op::SubjectSendUrgent
             | Op::SubjectReceive
             | Op::SubjectReceiveUntil
             | Op::Monotonic
             | Op::Argv
             | Op::EnvMap
             | Op::MapGet
-            | Op::SubjectSendUrgent
             | Op::MapHas
             | Op::MapKeys
             | Op::MapValues

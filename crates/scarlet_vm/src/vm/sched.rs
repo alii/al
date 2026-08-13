@@ -287,8 +287,8 @@ pub(super) struct Runtime {
     /// Every live mailbox, program-wide: senders on any scheduler reach a
     /// subject's queue through here. See [`super::mailbox`].
     pub(super) mailboxes: super::mailbox::Mailboxes,
-    /// Live mailbox count, gating the per-process-death cleanup scan so
-    /// subject-free programs pay one relaxed load.
+    /// Mailboxes open right now, program-wide: what `internal.live_subjects`
+    /// reports, so a test can pin that mailboxes are reclaimed.
     pub(super) live_subjects: AtomicUsize,
     /// Every live pid, with the monitors on it and the monitors it holds.
     /// See [`super::monitor`].

@@ -612,6 +612,7 @@ mod opc {
     pub const SUPERVISOR_WORKER_ON_EACH: u8 = Op::SupervisorWorkerOnEach as u8;
     pub const FACTORY_SPAWN: u8 = Op::FactorySpawn as u8;
     pub const STACK_DEPTH: u8 = Op::StackDepth as u8;
+    pub const LIVE_SUBJECTS: u8 = Op::LiveSubjects as u8;
     pub const STR_CONCAT_N: u8 = Op::StrConcatN as u8;
     pub const STR_CONTAINS: u8 = Op::StrContains as u8;
     pub const STR_LEN: u8 = Op::StrLen as u8;
@@ -883,6 +884,7 @@ impl VM {
             }
             opc::HTTP_HEADER_GET => self.http_header_get(),
             opc::STACK_DEPTH => self.stack_depth(),
+            opc::LIVE_SUBJECTS => self.live_subjects(),
             opc::TCP_LOCAL_ADDR => self.tcp_local_addr(),
             opc::PROCESS_SPAWN => self.process_spawn(reds, Link::ToParent),
             opc::PROCESS_SPAWN_UNLINKED => self.process_spawn(reds, Link::None),
@@ -892,8 +894,6 @@ impl VM {
                 Ok(())
             }
             opc::PROCESS_MONITOR => self.process_monitor(reds),
-            opc::PROCESS_DEMONITOR => self.process_demonitor(),
-            opc::ARGV => self.argv(),
             opc::SUPERVISOR_NEW => self.supervisor_new(),
             opc::SUPERVISOR_WORKER => self.supervisor_worker(reds),
             opc::FACTORY_NEW => self.factory_new(reds),
@@ -906,6 +906,8 @@ impl VM {
             opc::SUPERVISED_INFO => self.supervised_info(),
             opc::WATCH_NEW => self.watch_new(reds),
             opc::WATCH_CANCEL => self.watch_cancel(),
+            opc::PROCESS_DEMONITOR => self.process_demonitor(),
+            opc::ARGV => self.argv(),
             opc::TCP_LISTEN => self.tcp_listen(),
             opc::TCP_CLOSE => self.tcp_close(reds),
             opc::TLS_CLOSE => self.tls_close(reds),

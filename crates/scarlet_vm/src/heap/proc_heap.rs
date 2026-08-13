@@ -156,6 +156,12 @@ fn copy_node_into<A: Arena>(
     if !src.is_heap() || src.is_immortal() {
         return src.clone();
     }
+    // A subject's owning box never leaves its owner: every copy — into a
+    // message, a spawned closure, a frozen constant — is the immediate that
+    // merely names the mailbox (see `HeapTag::Subject`).
+    if let Some(id) = src.as_subject() {
+        return Value::subject(id);
+    }
     let immortal = arena.marks_immortal();
     let src_obj = src.heap_obj();
     let src_addr = src_obj as usize;
@@ -184,6 +190,8 @@ fn copy_node_into<A: Arena>(
         if immortal {
             mark_immortal(d.as_ptr());
         }
+        // The only off-heap link left to share is a Binary's backing: the
+        // other off-heap owner, a subject box, returned above.
         if header_has_off_heap_link(*d.as_ptr()) {
             binary_clone_backing(d.as_ptr());
         }

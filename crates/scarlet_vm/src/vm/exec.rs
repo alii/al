@@ -745,6 +745,7 @@ impl VM {
                 }
                 Op::Print => self.print_op(&mut reds)?,
                 Op::StackDepth => self.stack_depth()?,
+                Op::LiveSubjects => self.live_subjects()?,
                 Op::Monotonic => self.monotonic()?,
                 Op::Argv => self.argv()?,
                 Op::EnvMap => self.env_map()?,
@@ -860,7 +861,6 @@ impl VM {
                 Op::ProcessKill => self.process_kill(&mut reds)?,
                 Op::ProcessSelf => self.process_self(),
                 Op::ProcessMonitor => self.process_monitor(&mut reds)?,
-                Op::ProcessDemonitor => self.process_demonitor()?,
                 Op::SupervisorNew => self.supervisor_new()?,
                 Op::SupervisorWorker => self.supervisor_worker(&mut reds)?,
                 Op::FactoryNew => self.factory_new(&mut reds)?,
@@ -873,6 +873,7 @@ impl VM {
                 Op::SupervisedInfo => self.supervised_info()?,
                 Op::WatchNew => self.watch_new(&mut reds)?,
                 Op::WatchCancel => self.watch_cancel()?,
+                Op::ProcessDemonitor => self.process_demonitor()?,
                 Op::SupervisorWorkerOnEach => self.supervisor_worker_on_each(&mut reds)?,
                 Op::FactorySpawn => self.factory_spawn(&mut reds)?,
                 Op::Sleep => park!(self.sleep()),
@@ -1303,6 +1304,16 @@ impl VM {
     /// `Op::StackDepth` — the current call depth.
     pub(super) fn stack_depth(&mut self) -> VmResult<()> {
         self.stack.push(Value::small_int(self.frames.len() as i64));
+        Ok(())
+    }
+
+    /// `Op::LiveSubjects` — see the opcode's docs.
+    pub(super) fn live_subjects(&mut self) -> VmResult<()> {
+        let n = self
+            .runtime
+            .live_subjects
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.stack.push(Value::small_int(n as i64));
         Ok(())
     }
 

@@ -186,6 +186,7 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::FloatToString
         | Op::Print
         | Op::StackDepth
+        | Op::LiveSubjects
         | Op::TcpListen
         | Op::TcpClose
         | Op::TlsClose
@@ -215,8 +216,8 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::FactorySpawn
         | Op::SubjectNew
         | Op::SubjectSend
-        | Op::Monotonic
         | Op::SubjectSendUrgent
+        | Op::Monotonic
         | Op::Argv
         | Op::EnvMap
         | Op::MapGet

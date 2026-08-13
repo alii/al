@@ -20,23 +20,34 @@
 //! that re-check, and a send that lands after finds the waiter and delivers a
 //! wake through the owner scheduler's wake queue ([`Runtime::deliver_wake`]).
 //!
-//! A subject dies with its owner: process death drops its mailboxes and every
-//! queued message. Sending to a dead subject silently drops the message —
-//! fire-and-forget, the BEAM rule. The exception is a *durable* subject, the
-//! address of a supervised worker ([`super::supervision`]): it is not indexed
-//! under any process, so an incarnation's death leaves it in place for the
-//! next incarnation to be given ([`Runtime::subject_rehome`], which also
+//! A mailbox lives exactly as long as its owner holds the subject. The value
+//! `subject()` hands the owner is an owning box (`HeapTag::Subject`) whose
+//! release — by Perceus at the last use, or by the heap going away when the
+//! process ends — calls the [`SubjectCloser`] installed here, which closes
+//! the mailbox and drops whatever was queued. So a reply subject made for one
+//! request is gone the moment the reply has been received, and a process's
+//! mailboxes die with it, without any index of who owns what. Everyone else
+//! — a message carrying the subject, a spawned closure — holds only the
+//! immediate id, which sends can use while the mailbox exists and which
+//! silently drops the message afterwards: fire-and-forget, the BEAM rule.
+//! Nobody but the owner could ever receive, so nobody but the owner has any
+//! reason to keep a mailbox alive.
+//!
+//! The one mailbox not owned this way is a *durable* subject, the address of
+//! a supervised worker ([`super::supervision`]): the tree owns it, every
+//! incarnation receives on it as an immediate, an incarnation's death leaves
+//! it in place for the next one ([`Runtime::subject_rehome`], which also
 //! empties it — a fresh incarnation does not inherit the backlog that may
-//! have killed the last one), and it is closed explicitly
+//! have killed the last one), and the tree closes it
 //! ([`Runtime::subject_close`]) when the worker's slot is retired. That is
 //! what makes a supervised worker's address stable across restarts.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
-use crate::bytecode::Value;
+use crate::bytecode::{SubjectCloser, Value};
 use crate::heap::ProcHeap;
 
 use super::poll::{EPOCH, Parked, Wait, monotonic_now_ms};
@@ -74,13 +85,8 @@ pub(super) struct Mailboxes {
     next_slot: AtomicU64,
     /// Retired slot indices awaiting reuse. FIFO, so reuse spreads across
     /// slots and a serial needs its full 2^20 laps of one slot to alias.
-    /// Taken at create and death, never per message.
+    /// Taken at create and close, never per message.
     free: Mutex<VecDeque<u64>>,
-    /// Subject ids by owning pid — the death path's index, so ending a
-    /// process does not scan every mailbox in the program. Its own lock:
-    /// taken at create and death, never per message.
-    /// Durable subjects are absent from it, which is what makes them durable.
-    by_owner: Mutex<HashMap<u64, Vec<u64>>>,
 }
 
 /// One lazily-allocated block of slots, always `SEGMENT_SLOTS` long.
@@ -105,7 +111,6 @@ impl Mailboxes {
             segments,
             next_slot: AtomicU64::new(0),
             free: Mutex::new(VecDeque::new()),
-            by_owner: Mutex::new(HashMap::new()),
         }
     }
 
@@ -186,15 +191,17 @@ enum TryReceive {
 }
 
 impl Runtime {
-    /// Mint a mailbox owned by `owner`, indexed so it dies with `owner`, and
-    /// return its subject id.
-    fn subject_create(&self, owner: u64) -> u64 {
-        let id = self.alloc_mailbox(owner);
-        lock(&self.mailboxes.by_owner)
-            .entry(owner)
-            .or_default()
-            .push(id);
-        id
+    /// The closer an owning subject box carries: closes the mailbox in this
+    /// runtime, if the runtime is still there. Weak, so a box that outlives
+    /// the runtime (a value the embedder kept after the run) is a no-op to
+    /// free rather than a reason the runtime can never be dropped.
+    pub(super) fn subject_closer(self: &Arc<Runtime>) -> Arc<SubjectCloser> {
+        let runtime: Weak<Runtime> = Arc::downgrade(self);
+        Arc::new(SubjectCloser(Box::new(move |id| {
+            if let Some(runtime) = runtime.upgrade() {
+                runtime.subject_close(id);
+            }
+        })))
     }
 
     /// Mint a durable mailbox: received on by `receiver` for now, surviving
@@ -239,8 +246,10 @@ impl Runtime {
         drop(stale);
     }
 
-    /// Close one durable subject, dropping its queue. Later sends are
-    /// dropped, as to any dead subject.
+    /// Close a mailbox, dropping its queue: an owning box being freed, or
+    /// the tree retiring a durable address. Later sends are dropped, as to
+    /// any dead subject; a second close of the same id is a no-op, since the
+    /// serial no longer matches.
     pub(super) fn subject_close(&self, id: u64) {
         let dead = {
             let mut slot = lock(self.mailboxes.slot(slot_index(id)));
@@ -254,9 +263,10 @@ impl Runtime {
         drop(dead);
     }
 
-    /// Take a slot and install an empty mailbox for `owner` in it. Shared by
-    /// both kinds of subject; indexing is the caller's decision.
-    fn alloc_mailbox(&self, owner: u64) -> u64 {
+    /// Take a slot and install an empty mailbox received on by `owner`.
+    /// Shared by both kinds of subject: who closes it is the caller's
+    /// business — the owning box for `subject()`, the tree for an address.
+    pub(super) fn alloc_mailbox(&self, owner: u64) -> u64 {
         let index = match lock(&self.mailboxes.free).pop_front() {
             Some(i) => i,
             None => {
@@ -345,39 +355,6 @@ impl Runtime {
         true
     }
 
-    /// Drop every mailbox `owner` created, with its queued messages. Called
-    /// on process death; the counter gate keeps subject-free programs at one
-    /// atomic load per death.
-    pub(super) fn subject_close_all(&self, owner: u64) {
-        if self.live_subjects.load(Ordering::Relaxed) == 0 {
-            return;
-        }
-        let Some(ids) = lock(&self.mailboxes.by_owner).remove(&owner) else {
-            return;
-        };
-        // The serial stays until the slot's next tenant bumps it, so a
-        // straggler send between here and reuse misses on `mb` being gone.
-        let mut retired = Vec::with_capacity(ids.len());
-        let dead: Vec<Mailbox> = ids
-            .into_iter()
-            .filter_map(|id| {
-                let mut slot = lock(self.mailboxes.slot(slot_index(id)));
-                let live = slot.serial == slot_serial(id);
-                let mb = if live { slot.mb.take() } else { None };
-                if mb.is_some() {
-                    retired.push(slot_index(id));
-                }
-                mb
-            })
-            .collect();
-        self.live_subjects.fetch_sub(dead.len(), Ordering::Relaxed);
-        lock(&self.mailboxes.free).extend(retired);
-        // The queued graphs are freed here, outside the lock. The owner
-        // cannot be parked on any of these (it just died), so no waiter is
-        // stranded.
-        drop(dead);
-    }
-
     /// Queue a wait id on scheduler `sched`'s wake list and interrupt its
     /// poller. The cross-thread half of waking a parked receiver.
     ///
@@ -395,10 +372,12 @@ impl Runtime {
 }
 
 impl VM {
-    /// `Op::SubjectNew`: push a fresh subject owned by the current process.
+    /// `Op::SubjectNew`: push a fresh subject owned by the current process —
+    /// the owning box, whose lifetime is the mailbox's.
     pub(super) fn subject_new(&mut self) -> VmResult<()> {
-        let id = self.runtime.subject_create(self.current_pid);
-        self.stack.push(Value::subject(id));
+        let id = self.runtime.alloc_mailbox(self.current_pid);
+        let handle = Value::owned_subject_in(&mut self.heap, id, &self.subject_closer);
+        self.stack.push(handle);
         Ok(())
     }
 

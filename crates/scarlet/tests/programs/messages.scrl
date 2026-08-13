@@ -3,6 +3,7 @@
 // multi-sender traffic is asserted as an aggregate, and every sequenced line
 // rides a request/reply handshake that forces the order it prints in.
 
+import scarlet/internal
 import scarlet/process
 import scarlet/process.{Subject}
 
@@ -152,4 +153,34 @@ pub fn main() {
 	process.sleep(30)
 	process.send(orphan, 99)
 	println('send to a dead subject: ok')
+
+	// --- a subject dies when its owner lets go of it -------------------------------
+	// A request/reply makes a fresh reply subject per call; each is reclaimed
+	// as soon as the reply has been received, so a thousand exchanges leave
+	// the mailbox count exactly where it started. (Reference counting frees
+	// the handle at its last use; freeing the handle closes the mailbox.)
+
+	counter_boot = process.subject()
+	_ = process.spawn(fn() {
+		counter_inbox = process.subject()
+		process.send(counter_boot, counter_inbox)
+		serve(counter_inbox, 0)
+	})
+	counter = process.receive(counter_boot)
+	before = internal.live_subjects()
+	check('a thousand request/replies add up', True, ask_repeatedly(counter, 1000, 0) == 1000)
+	check('and leave no mailboxes behind', True, internal.live_subjects() == before)
+	stopped = process.subject()
+	process.send(counter, Stop(stopped))
+	_ = process.receive(stopped)
+}
+
+fn ask_repeatedly(server Subject(Msg), left Int, last Int) Int {
+	if left == 0 {
+		last
+	} else {
+		reply = process.subject()
+		process.send(server, Add(1, reply))
+		ask_repeatedly(server, left - 1, process.receive(reply))
+	}
 }

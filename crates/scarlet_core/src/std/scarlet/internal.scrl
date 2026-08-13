@@ -2,6 +2,13 @@
  * VM introspection hooks; unstable, for debugging — not a stable API.
  */
 
-// The number of stack frames in the calling process — see examples/tco.al.
+// The number of stack frames in the calling process — see examples/tco.scrl.
 @vm(internal__stack_depth)
 pub fn stack_depth() Int
+
+// The number of mailboxes open across the whole program: every subject some
+// process still holds, plus every supervised worker's address. A subject is
+// reclaimed as soon as its owner lets go of it, so this stays flat through
+// any number of request/reply exchanges — see tests/programs/messages.scrl.
+@vm(internal__live_subjects)
+pub fn live_subjects() Int

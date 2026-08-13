@@ -459,6 +459,10 @@ pub struct VM {
     /// The scheduler runtime, present from construction. Worker threads
     /// inside it start lazily on the first spawn.
     runtime: Arc<Runtime>,
+    /// What every subject this scheduler creates carries, to close its
+    /// mailbox when the owner lets go of it (see [`mailbox`]). One per
+    /// scheduler, shared by all of its subjects.
+    subject_closer: Arc<crate::bytecode::SubjectCloser>,
     /// This VM's scheduler index; 0 is the main thread.
     scheduler_index: usize,
     /// The global (literal) area: top-level bindings, addressed by
@@ -542,6 +546,7 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
         timer_heap: BinaryHeap::new(),
         poll,
         poll_events: mio::Events::with_capacity(poll::EVENTS_CAPACITY),
+        subject_closer: runtime.subject_closer(),
         runtime,
         scheduler_index: index,
         globals: vec![Value::nil(); globals_len],
@@ -690,43 +695,46 @@ impl VM {
                     return Err(VmError::internal("Step::Dispatch escaped run_slice"));
                 }
                 Step::Done => {
-                    let exit = self.terminate(self.current_pid, Exit::Normal)?;
-                    // The finished process's result is its top-of-stack —
-                    // unless it turned out to have been killed on the way
-                    // out, in which case main has no result to give.
-                    if self.current_is_main && matches!(exit, Exit::Killed) {
-                        self.note_main_killed();
-                    } else if self.current_is_main {
-                        // Stash the (value, heap) pair together until the
-                        // loop's exit hands the value out; dropping the heap
-                        // here would dangle the result.
-                        //
-                        // Above the locals, or there is no result: the entry
-                        // frame's locals are pre-filled with `0`, so a bare
-                        // `pop` of an empty evaluation stack would hand back
-                        // one of those zeros as if the program had computed
-                        // it. That is what a program whose toplevel was never
-                        // emitted looks like, and it is a compiler bug, not a
-                        // value.
+                    let pid = self.current_pid;
+                    let was_main = std::mem::take(&mut self.current_is_main);
+                    // The finished process's result is its top-of-stack.
+                    // Above the locals, or there is no result: the entry
+                    // frame's locals are pre-filled with `0`, so a bare `pop`
+                    // of an empty evaluation stack would hand back one of
+                    // those zeros as if the program had computed it. That is
+                    // what a program whose toplevel was never emitted looks
+                    // like, and it is a compiler bug, not a value.
+                    let result = if was_main {
                         if self.stack.len() <= self.main_stack_floor {
                             return Err(VmError::internal(
                                 "the entry frame halted without a value: its toplevel is missing",
                             ));
                         }
-                        let result = match self.stack.pop() {
+                        Some(match self.stack.pop() {
                             Some(v) => v,
                             None => self.make_nil()?,
-                        };
-                        self.main_outcome = Some(MainOutcome::Returned(
-                            result,
-                            std::mem::take(&mut self.heap),
-                        ));
+                        })
                     } else {
-                        self.heap = ProcHeap::new();
-                    }
+                        None
+                    };
+                    // Everything else the process held is released before
+                    // anyone is told it ended: its subjects close as their
+                    // owning handles go, so a monitor's notice can never be
+                    // delivered to one of the dead process's own mailboxes.
                     self.stack.clear();
                     self.frames.clear();
-                    self.current_is_main = false;
+                    let heap = std::mem::take(&mut self.heap);
+                    let exit = self.terminate(pid, Exit::Normal)?;
+                    match result {
+                        // A return that turned out to be a kill leaves main
+                        // with nothing to hand out.
+                        Some(_) if matches!(exit, Exit::Killed) => self.note_main_killed(),
+                        // Stashed with its heap until the loop's exit hands
+                        // the value out; the pair travels together because
+                        // the value points into the heap.
+                        Some(value) => self.main_outcome = Some(MainOutcome::Returned(value, heap)),
+                        None => {}
+                    }
                 }
                 Step::Yield => {
                     // One balancing decision per yield: take whatever peers

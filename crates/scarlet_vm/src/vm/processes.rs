@@ -523,7 +523,6 @@ impl VM {
     /// is reported as one.
     pub(super) fn terminate(&mut self, pid: u64, exit: Exit) -> VmResult<Exit> {
         self.release_connections_of(pid);
-        self.runtime.subject_close_all(pid);
         let (exit, aftermath) = self.runtime.unregister_process(pid, exit);
         for notice in aftermath.notices {
             let reason = self.exit_reason(&exit)?;
