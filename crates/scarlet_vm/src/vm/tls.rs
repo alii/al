@@ -65,6 +65,7 @@
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
 use rustls_pki_types::ServerName;
@@ -73,7 +74,7 @@ use crate::abi::AbiSlot;
 use crate::bytecode::{SocketKind, SocketValue, Value};
 
 use super::io::stale_socket;
-use super::poll::{Parked, Wait};
+use super::poll::{EPOCH, Parked, Wait, monotonic_now_ms};
 use super::port::ConnIo;
 use super::{IO_REDUCTION_COST, VM, VmError, VmResult, bin_ref, str_ref};
 
@@ -528,6 +529,48 @@ impl VM {
                 self.stack.push(sock_val);
                 self.stack.push(Value::small_int(max as i64));
                 return Ok(Some(Parked::retry(Wait::readable(sv.id))));
+            }
+            Err(e) => self.push_tls_io(e)?,
+        }
+        Ok(None)
+    }
+
+    /// `Op::TlsReadUntil`: `[tls_socket, max, deadline_ms] -> Result(Read, TlsError)`.
+    ///
+    /// The same shape as `Op::TcpReadUntil`, including the deadline-captured-
+    /// once-in-Scarlet discipline: a re-run re-reads the absolute monotonic ms
+    /// and never resets the clock. Split from that opcode because a timeout
+    /// here is `TlsError::Transport(TimedOut)`, not a bare `NetError`.
+    pub(super) fn tls_read_until(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
+        *reds -= IO_REDUCTION_COST;
+        // Stack, top first: the deadline as an absolute monotonic ms, the max
+        // byte count, then the socket. Scarlet captures the deadline once, so a
+        // re-run after a wake re-reads it and never resets the clock.
+        let deadline_ms = self.pop_int("tls.read_within")?;
+        let max = self.pop_int("tls.read_within")?;
+        let sock_val = self.pop()?;
+        let sv = stream_handle(&sock_val, "tls.read_within")?;
+        let (max, read_res) = self.socket_read(sv, max);
+        match read_res {
+            // The read runs before the deadline check, so bytes that arrived
+            // as the clock ran out are never discarded.
+            Ok(n) => self.push_read_ok(n)?,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                if monotonic_now_ms() >= deadline_ms {
+                    let timed_out = self.abi_nullary(AbiSlot::NetEtimedout)?;
+                    let err = self.abi_make(AbiSlot::TlsTransport, &[timed_out])?;
+                    let v = self.make_err(err)?;
+                    self.stack.push(v);
+                } else {
+                    self.stack.push(sock_val);
+                    self.stack.push(Value::small_int(max as i64));
+                    self.stack.push(Value::small_int(deadline_ms));
+                    let deadline = *EPOCH.get_or_init(Instant::now)
+                        + Duration::from_millis(deadline_ms.max(0) as u64);
+                    return Ok(Some(Parked::retry(Wait::read_with_deadline(
+                        sv.id, deadline,
+                    ))));
+                }
             }
             Err(e) => self.push_tls_io(e)?,
         }

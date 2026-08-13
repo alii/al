@@ -635,6 +635,7 @@ mod opc {
     pub const TLS_CLOSE: u8 = Op::TlsClose as u8;
     pub const TLS_HANDSHAKE: u8 = Op::TlsHandshake as u8;
     pub const TLS_READ: u8 = Op::TlsRead as u8;
+    pub const TLS_READ_UNTIL: u8 = Op::TlsReadUntil as u8;
     pub const TLS_WRITE: u8 = Op::TlsWrite as u8;
     pub const TO_STRING: u8 = Op::ToString as u8;
     pub const TUPLE_INDEX: u8 = Op::TupleIndex as u8;
@@ -755,6 +756,7 @@ impl VM {
             opc::TCP_WRITE_PARTS => self.tcp_write_parts(reds),
             opc::TLS_HANDSHAKE => self.tls_handshake(reds),
             opc::TLS_READ => self.tls_read(reds),
+            opc::TLS_READ_UNTIL => self.tls_read_until(reds),
             opc::TLS_WRITE => self.tls_write(reds),
             opc::DNS_RESOLVE => self.dns_resolve(reds),
             opc::SLEEP => self.sleep(),

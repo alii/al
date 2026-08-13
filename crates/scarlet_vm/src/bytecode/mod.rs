@@ -344,6 +344,12 @@ pub enum Op {
     /// from `TcpRead` because its failures are `TlsError` values, not
     /// `NetError` ones. (scarlet/net/tls.read)
     TlsRead,
+    /// `[tls_socket, max, deadline_ms] -> Result(Read, TlsError)` — parks until
+    /// plaintext decrypts, the peer closes, or the absolute monotonic-ms
+    /// deadline passes (then `Err(Transport(TimedOut))`). Split from
+    /// `TcpReadUntil` for the same reason `TlsRead` is split from `TcpRead`.
+    /// (scarlet/net/tls.read_until)
+    TlsReadUntil,
     /// `[tls_socket, data] -> Result(Nil, TlsError)` — encrypting write, which
     /// returns only once the ciphertext has reached the kernel rather than the
     /// session's own buffer. (scarlet/net/tls.write)
@@ -719,6 +725,7 @@ impl Op {
             | Op::PortClose
             | Op::TlsHandshake
             | Op::TlsRead
+            | Op::TlsReadUntil
             | Op::TlsWrite
             | Op::TlsClose
             | Op::ProcessSpawn
@@ -938,6 +945,7 @@ impl Op {
             | Op::PortClose
             | Op::TlsHandshake
             | Op::TlsRead
+            | Op::TlsReadUntil
             | Op::TlsWrite
             | Op::TlsClose
             | Op::ProcessSpawn
