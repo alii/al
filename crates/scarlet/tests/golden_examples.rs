@@ -278,6 +278,9 @@ suite! {
         // A supervised application (a chat service): the reference for the
         // shape of a `process.root` program. Serves for ever, like http_server.
         supervision,
+        // A single-room chat: SSE responses served out of per-connection
+        // mailboxes, tabs rejoining a restarted worker. Serves for ever.
+        chat,
     ],
 
     // Perf infrastructure driven from outside this file (scripts/bench*.sh, and

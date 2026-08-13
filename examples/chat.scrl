@@ -1,0 +1,557 @@
+// A live chatroom in one file: one room, a dashboard served from this file,
+// messages pushed to every browser over server-sent events.
+//
+//	main
+//	└─ app                     one-for-one, 10 restarts a minute
+//	   ├─ room                 permanent worker: members, history, the counters
+//	   └─ http                 (declared by http.serve_in)
+//	      ├─ connections       factory: one disposable member per connection —
+//	      │                    every open browser tab is one of these, parked
+//	      │                    on its own mailbox inside its SSE response
+//	      └─ acceptor × cores
+//
+// A browser tab GETs /events; the connection's process subscribes its own
+// mailbox to the room and then serves the response body straight out of that
+// mailbox, so a message is one send per tab. The room monitors each tab's
+// process and drops it when the tab goes away. The tab's process watches the
+// room's place in the tree: when the room crashes (there is a button for
+// that) the supervisor restarts it at the same address, every tab rejoins the
+// new incarnation without reconnecting, and all that is lost is the history.
+//
+// Run it and open http://localhost:8080 in a few tabs. PORT overrides the port.
+
+import scarlet/array
+import scarlet/binary
+import scarlet/binary.{Dec}
+import scarlet/http
+import scarlet/http.{Fixed, Get, Post, Request, Response, Unsized}
+import scarlet/http/body
+import scarlet/http/body.{Body, Chunk, Done}
+import scarlet/http/headers.{Header}
+import scarlet/map
+import scarlet/map.{Map}
+import scarlet/os
+import scarlet/process
+import scarlet/process.{
+	Disposable,
+	Down,
+	FactoryOf,
+	Gone,
+	OneForAll,
+	OneForOne,
+	Permanent,
+	Pid,
+	Process,
+	RestForOne,
+	Restarted,
+	Restarting,
+	Running,
+	Subject,
+	Supervised,
+	SupervisorOf,
+	Temporary,
+	Transient,
+	Worker,
+}
+import scarlet/string
+
+const HISTORY = 100
+const MAX_NAME = 24
+const MAX_TEXT = 500
+const MAX_SAY = 4096
+// A tab that has heard nothing for this long is sent a comment, which is how a
+// tab that silently went away is found out: the write fails, the connection's
+// process ends, and the room's monitor on it fires.
+const HEARTBEAT_MS = 15_000
+
+// ---- the room ------------------------------------------------------------------------
+
+type RoomMsg {
+	// A tab's process, and the mailbox its response body is being served from.
+	Join(who Pid, feed Subject(Feed))
+	Say(name String, text String)
+	// The monitor placed at Join, wrapped into the room's own message type.
+	Left(down Down)
+	Crash
+}
+
+// What a tab's process receives: rendered SSE frames from the room, and the
+// watch it holds on the room's place in the tree.
+type Feed {
+	Frame(bytes Binary)
+	RoomExit(exit process.Exit)
+}
+
+type Room {
+	inbox Subject(RoomMsg)
+	// The room's own place in the tree: its restart count is on the dashboard,
+	// and its parent is the whole application, which the dashboard draws.
+	place Supervised
+	members Map(Pid, Subject(Feed))
+	// The last HISTORY message frames, oldest first, replayed to each joiner.
+	history Array(Binary)
+	said Int
+}
+
+fn room(inbox Subject(RoomMsg)) Nil {
+	room_loop(
+		Room(
+			inbox: inbox,
+			place: process.supervised(inbox),
+			members: map.new(),
+			history: [],
+			said: 0,
+		),
+	)
+}
+
+fn room_loop(r Room) Nil {
+	match process.receive(r.inbox) {
+		Join(who, feed) -> {
+			_ = process.monitor(who, r.inbox, fn(down) Left(down))
+			replay(feed, r.history)
+			joined = Room(..r, members: map.set(r.members, who, feed))
+			announce(joined)
+			room_loop(joined)
+		}
+		Left(down) -> {
+			left = Room(..r, members: map.delete(r.members, down.pid))
+			announce(left)
+			room_loop(left)
+		}
+		Say(name, text) -> {
+			frame = message_frame(name, text)
+			broadcast(r.members, frame)
+			said = Room(..r, history: remember(r.history, frame), said: r.said + 1)
+			broadcast(said.members, stats_frame(said))
+			room_loop(said)
+		}
+		// An out-of-range slice is a crash: this process ends, the supervisor
+		// starts `room` again on the same inbox, and the tabs rejoin it.
+		Crash -> {
+			_ = r.history[0..1_000_000]
+			Nil
+		}
+	}
+}
+
+// Someone came or went: the counters and the tree have both changed.
+fn announce(r Room) Nil {
+	broadcast(r.members, stats_frame(r))
+	broadcast(r.members, tree_frame(r))
+}
+
+// One send per member of a frame rendered once; the bytes are shared, not
+// copied, so a message to a thousand tabs is a thousand sends of one Binary.
+fn broadcast(members Map(Pid, Subject(Feed)), frame Binary) Nil {
+	map.fold(members, Nil, fn(_, _who, feed) process.send(feed, Frame(frame)))
+}
+
+// The whole history goes to a joiner as one chunk.
+fn replay(feed Subject(Feed), history Array(Binary)) Nil {
+	match history {
+		[] -> Nil
+		_ -> process.send(feed, Frame(array.fold(history, <<>>, fn(acc, f) binary.append(acc, f))))
+	}
+}
+
+fn remember(history Array(Binary), frame Binary) Array(Binary) {
+	n = array.length(history)
+	kept = if n < HISTORY {
+		history
+	} else {
+		history[1..n]
+	}
+	[..kept, frame]
+}
+
+// ---- frames --------------------------------------------------------------------------
+//
+// Server-sent events: a frame is `event:` and `data:` lines ending in a blank
+// line; a browser joins several data lines with newlines, which is how a
+// multi-line message crosses. The name rides as the first data line.
+
+fn message_frame(name String, text String) Binary {
+	head = 'event: message\ndata: ${name}\n'
+	framed = array.fold(string.split(text, '\n'), head, fn(acc, line) acc + 'data: ${line}\n')
+	binary.from_string(framed + '\n')
+}
+
+fn stats_frame(r Room) Binary {
+	restarts = process.info(r.place).restarts
+	binary.from_string('event: stats\ndata: ${map.size(r.members)} ${r.said} ${restarts}\n\n')
+}
+
+fn tree_frame(r Room) Binary {
+	lines = render(process.parent(r.place), '', r.place)
+	framed = array.fold(lines, 'event: tree\n', fn(acc, line) acc + 'data: ${line}\n')
+	binary.from_string(framed + '\n')
+}
+
+const HELLO = <<'retry: 1000\n\n'>>
+const PING = <<': ping\n\n'>>
+const RESTARTED = <<
+	'event: system\ndata: the room process crashed and was restarted; this tab rejoined it\n\n',
+>>
+
+// ---- the tree, as text ---------------------------------------------------------------
+
+// `node` and everything under it, one line each. Runs of identical siblings
+// (one acceptor per core) collapse into one line with a multiplier.
+fn render(node Supervised, indent String, me Supervised) Array(String) {
+	blocks = array.map(process.children(node), fn(child) render(child, indent + '  ', me))
+	array.fold(
+		collapse(blocks),
+		[indent + describe(node, me)],
+		fn(out, block) array.concat(out, block),
+	)
+}
+
+fn describe(node Supervised, me Supervised) String {
+	info = process.info(node)
+	what = match info.kind {
+		Process -> 'process'
+		Worker(policy) -> if node == me {
+			'room  ${policy_name(policy)} worker'
+		} else {
+			'${policy_name(policy)} worker'
+		}
+		SupervisorOf(strategy) -> 'supervisor ' + strategy_name(strategy)
+		FactoryOf(Disposable) -> 'factory disposable, ${process.count(node)} live'
+		FactoryOf(Restarted(restarts, within_ms)) ->
+			'factory ${budget(restarts, within_ms)}, ${process.count(node)} live'
+	}
+	restarted = if info.restarts > 0 {
+		', restarted ${info.restarts}'
+	} else {
+		''
+	}
+	status = match info.status {
+		Running -> ''
+		Restarting -> ' (restarting)'
+		Gone -> ' (gone)'
+	}
+	what + restarted + status
+}
+
+fn policy_name(policy process.Policy) String {
+	match policy {
+		Permanent -> 'permanent'
+		Transient -> 'transient'
+		Temporary -> 'temporary'
+	}
+}
+
+fn strategy_name(strategy process.Strategy) String {
+	match strategy {
+		OneForOne(restarts, within_ms) -> 'one-for-one, ${budget(restarts, within_ms)}'
+		OneForAll(restarts, within_ms) -> 'one-for-all, ${budget(restarts, within_ms)}'
+		RestForOne(restarts, within_ms) -> 'rest-for-one, ${budget(restarts, within_ms)}'
+	}
+}
+
+fn budget(restarts Int, within_ms Int) String {
+	if within_ms % 1000 == 0 {
+		'${restarts} restarts/${within_ms / 1000}s'
+	} else {
+		'${restarts} restarts/${within_ms}ms'
+	}
+}
+
+fn collapse(blocks Array(Array(String))) Array(Array(String)) {
+	runs = array.fold(blocks, [], fn(acc, block) match acc {
+		[(prev, n), ..rest] if prev == block -> [(prev, n + 1), ..rest]
+		_ -> [(block, 1), ..acc]
+	})
+	array.map(array.reverse(runs), fn(run) {
+		(block, n) = run
+		match block {
+			[first, ..rest] if n > 1 -> ['${first} ×${n}', ..rest]
+			_ -> block
+		}
+	})
+}
+
+// ---- http ----------------------------------------------------------------------------
+
+fn route(req Request, chat Subject(RoomMsg)) Response {
+	match (req.method, http.path(req)) {
+		(Get, <<'/'>>) -> page()
+		(Get, <<'/events'>>) -> events(chat)
+		(Post, <<'/say'>>) -> say(req, chat)
+		(Post, <<'/crash'>>) -> {
+			process.send(chat, Crash)
+			no_content()
+		}
+		_ -> http.not_found()
+	}
+}
+
+// Runs in the connection's own process, which is what makes this work: the
+// mailbox made here belongs to that process, and the response body below is
+// pulled by that same process, so it may receive on it. The body's first
+// chunk is ready before anything has been received, so the response head goes
+// out at once; after that each pull is one message from the room. The
+// connection lives exactly as long as this body: a tab that closes makes the
+// next write fail, which ends the process, which fires the room's monitor.
+fn events(chat Subject(RoomMsg)) Response {
+	feed = process.subject()
+	_ = process.watch(process.supervised(chat), feed, fn(exit) RoomExit(exit))
+	process.send(chat, Join(process.self(), feed))
+	Response(
+		status: 200,
+		headers: SSE_HEADERS,
+		body: Unsized(fn() Ok(Chunk(HELLO, live(chat, feed)))),
+	)
+}
+
+fn live(chat Subject(RoomMsg), feed Subject(Feed)) Body {
+	fn() match process.receive_within(feed, HEARTBEAT_MS) {
+		Ok(Frame(bytes)) -> Ok(Chunk(bytes, live(chat, feed)))
+		Ok(RoomExit(exit)) -> match exit.status {
+			// The address survived the process behind it: join the new one.
+			Running -> {
+				process.send(chat, Join(process.self(), feed))
+				Ok(Chunk(RESTARTED, live(chat, feed)))
+			}
+			// The supervisor gave up: the program is on its way out. Ending
+			// the stream makes the browser retry, which finds nobody.
+			Restarting -> Ok(Done([]))
+			Gone -> Ok(Done([]))
+		}
+		Err(Nil) -> Ok(Chunk(PING, live(chat, feed)))
+	}
+}
+
+// The body is the name on the first line and the message on the rest.
+fn say(req Request, chat Subject(RoomMsg)) Response {
+	match body.collect(req.body, MAX_SAY) {
+		Err(_) -> text(413, 'too long')
+		Ok(bytes) -> match binary.to_string(bytes) {
+			Err(Nil) -> text(400, 'not utf-8')
+			Ok(s) -> match string.split(s, '\n') {
+				[] -> text(400, 'empty')
+				[first, ..rest] -> {
+					name = string.trim(without(first, '\r'))
+					message = string.trim(without(join(rest, '\n'), '\r'))
+					if name == '' || string.length(name) > MAX_NAME {
+						text(400, 'bad name')
+					} else if message == '' || string.length(message) > MAX_TEXT {
+						text(400, 'bad message')
+					} else {
+						process.send(chat, Say(name, message))
+						no_content()
+					}
+				}
+			}
+		}
+	}
+}
+
+// A bare carriage return would end an SSE line early, so none may get in.
+fn without(s String, needle String) String {
+	join(string.split(s, needle), '')
+}
+
+fn join(parts Array(String), sep String) String {
+	match parts {
+		[] -> ''
+		[first, ..rest] -> array.fold(rest, first, fn(acc, part) acc + sep + part)
+	}
+}
+
+const NAME_CONTENT_TYPE = <<'Content-Type'>>
+const NAME_CACHE_CONTROL = <<'Cache-Control'>>
+const SSE_HEADERS = [
+	Header(name: NAME_CONTENT_TYPE, value: <<'text/event-stream'>>),
+	Header(name: NAME_CACHE_CONTROL, value: <<'no-cache'>>),
+]
+
+fn page() Response {
+	Response(
+		status: 200,
+		headers: [Header(name: NAME_CONTENT_TYPE, value: <<'text/html; charset=utf-8'>>)],
+		body: Fixed(binary.byte_size(PAGE), body.from_binary(PAGE)),
+	)
+}
+
+fn no_content() Response {
+	Response(status: 204, headers: [], body: Fixed(0, body.empty()))
+}
+
+fn text(status Int, s String) Response {
+	bytes = binary.from_string(s)
+	Response(
+		status: status,
+		headers: [Header(name: NAME_CONTENT_TYPE, value: <<'text/plain; charset=utf-8'>>)],
+		body: Fixed(binary.byte_size(bytes), body.from_binary(bytes)),
+	)
+}
+
+// ---- main ----------------------------------------------------------------------------
+
+fn port() Int {
+	match os.get_env('PORT') {
+		Some(p) -> binary.parse_int(binary.from_string(p), Dec) or 8080
+		None -> 8080
+	}
+}
+
+pub fn main() Nil {
+	// The crash button counts against this. Past it the supervisor gives up,
+	// which kills this process: the program exits non-zero, as it should when
+	// something is failing faster than restarting can help.
+	app <- process.root(OneForOne(restarts: 10, within_ms: 60_000))
+	chat = process.permanent(app, room)
+	match http.serve_in(app, '0.0.0.0', port(), fn(req) route(req, chat)) {
+		Ok(_) -> println('chat is up on http://localhost:${port()}')
+		// Nothing to serve with: failing this process takes the tree down and
+		// exits non-zero, instead of `root` parking a program that does nothing.
+		Err(e) -> {
+			println('cannot listen on port ${port()}: ${e}')
+			process.kill(process.self())
+		}
+	}
+}
+
+// ---- the dashboard -------------------------------------------------------------------
+//
+// One page, no build step, no dependencies. Messages are rendered with
+// textContent, so nothing anyone types is ever interpreted as markup.
+
+const PAGE = binary.from_string(join(PAGE_LINES, '\n'))
+
+const PAGE_LINES = [
+	'<!doctype html>',
+	'<html lang="en">',
+	'<head>',
+	'<meta charset="utf-8">',
+	'<meta name="viewport" content="width=device-width, initial-scale=1">',
+	'<title>scarlet chat</title>',
+	'<style>',
+	':root{--bg:#0c0e13;--panel:#12151d;--line:#222835;--fg:#e8eaf0;--dim:#8b93a7;--red:#e5484d;--red-soft:rgba(229,72,77,.13);--ok:#3ddc84;',
+	'--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:-apple-system,BlinkMacSystemFont,Inter,"Segoe UI",Roboto,sans-serif}',
+	'*{box-sizing:border-box}',
+	'html,body{height:100%;margin:0}',
+	'body{display:grid;grid-template-rows:54px 1fr;grid-template-columns:1fr 340px;grid-template-areas:"head head" "chat side";background:var(--bg);color:var(--fg);font:15px/1.45 var(--sans)}',
+	'header{grid-area:head;display:flex;align-items:center;gap:12px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--panel)}',
+	'header h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.2px}',
+	'header h1 b{color:var(--red)}',
+	'#dot{width:8px;height:8px;border-radius:50%;background:var(--dim);transition:background .3s,box-shadow .3s}',
+	'#dot.on{background:var(--ok);box-shadow:0 0 10px var(--ok)}',
+	'#state{margin-left:auto;color:var(--dim);font:12px var(--mono)}',
+	'main{grid-area:chat;display:flex;flex-direction:column;min-height:0}',
+	'#log{flex:1;overflow-y:auto;padding:18px 24px 8px}',
+	'.col{max-width:760px;margin:0 auto}',
+	'#empty{padding:80px 0;color:var(--dim);text-align:center;font-size:13px}',
+	'.m{display:grid;grid-template-columns:34px 1fr;gap:10px;padding:5px 0;animation:in .18s ease-out}',
+	'@keyframes in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}',
+	'.av{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;font-weight:700;font-size:14px;color:#0c0e13}',
+	'.who{font-weight:600;font-size:13px}',
+	'.when{margin-left:8px;color:var(--dim);font:11px var(--mono)}',
+	'.txt{white-space:pre-wrap;overflow-wrap:anywhere}',
+	'.sys{padding:10px 0;text-align:center;color:var(--red);font:12px var(--mono)}',
+	'footer{padding:14px 24px 18px;border-top:1px solid var(--line);background:var(--panel)}',
+	'form{display:grid;grid-template-columns:150px 1fr auto;gap:8px}',
+	'input,button{min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--fg);font:inherit;outline:none}',
+	'input:focus{border-color:var(--red)}',
+	'button{padding:10px 18px;border-color:var(--red);background:var(--red);color:#fff;font-weight:600;cursor:pointer}',
+	'aside{grid-area:side;display:flex;flex-direction:column;gap:18px;padding:18px;border-left:1px solid var(--line);background:var(--panel);overflow-y:auto}',
+	'aside h2{margin:0 0 8px;color:var(--dim);font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase}',
+	'.tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}',
+	'.tile{padding:10px 6px;border:1px solid var(--line);border-radius:10px;background:var(--bg);text-align:center}',
+	'.tile b{display:block;font-size:22px;font-weight:600;line-height:1.1;font-variant-numeric:tabular-nums;transition:color .5s}',
+	'.tile.bump b{color:var(--red);transition:none}',
+	'.tile span{color:var(--dim);font-size:11px}',
+	'pre{margin:0;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--dim);font:11.5px/1.6 var(--mono);overflow-x:auto}',
+	'#crash{margin-top:auto;border-color:transparent;background:var(--red-soft);color:var(--red);font-size:13px;font-weight:500}',
+	'#crash:hover{background:var(--red);color:#fff}',
+	'aside p{margin:8px 0 0;color:var(--dim);font-size:11.5px;line-height:1.45}',
+	'@media (max-width:760px){body{grid-template-columns:1fr;grid-template-areas:"head" "chat"}aside{display:none}form{grid-template-columns:110px 1fr auto}}',
+	'</style>',
+	'</head>',
+	'<body>',
+	'<header><span id="dot"></span><h1><b>scarlet</b> chat</h1><span id="state">connecting</span></header>',
+	'<main>',
+	'<div id="log"><div class="col" id="messages"></div></div>',
+	'<footer><form class="col" id="composer">',
+	'<input id="who" placeholder="name" maxlength="24" autocomplete="off">',
+	'<input id="what" placeholder="say something" maxlength="500" autocomplete="off" autofocus>',
+	'<button>send</button>',
+	'</form></footer>',
+	'</main>',
+	'<aside>',
+	'<section><h2>Room</h2><div class="tiles">',
+	'<div class="tile"><b id="n-online">0</b><span>online</span></div>',
+	'<div class="tile"><b id="n-said">0</b><span>messages</span></div>',
+	'<div class="tile"><b id="n-restarts">0</b><span>restarts</span></div>',
+	'</div></section>',
+	'<section><h2>Process tree</h2><pre id="tree">waiting for the room</pre></section>',
+	'<button id="crash" type="button">crash the room process</button>',
+	'<p>The room is a supervised worker. Crash it and the supervisor restarts it at the same address:',
+	' every open tab rejoins the new one without reconnecting, and only the history is lost.',
+	' Crash it more than ten times in a minute and the supervisor gives up, and the program exits.</p>',
+	'</aside>',
+	'<script>',
+	'(function () {',
+	'  var byId = function (id) { return document.getElementById(id); };',
+	'  var log = byId("log"), list = byId("messages"), tree = byId("tree"), dot = byId("dot"), state = byId("state");',
+	'  var who = byId("who"), what = byId("what"), crash = byId("crash");',
+	'  var tiles = [byId("n-online"), byId("n-said"), byId("n-restarts")];',
+	'  who.value = localStorage.getItem("chat.name") || "";',
+	'  function hue(s) { var h = 0; for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h % 360; }',
+	'  function two(n) { return (n < 10 ? "0" : "") + n; }',
+	'  function stamp() { var d = new Date(); return two(d.getHours()) + ":" + two(d.getMinutes()); }',
+	'  function el(tag, cls, body) { var e = document.createElement(tag); e.className = cls; if (body !== undefined) e.textContent = body; return e; }',
+	'  function add(node) {',
+	'    var pinned = log.scrollHeight - log.scrollTop - log.clientHeight < 40;',
+	'    var empty = byId("empty");',
+	'    if (empty) empty.remove();',
+	'    list.appendChild(node);',
+	'    while (list.children.length > 400) list.removeChild(list.firstChild);',
+	'    if (pinned) log.scrollTop = log.scrollHeight;',
+	'  }',
+	'  function reset(note) { list.textContent = ""; var e = el("div", "", note); e.id = "empty"; list.appendChild(e); }',
+	'  function system(line) { add(el("div", "sys", line)); }',
+	'  function message(name, body) {',
+	'    var m = el("div", "m"), av = el("div", "av", name.charAt(0).toUpperCase()), right = el("div", "");',
+	'    var head = el("div", ""), n = el("span", "who", name);',
+	'    av.style.background = "hsl(" + hue(name) + " 70% 66%)";',
+	'    n.style.color = "hsl(" + hue(name) + " 70% 74%)";',
+	'    head.appendChild(n); head.appendChild(el("span", "when", stamp()));',
+	'    right.appendChild(head); right.appendChild(el("div", "txt", body));',
+	'    m.appendChild(av); m.appendChild(right); add(m);',
+	'  }',
+	'  function stats(line) {',
+	'    line.split(" ").forEach(function (n, i) {',
+	'      var tile = tiles[i];',
+	'      if (tile.textContent === n) return;',
+	'      tile.textContent = n;',
+	'      tile.parentNode.classList.add("bump");',
+	'      setTimeout(function () { tile.parentNode.classList.remove("bump"); }, 50);',
+	'    });',
+	'  }',
+	'  var events = new EventSource("/events");',
+	'  events.onopen = function () { reset("nothing said yet"); dot.className = "on"; state.textContent = "live"; };',
+	'  events.onerror = function () { dot.className = ""; state.textContent = "reconnecting"; };',
+	'  events.addEventListener("message", function (e) { var i = e.data.indexOf("\\n"); message(e.data.slice(0, i), e.data.slice(i + 1)); });',
+	'  events.addEventListener("stats", function (e) { stats(e.data); });',
+	'  events.addEventListener("tree", function (e) { tree.textContent = e.data; });',
+	'  events.addEventListener("system", function (e) { system(e.data); });',
+	'  byId("composer").onsubmit = function (e) {',
+	'    e.preventDefault();',
+	'    var name = who.value.trim() || "anon", body = what.value.trim();',
+	'    if (!body) return;',
+	'    localStorage.setItem("chat.name", name);',
+	'    what.value = "";',
+	'    var restore = function (why) { system(why); if (!what.value) what.value = body; };',
+	'    fetch("/say", { method: "POST", body: name + "\\n" + body })',
+	'      .then(function (r) { if (!r.ok) restore("rejected: " + r.status); },',
+	'            function () { restore("send failed"); });',
+	'  };',
+	'  crash.onclick = function () { fetch("/crash", { method: "POST" }); what.focus(); };',
+	'})();',
+	'</script>',
+	'</body>',
+	'</html>',
+]
