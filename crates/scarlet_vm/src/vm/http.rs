@@ -255,6 +255,18 @@ impl ConnTokens {
             self.has_keep_alive() | other.has_keep_alive(),
         )
     }
+
+    /// The matching `scarlet/http/h1.ConnTokens` value. Total, so a variant
+    /// added here without an ABI slot is a compile error rather than a state
+    /// the parser can reach and not spell.
+    fn value(self, t: &H1) -> Value {
+        match self {
+            Self::Neither => t.conn_neither.clone(),
+            Self::Close => t.conn_close.clone(),
+            Self::KeepAlive => t.conn_keep_alive.clone(),
+            Self::Both => t.conn_both.clone(),
+        }
+    }
 }
 
 /// The minimum status line: `HTTP/1.1 200` — eight version bytes, one space,
@@ -376,11 +388,7 @@ fn build_head_flags(t: &H1, a: &mut ProcHeap, flags: HeadFlags) -> Value {
     } else {
         t.head_flags.instantiate(
             a,
-            &[
-                Value::bool(flags.conn.has_close()),
-                Value::bool(flags.conn.has_keep_alive()),
-                Value::bool(flags.expect_100_continue),
-            ],
+            &[flags.conn.value(t), Value::bool(flags.expect_100_continue)],
         )
     }
 }
@@ -981,17 +989,22 @@ mod tests {
     }
 
     /// `(conn_close, conn_keep_alive, expect_100_continue)` as recorded on a
-    /// parsed head.
+    /// parsed head. The connection pair is read back out of the `ConnTokens`
+    /// variant that crossed the ABI, so the case table below witnesses the
+    /// encoding of all four token sets as well as the scanning.
     fn flags_of(x: &mut Fix, src: &str) -> (bool, bool, bool) {
         let parsed = x.parse(src, 0);
         assert_eq!(variant_of(&parsed), "Done", "for {src:?}");
         let f = parsed.as_enum().unwrap().payload()[4].clone();
         let p = f.as_enum().expect("expected a HeadFlags record").payload();
-        (
-            p[0].as_bool().unwrap(),
-            p[1].as_bool().unwrap(),
-            p[2].as_bool().unwrap(),
-        )
+        let (close, keep_alive) = match variant_of(&p[0]).as_str() {
+            "ConnNeither" => (false, false),
+            "ConnClose" => (true, false),
+            "ConnKeepAlive" => (false, true),
+            "ConnBoth" => (true, true),
+            other => panic!("unexpected ConnTokens variant {other:?} for {src:?}"),
+        };
+        (close, keep_alive, p[1].as_bool().unwrap())
     }
 
     #[test]

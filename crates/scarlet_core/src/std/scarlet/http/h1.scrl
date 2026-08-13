@@ -26,6 +26,22 @@ pub type Version {
 	Http11
 }
 
+// Which `Connection` tokens the head carried, as one value rather than one
+// Bool per token: the pair is a single field's token set, so neither half is
+// separately assignable. `Connection` is a repeatable token list (RFC 9110
+// §7.6.1), so a peer can genuinely send both — `ConnBoth` is a state the
+// parser witnesses, not a contradiction, and recording it keeps the RFC 9112
+// §9.3 precedence in `should_close` rather than in the parser.
+//
+// Mirrors the VM's `ConnTokens` across the ABI; the two are one boundary in
+// two languages and change together.
+pub type ConnTokens {
+	ConnNeither
+	ConnClose
+	ConnKeepAlive
+	ConnBoth
+}
+
 // The `Connection` and `Expect` token-list answers, recorded by the head
 // parser during the single pass it already makes over every field. They are
 // the raw tokens found, not a decision: `close` beating `keep_alive` and the
@@ -37,8 +53,7 @@ pub type Version {
 // block never does: trailers carry no connection or expectation semantics
 // (RFC 9110 §6.5.1).
 pub opaque type HeadFlags {
-	conn_close Bool
-	conn_keep_alive Bool
+	conn ConnTokens
 	expect_100_continue Bool
 }
 
@@ -244,14 +259,20 @@ pub fn serialize_head(code Int, hs Headers) Binary {
 // `keep-alive, Upgrade` still keeps an HTTP/1.0 connection alive.
 // The tokens themselves were found by the head parser (`HeadFlags`), so this
 // is the decision only — no second walk of the header list.
+//
+// One arm per token set, so each verdict stands on its own rather than on
+// having tested `close` first: a fifth state could not be added without the
+// exhaustiveness checker naming this match.
 pub fn should_close(version Version, f HeadFlags) Bool {
-	if f.conn_close {
-		True
-	} else {
-		match version {
-			Http11 -> False
-			Http10 -> !f.conn_keep_alive
-		}
+	match f.conn {
+		ConnClose -> True
+		ConnBoth -> True
+		ConnKeepAlive -> False
+		ConnNeither ->
+			match version {
+				Http11 -> False
+				Http10 -> True
+			}
 	}
 }
 

@@ -713,13 +713,18 @@ fn native_and_al_token_matching_agree() {
     for (value, expected) in cases {
         let source = format!(
             "import scarlet/binary\n\
-             import scarlet/http/h1.{{Done}}\n\
+             import scarlet/http/h1.{{Done, ConnNeither, ConnClose, ConnKeepAlive, ConnBoth}}\n\
              import scarlet/http/headers.{{Header}}\n\
              pub fn main() {{\n\
              \tname = binary.from_string('Connection')\n\
              \tvalue = binary.from_string('{value}')\n\
              \tnative = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\nConnection: {value}\\r\\n\\r\\n'), 0) {{\n\
-             \t\tDone(_, _, _, _, flags, _) -> flags.conn_close\n\
+             \t\tDone(_, _, _, _, flags, _) -> match flags.conn {{\n\
+             \t\t\tConnClose -> True\n\
+             \t\t\tConnBoth -> True\n\
+             \t\t\tConnKeepAlive -> False\n\
+             \t\t\tConnNeither -> False\n\
+             \t\t}}\n\
              \t\t_ -> False\n\
              \t}}\n\
              \tal = headers.contains_token([Header(name: name, value: value)], name, binary.from_string('close'))\n\

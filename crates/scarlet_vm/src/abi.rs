@@ -132,7 +132,11 @@ pub enum AbiSlot {
     H1Header,
     H1Http10,
     H1Http11,
-    /// `[conn_close Bool, conn_keep_alive Bool, expect_100_continue Bool]`
+    H1ConnNeither,
+    H1ConnClose,
+    H1ConnKeepAlive,
+    H1ConnBoth,
+    /// `[conn ConnTokens, expect_100_continue Bool]`
     H1HeadFlags,
     /// `[method Binary, target Binary, version, headers, flags, consumed Int]`
     H1ParsedDone,
@@ -256,6 +260,10 @@ impl AbiSlot {
             H1Header,
             H1Http10,
             H1Http11,
+            H1ConnNeither,
+            H1ConnClose,
+            H1ConnKeepAlive,
+            H1ConnBoth,
             H1HeadFlags,
             H1ParsedDone,
             H1ParsedNeedMore,
@@ -353,6 +361,10 @@ impl AbiSlot {
             H1Header => "H1Header",
             H1Http10 => "H1Http10",
             H1Http11 => "H1Http11",
+            H1ConnNeither => "H1ConnNeither",
+            H1ConnClose => "H1ConnClose",
+            H1ConnKeepAlive => "H1ConnKeepAlive",
+            H1ConnBoth => "H1ConnBoth",
             H1HeadFlags => "H1HeadFlags",
             H1ParsedDone => "H1ParsedDone",
             H1ParsedNeedMore => "H1ParsedNeedMore",
@@ -407,11 +419,12 @@ impl AbiSlot {
             | NetEaddrinuse | NetEaddrnotavail | NetEnetdown | NetEnetunreach | NetEhostunreach
             | NetEacces | NetInvalidPort | NetUnalignedBinary | ReadClosed | ExitNormal
             | ExitNoProcess | ExitKilled | CrashForeignReceive | H1Http10 | H1Http11
-            | H1ParsedNeedMore | H1FramingNoBody | H1FramingChunked | H1ChunkedNeedMore
-            | TlsCertUnknownIssuer | TlsCertExpired | TlsCertNotYetValid | TlsCertRevoked
-            | TlsHostnameMismatch | TlsBadCertificate | TlsProtocolError | TlsHandshakeFailed
-            | TlsInvalidServerName | H1RespNeedMore | H1BadStatusLine | H1BadVersion
-            | H1BadField | H1BadHeadTooLarge | WireTruncated | WireNotWire => 0,
+            | H1ConnNeither | H1ConnClose | H1ConnKeepAlive | H1ConnBoth | H1ParsedNeedMore
+            | H1FramingNoBody | H1FramingChunked | H1ChunkedNeedMore | TlsCertUnknownIssuer
+            | TlsCertExpired | TlsCertNotYetValid | TlsCertRevoked | TlsHostnameMismatch
+            | TlsBadCertificate | TlsProtocolError | TlsHandshakeFailed | TlsInvalidServerName
+            | H1RespNeedMore | H1BadStatusLine | H1BadVersion | H1BadField | H1BadHeadTooLarge
+            | WireTruncated | WireNotWire => 0,
             ResultOk | ResultErr | OptionSome | FsEnoent | FsEacces | FsEexist | FsEnotdir
             | FsEisdir | FsErofs | FsEloop | FsEfbig | FsErrnoOther | NetErrnoOther | IpV4
             | IpV6 | ReadData | ExitCrashed | CrashSupervision | PortExited | PortSignaled
@@ -426,11 +439,10 @@ impl AbiSlot {
             | CrashIndexOutOfBounds
             | Port
             | H1Header
+            | H1HeadFlags
             | WireSchemaMismatch
             | WireMalformed => 2,
-            H1HeadFlags | H1ChunkedDone | CrashSliceOutOfBounds | CrashTypeMismatch | TlsSocket => {
-                3
-            }
+            H1ChunkedDone | CrashSliceOutOfBounds | CrashTypeMismatch | TlsSocket => 3,
             H1ParsedDone | H1RespDone => 6,
         }
     }
@@ -632,6 +644,10 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::H1Http10,
             S::H1Http11,
             S::H1HeadFlags,
+            S::H1ConnNeither,
+            S::H1ConnClose,
+            S::H1ConnKeepAlive,
+            S::H1ConnBoth,
         ],
         Op::HttpParseResponseHead => &[
             S::H1RespDone,
@@ -645,6 +661,10 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::H1Http10,
             S::H1Http11,
             S::H1HeadFlags,
+            S::H1ConnNeither,
+            S::H1ConnClose,
+            S::H1ConnKeepAlive,
+            S::H1ConnBoth,
         ],
         Op::HttpFraming => &[
             S::H1FramingNoBody,
