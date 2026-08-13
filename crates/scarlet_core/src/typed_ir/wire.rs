@@ -95,21 +95,31 @@ pub enum Node {
     Data(Vec<WireVariant>),
 }
 
-/// The descriptor of one type: a node table and the node the type itself is.
+/// The descriptor of one type: a node table, the node the type itself is, and
+/// the fingerprint of that shape.
 ///
-/// No fingerprint field yet — the fingerprint and its stability test are
-/// ticket 5 of this series, and a field that is always zero would read as a
-/// computed one at every call site written against it in the meantime.
+/// `fingerprint` is not recomputable from the other two fields: it folds
+/// constructor and field names as **text**, and a [`Desc`] holds only the
+/// [`StrId`]s. It is minted in [`build_desc`], which has the [`WireCtx`] that
+/// can resolve them, and there is no second way to arrive at one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Desc {
     nodes: Vec<Node>,
     root: NodeIdx,
+    fingerprint: u64,
 }
 
 impl Desc {
     /// The node the described type itself is.
     pub fn root(&self) -> NodeIdx {
         self.root
+    }
+
+    /// The 64-bit hash of this type's shape. Two peers agree they are talking
+    /// about the same shape by comparing these; `wire.scrl`'s module doc
+    /// specifies how it is computed and what moves it.
+    pub fn fingerprint(&self) -> u64 {
+        self.fingerprint
     }
 
     /// The node at `i`, or `None` for an index from another `Desc`.
@@ -296,6 +306,91 @@ enum Key {
     Nominal(TypeId, SmallVec<[NodeIdx; 4]>),
 }
 
+/// Version of the fingerprint algorithm, folded in first so that a change to
+/// what is hashed cannot produce a value a peer would mistake for the old one.
+///
+/// **Bumping this is bumping the format version byte**, and `wire.scrl`'s
+/// module doc says so as a rule rather than as a note: the fingerprint travels
+/// in every message, so an algorithm change that kept the version would show up
+/// at a peer as a `SchemaMismatch` on a type nobody had touched.
+const FINGERPRINT_VERSION: u64 = 1;
+
+const FINGERPRINT_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// FNV-1a over one `u64` at a time. The same construction the VM's value hash
+/// uses, restated here because these two hashes must be free to move
+/// independently: that one is an equality fast-reject inside one program and
+/// samples long inputs, this one is a compatibility surface between two
+/// programs and may never sample anything.
+#[inline]
+fn mix(h: u64, v: u64) -> u64 {
+    (h ^ v).wrapping_mul(FINGERPRINT_PRIME)
+}
+
+/// Length first, then the UTF-8 bytes — so `("ab", "c")` and `("a", "bc")` do
+/// not fold to the same hash.
+fn mix_str(h: u64, s: &str) -> u64 {
+    let mut h = mix(h, s.len() as u64);
+    for b in s.as_bytes() {
+        h = mix(h, u64::from(*b));
+    }
+    h
+}
+
+/// Fold the node table in index order.
+///
+/// A child is folded as its **index**, never by descending into it, which is
+/// what lets a recursive type hash without recursing: `Cons.tail` is the number
+/// 1, and node 1's own row is folded when the loop reaches it. That makes the
+/// fingerprint a hash of the table as [`build_desc`] canonically lays it out —
+/// so a change to the walk order is a change to the algorithm, and takes
+/// [`FINGERPRINT_VERSION`] with it.
+///
+/// What is folded, and the reasoning, is specified for a second implementation
+/// in `wire.scrl`'s module doc; this function is that spec in Rust.
+fn fingerprint_of<C: WireCtx + ?Sized>(cx: &C, nodes: &[Node], root: NodeIdx) -> u64 {
+    let mut h = mix(FINGERPRINT_BASIS, FINGERPRINT_VERSION);
+    h = mix(h, nodes.len() as u64);
+    h = mix(h, u64::from(root.0));
+
+    for n in nodes {
+        h = match n {
+            Node::Int => mix(h, 1),
+            Node::Float => mix(h, 2),
+            Node::String => mix(h, 3),
+            Node::Binary => mix(h, 4),
+            Node::Array(e) => mix(mix(h, 5), u64::from(e.0)),
+            Node::Map(k, v) => mix(mix(mix(h, 6), u64::from(k.0)), u64::from(v.0)),
+            Node::Tuple(es) => {
+                let mut h = mix(mix(h, 7), es.len() as u64);
+                for e in es {
+                    h = mix(h, u64::from(e.0));
+                }
+                h
+            }
+            Node::Data(vs) => {
+                let mut h = mix(mix(h, 8), vs.len() as u64);
+                for v in vs {
+                    // The tag the peer receives, and the constructor name. The
+                    // owning type's id and NAME are deliberately absent: two
+                    // programs that declare this shape independently, under
+                    // whatever name and in whatever module, must agree.
+                    h = mix(h, u64::from(v.variant.variant_idx));
+                    h = mix_str(h, &cx.name(v.variant.variant_name));
+                    h = mix(h, v.fields.len() as u64);
+                    for f in &v.fields {
+                        h = mix_str(h, &cx.name(f.label));
+                        h = mix(h, u64::from(f.node.0));
+                    }
+                }
+                h
+            }
+        };
+    }
+    h
+}
+
 /// Build the descriptor of `root`, or refuse.
 ///
 /// Total over the checker's output: every resolved type either describes or
@@ -317,9 +412,11 @@ pub fn build_desc<C: WireCtx + ?Sized>(
     };
     let mut path = Vec::new();
     let root = b.walk(root, &mut path)?;
+    let fingerprint = fingerprint_of(b.cx, &b.nodes, root);
     Ok(Desc {
         nodes: b.nodes,
         root,
+        fingerprint,
     })
 }
 
@@ -1070,6 +1167,202 @@ mod tests {
             panic!("not an Array")
         };
         assert_eq!(d.node(e), Some(&Node::String));
+    }
+
+    // --- the fingerprint ---
+
+    /// Declare `type <ty_name> { ctors... }` at `id` and return its
+    /// fingerprint.
+    ///
+    /// Every test below is two calls to this with **exactly one argument
+    /// different**, so what moved the fingerprint is named by the call and not
+    /// by a comment. Each property gets its own test: a single "different
+    /// shapes differ" assertion would pass on a fingerprint that ignored names
+    /// entirely.
+    fn fp(f: &mut Fixture, id: TypeId, ty_name: &str, ctors: &[(&str, &[(&str, RTy)])]) -> u64 {
+        let mut decls = Vec::new();
+        for (i, (name, fields)) in ctors.iter().enumerate() {
+            decls.push(f.ctor(id, ty_name, i as u16, name, fields));
+        }
+        f.data(id, decls);
+        let t = f.con(id, ty_name, &[]);
+        desc(f.build(t)).fingerprint()
+    }
+
+    /// The shape the sensitivity tests vary away from:
+    /// `type Colour { Red, Shade(level Int) }`.
+    fn colour(f: &mut Fixture, id: TypeId, ty_name: &str) -> u64 {
+        let int = f.int();
+        fp(
+            f,
+            id,
+            ty_name,
+            &[("Red", &[]), ("Shade", &[("level", int)])],
+        )
+    }
+
+    const C1: TypeId = TypeId(100);
+    const C2: TypeId = TypeId(101);
+
+    /// The stability half of the DONE-WHEN, one layer below `dis`: the
+    /// fingerprint may not depend on how the names happened to be interned.
+    ///
+    /// This is what a two-compile `dis` test would catch and the only part of
+    /// it reachable before elaboration emits the constant (ticket 7). A second
+    /// compile meets identifiers in a different order, so `StrId(4)` is a
+    /// different string in each — a fingerprint folding `StrId.0` rather than
+    /// the name text passes every other test in this file and fails here.
+    #[test]
+    fn the_fingerprint_survives_a_different_interning_order() {
+        let mut a = Fixture::new();
+        let fa = colour(&mut a, C1, "Colour");
+
+        let mut b = Fixture::new();
+        for junk in ["parse", "render", "Shade", "level", "Red"] {
+            b.intern(junk);
+        }
+        let fb = colour(&mut b, C1, "Colour");
+
+        // Without this the test is vacuous: if both compiles gave the names the
+        // same ids, a StrId-folding fingerprint would pass it too.
+        assert_ne!(
+            a.intern("Shade"),
+            b.intern("Shade"),
+            "premise: the two compiles must disagree about Shade's StrId"
+        );
+        assert_eq!(fa, fb, "the same shape, interned differently");
+    }
+
+    #[test]
+    fn the_fingerprint_is_the_same_on_a_second_build_of_one_type() {
+        let mut f = Fixture::new();
+        assert_eq!(colour(&mut f, C1, "Colour"), colour(&mut f, C1, "Colour"));
+    }
+
+    #[test]
+    fn renaming_a_constructor_changes_the_fingerprint() {
+        let mut f = Fixture::new();
+        let int = f.int();
+        let before = fp(&mut f, C1, "Colour", &[("Shade", &[("level", int)])]);
+        let after = fp(&mut f, C1, "Colour", &[("Tint", &[("level", int)])]);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn reordering_variants_changes_the_fingerprint() {
+        let mut f = Fixture::new();
+        let int = f.int();
+        let before = fp(
+            &mut f,
+            C1,
+            "Colour",
+            &[("Red", &[]), ("Shade", &[("level", int)])],
+        );
+        let after = fp(
+            &mut f,
+            C1,
+            "Colour",
+            &[("Shade", &[("level", int)]), ("Red", &[])],
+        );
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn adding_a_field_changes_the_fingerprint() {
+        let mut f = Fixture::new();
+        let int = f.int();
+        let before = fp(&mut f, C1, "Colour", &[("Shade", &[("level", int)])]);
+        let after = fp(
+            &mut f,
+            C1,
+            "Colour",
+            &[("Shade", &[("level", int), ("alpha", int)])],
+        );
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn changing_a_field_type_changes_the_fingerprint() {
+        let mut f = Fixture::new();
+        let int = f.int();
+        let s = f.string();
+        let before = fp(&mut f, C1, "Colour", &[("Shade", &[("level", int)])]);
+        let after = fp(&mut f, C1, "Colour", &[("Shade", &[("level", s)])]);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn renaming_a_field_changes_the_fingerprint() {
+        let mut f = Fixture::new();
+        let int = f.int();
+        let before = fp(&mut f, C1, "Colour", &[("Shade", &[("level", int)])]);
+        let after = fp(&mut f, C1, "Colour", &[("Shade", &[("lvl", int)])]);
+        assert_ne!(before, after);
+    }
+
+    /// The type's own name is not part of its shape, so renaming it is not a
+    /// schema change and peers keep talking.
+    #[test]
+    fn renaming_the_type_does_not_change_the_fingerprint() {
+        let mut f = Fixture::new();
+        let before = colour(&mut f, C1, "Colour");
+        let after = colour(&mut f, C1, "Hue");
+        assert_eq!(before, after);
+    }
+
+    /// Moving a declaration to another module mints a new `TypeId`. The
+    /// fingerprint must not notice — this is the property that keeps a module
+    /// reshuffle from reading as a wire break at every peer.
+    #[test]
+    fn moving_the_type_to_another_module_does_not_change_the_fingerprint() {
+        let mut f = Fixture::new();
+        let before = colour(&mut f, C1, "Colour");
+        let after = colour(&mut f, C2, "Colour");
+        assert_eq!(before, after);
+    }
+
+    /// The interoperability claim in the module doc, asserted: two programs
+    /// that never shared a declaration agree, because they agree on the shape.
+    #[test]
+    fn the_same_shape_declared_twice_gets_one_fingerprint() {
+        let mut mine = Fixture::new();
+        let a = colour(&mut mine, C1, "Colour");
+
+        let mut theirs = Fixture::new();
+        let b = colour(&mut theirs, C2, "Paint");
+
+        assert_eq!(a, b, "same constructors, same labels, same field types");
+    }
+
+    /// The headline claim of the algorithm: children are folded as indices, so
+    /// a cyclic descriptor terminates — a fingerprint that descended into
+    /// `Cons.tail` would not return from this test at all.
+    ///
+    /// Terminating is half of it. The other half is that the element type is
+    /// still reached, which `List(Int)` against `List(String)` is what asserts:
+    /// a hash that stopped at the cycle would give these two one value.
+    #[test]
+    fn a_recursive_type_fingerprints_without_recursing() {
+        let mut f = Fixture::new();
+        let a = f.bound(0);
+        let list = TypeId(110);
+        let list_a = f.con(list, "List", &[a]);
+        let nil = f.ctor(list, "List", 0, "Nil", &[]);
+        let cons = f.ctor(list, "List", 1, "Cons", &[("head", a), ("tail", list_a)]);
+        f.data(list, vec![nil, cons]);
+
+        let int = f.int();
+        let s = f.string();
+        let li = f.con(list, "List", &[int]);
+        let ls = f.con(list, "List", &[s]);
+
+        let fi = desc(f.build(li)).fingerprint();
+        assert_eq!(fi, desc(f.build(li)).fingerprint(), "stable");
+        assert_ne!(
+            fi,
+            desc(f.build(ls)).fingerprint(),
+            "List(Int) vs List(String)"
+        );
     }
 
     /// A phantom parameter still has to be encodable: encodability is a
