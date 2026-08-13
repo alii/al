@@ -512,7 +512,7 @@ fn http_server_get_and_keepalive() {
     let proj = Project::new("io_http");
     let src = listening_src(
         "import scarlet/http",
-        "http.serve_on(server, fn(_req) http.text('Hello from scarlet/http!'))",
+        "_ = http.serve_on(server, fn(_req) http.text('Hello from scarlet/http!'))",
     );
 
     let srv = spawn_al_server(&proj, &src);
@@ -541,7 +541,7 @@ fn http_server_chunked_post_roundtrip() {
     let proj = Project::new("io_http_chunked");
     let src = listening_src(
         "import scarlet/http\nimport scarlet/http/body\nimport scarlet/http/headers\nimport scarlet/binary",
-        r#"http.serve_on(server, fn(req) {
+        r#"_ = http.serve_on(server, fn(req) {
 	collected = body.collect(req.body, 1048576) or <<>>
 	echoed = binary.to_string(collected) or '<not-utf8>'
 	trailer = match headers.get(req.trailers, <<'x-checksum'>>) {
@@ -625,7 +625,7 @@ fn http_server_connection_close_semantics() {
     let proj = Project::new("io_http_close");
     let src = listening_src(
         "import scarlet/http",
-        "http.serve_on(server, fn(_req) http.text('bye'))",
+        "_ = http.serve_on(server, fn(_req) http.text('bye'))",
     );
     let srv = spawn_al_server(&proj, &src);
     let mut tmp = [0u8; 64];
@@ -729,7 +729,7 @@ fn http_server_body_source_failure_yields_framed_500() {
     let proj = Project::new("io_http_source_500");
     let src = listening_src(
         "import scarlet/http.{Response, Fixed, Unsized}\nimport scarlet/net/error.{UnexpectedEof}",
-        r#"http.serve_on(server, fn(req) {
+        r#"_ = http.serve_on(server, fn(req) {
 	match http.path(req) {
 		<<'/fixed'>> -> Response(status: 200, headers: [], body: Fixed(5, fn() Err(UnexpectedEof)))
 		<<'/unsized'>> -> Response(status: 200, headers: [], body: Unsized(fn() Err(UnexpectedEof)))

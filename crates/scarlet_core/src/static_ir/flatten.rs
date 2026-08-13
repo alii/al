@@ -352,7 +352,7 @@ mod tests {
             .expect("scarlet/process is precompiled");
         let doc =
             p.str_pool[process.doc.expect("scarlet/process has a module doc").0 as usize].as_str();
-        assert!(doc.contains("Lightweight processes and message passing."));
+        assert!(doc.contains("Processes, message passing, and the supervision tree."));
 
         assert_eq!(p.typeinfo_by_name.len(), out.blob.type_info.len());
 

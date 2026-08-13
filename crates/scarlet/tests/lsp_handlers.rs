@@ -1081,7 +1081,7 @@ fn hover_on_a_stdlib_module_alias_shows_its_module_doc() {
         "the `s` of `s.spawn(..)` names a module: {md:?}"
     );
     assert!(
-        md.contains("Lightweight processes and message passing."),
+        md.contains("Processes, message passing, and the supervision tree."),
         "hover must render scarlet/process's module doc: {md:?}"
     );
 }

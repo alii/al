@@ -16,7 +16,8 @@ import scarlet/http/h1.{
 }
 import scarlet/http/body.{Body, Empty, Whole, Streaming}
 import scarlet/http/headers.{Header, Headers}
-import scarlet/net.{Server}
+import scarlet/net.{Server, Service}
+import scarlet/process.{Supervisor}
 import scarlet/net/socket.{Socket, Data, Closed}
 import scarlet/net/error.{NetError}
 import scarlet/binary.{Dec}
@@ -223,22 +224,33 @@ fn build_request(head ReqHead, trailers Headers, b Body) Request {
 	)
 }
 
-// Listen on host:port and serve each accepted connection on its own process.
-// One slow or hostile connection parks only its own process. The accept loop
-// runs on every core in parallel (net.serve), all draining one shared accept
-// queue, and each connection is handled on the core that accepted it.
-// Returns the bound `Server` handle, so the caller can shut the listener down
-// with `net.close` or read a kernel-assigned port back with `net.local_addr`.
-pub fn serve(host String, port Int, handler fn(Request) Response) Result(Server, NetError) {
+// Listen on host:port and serve each accepted connection in a process of its
+// own: one slow or hostile connection parks only its own process, and one
+// that crashes the handler closes only itself. The accept loop runs on every
+// core in parallel (net.serve), each connection handled on the core that
+// accepted it. Returns the running `Service`: its listener, for `net.close`
+// or reading a kernel-assigned port back with `net.local_addr`, and its
+// place in the process tree, where `process.count(service.connections)` is
+// the number of open connections.
+pub fn serve(host String, port Int, handler fn(Request) Response) Result(Service, NetError) {
 	net.serve(host, port, fn(sock) drive(sock, handler))
 }
 
-// Serve connections from a listener the caller already bound. This is the
-// entry point when the caller needs the bound address before serving — e.g.
-// listen on port 0, read the kernel-assigned port back with net.local_addr,
-// then hand the listener over. `serve` is the listen-and-serve convenience on
-// top of this.
-pub fn serve_on(server Server, handler fn(Request) Response) Nil {
+// As `serve`, declared inside an application's own supervisor, so the
+// server is stopped and restarted along with the rest of the tree.
+pub fn serve_in(
+	sup Supervisor,
+	host String,
+	port Int,
+	handler fn(Request) Response,
+) Result(Service, NetError) {
+	net.serve_in(sup, host, port, fn(sock) drive(sock, handler))
+}
+
+// Serve connections from a listener the caller already bound — listen on
+// port 0, read the port back with net.local_addr, then hand the listener
+// over. `serve` is the listen-and-serve convenience on top of this.
+pub fn serve_on(server Server, handler fn(Request) Response) Service {
 	net.serve_on(server, fn(sock) drive(sock, handler))
 }
 

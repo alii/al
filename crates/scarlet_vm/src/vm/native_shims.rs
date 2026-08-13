@@ -23,6 +23,7 @@
 use crate::bytecode::value::{ReuseAddr, proof_violation, range_len};
 use crate::bytecode::{NativeStatus, Op, Value, ValueView, seq};
 
+use super::mailbox::Delivery;
 use super::poll::{Parked, Resume};
 use super::processes::Link;
 use super::{Step, VM, VmResult};
@@ -586,6 +587,18 @@ mod opc {
     pub const PROCESS_DEMONITOR: u8 = Op::ProcessDemonitor as u8;
     pub const PROCESS_KILL: u8 = Op::ProcessKill as u8;
     pub const PROCESS_MONITOR: u8 = Op::ProcessMonitor as u8;
+    pub const SUPERVISOR_NEW: u8 = Op::SupervisorNew as u8;
+    pub const SUPERVISOR_WORKER: u8 = Op::SupervisorWorker as u8;
+    pub const FACTORY_NEW: u8 = Op::FactoryNew as u8;
+    pub const FACTORY_LOOKUP_OR_START: u8 = Op::FactoryLookupOrStart as u8;
+    pub const FACTORY_LOOKUP: u8 = Op::FactoryLookup as u8;
+    pub const SUPERVISED_OF: u8 = Op::SupervisedOf as u8;
+    pub const SUPERVISED_PARENT: u8 = Op::SupervisedParent as u8;
+    pub const SUPERVISED_CHILDREN: u8 = Op::SupervisedChildren as u8;
+    pub const SUPERVISED_COUNT: u8 = Op::SupervisedCount as u8;
+    pub const SUPERVISED_INFO: u8 = Op::SupervisedInfo as u8;
+    pub const WATCH_NEW: u8 = Op::WatchNew as u8;
+    pub const WATCH_CANCEL: u8 = Op::WatchCancel as u8;
     pub const PROCESS_SELF: u8 = Op::ProcessSelf as u8;
     pub const PROCESS_SPAWN: u8 = Op::ProcessSpawn as u8;
     pub const PROCESS_SPAWN_UNLINKED: u8 = Op::ProcessSpawnUnlinked as u8;
@@ -595,7 +608,9 @@ mod opc {
     pub const SUBJECT_RECEIVE: u8 = Op::SubjectReceive as u8;
     pub const SUBJECT_RECEIVE_UNTIL: u8 = Op::SubjectReceiveUntil as u8;
     pub const SUBJECT_SEND: u8 = Op::SubjectSend as u8;
-    pub const SPAWN_ON_EACH: u8 = Op::SpawnOnEach as u8;
+    pub const SUBJECT_SEND_URGENT: u8 = Op::SubjectSendUrgent as u8;
+    pub const SUPERVISOR_WORKER_ON_EACH: u8 = Op::SupervisorWorkerOnEach as u8;
+    pub const FACTORY_SPAWN: u8 = Op::FactorySpawn as u8;
     pub const STACK_DEPTH: u8 = Op::StackDepth as u8;
     pub const STR_CONCAT_N: u8 = Op::StrConcatN as u8;
     pub const STR_CONTAINS: u8 = Op::StrContains as u8;
@@ -879,14 +894,28 @@ impl VM {
             opc::PROCESS_MONITOR => self.process_monitor(reds),
             opc::PROCESS_DEMONITOR => self.process_demonitor(),
             opc::ARGV => self.argv(),
+            opc::SUPERVISOR_NEW => self.supervisor_new(),
+            opc::SUPERVISOR_WORKER => self.supervisor_worker(reds),
+            opc::FACTORY_NEW => self.factory_new(reds),
+            opc::FACTORY_LOOKUP_OR_START => self.factory_lookup_or_start(reds),
+            opc::FACTORY_LOOKUP => self.factory_lookup(),
+            opc::SUPERVISED_OF => self.supervised_of(),
+            opc::SUPERVISED_PARENT => self.supervised_parent(),
+            opc::SUPERVISED_CHILDREN => self.supervised_children(),
+            opc::SUPERVISED_COUNT => self.supervised_count(),
+            opc::SUPERVISED_INFO => self.supervised_info(),
+            opc::WATCH_NEW => self.watch_new(reds),
+            opc::WATCH_CANCEL => self.watch_cancel(),
             opc::TCP_LISTEN => self.tcp_listen(),
             opc::TCP_CLOSE => self.tcp_close(reds),
             opc::TLS_CLOSE => self.tls_close(reds),
             opc::TCP_GIVE => self.tcp_give(),
             opc::TCP_CLOSE_SERVER => self.tcp_close_server(),
-            opc::SPAWN_ON_EACH => self.process_spawn_on_each(reds),
+            opc::SUPERVISOR_WORKER_ON_EACH => self.supervisor_worker_on_each(reds),
+            opc::FACTORY_SPAWN => self.factory_spawn(reds),
             opc::SUBJECT_NEW => self.subject_new(),
-            opc::SUBJECT_SEND => self.subject_send(reds),
+            opc::SUBJECT_SEND => self.subject_send(reds, Delivery::Back),
+            opc::SUBJECT_SEND_URGENT => self.subject_send(reds, Delivery::Front),
             // `Print` is the one void op: it pushes nothing, and the bytecode
             // emitter supplies the `()` with a following `PushNil`. The bridge
             // returns exactly one value, so it must do the same.

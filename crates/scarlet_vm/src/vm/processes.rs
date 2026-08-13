@@ -76,7 +76,7 @@ pub(super) struct ProcessTable {
     next_monitor: AtomicU64,
 }
 
-type PidHash = BuildHasherDefault<PidHasher>;
+pub(super) type PidHash = BuildHasherDefault<PidHasher>;
 
 /// One shard: the records of the live processes hashed here.
 type Shard = HashMap<u64, ProcRecord, PidHash>;
@@ -87,7 +87,7 @@ type Shard = HashMap<u64, ProcRecord, PidHash>;
 /// lifetime; the odd multiplier (2^64 / φ) spreads consecutive ids across
 /// the high bits, which is what `HashMap` indexes by.
 #[derive(Default)]
-struct PidHasher(u64);
+pub(super) struct PidHasher(u64);
 
 impl Hasher for PidHasher {
     #[inline]
@@ -123,6 +123,13 @@ struct ProcRecord {
 
 #[derive(Default)]
 struct More {
+    /// The supervision slot this process is the incarnation of
+    /// ([`super::supervision`]); its death is reported there.
+    slot: Option<u64>,
+    /// Whether the supervision tree wants to hear about this process's
+    /// death: it declared top-level supervisors (torn down if it fails) or
+    /// holds watches (released either way).
+    in_tree: bool,
     /// Linked children still alive.
     children: HashSet<u64, PidHash>,
     /// Death notices to fire when this process ends, by monitor id.
@@ -170,10 +177,21 @@ pub(super) enum Link {
 
 /// How a process ended. What the notices report, and what decides whether
 /// the exit spreads over links.
+#[derive(Debug, Clone)]
 pub(super) enum Exit {
     Normal,
     Killed,
     Crashed(Crash),
+}
+
+impl std::fmt::Display for Exit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Exit::Normal => f.write_str("returned"),
+            Exit::Killed => f.write_str("killed"),
+            Exit::Crashed(crash) => write!(f, "crashed: {crash}"),
+        }
+    }
 }
 
 impl Exit {
@@ -191,6 +209,16 @@ struct Aftermath {
     /// The processes linked to it — parent and children — which an abnormal
     /// exit kills. Empty for a normal exit, whose links are simply undone.
     linked: Vec<u64>,
+    /// The supervision slot it was running in, to be told of the exit.
+    slot: Option<u64>,
+    /// Whether the tree is to be told of the death (see `More::in_tree`),
+    /// and whether the death was a failure, which is what tears down the
+    /// supervisors it declared: they follow the link rule, dying with the
+    /// process when it fails and outliving it when it merely returns — a
+    /// script that sets up a server and falls off the end of the file has
+    /// started a server, not torn one down.
+    in_tree: bool,
+    failed: bool,
 }
 
 impl Aftermath {
@@ -198,6 +226,9 @@ impl Aftermath {
         Aftermath {
             notices: Vec::new(),
             linked: Vec::new(),
+            slot: None,
+            in_tree: false,
+            failed: false,
         }
     }
 }
@@ -250,6 +281,36 @@ impl Runtime {
         }
     }
 
+    /// Mint the pid of a process that will run in supervision slot `slot`.
+    /// Linked to nothing: its failure is the slot's business.
+    pub(super) fn alloc_incarnation(&self, sched: usize, slot: u64) -> u64 {
+        let pid = self.alloc_pid(sched, None);
+        if let Some(r) = lock(self.processes.shard(pid)).get_mut(&pid) {
+            r.more().slot = Some(slot);
+        }
+        pid
+    }
+
+    /// `pid` declared a top-level supervisor or placed a watch; the tree
+    /// must hear of its death.
+    pub(super) fn note_in_tree(&self, pid: u64) {
+        if let Some(r) = lock(self.processes.shard(pid)).get_mut(&pid) {
+            r.more().in_tree = true;
+        }
+    }
+
+    pub(super) fn process_is_live(&self, pid: u64) -> bool {
+        lock(self.processes.shard(pid)).contains_key(&pid)
+    }
+
+    /// What is above a process: the slot it incarnates, else the process it
+    /// is linked under. `None` for a root or a dead pid.
+    pub(super) fn process_parent(&self, pid: u64) -> Option<u64> {
+        let shard = lock(self.processes.shard(pid));
+        let r = shard.get(&pid)?;
+        r.more.as_ref().and_then(|m| m.slot).or(r.parent)
+    }
+
     /// A process has arrived on scheduler `sched` (by donation or as a
     /// pinned seed). Records where it is and reports whether a kill reached
     /// the table while it was in transit, which the adopter must then carry
@@ -269,7 +330,7 @@ impl Runtime {
     /// the kill stick whatever the process is doing — then pokes the
     /// scheduler last known to hold it. A pid that has already ended is a
     /// no-op. Returns whether the process was alive.
-    fn kill(&self, pid: u64) -> bool {
+    pub(super) fn kill(&self, pid: u64) -> bool {
         let sched = {
             let mut shard = lock(self.processes.shard(pid));
             let Some(r) = shard.get_mut(&pid) else {
@@ -315,6 +376,9 @@ impl Runtime {
         let Some(more) = record.more else {
             return (exit, aftermath);
         };
+        aftermath.slot = more.slot;
+        aftermath.in_tree = more.in_tree;
+        aftermath.failed = spread;
         for child in more.children {
             if spread {
                 aftermath.linked.push(child);
@@ -388,11 +452,6 @@ impl Runtime {
         lock(self.processes.shard(pid))
             .get(&pid)
             .map(|r| r.sched as usize)
-    }
-
-    #[cfg(test)]
-    fn is_live_process(&self, pid: u64) -> bool {
-        lock(self.processes.shard(pid)).contains_key(&pid)
     }
 }
 
@@ -473,6 +532,17 @@ impl VM {
         for linked in aftermath.linked {
             self.runtime.kill(linked);
         }
+        // Supervision last, and before the live count drops: a restart it
+        // orders is started here, so the program cannot be seen as finished
+        // between a supervised worker's death and its re-incarnation.
+        if let Some(slot) = aftermath.slot {
+            let actions = self.runtime.slot_incarnation_exited(slot, &exit);
+            self.run_supervision_actions(actions)?;
+        }
+        if aftermath.in_tree {
+            let actions = self.runtime.tree_process_exited(pid, aftermath.failed);
+            self.run_supervision_actions(actions)?;
+        }
         self.runtime.process_finished();
         Ok(exit)
     }
@@ -493,7 +563,7 @@ impl VM {
 
     /// The `ExitReason` value for `exit`, built fresh per notice: each notice
     /// becomes a separate process, and processes share no mortal values.
-    fn exit_reason(&mut self, exit: &Exit) -> VmResult<Value> {
+    pub(super) fn exit_reason(&mut self, exit: &Exit) -> VmResult<Value> {
         match exit {
             Exit::Normal => self.abi_nullary(AbiSlot::ExitNormal),
             Exit::Killed => self.abi_nullary(AbiSlot::ExitKilled),
@@ -522,6 +592,10 @@ impl VM {
                 self.abi_make(AbiSlot::CrashSliceOutOfBounds, &fields)
             }
             Crash::ForeignReceive => self.abi_nullary(AbiSlot::CrashForeignReceive),
+            Crash::Supervision(refusal) => {
+                let why = Value::str_in(&mut self.heap, &refusal.to_string());
+                self.abi_make(AbiSlot::CrashSupervision, &[why])
+            }
             Crash::TypeMismatch { op, expected, got } => {
                 let fields = [
                     Value::str_in(&mut self.heap, op),
@@ -645,14 +719,14 @@ mod tests {
         let vm = halt_test_vm();
         let rt = &vm.runtime;
         let pid = rt.alloc_pid(0, None);
-        assert!(rt.is_live_process(pid));
+        assert!(rt.process_is_live(pid));
         assert!(
             rt.unregister_process(pid, Exit::Normal)
                 .1
                 .notices
                 .is_empty()
         );
-        assert!(!rt.is_live_process(pid));
+        assert!(!rt.process_is_live(pid));
         // Ending it twice is harmless: nothing races on this, but the table
         // should not care either way.
         assert!(
@@ -789,7 +863,7 @@ mod tests {
         let mut expected = vec![parent, a, b];
         expected.sort_unstable();
         assert_eq!(after.linked, expected);
-        assert!(vm.runtime.is_live_process(unlinked));
+        assert!(vm.runtime.process_is_live(unlinked));
         // Killing what it named marks them; their own ends spread further.
         for pid in after.linked {
             assert!(vm.runtime.kill(pid));

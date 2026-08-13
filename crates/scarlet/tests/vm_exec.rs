@@ -7,6 +7,22 @@ mod common;
 use common::run_outputs;
 
 run_case! {
+    // `_` separators in number literals are spelling only: the same value in
+    // expressions, in patterns (which must also match their plain spelling —
+    // exhaustiveness keys on the digits, so `1_000` and `1000` are one arm),
+    // and in floats.
+    digit_separators: (
+        "pub fn main() {\n\
+         \tprintln(1_000_000 + 1)\n\
+         \tprintln(match 1000 {\n\
+         \t\t1_000 -> 'grouped'\n\
+         \t\t_ -> 'other'\n\
+         \t})\n\
+         \tprintln(1_0.2_5 == 10.25)\n\
+         }\n",
+        "1000001\ngrouped\nTrue\n",
+    ),
+
     // `range[i] or default` lowers to `Op::Index` plus an Option match. The golden
     // examples only index arrays (`numbers[0] or 0`); a lazy Range scrutinee takes
     // a distinct arm inside `Op::Index` (`range_elem` instead of `Seq::get`).

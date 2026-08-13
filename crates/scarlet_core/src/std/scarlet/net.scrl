@@ -12,7 +12,7 @@ import scarlet/net/error.{
 }
 import scarlet/result
 import scarlet/process
-import scarlet/process.{Pid}
+import scarlet/process.{Pid, Supervisor, Supervised, Factory, Disposable, Transient, OneForOne}
 import scarlet/string
 
 // A TCP server. The value is only ever constructed by the VM, and has no values.
@@ -44,94 +44,133 @@ pub fn listen(host String, port Int) Result(Server, NetError) {
 @vm(net__accept)
 pub fn accept(s Server) Result(Option(Socket), NetError)
 
+// A running server: the listener, and the server's place in the process
+// tree. `net.close(service.server)` stops accepting — the acceptors end and
+// open connections finish on their own; `process.count(service.connections)`
+// is the number of connections open right now, and
+// `process.children(service.supervised)` shows the acceptors and the
+// connection factory, as `serve` declares them.
+pub type Service {
+	server Server
+	supervised Supervised
+	connections Supervised
+}
+
 // Listen on host:port and serve connections across every CPU core in parallel.
 //
-// One listening socket, one accept queue, an acceptor process on every core:
-// the kernel hands each connection to exactly one accepter, so no core can be
-// starved and no connection can be routed where nobody accepts. Every accepted
-// connection is handled on the core that accepted it (the connection's socket
-// never moves between cores), and `handler` runs once per connection in its
-// own lightweight process.
+// One listening socket, one accept queue, an acceptor on every core: the
+// kernel hands each connection to exactly one acceptor, so no core can be
+// starved and no connection can be routed where nobody accepts. Every
+// connection is handled on the core that accepted it, by `handler`, in a
+// process of its own.
 //
-// Returns the bound `Server` once the listeners are bound and the acceptors
-// are running; the acceptors keep the program alive. The handle is what lets
-// the caller shut the listener down later with `close`, or read a kernel-
-// assigned port back with `local_addr` after binding port 0. A bind failure
-// is reported as `Err`.
-pub fn serve(host String, port Int, handler fn(Socket) Nil) Result(Server, NetError) {
+// The server is a subtree of the process tree, declared under a supervisor
+// of its own that `serve` creates for the calling process: a factory whose
+// members are the connections — one ends when its handler returns or
+// crashes, taking the connection with it and nothing else — and the
+// acceptors, restarted on their own cores if one fails; acceptors failing
+// faster than a few times a second means the listener is broken, and the
+// supervisor gives up as any supervisor does. To place the server inside an
+// application's own tree instead, use `serve_in`. A bind failure is `Err`.
+pub fn serve(host String, port Int, handler fn(Socket) Nil) Result(Service, NetError) {
+	serve_in(process.supervisor(ACCEPTOR_BUDGET), host, port, handler)
+}
+
+// As `serve`, declaring the server's subtree inside `sup`, so that it is
+// started, stopped and restarted with the rest of the application's tree.
+pub fn serve_in(
+	sup Supervisor,
+	host String,
+	port Int,
+	handler fn(Socket) Nil,
+) Result(Service, NetError) {
 	server <- result.then(listen(host, port))
-	serve_on(server, handler)
-	Ok(server)
+	Ok(serve_on_in(sup, server, handler))
 }
 
-// Serve connections from a listener already bound with `listen`, fanning the
-// accept loop out across every core exactly as `serve` does. Useful to bind on
-// port 0, read the kernel-assigned port back with `local_addr`, then serve.
-// Returns `Nil`: once the listener is bound the acceptors cannot fail here —
-// the only fallible step is the bind, which the caller has already done.
-pub fn serve_on(server Server, handler fn(Socket) Nil) Nil {
-	spawn_per_core(fn() accept_loop(server, handler))
+// Serve a listener already bound with `listen` — bind on port 0, read the
+// port back with `local_addr`, then serve. Nothing here can fail: the bind
+// was the fallible step.
+pub fn serve_on(server Server, handler fn(Socket) Nil) Service {
+	serve_on_in(process.supervisor(ACCEPTOR_BUDGET), server, handler)
 }
 
-// Start one copy of `f` pinned to every core. Not a process-level primitive —
-// where a process runs is normally the runtime's decision alone — but the
-// accept fan-out is the one place the program knows better: a connection's
-// socket is registered with the core that accepted it, so an acceptor per
-// core is what keeps every connection on the core that serves it.
-@vm(net__spawn_per_core)
-fn spawn_per_core(f fn() Nil) Nil
+// As `serve_on`, inside `sup`. The layout every server has:
+//
+//	sup
+//	└─ server        supervisor (acceptor budget)
+//	   ├─ connections   factory of disposable members, one per connection
+//	   └─ acceptor ×N   transient, one pinned to each core
+//
+// The factory is declared first, so it is stopped last: stopping the server
+// stops accepting before it closes what was accepted.
+pub fn serve_on_in(sup Supervisor, server Server, handler fn(Socket) Nil) Service {
+	me = process.supervisor_in(sup, ACCEPTOR_BUDGET)
+	connections = process.factory(me, Disposable, fn(_inbox, sock) {
+		// The connection was accepted by, and so belongs to, the acceptor;
+		// it becomes this process's first thing, so that it closes when this
+		// process ends — however that happens.
+		give(sock, process.self())
+		handler(sock)
+	})
+	process.worker_per_scheduler(me, Transient, fn(_inbox) accept_loop(server, connections))
+	Service(server: server, supervised: me.supervised, connections: connections.supervised)
+}
 
-// Make `to` the process whose end closes `sock`. Only meaningful for a
-// process just spawned by the caller, which is the one case here; the
-// runtime closes the connection outright if `to` has already ended.
+// One server's acceptors are its own affair; a listener that cannot accept
+// at all makes every acceptor fail at once, which this exhausts within a
+// second or two whatever the core count, so the failure surfaces instead of
+// being retried for ever.
+const ACCEPTOR_BUDGET = OneForOne(restarts: 10, within_ms: 5000)
+
+// Make `to` the process whose end closes `sock`. `to` must be on the core
+// that holds the socket — the connection's own handler process, started on
+// the core that accepted it, is the one caller.
 @vm(net__give)
 fn give(sock Socket, to Pid) Nil
 
-// The per-core accept loop: accept a connection, hand it to its own process,
-// then loop. A spawned process starts on the core that spawned it, so the
-// handler begins on the core whose poller holds the connection's socket. One
-// copy runs on every core, all draining the listener's single shared accept
-// queue — spreading the accepts is a locality preference, not a correctness
-// need.
+// The per-core accept loop: accept a connection, start a member of the
+// connection factory for it, loop. A member starts on the core that
+// declared it, so the handler begins on the core whose poller holds the
+// socket. Every core's acceptor drains the listener's single shared queue —
+// spreading the accepts is a locality preference, not a correctness need.
 //
 // A per-connection accept failure (ECONNABORTED, ECONNRESET, an unmapped errno
 // such as EMFILE/EPROTO) means one incoming connection was lost, not that the
 // listening socket is dead — the loop retries. ENETDOWN/ENETUNREACH/
 // EHOSTUNREACH are per-connection too: accept(2) documents them as
 // already-pending errors of the ACCEPTED connection — one that died in the
-// queue — not as listener death, so they retry as well. An unmapped errno is usually
-// descriptor exhaustion (EMFILE/ENFILE), where accept fails without dequeuing
-// anything, so that retry backs off for 100ms first — retrying immediately
-// would spin this core at full speed against the same full descriptor table.
-// `Ok(None)` is the shutdown a `net.close` delivers to parked acceptors, so
-// the loop exits quietly. Any other failure is one this loop has no answer
-// to; it is reported before this core stops accepting.
-fn accept_loop(server Server, handler fn(Socket) Nil) Nil {
+// queue — not as listener death, so they retry as well. An unmapped errno is
+// usually descriptor exhaustion (EMFILE/ENFILE), where accept fails without
+// dequeuing anything, so that retry backs off for 100ms first — retrying
+// immediately would spin this core at full speed against the same full
+// descriptor table. `Ok(None)` is the shutdown a `net.close` delivers to
+// parked acceptors: the acceptor returns, which for a transient worker
+// means it is done. Any other failure is one this loop has no answer to: it
+// is reported, and the acceptor has itself killed, which is how a transient
+// worker asks to be restarted — a fresh acceptor on a healthy listener
+// carries on; on a broken one the restarts exhaust the server's budget and
+// the failure moves up the tree.
+fn accept_loop(server Server, connections Factory(Nil, Socket)) Nil {
 	match accept(server) {
 		Ok(Some(sock)) -> {
-			// The handler is unlinked, so one that crashes ends its own
-			// process and nothing else: the acceptor and every other
-			// connection carry on. The connection is then given to it, so
-			// that it closes when the handler ends — by returning, by
-			// forgetting to close, or by crashing — rather than belonging
-			// to this acceptor, which loops for the server's whole life.
-			// The handler has not run yet when the give happens: a spawned
-			// process starts only once this one yields.
-			handler_pid = process.spawn_unlinked(fn() handler(sock))
-			give(sock, handler_pid)
-			accept_loop(server, handler)
+			_ = process.start_in(connections, sock)
+			accept_loop(server, connections)
 		}
 		Ok(None) -> Nil
 		Err(ConnectionAborted)
 		| Err(ConnectionReset)
 		| Err(NetworkDown)
 		| Err(NetworkUnreachable)
-		| Err(HostUnreachable) -> accept_loop(server, handler)
+		| Err(HostUnreachable) -> accept_loop(server, connections)
 		Err(Errno(_)) -> {
 			process.sleep(100)
-			accept_loop(server, handler)
+			accept_loop(server, connections)
 		}
-		Err(e) -> println('accept failed: ${string.inspect(e)}')
+		Err(e) -> {
+			println('accept failed: ${string.inspect(e)}')
+			process.kill(process.self())
+		}
 	}
 }
 

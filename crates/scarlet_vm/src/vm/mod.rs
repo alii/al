@@ -97,6 +97,7 @@ mod poll;
 mod port;
 mod processes;
 mod sched;
+mod supervision;
 mod templates;
 #[cfg(test)]
 mod tests;
@@ -116,7 +117,7 @@ use text::{int_to_ascii, parse_uint_ascii};
 /// A failure raised while running one process's code. It ends that process
 /// and nothing else (see [`processes`]): a supervisor learns of it as
 /// `Crashed(..)`, and every process linked to the crashed one is killed.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Crash {
     /// An operand had the wrong runtime tag for `op`. In a program the
     /// checker accepted this is a compiler bug, but it is still one
@@ -137,6 +138,8 @@ pub enum Crash {
     /// `process.receive` on a subject the calling process did not create.
     /// Only the owner may receive; the handle can travel, the right cannot.
     ForeignReceive,
+    /// A supervision declaration the tree refused.
+    Supervision(supervision::Refusal),
 }
 
 impl fmt::Display for Crash {
@@ -160,6 +163,7 @@ impl fmt::Display for Crash {
                     "receive: only the process that created a subject may receive on it"
                 )
             }
+            Self::Supervision(refusal) => write!(f, "supervision: {refusal}"),
         }
     }
 }
@@ -182,6 +186,10 @@ pub enum VmError {
     /// to it crashed (that crash was reported to stderr as it happened) or
     /// something called `kill` on it. The run counts as failed.
     MainKilled,
+    /// Every process ended, but a supervisor whose declaring process had
+    /// already returned gave up along the way (reported to stderr as it
+    /// happened): the program did not do what it was set up to do.
+    SupervisionFailed,
     /// Type-system invariant broken: a compiler bug, not user error. The
     /// runtime behind an `Internal`-errored run is leaked (see [`VM::run`]).
     Internal(Cow<'static, str>),
@@ -210,6 +218,7 @@ impl fmt::Display for VmError {
             Self::Crash(c) => write!(f, "{c}"),
             Self::MainCrashed(c) => write!(f, "{c}"),
             Self::MainKilled => write!(f, "the main process was killed"),
+            Self::SupervisionFailed => write!(f, "a supervisor gave up"),
             Self::Internal(s) => {
                 write!(f, "internal VM error (compiler bug): {s}")
             }
@@ -651,6 +660,9 @@ impl VM {
                 return match self.main_outcome.take() {
                     Some(MainOutcome::Returned(value, heap)) => {
                         self.heap = heap;
+                        if self.runtime.had_unsupervised_failure() {
+                            return Err(VmError::SupervisionFailed);
+                        }
                         Ok(value)
                     }
                     Some(MainOutcome::Crashed(crash)) => Err(VmError::MainCrashed(crash)),
@@ -668,7 +680,7 @@ impl VM {
                 }
                 Err(fault @ (VmError::Internal(_) | VmError::Io(_))) => return Err(fault),
                 // Minted only by this loop's own exit above.
-                Err(VmError::MainCrashed(_) | VmError::MainKilled) => {
+                Err(VmError::MainCrashed(_) | VmError::MainKilled | VmError::SupervisionFailed) => {
                     return Err(VmError::internal("a run outcome was raised inside a slice"));
                 }
             };
@@ -1178,32 +1190,6 @@ impl VM {
         Ok(())
     }
 
-    /// Spawn one copy of `f` pinned to every live scheduler, turning a single
-    /// accept loop into one acceptor per core. A listener is one kernel socket,
-    /// so all copies drain the same queue; the spread is only a locality
-    /// preference. A connection the closure captures stays in this
-    /// scheduler's tables, so only the local copy can use it — `net.serve`,
-    /// the one caller, captures a listener and a handler.
-    fn spawn_on_each(&mut self, f: Value) -> VmResult<()> {
-        self.check_spawnable(&f)?;
-        // Every scheduler slot must be live before a copy is placed on it.
-        // Skipping a never-spawned worker is safe: any live acceptor drains
-        // the shared queue.
-        self.runtime.ensure_workers();
-        for i in 0..self.runtime.scheduler_count() {
-            if i == self.scheduler_index {
-                let (heap, root) = ProcHeap::spawn(&f);
-                self.runtime.process_started();
-                let pid = self.alloc_pid(Link::ToParent);
-                self.start_process(pid, heap, root, &[]);
-            } else if self.runtime.is_live_scheduler(i) {
-                let seed = self.build_seed(&f);
-                self.runtime.submit_to(i, seed);
-            }
-        }
-        Ok(())
-    }
-
     /// Close every connection and port the just-ended process `pid` controls
     /// — the BEAM rule that a socket lives as long as its controlling process.
     /// Anything parked on one fails with the stale-socket `NetError` instead
@@ -1281,29 +1267,11 @@ impl VM {
         });
     }
 
-    /// Copy a closure into a seed the child adopts wholesale. No value is
-    /// shared with this scheduler afterwards, so handing the seed to another OS
-    /// thread is a plain move. `Binary` `Arc` backings are shared zero-copy:
-    /// only the box is copied, never the bytes. Captured listeners need no
-    /// transfer (the socket is program-wide); captured connections never
-    /// reach here from `spawn_process`, which keeps such a child local.
-    fn build_seed(&mut self, f: &Value) -> Seed {
-        // `root` points into `heap`, so the pair is self-contained and `Send`.
-        let (heap, root) = ProcHeap::spawn(f);
-        // Registered here, on the minting scheduler; the destination corrects
-        // that when it adopts the seed. Linked like a local spawn.
-        Seed {
-            pid: self.alloc_pid(Link::ToParent),
-            heap,
-            root,
-        }
-    }
-
     /// Build a runnable process on this scheduler from a seed. The seed carries
     /// no top-level bindings: those come from the global area, which `admit`
     /// syncs on every arrival path.
     fn hydrate_seed(&mut self, seed: Seed) {
-        self.start_process(seed.pid, seed.heap, seed.root, &[]);
+        self.start_process(seed.pid, seed.heap, seed.root, &seed.args);
     }
 }
 

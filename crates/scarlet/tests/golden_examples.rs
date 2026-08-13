@@ -250,6 +250,12 @@ suite! {
         // directions stopping at an unlinked boundary, normal exits not
         // spreading, self-kill. (Crashes write to stderr: tests/vm_exits.rs.)
         exits,
+        // Supervision: restart at a stable address, policies, one-for-all /
+        // rest-for-one stop order and restart sets, Ask shutdown, nested
+        // supervisors, keyed and unkeyed factories, introspection, and the
+        // tree dying with the process that declared it. (Crashes and budget
+        // exhaustion write to stderr: tests/vm_supervision.rs.)
+        supervisors,
         // HTTP/1.1 surface. Locks the native scanners behind scarlet/http/h1 to the
         // sans-IO contract the Scarlet reference parser defined.
         http_parse,
@@ -269,6 +275,9 @@ suite! {
     checks: [
         http_server,
         processes,
+        // A supervised application (a chat service): the reference for the
+        // shape of a `process.root` program. Serves for ever, like http_server.
+        supervision,
     ],
 
     // Perf infrastructure driven from outside this file (scripts/bench*.sh, and

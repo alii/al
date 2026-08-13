@@ -147,10 +147,11 @@ fn a_big_int_constant_is_pooled_once() {
         .filter(|c| c.as_int() == Some(4611686018427387905))
         .count();
     assert_eq!(hits, 1, "one value, one pool entry");
-    // The whole pool stays the stdlib's worth of constants, not one entry per
-    // constructor use site.
+    // The whole pool stays the stdlib's worth of constants (a few hundred,
+    // growing a little with every stdlib module), not one entry per
+    // constructor use site, which would be thousands.
     assert!(
-        p.constants.len() < 600,
+        p.constants.len() < 800,
         "pool regressed to per-use-site duplicates: {} entries",
         p.constants.len()
     );

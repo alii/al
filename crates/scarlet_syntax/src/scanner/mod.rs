@@ -459,6 +459,11 @@ impl Scanner {
 
             if next.is_ascii_digit() {
                 self.incr_pos();
+            } else if next == b'_' && self.byte_at(self.pos + 1).is_ascii_digit() {
+                // `1_000_000`: a separator between digits, kept in the token
+                // text so the formatter preserves it; `NumberLiteral::digits`
+                // drops it for everything that reads the number.
+                self.incr_pos();
             } else if next == b'.' && !has_dot {
                 if !self.byte_at(self.pos + 1).is_ascii_digit() {
                     break;
@@ -671,6 +676,18 @@ mod tests {
     const HELLO_SRC: &str = "// Hello world, plus string interpolation with ${}.\n\nprintln('hello, world')\n\nname = 'Scarlet'\nprintln('hello from ${name}')\nprintln('2 + 2 = ${2 + 2}')\n";
 
     const FIZZBUZZ_SRC: &str = "fn fizzbuzz(n Int) String {\n\tmatch (n % 3, n % 5) {\n\t\t(0, 0) -> 'FizzBuzz'\n\t\t(0, _) -> 'Fizz'\n\t\t(_, 0) -> 'Buzz'\n\t\t_ -> '${n}'\n\t}\n}\n\nfn run(n Int, last Int) Nil {\n\tif n > last {\n\t\tNil\n\t} else {\n\t\tprintln(fizzbuzz(n))\n\t\trun(n + 1, last)\n\t}\n}\n\nrun(1, 20)\n";
+
+    #[test]
+    fn digit_separators_stay_in_the_token() {
+        assert_eq!(
+            kinds_clean("1_000_000 + 3.141_592"),
+            vec![num("1_000_000"), PuncPlus, num("3.141_592"), Eof]
+        );
+        // A separator must sit between digits: anything else ends the
+        // number, and what follows is scanned as whatever it is.
+        assert_eq!(kinds("1_"), vec![num("1"), ident("_"), Eof]);
+        assert_eq!(kinds("1__0"), vec![num("1"), ident("__0"), Eof]);
+    }
 
     #[test]
     fn scans_hello_world() {

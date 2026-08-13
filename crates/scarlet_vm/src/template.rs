@@ -240,6 +240,14 @@ pub(crate) mod test_fixture {
             "TypeMismatch",
             &["op", "expected", "got"],
         ),
+        (
+            S::CrashSupervision,
+            4355,
+            4,
+            "Crash",
+            "Supervision",
+            &["why"],
+        ),
         (S::Port, 4608, 0, "Port", "Port", &["conn", "os_pid"]),
         (S::PortExited, 4609, 0, "ExitStatus", "Exited", CODE),
         (

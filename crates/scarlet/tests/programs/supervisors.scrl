@@ -1,0 +1,456 @@
+// Supervision, driven by kills (a crash would write to stderr; the crash
+// cases live in tests/vm_supervision.rs). The tree is declared by a helper
+// process rather than by main: the program has to end, and a tree ends when
+// the process that declared it fails — main returning would leave the
+// workers running for ever, which is the point of them.
+
+import scarlet/array
+import scarlet/process
+import scarlet/process.{
+	Ask,
+	Disposable,
+	Exit,
+	Exited,
+	FactoryOf,
+	Gone,
+	Kill,
+	Killed,
+	Normal,
+	NoProcess,
+	OneForAll,
+	OneForOne,
+	Permanent,
+	Pid,
+	Process,
+	Restarted,
+	RestForOne,
+	Running,
+	Subject,
+	SupervisorOf,
+	Transient,
+	Worker,
+}
+
+fn check(name String, ok Bool) Nil {
+	if ok {
+		println('PASS ${name}')
+	} else {
+		println('FAIL ${name}')
+	}
+}
+
+// ---- workers ----------------------------------------------------------------------
+
+type Req {
+	// Reply with the pid of the process serving this address right now.
+	Whoami(reply Subject(Pid))
+	// Ask the worker to return; what an `Ask` shutdown sends.
+	Close
+}
+
+// A worker that reports its name when it starts and when it is closed, so
+// the order in which a supervisor starts and stops things is observable.
+fn reporting(name String, log Subject(String)) fn(Subject(Req)) Nil {
+	fn(inbox) {
+		process.send(log, 'start ${name}')
+		serve(inbox, name, log)
+	}
+}
+
+fn serve(inbox Subject(Req), name String, log Subject(String)) Nil {
+	match process.receive(inbox) {
+		Whoami(reply) -> {
+			process.send(reply, process.self())
+			serve(inbox, name, log)
+		}
+		Close -> process.send(log, 'close ${name}')
+	}
+}
+
+// The pid behind an address, retrying while it is between incarnations: a
+// request sent to a dead incarnation is dropped with it, so a client asks
+// again, exactly as it would of a slow server.
+fn whoami(addr Subject(Req)) Pid {
+	reply = process.subject()
+	process.send(addr, Whoami(reply))
+	match process.receive_within(reply, 20) {
+		Ok(pid) -> pid
+		Err(Nil) -> whoami(addr)
+	}
+}
+
+// Wait until the address is served by something other than `old`.
+fn await_restart(addr Subject(Req), old Pid) Pid {
+	pid = whoami(addr)
+	if pid == old {
+		process.sleep(1)
+		await_restart(addr, old)
+	} else {
+		pid
+	}
+}
+
+// Drain `n` messages from the log.
+fn take(log Subject(String), n Int, acc Array(String)) Array(String) {
+	if n == 0 {
+		acc
+	} else {
+		take(log, n - 1, array.concat(acc, [process.receive(log)]))
+	}
+}
+
+// The same messages, in any order: restarted siblings start concurrently.
+fn same_set(got Array(String), wanted Array(String)) Bool {
+	array.length(got) == array.length(wanted) && array.all(wanted, fn(w) array.contains(got, w))
+}
+
+// ---- factory members -------------------------------------------------------------------
+
+type Member {
+	Key(reply Subject(String))
+	MemberPid(reply Subject(Pid))
+	Done
+}
+
+fn member(inbox Subject(Member), key String) Nil {
+	match process.receive(inbox) {
+		Key(reply) -> {
+			process.send(reply, key)
+			member(inbox, key)
+		}
+		MemberPid(reply) -> {
+			process.send(reply, process.self())
+			member(inbox, key)
+		}
+		Done -> Nil
+	}
+}
+
+fn member_key(addr Subject(Member)) String {
+	reply = process.subject()
+	process.send(addr, Key(reply))
+	match process.receive_within(reply, 20) {
+		Ok(key) -> key
+		Err(Nil) -> member_key(addr)
+	}
+}
+
+fn member_pid(addr Subject(Member)) Pid {
+	reply = process.subject()
+	process.send(addr, MemberPid(reply))
+	match process.receive_within(reply, 20) {
+		Ok(pid) -> pid
+		Err(Nil) -> member_pid(addr)
+	}
+}
+
+fn await_member_restart(addr Subject(Member), old Pid) Pid {
+	pid = member_pid(addr)
+	if pid == old {
+		process.sleep(1)
+		await_member_restart(addr, old)
+	} else {
+		pid
+	}
+}
+
+// Wait until the factory's live count is `n`: a member's exit is observed a
+// moment after it returns.
+fn await_count(f process.Supervised, n Int, tries Int) Bool {
+	if process.count(f) == n {
+		True
+	} else if tries == 0 {
+		False
+	} else {
+		process.sleep(1)
+		await_count(f, n, tries - 1)
+	}
+}
+
+// ---- the scenarios ----------------------------------------------------------------------
+
+fn scenarios() Nil {
+	log = process.subject()
+	app = process.supervisor(OneForOne(restarts: 100, within_ms: 60000))
+
+	// A permanent worker comes back at the same address.
+	a = process.permanent(app, reporting('a', log))
+	_ = take(log, 1, [])
+	a1 = whoami(a)
+	process.kill(a1)
+	a2 = await_restart(a, a1)
+	check('a killed permanent worker is restarted at the same address', a1 != a2)
+	check('and says so when it starts', take(log, 1, []) == ['start a'])
+	info = process.info(process.supervised(a))
+	check('info counts the restart', info.restarts == 1)
+	check('info names the policy', match info.kind {
+		Worker(Permanent) -> True
+		_ -> False
+	})
+	check('info carries the current pid', info.pid == Some(a2))
+
+	// A transient worker that returns is finished.
+	t = process.transient(app, reporting('t', log))
+	check('t started', take(log, 1, []) == ['start t'])
+	entry = process.supervised(t)
+	process.send(t, Close)
+	check('t closed', take(log, 1, []) == ['close t'])
+	check('a returned transient worker is gone', await_gone(entry, 200))
+	check('the supervisor forgot it', process.count(app.supervised) == 1)
+
+	// One-for-all: siblings are closed in reverse order, then all restart.
+	group = process.supervisor_in(app, OneForAll(restarts: 10, within_ms: 60000))
+	g1 = process.worker(group, Permanent, Ask(Close, grace_ms: 1000), reporting('g1', log))
+	g2 = process.worker(group, Permanent, Ask(Close, grace_ms: 1000), reporting('g2', log))
+	g3 = process.worker(group, Permanent, Ask(Close, grace_ms: 1000), reporting('g3', log))
+	_ = take(log, 3, [])
+	g1_pid = whoami(g1)
+	g2_pid = whoami(g2)
+	g3_pid = whoami(g3)
+	process.kill(g1_pid)
+	check(
+		'one-for-all closes the survivors last-declared first',
+		take(log, 2, []) == ['close g3', 'close g2'],
+	)
+	check(
+		'then starts everything again',
+		same_set(take(log, 3, []), ['start g1', 'start g2', 'start g3']),
+	)
+	check(
+		'every sibling is a new process',
+		await_restart(g2, g2_pid) != g2_pid && await_restart(g3, g3_pid) != g3_pid,
+	)
+	check('at the same addresses', whoami(g1) != g1_pid)
+	check(
+		'the nested supervisor is a child of the application',
+		process.parent(group.supervised) == app.supervised,
+	)
+	check(
+		'and the worker a child of the nested supervisor',
+		process.parent(process.supervised(g2)) == group.supervised,
+	)
+	check('the nested supervisor reports its strategy', match process.info(group.supervised).kind {
+		SupervisorOf(OneForAll(10, 60000)) -> True
+		_ -> False
+	})
+	check(
+		'a top-level supervisor is declared under a plain process',
+		match process.info(process.parent(app.supervised)).kind {
+			Process -> True
+			_ -> False
+		},
+	)
+
+	// Rest-for-one: only the workers declared after the dead one move.
+	rest = process.supervisor_in(app, RestForOne(restarts: 10, within_ms: 60000))
+	r1 = process.worker(rest, Permanent, Ask(Close, grace_ms: 1000), reporting('r1', log))
+	r2 = process.worker(rest, Permanent, Ask(Close, grace_ms: 1000), reporting('r2', log))
+	r3 = process.worker(rest, Permanent, Ask(Close, grace_ms: 1000), reporting('r3', log))
+	_ = take(log, 3, [])
+	r1_pid = whoami(r1)
+	r2_pid = whoami(r2)
+	process.kill(r2_pid)
+	check('rest-for-one closes only the later siblings', take(log, 1, []) == ['close r3'])
+	check(
+		'and restarts from the dead one onward',
+		same_set(take(log, 2, []), ['start r2', 'start r3']),
+	)
+	_ = await_restart(r2, r2_pid)
+	check('the earlier sibling was not touched', whoami(r1) == r1_pid)
+	check(
+		'children lists every worker',
+		array.map(process.children(rest.supervised), fn(
+			c,
+		) c == process.supervised(r1) || c == process.supervised(r2) ||
+		c == process.supervised(r3)) ==
+		[True, True, True],
+	)
+
+	// A factory: one member per key, restarted in place, keys freed on exit.
+	rooms = process.factory(app, Restarted(restarts: 10, within_ms: 60000), member)
+	lobby = process.lookup_or_start(rooms, 'lobby')
+	check('a member knows its key', member_key(lobby) == 'lobby')
+	check('the same key finds the same member', process.lookup_or_start(rooms, 'lobby') == lobby)
+	check('lookup finds it too', process.lookup(rooms, 'lobby') == Some(lobby))
+	check('another key is another member', process.lookup_or_start(rooms, 'ops') != lobby)
+	check('an unknown key is nothing', process.lookup(rooms, 'nowhere') == None)
+	check('the factory counts its members', process.count(rooms.supervised) == 2)
+	check('and reports its kind', match process.info(rooms.supervised).kind {
+		FactoryOf(Restarted(10, 60000)) -> True
+		_ -> False
+	})
+	lobby_pid = member_pid(lobby)
+	process.kill(lobby_pid)
+	check(
+		'a killed member is restarted at its address',
+		await_member_restart(lobby, lobby_pid) != lobby_pid,
+	)
+	check('with its key', member_key(lobby) == 'lobby')
+	process.send(lobby, Done)
+	check('a member that returns is done', await_count(rooms.supervised, 1, 200))
+	check('which frees its key', process.lookup(rooms, 'lobby') == None)
+	check('so the next request makes a new one', process.lookup_or_start(rooms, 'lobby') != lobby)
+
+	// Disposable members made without keys: what a server's connections are.
+	jobs = process.factory(app, Disposable, member)
+	j1 = process.start_in(jobs, 'one')
+	j2 = process.start_in(jobs, 'two')
+	check('unkeyed members are counted', process.count(jobs.supervised) == 2)
+	check('and receive their argument', member_key(j1) == 'one' && member_key(j2) == 'two')
+	check('but are not in the key index', process.lookup(jobs, 'one') == None)
+	process.send(j1, Done)
+	check('one finishing leaves the other', await_count(jobs.supervised, 1, 200))
+	check('a supervisor value reports its own kind', match process.info(app.supervised).kind {
+		SupervisorOf(OneForOne(100, 60000)) -> True
+		_ -> False
+	})
+	check(
+		'the application holds every subtree declared into it',
+		process.count(app.supervised) == 5,
+	)
+	check(
+		'the declaring process holds the application',
+		process.count(process.parent(app.supervised)) == 1,
+	)
+	check('walking up stops at a fixed point', {
+		main_entry = process.parent(app.supervised)
+		process.parent(main_entry) == main_entry
+	})
+	check('shutdown by Kill is the default', {
+		k = process.worker(app, Transient, Kill, reporting('k', log))
+		_ = take(log, 1, [])
+		process.send(k, Close)
+		take(log, 1, []) == ['close k']
+	})
+
+	// Watches: every exit at a place, across restarts, then its removal.
+	events = process.subject()
+	w = process.permanent(app, reporting('w', log))
+	_ = take(log, 1, [])
+	place = process.supervised(w)
+	watch = process.watch(place, events, fn(e) e)
+	process.kill(whoami(w))
+	first = process.receive(events)
+	check(
+		'a watch reports the exit',
+		first.supervised == place &&
+		match first.ended {
+			Exited(Killed) -> True
+			_ -> False
+		},
+	)
+	check('and that it was restarted on the spot', first.status == Running)
+	_ = take(log, 1, [])
+	process.kill(whoami(w))
+	second = process.receive(events)
+	check('a watch survives the restart', second.status == Running)
+	_ = take(log, 1, [])
+	process.unwatch(watch)
+	process.kill(whoami(w))
+	_ = take(log, 1, [])
+	check('unwatch stops the reports', process.receive_within(events, 30) == Err(Nil))
+
+	// A transient worker returning: one report, and the place is gone.
+	v = process.transient(app, reporting('v', log))
+	_ = take(log, 1, [])
+	_ = process.watch(process.supervised(v), events, fn(e) e)
+	process.send(v, Close)
+	_ = take(log, 1, [])
+	last = process.receive(events)
+	check(
+		'a final exit reports Gone',
+		last.status == Gone &&
+		match last.ended {
+			Exited(Normal) -> True
+			_ -> False
+		},
+	)
+	check('watching a place that is gone reports so at once', {
+		_ = process.watch(process.supervised(v), events, fn(e) e)
+		match process.receive(events) {
+			Exit(ended: Exited(NoProcess), status: Gone, ..) -> True
+			_ -> False
+		}
+	})
+
+	// Watching a plain process is monitoring it: a subject it owns locates
+	// it in the tree.
+	handoff = process.subject()
+	helper = process.spawn_unlinked(fn() {
+		mine = process.subject()
+		process.send(handoff, mine)
+		process.receive(mine)
+	})
+	helper_place = process.supervised(process.receive(handoff))
+	check('a plain subject places its owner', match process.info(helper_place).kind {
+		Process -> True
+		_ -> False
+	})
+	_ = process.watch(helper_place, events, fn(e) e)
+	process.kill(helper)
+	check('a plain process reports its one exit', match process.receive(events) {
+		Exit(ended: Exited(Killed), status: Gone, ..) -> True
+		_ -> False
+	})
+
+	// An Ask shutdown is delivered ahead of a backlog.
+	pair = process.supervisor_in(app, OneForAll(restarts: 5, within_ms: 60000))
+	slow = process.worker(pair, Permanent, Ask(Close, grace_ms: 5000), slow_worker(log))
+	trigger = process.permanent(pair, reporting('trigger', log))
+	_ = take(log, 2, [])
+	// Queue up slow work, then have the group stop the slow worker: the
+	// close message overtakes the backlog, so it closes having done at most
+	// the job it was in the middle of.
+	array.each([1, 2, 3, 4, 5, 6, 7, 8], fn(_) process.send(slow, Whoami(process.subject())))
+	process.kill(whoami(trigger))
+	check('the stop message overtakes queued work', match take(log, 1, []) {
+		['closed after 0 jobs'] | ['closed after 1 jobs'] -> True
+		_ -> False
+	})
+}
+
+// A worker that counts the requests it has handled and reports the count
+// when closed; each request takes a while, so a backlog builds up.
+fn slow_worker(log Subject(String)) fn(Subject(Req)) Nil {
+	fn(inbox) {
+		process.send(log, 'start slow')
+		slow_loop(inbox, log, 0)
+	}
+}
+
+fn slow_loop(inbox Subject(Req), log Subject(String), jobs Int) Nil {
+	match process.receive(inbox) {
+		Whoami(reply) -> {
+			process.sleep(20)
+			process.send(reply, process.self())
+			slow_loop(inbox, log, jobs + 1)
+		}
+		Close -> process.send(log, 'closed after ${jobs} jobs')
+	}
+}
+
+fn await_gone(entry process.Supervised, tries Int) Bool {
+	match process.info(entry).status {
+		Gone -> True
+		Running | process.Restarting -> if tries == 0 {
+			False
+		} else {
+			process.sleep(1)
+			await_gone(entry, tries - 1)
+		}
+	}
+}
+
+pub fn main() {
+	// Run the scenarios in a helper whose failure takes the tree with it: when
+	// it has finished it has itself killed, every worker declared under it is
+	// stopped, and the program — main included, once told — can end.
+	done = process.subject()
+	_ = process.spawn_unlinked(fn() {
+		scenarios()
+		process.send(done, Nil)
+		process.kill(process.self())
+	})
+	process.receive(done)
+	println('done')
+}

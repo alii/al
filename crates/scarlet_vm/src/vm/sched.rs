@@ -17,7 +17,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Once, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, Once, OnceLock, RwLock};
 
 use crate::bytecode::{Program, Value};
 use crate::heap::ProcHeap;
@@ -38,6 +38,9 @@ pub(super) struct Seed {
     /// The child's allocator handle. Zero-sized: allocation goes to mimalloc's
     /// per-thread default heap and `mi_free` works from any thread.
     pub heap: ProcHeap,
+    /// The closure's arguments — immediates, or pointers into the same
+    /// child heap. A pinned supervised worker's inbox travels here.
+    pub args: Vec<Value>,
 }
 
 // A seed crosses scheduler threads, so if it ever regains a non-`Send` field
@@ -290,6 +293,14 @@ pub(super) struct Runtime {
     /// Every live pid, with the monitors on it and the monitors it holds.
     /// See [`super::monitor`].
     pub(super) processes: super::processes::ProcessTable,
+    /// The supervision tree over those processes, and the factories' key
+    /// indexes, published separately so lookups bypass the tree lock.
+    pub(super) supervision: Mutex<super::supervision::Tree>,
+    pub(super) factory_keys: super::supervision::FactoryKeys,
+    /// A top-level supervisor gave up after the process that declared it
+    /// had returned, so there was nothing to kill; the run still counts as
+    /// failed. See [`super::supervision::Action::FailOwner`].
+    unsupervised_failure: AtomicBool,
     next_pid: AtomicU64,
     /// Per-scheduler shared slots, indexed by scheduler id.
     pub(super) slots: Vec<SchedSlot>,
@@ -338,6 +349,9 @@ impl Runtime {
             mailboxes: super::mailbox::Mailboxes::new(),
             live_subjects: AtomicUsize::new(0),
             processes: super::processes::ProcessTable::new(count),
+            supervision: super::supervision::new_tree(),
+            factory_keys: RwLock::new(HashMap::default()),
+            unsupervised_failure: AtomicBool::new(false),
             next_pid: AtomicU64::new(1),
             slots,
             submit_cursor: AtomicUsize::new(0),
@@ -428,6 +442,20 @@ impl Runtime {
         let pid = self.next_pid.fetch_add(1, Ordering::Relaxed);
         self.register_process(pid, sched, parent);
         pid
+    }
+
+    pub(super) fn note_unsupervised_failure(&self) {
+        self.unsupervised_failure.store(true, Ordering::Release);
+    }
+
+    pub(super) fn had_unsupervised_failure(&self) -> bool {
+        self.unsupervised_failure.load(Ordering::Acquire)
+    }
+
+    /// An id for a supervision entry, from the same counter as pids so the
+    /// two share the namespace the program's `Supervised` values live in.
+    pub(super) fn alloc_entry_id(&self) -> u64 {
+        self.next_pid.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Route a kill for `pid` to scheduler `sched`, the one last known to

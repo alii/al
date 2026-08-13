@@ -1,0 +1,52 @@
+PASS a killed permanent worker is restarted at the same address
+PASS and says so when it starts
+PASS info counts the restart
+PASS info names the policy
+PASS info carries the current pid
+PASS t started
+PASS t closed
+PASS a returned transient worker is gone
+PASS the supervisor forgot it
+PASS one-for-all closes the survivors last-declared first
+PASS then starts everything again
+PASS every sibling is a new process
+PASS at the same addresses
+PASS the nested supervisor is a child of the application
+PASS and the worker a child of the nested supervisor
+PASS the nested supervisor reports its strategy
+PASS a top-level supervisor is declared under a plain process
+PASS rest-for-one closes only the later siblings
+PASS and restarts from the dead one onward
+PASS the earlier sibling was not touched
+PASS children lists every worker
+PASS a member knows its key
+PASS the same key finds the same member
+PASS lookup finds it too
+PASS another key is another member
+PASS an unknown key is nothing
+PASS the factory counts its members
+PASS and reports its kind
+PASS a killed member is restarted at its address
+PASS with its key
+PASS a member that returns is done
+PASS which frees its key
+PASS so the next request makes a new one
+PASS unkeyed members are counted
+PASS and receive their argument
+PASS but are not in the key index
+PASS one finishing leaves the other
+PASS a supervisor value reports its own kind
+PASS the application holds every subtree declared into it
+PASS the declaring process holds the application
+PASS walking up stops at a fixed point
+PASS shutdown by Kill is the default
+PASS a watch reports the exit
+PASS and that it was restarted on the spot
+PASS a watch survives the restart
+PASS unwatch stops the reports
+PASS a final exit reports Gone
+PASS watching a place that is gone reports so at once
+PASS a plain subject places its owner
+PASS a plain process reports its one exit
+PASS the stop message overtakes queued work
+done

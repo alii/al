@@ -1,5 +1,5 @@
 /**
- * Lightweight processes and message passing.
+ * Processes, message passing, and the supervision tree.
  *
  * spawn(f) starts a new process running f and returns its Pid. Processes are
  * cheap (a few hundred bytes, about a microsecond to start) — spawn freely,
@@ -16,24 +16,36 @@
  * spawned it: if either of them crashes or is killed, so is the other, and so
  * on through everything linked to those — so a crash takes down the whole
  * linked tree, up to and including the main process, unless something in
- * between was started with spawn_unlinked. That is the point: a failure
+ * between was declared with a policy for it. That is the point: a failure
  * nobody planned for stops the program instead of leaving part of it silently
  * dead, and a failure somebody did plan for is contained exactly where they
- * said. A supervisor is a process that starts its children with
- * spawn_unlinked, monitors them, and restarts them when their notices arrive.
+ * said.
  *
- * A Pid names a process. monitor(pid, inbox, wrap) asks to be sent a message
- * of your own choosing when that process ends, and how it ended; kill(pid)
- * ends it. A Pid carries no right to send to the process — processes talk
- * through Subjects. A Subject(msg) is a typed mailbox: the process that calls
+ * Planning for failure is what the supervision half of this module is (see
+ * the section below, and examples/supervision.scrl). A long-lived process is
+ * declared as a worker under a supervisor — `db = process.permanent(app,
+ * db.serve)` — and the binding is its address, a Subject that stays valid
+ * however many times the process behind it is restarted; a supervisor
+ * carries the strategy and budget for restarting what is under it, and a
+ * factory makes workers of one shape on demand, by key. The runtime holds
+ * the tree, restarts things in declaration order, stops them in reverse, and
+ * answers questions about it (children, count, info).
+ *
+ * A Pid names one process. monitor(pid, inbox, wrap) asks to be sent a
+ * message of your own choosing when that process ends, and how it ended;
+ * kill(pid) ends it (and, if it was a supervised worker, has it restarted).
+ * A Pid carries no right to send to the process — processes talk through
+ * Subjects. A Subject(msg) is a typed mailbox: the process that calls
  * subject() owns it and is the only one that may receive on it; the handle
  * itself is a value — capture it in a spawned closure or send it inside a
  * message (a reply address) — and any process holding it may send.
  * receive(s) blocks until a message arrives; receive_within adds a timeout.
  * Messages on one subject arrive in the order they were sent.
  *
- * The program exits when every process has finished.
+ * The program exits when every process has finished — which, for a program
+ * built as a tree under `root`, is when the tree has failed for good.
  */
+import scarlet/array
 import scarlet/time.{Instant}
 import scarlet/time
 
@@ -57,9 +69,10 @@ pub type Pid
 pub fn spawn(f fn() Nil) Pid
 
 // As `spawn`, with no link: the new process and the calling process fail
-// independently. What a supervisor uses to start the children it monitors,
-// and what `net.serve` uses to start connection handlers, so that one bad
-// request ends one connection and nothing else.
+// independently. For a task whose failure the caller means to observe with
+// `monitor` and handle itself; anything longer-lived than that belongs in
+// the tree (`permanent`, `factory`, ...), which is what `net.serve` uses for
+// its connections.
 @vm(process__spawn_unlinked)
 pub fn spawn_unlinked(f fn() Nil) Pid
 
@@ -112,6 +125,9 @@ pub type Crash {
 	// The runtime met a value of the wrong type — a compiler bug, reported
 	// with the operation and what it saw, so it can be filed.
 	TypeMismatch(op String, expected String, got String)
+	// A supervision declaration the runtime refused: declaring into a
+	// supervisor or factory this process did not create, or one that is gone.
+	Supervision(why String)
 }
 
 // The notice a monitor delivers: which process ended, and why.
@@ -130,16 +146,18 @@ pub opaque type Monitor {
 // it already has — `wrap(Down(pid, reason))` is sent to `notify`, so the
 // notice arrives in the same mailbox, and as the same type, as everything
 // else the calling process receives; one `receive` loop handles both. A
-// supervisor is a process that starts its children with `spawn_unlinked`,
-// monitors each of them into its own inbox, and matches the down message
-// next to its ordinary traffic:
+// pool that hands jobs to helper processes, say, monitors each helper into
+// its own inbox and matches the notice next to its ordinary traffic:
 //
 //	type Msg {
 //		Job(job Job)
-//		WorkerDown(id Int, down Down)
+//		HelperDown(id Int, down Down)
 //	}
 //
-//	process.monitor(worker, inbox, fn(down) WorkerDown(3, down))
+//	process.monitor(helper, inbox, fn(down) HelperDown(3, down))
+//
+// (Restarting things is the supervision tree's job — see below; `watch` is
+// its counterpart to this for places in the tree.)
 //
 // `wrap` is copied when the monitor is placed, like a message, and runs in a
 // process of its own when the notice fires; give it the values it needs by
@@ -179,6 +197,12 @@ pub fn subject() Subject(msg)
 @vm(process__send)
 pub fn send(s Subject(msg), m msg) Nil
 
+// `send`, to the front of the queue. Only for `Ask`: a program's own
+// messages are ordered, and a stop request is the one thing that must not
+// wait its turn.
+@vm(process__send_urgent)
+fn send_urgent(s Subject(msg), m msg) Nil
+
 // The oldest message sent to `s`, parking the calling process until one
 // arrives. Only the owner may call this; a receive on another process's
 // subject is a runtime error.
@@ -199,3 +223,471 @@ pub fn receive_until(s Subject(msg), deadline Instant) Result(msg, Nil) {
 
 @vm(process__receive_until)
 fn receive_until_ms(s Subject(msg), deadline_ms Int) Result(msg, Nil)
+
+// ---- Supervision -----------------------------------------------------------------
+//
+// A supervision tree is declared as a sequence of ordinary bindings:
+//
+//	app <- process.root(OneForOne(restarts: 5, within_ms: 60_000))
+//	db = process.permanent(app, db.serve)
+//	cache = process.permanent(app, cache.serve(db))
+//	storage = process.supervisor_in(app, OneForAll(restarts: 3, within_ms: 10_000))
+//	wal = process.worker(storage, Permanent, Ask(Close, grace_ms: 2000), wal.serve)
+//	index = process.permanent(storage, index.serve(wal))
+//
+// Each worker line binds the worker's address, a Subject the runtime creates
+// before the worker runs and keeps for as long as the worker is declared:
+// when the worker's process ends and its policy says to restart it, the start
+// function is run again in a new process that receives on the same Subject,
+// so `db` above stays valid for the life of the program whatever happens to
+// the process behind it. (What was queued for the dead process is dropped;
+// a request that got no reply is the caller's to retry, exactly as with a
+// process that was merely slow.) Line order is declaration order: a worker
+// can only capture the addresses bound above it, which is also the order
+// they are started in and the reverse of the order they are stopped in.
+//
+// Restarting is the supervisor's job. Its Strategy carries its budget: more
+// than `restarts` restarts within `within_ms` and it gives up — stops all of
+// its children, in reverse order — and reports that to whatever it was
+// declared under: an enclosing supervisor, which treats it as a child that
+// died and applies its own strategy and budget, or, for a top-level
+// supervisor, the process that declared it, which is killed. So a failure
+// nothing was prepared for still ends the program, as it does for plain
+// spawned processes; supervisors only ever narrow that.
+//
+// Only the process that created a supervisor may declare into it. A worker
+// wanting children of its own creates a supervisor of its own inside its
+// start function (with `supervisor`, which is what a process that only
+// supervises looks like); had it been allowed to declare into a supervisor
+// it captured, every restart would have declared them again.
+
+// What a supervisor does when one of its workers needs restarting, and how
+// many restarts it tolerates: more than `restarts` in any `within_ms`
+// window and it gives up. There is no default budget; every restart that
+// happens traces back to a number somebody wrote here.
+pub type Strategy {
+	// Restart the one that died. Right whenever its siblings talk to it
+	// only through its address, which restarting keeps valid.
+	OneForOne(restarts Int, within_ms Int)
+	// Stop every other worker (in reverse order) and restart them all (in
+	// order): their states only make sense together.
+	OneForAll(restarts Int, within_ms Int)
+	// As OneForAll, for the one that died and the workers declared after it —
+	// the ones that could have captured its address and built state on it.
+	RestForOne(restarts Int, within_ms Int)
+}
+
+// When a worker's process is restarted.
+pub type Policy {
+	// After any exit, including returning normally: a server.
+	Permanent
+	// After a crash or a kill; returning normally means it was done.
+	Transient
+	// Never: it is declared for the tree's sake — stopped and counted with
+	// its siblings — but its exit, however it happens, ends it.
+	Temporary
+}
+
+// How a worker is stopped when its supervisor needs it gone (a sibling's
+// one-for-all restart, the supervisor giving up or being torn down).
+pub type Shutdown(msg) {
+	// At once. Right for anything whose state lives elsewhere.
+	Kill
+	// Send it `message` — one of its own messages, so a worker's stop message
+	// is checked against the worker it is declared with — and kill it if it
+	// is still running `grace_ms` later. The worker stops by returning. The
+	// message is delivered ahead of whatever is queued, so the grace period
+	// is for finishing the message in hand and cleaning up, not for draining
+	// a backlog (OTP's shutdown is a signal for the same reason).
+	Ask(message msg, grace_ms Int)
+}
+
+// What a factory does with its members.
+pub type Members {
+	// A member ends when its process ends: connections, requests, jobs.
+	Disposable
+	// A member whose process crashes or is killed is restarted at the same
+	// address and key, within this budget; one that returns is done. The
+	// budget is the factory's own: a chat server's channels crash-looping
+	// should give up the channels, not the whole application.
+	Restarted(restarts Int, within_ms Int)
+}
+
+// A supervisor: something to declare workers, factories and further
+// supervisors into. `supervised` is its place in the tree, for
+// introspection.
+pub opaque type Supervisor {
+	supervised Supervised
+}
+
+// A source of workers of one shape, made on demand and found again by key
+// — a registry and a dynamic supervisor in one. `msg` is what a member
+// receives; `key` is what identifies one.
+pub opaque type Factory(msg, key) {
+	supervised Supervised
+}
+
+// A place in the tree: a worker, a supervisor, a factory, or a plain
+// process. Compares by identity; valid as a map key. Every function taking
+// one is total — a place whose occupant is gone answers as such.
+pub opaque type Supervised {
+	id Int
+}
+
+// Declare a top-level supervisor owned by the calling process, run `body`
+// with it — under backpassing, `body` is the rest of the block — and then
+// park the calling process for good: from here on the tree is the program.
+// It ends when the tree's failures exhaust the supervisor, which kills this
+// process (a failing exit status), or when the operating system ends the
+// program. What an application's main function looks like:
+//
+//	app <- process.root(OneForOne(restarts: 5, within_ms: 60_000))
+//	db = process.permanent(app, db.serve)
+//	...
+pub fn root(strategy Strategy, body fn(Supervisor) a) b {
+	_ = body(supervisor(strategy))
+	receive(subject())
+}
+
+// A top-level supervisor owned by the calling process, as a value. What
+// libraries that set up a subtree on the caller's behalf (`net.serve`) use,
+// and what a script that should keep running after its last line uses:
+// the supervisor outlives the process that declared it if that process
+// returns normally, and dies with it if it fails. If it gives up, the
+// declaring process is killed if it is still running; otherwise the failure
+// is reported and the program's exit status says so once it ends.
+// Applications should prefer `root`, which additionally holds the program
+// open for exactly as long as the tree stands.
+pub fn supervisor(strategy Strategy) Supervisor {
+	Supervisor(supervised: Supervised(id: declare_supervisor(strategy, Nil)))
+}
+
+// Declare a supervisor inside `parent`, as one of its children: a subtree
+// with its own strategy and budget, started and stopped in order with its
+// siblings, and restarted by `parent` if it gives up.
+pub fn supervisor_in(parent Supervisor, strategy Strategy) Supervisor {
+	Supervisor(supervised: Supervised(id: declare_supervisor(strategy, parent.supervised.id)))
+}
+
+fn declare_supervisor(strategy Strategy, parent p) Int {
+	match strategy {
+		OneForOne(restarts, within_ms) -> supervisor_entry(0, restarts, within_ms, parent)
+		OneForAll(restarts, within_ms) -> supervisor_entry(1, restarts, within_ms, parent)
+		RestForOne(restarts, within_ms) -> supervisor_entry(2, restarts, within_ms, parent)
+	}
+}
+
+@vm(process__supervisor)
+fn supervisor_entry(strategy Int, restarts Int, within_ms Int, parent p) Int
+
+// Declare a worker in `sup` and start it: `start` runs in a new process
+// with the worker's address, and the address is returned. See the section
+// comment for what the address, the policy and the shutdown mean.
+//
+//	wal = process.worker(storage, Permanent, Ask(Close, grace_ms: 2000), wal.serve)
+pub fn worker(
+	sup Supervisor,
+	policy Policy,
+	stop Shutdown(msg),
+	start fn(Subject(msg)) Nil,
+) Subject(msg) {
+	code = policy_code(policy)
+	match stop {
+		Kill -> worker_slot(sup.supervised.id, code, Nil, start)
+		Ask(message, grace_ms) -> worker_slot(
+			sup.supervised.id,
+			code,
+			fn(addr, pid) {
+				send_urgent(addr, message)
+				sleep(grace_ms)
+				kill(pid)
+			},
+			start,
+		)
+	}
+}
+
+// `worker` with `Permanent` and `Kill`: the common server.
+pub fn permanent(sup Supervisor, start fn(Subject(msg)) Nil) Subject(msg) {
+	worker(sup, Permanent, Kill, start)
+}
+
+// `worker` with `Transient` and `Kill`: something that should finish, and
+// be retried if it fails.
+pub fn transient(sup Supervisor, start fn(Subject(msg)) Nil) Subject(msg) {
+	worker(sup, Transient, Kill, start)
+}
+
+// `worker` with `Temporary` and `Kill`: in the tree, never restarted.
+pub fn temporary(sup Supervisor, start fn(Subject(msg)) Nil) Subject(msg) {
+	worker(sup, Temporary, Kill, start)
+}
+
+fn policy_code(policy Policy) Int {
+	match policy {
+		Permanent -> 0
+		Transient -> 1
+		Temporary -> 2
+	}
+}
+
+// `stopper` is a `fn(Subject(msg), Pid) Nil`, or Nil to kill outright.
+@vm(process__worker)
+fn worker_slot(sup Int, policy Int, stopper s, start fn(Subject(msg)) Nil) Subject(msg)
+
+// Declare a factory in `sup`. `template` is run, in a new process, for each
+// member `lookup_or_start` creates, with the member's address and its key.
+//
+//	channels = process.factory(app, Restarted(restarts: 50, within_ms: 60_000), channel.serve)
+//	general = process.lookup_or_start(channels, 'general')
+pub fn factory(
+	sup Supervisor,
+	members Members,
+	template fn(Subject(msg), key) Nil,
+) Factory(msg, key) {
+	id = match members {
+		Disposable -> factory_entry(sup.supervised.id, -1, 0, template)
+		Restarted(restarts, within_ms) ->
+			factory_entry(sup.supervised.id, restarts, within_ms, template)
+	}
+	Factory(supervised: Supervised(id: id))
+}
+
+@vm(process__factory)
+fn factory_entry(sup Int, restarts Int, within_ms Int, template fn(Subject(msg), key) Nil) Int
+
+// The address of the member for `k`, starting it if there is none: there is
+// at most one member per key at a time, however many processes ask at once.
+// Any process may call this. Once a member has ended for good, its key is
+// free and the next call starts a fresh one.
+pub fn lookup_or_start(f Factory(msg, key), k key) Subject(msg) {
+	lookup_or_start_in(f.supervised.id, k)
+}
+
+@vm(process__lookup_or_start)
+fn lookup_or_start_in(factory Int, k key) Subject(msg)
+
+// The address of the member for `k`, if one is currently declared.
+pub fn lookup(f Factory(msg, key), k key) Option(Subject(msg)) {
+	lookup_in(f.supervised.id, k)
+}
+
+@vm(process__lookup)
+fn lookup_in(factory Int, k key) Option(Subject(msg))
+
+// Start a member for `arg` without registering it under any key: one more
+// of whatever the factory makes, findable afterwards only through
+// `children`. What a server does with each accepted connection, so that
+// `count` of the factory is the number of open connections. The template
+// receives `arg` where a keyed member receives its key.
+pub fn start_in(f Factory(msg, arg), a arg) Subject(msg) {
+	start_member(f.supervised.id, a)
+}
+
+@vm(process__start_in)
+fn start_member(factory Int, a arg) Subject(msg)
+
+// One worker per scheduler thread, each restarted on the same thread it
+// was declared on. The one placement decision a program is allowed to
+// make, and only `net` makes it: a connection's socket belongs to the
+// thread that accepted it, so an acceptor per thread keeps every connection
+// on the thread that serves it. Not for application code, which does not
+// know or care where it runs.
+pub fn worker_per_scheduler(sup Supervisor, policy Policy, start fn(Subject(msg)) Nil) Nil {
+	worker_slots_per_scheduler(sup.supervised.id, policy_code(policy), start)
+}
+
+@vm(process__worker_on_each)
+fn worker_slots_per_scheduler(sup Int, policy Int, start fn(Subject(msg)) Nil) Nil
+
+// The place in the tree behind an address: the worker it belongs to, or, for
+// a subject made with `subject()`, the process that owns it.
+pub fn supervised(addr Subject(msg)) Supervised {
+	Supervised(id: supervised_id(addr))
+}
+
+@vm(process__supervised)
+fn supervised_id(addr Subject(msg)) Int
+
+// What `s` is declared under: a worker's or subtree's supervisor, a member's
+// factory, a top-level supervisor's owning process. A process's parent is
+// the process that spawned it. Something with nothing above it — the main
+// process — is its own parent, so walking up always terminates at a fixed
+// point.
+pub fn parent(s Supervised) Supervised {
+	Supervised(id: parent_id(s.id))
+}
+
+@vm(process__parent)
+fn parent_id(id Int) Int
+
+// What is declared under `s`, in declaration order (a factory's members in
+// no particular order; a process's top-level supervisors). A snapshot.
+pub fn children(s Supervised) Array(Supervised) {
+	array.map(children_ids(s.id), fn(id) Supervised(id: id))
+}
+
+@vm(process__children)
+fn children_ids(id Int) Array(Int)
+
+// `array.length(children(s))`, without building the array — a factory's
+// live member count is what a server reports as its connection count.
+pub fn count(s Supervised) Int {
+	count_of(s.id)
+}
+
+@vm(process__count)
+fn count_of(id Int) Int
+
+// What kind of thing occupies a place in the tree.
+pub type Kind {
+	// A plain process: spawned, or the main process.
+	Process
+	Worker(policy Policy)
+	SupervisorOf(strategy Strategy)
+	FactoryOf(members Members)
+}
+
+pub type Status {
+	Running
+	// A worker whose process has ended and not yet been restarted — its
+	// supervisor is stopping siblings first, or has given up.
+	Restarting
+	// Nothing is there any more.
+	Gone
+}
+
+pub type Info {
+	kind Kind
+	status Status
+	// The process currently running there, for `monitor` or `kill` — which,
+	// on a supervised worker, restarts it. None for a supervisor, a factory,
+	// or a worker between incarnations.
+	pid Option(Pid)
+	// How many times the worker there has been restarted.
+	restarts Int
+}
+
+// What a watch reports.
+pub type Ended {
+	// The process occupying the place exited, thus. `NoProcess` if the
+	// watch was placed on something already gone; `Killed` also describes a
+	// place removed from under its watchers, torn down with something above.
+	Exited(reason ExitReason)
+	// The supervisor or factory there exhausted its budget: what was under
+	// it has been stopped, and whatever it was declared under decides next.
+	GaveUp(restarts Int, within_ms Int)
+}
+
+// One notification from a watch: what happened at `supervised`, and what
+// the place looks like afterwards — `Running` if it was restarted on the
+// spot, `Restarting` if that is still being arranged (siblings are being
+// stopped first, or the give-up is being escalated), `Gone` if it is over.
+pub type Exit {
+	supervised Supervised
+	ended Ended
+	status Status
+}
+
+// A watch registration, for `unwatch`.
+pub opaque type Watch {
+	OnPlace(supervised Supervised, id Int)
+	OnProcess(monitor Monitor)
+}
+
+// Be told, as a message of your own type, every time something happens at
+// `s`: each exit of the worker there — restarts included, which is what
+// distinguishes this from `monitor` on the current pid — a supervisor or
+// factory there giving up, and finally its removal. As with `monitor`, the
+// notice is built by `wrap` and sent to `notify`, so it arrives among the
+// watcher's ordinary messages. Watching a plain process is watching its one
+// and only exit. Released by `unwatch`, by the place going away (after its
+// last notice), or by the watching process ending.
+//
+//	_ = process.watch(process.supervised(db), inbox, fn(e) DbEvent(e))
+pub fn watch(s Supervised, notify Subject(msg), wrap fn(Exit) msg) Watch {
+	match info(s) {
+		Info(kind: Process, pid: Some(pid), ..) ->
+			OnProcess(
+				monitor(
+					pid,
+					notify,
+					fn(down) wrap(Exit(supervised: s, ended: Exited(down.reason), status: Gone)),
+				),
+			)
+		Info(kind: Process, pid: None, ..) -> {
+			send(notify, wrap(Exit(supervised: s, ended: Exited(NoProcess), status: Gone)))
+			OnPlace(s, 0)
+		}
+		Info(..) ->
+			OnPlace(
+				s,
+				watch_place(s.id, fn(description) send(notify, wrap(decode_exit(description)))),
+			)
+	}
+}
+
+// Cancel a watch. A notice already on its way still arrives, as with
+// `demonitor`.
+pub fn unwatch(w Watch) Nil {
+	match w {
+		OnPlace(s, id) -> unwatch_place(s.id, id)
+		OnProcess(m) -> demonitor(m)
+	}
+}
+
+// The runtime's description of an event: (0 for an exit or 1 for a give-up,
+// the reason, the give-up's budget, the status code, the place's id).
+fn decode_exit(description (Int, ExitReason, Int, Int, Int, Int)) Exit {
+	(kind, reason, restarts, within_ms, status, id) = description
+	Exit(
+		supervised: Supervised(id: id),
+		ended: if kind == 1 {
+			GaveUp(restarts, within_ms)
+		} else {
+			Exited(reason)
+		},
+		status: match status {
+			0 -> Running
+			1 -> Restarting
+			_ -> Gone
+		},
+	)
+}
+
+@vm(process__watch)
+fn watch_place(id Int, notice fn((Int, ExitReason, Int, Int, Int, Int)) Nil) Int
+
+@vm(process__unwatch)
+fn unwatch_place(id Int, watch Int) Nil
+
+pub fn info(s Supervised) Info {
+	(kind, detail, restarts, within_ms, status, restarted, pid) = info_of(s.id)
+	kind = match kind {
+		1 -> Worker(match detail {
+			0 -> Permanent
+			1 -> Transient
+			_ -> Temporary
+		})
+		2 -> SupervisorOf(match detail {
+			0 -> OneForOne(restarts, within_ms)
+			1 -> OneForAll(restarts, within_ms)
+			_ -> RestForOne(restarts, within_ms)
+		})
+		3 -> FactoryOf(if detail == 1 {
+			Restarted(restarts, within_ms)
+		} else {
+			Disposable
+		})
+		_ -> Process
+	}
+	status = match status {
+		0 -> Running
+		1 -> Restarting
+		_ -> Gone
+	}
+	Info(kind: kind, status: status, pid: pid, restarts: restarted)
+}
+
+@vm(process__info)
+fn info_of(id Int) (Int, Int, Int, Int, Int, Int, Option(Pid))

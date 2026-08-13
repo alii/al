@@ -358,11 +358,59 @@ pub enum Op {
     ProcessMonitor,
     /// `[Monitor] -> Nil` — cancel a monitor. (scarlet/process.demonitor)
     ProcessDemonitor,
-    /// `[closure] -> Nil` — spawn one copy of the closure pinned to every
-    /// live scheduler. `net.serve`'s accept fan-out: with per-scheduler fd
-    /// tables, one acceptor per scheduler keeps every accepted connection on
-    /// the scheduler that will serve it. Not part of the process API.
-    SpawnOnEach,
+
+    // Supervision (`crate::vm::supervision`). Handles are entry ids as Ints;
+    // the stdlib wraps them in its own opaque types, and policies and
+    // strategies cross as small integer codes, so the VM constructs none of
+    // `scarlet/process`'s supervision types except through `SupervisedInfo`'s
+    // raw tuple.
+    /// `[strategy_code, restarts, within_ms, parent] -> Int` — a supervisor,
+    /// nested under `parent` (an Int) or owned by the calling process (any
+    /// non-Int). (scarlet/process.supervisor)
+    SupervisorNew,
+    /// `[supervisor, policy_code, stopper, start fn(Subject) Nil] -> Subject`
+    /// — declare a worker slot and start its first incarnation; `stopper` is
+    /// a `fn(Subject, Pid) Nil` or a non-closure for plain kill.
+    /// (scarlet/process.worker)
+    SupervisorWorker,
+    /// `[supervisor, restarts, within_ms, template fn(Subject, key) Nil] ->
+    /// Int` — a factory; `restarts < 0` for disposable members.
+    /// (scarlet/process.factory)
+    FactoryNew,
+    /// `[factory, key] -> Subject` — the member for `key`, started if new.
+    /// (scarlet/process.lookup_or_start)
+    FactoryLookupOrStart,
+    /// `[factory, key] -> Option(Subject)`. (scarlet/process.lookup)
+    FactoryLookup,
+    /// `[subject] -> Int` — the tree id behind an address.
+    /// (scarlet/process.supervised)
+    SupervisedOf,
+    /// `[id] -> Int`. (scarlet/process.parent)
+    SupervisedParent,
+    /// `[id] -> Array(Int)`. (scarlet/process.children)
+    SupervisedChildren,
+    /// `[id] -> Int`. (scarlet/process.count)
+    SupervisedCount,
+    /// `[id] -> (Int, Int, Int, Int, Int, Int, Option(Pid))`.
+    /// (scarlet/process.info)
+    SupervisedInfo,
+    /// `[entry, notice fn(description) Nil] -> Int` — be told each time the
+    /// occupant of a tree entry exits, and when the entry goes; survives
+    /// restarts. Nothing there: the notice starts at once. (scarlet/process.watch)
+    WatchNew,
+    /// `[entry, watch_id] -> Nil`. (scarlet/process.unwatch)
+    WatchCancel,
+    /// `[supervisor, policy_code, start] -> Nil` — declare one worker per
+    /// scheduler, each pinned to its scheduler for every incarnation.
+    /// `net.serve`'s acceptors: with per-scheduler fd tables, an acceptor per
+    /// scheduler keeps each accepted connection on the scheduler that will
+    /// serve it, and a restarted acceptor must come back on the same one.
+    /// Not part of the public process API. (scarlet/net)
+    SupervisorWorkerOnEach,
+    /// `[factory, arg] -> Subject` — an unkeyed member: `template(inbox,
+    /// arg)` in a new process, findable only through `children`. What a
+    /// server's connections are. (scarlet/process.start_in)
+    FactorySpawn,
     /// Park the current process for `ms` milliseconds.
     Sleep,
     /// Push a fresh `Subject` owned by the current process.
@@ -376,6 +424,11 @@ pub enum Op {
     /// one arrives. Only the owning process may receive.
     /// (scarlet/process.receive)
     SubjectReceive,
+    /// As `SubjectSend`, but the message goes to the front of the queue: what
+    /// a supervisor's `Ask` shutdown sends, so a stop request is not stuck
+    /// behind a backlog for its whole grace period — OTP's shutdown is a
+    /// signal for the same reason. Not part of the public API. (scarlet/process)
+    SubjectSendUrgent,
     /// `[subject, deadline_ms] -> Result(msg, Nil)` — as `SubjectReceive`,
     /// but `Err(Nil)` once the absolute monotonic-ms deadline passes.
     /// (scarlet/process.receive_until)
@@ -649,7 +702,20 @@ impl Op {
             | Op::ProcessSelf
             | Op::ProcessMonitor
             | Op::ProcessDemonitor
-            | Op::SpawnOnEach
+            | Op::SupervisorNew
+            | Op::SupervisorWorker
+            | Op::FactoryNew
+            | Op::FactoryLookupOrStart
+            | Op::FactoryLookup
+            | Op::SupervisedOf
+            | Op::SupervisedParent
+            | Op::SupervisedChildren
+            | Op::SupervisedCount
+            | Op::SupervisedInfo
+            | Op::WatchNew
+            | Op::WatchCancel
+            | Op::SupervisorWorkerOnEach
+            | Op::FactorySpawn
             | Op::Sleep
             | Op::SubjectNew
             | Op::SubjectSend
@@ -658,6 +724,7 @@ impl Op {
             | Op::Monotonic
             | Op::Argv
             | Op::EnvMap
+            | Op::SubjectSendUrgent
             | Op::MapGet
             | Op::MapHas
             | Op::MapKeys
@@ -850,7 +917,20 @@ impl Op {
             | Op::ProcessSelf
             | Op::ProcessMonitor
             | Op::ProcessDemonitor
-            | Op::SpawnOnEach
+            | Op::SupervisorNew
+            | Op::SupervisorWorker
+            | Op::FactoryNew
+            | Op::FactoryLookupOrStart
+            | Op::FactoryLookup
+            | Op::SupervisedOf
+            | Op::SupervisedParent
+            | Op::SupervisedChildren
+            | Op::SupervisedCount
+            | Op::SupervisedInfo
+            | Op::WatchNew
+            | Op::WatchCancel
+            | Op::SupervisorWorkerOnEach
+            | Op::FactorySpawn
             | Op::Sleep
             | Op::SubjectNew
             | Op::SubjectSend
@@ -860,6 +940,7 @@ impl Op {
             | Op::Argv
             | Op::EnvMap
             | Op::MapGet
+            | Op::SubjectSendUrgent
             | Op::MapHas
             | Op::MapKeys
             | Op::MapValues

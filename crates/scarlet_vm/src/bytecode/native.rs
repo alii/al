@@ -199,10 +199,24 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::ProcessSelf
         | Op::ProcessMonitor
         | Op::ProcessDemonitor
-        | Op::SpawnOnEach
+        | Op::SupervisorNew
+        | Op::SupervisorWorker
+        | Op::FactoryNew
+        | Op::FactoryLookupOrStart
+        | Op::FactoryLookup
+        | Op::SupervisedOf
+        | Op::SupervisedParent
+        | Op::SupervisedChildren
+        | Op::SupervisedCount
+        | Op::SupervisedInfo
+        | Op::WatchNew
+        | Op::WatchCancel
+        | Op::SupervisorWorkerOnEach
+        | Op::FactorySpawn
         | Op::SubjectNew
         | Op::SubjectSend
         | Op::Monotonic
+        | Op::SubjectSendUrgent
         | Op::Argv
         | Op::EnvMap
         | Op::MapGet

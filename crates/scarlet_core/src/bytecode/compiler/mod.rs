@@ -5525,7 +5525,7 @@ impl Compiler {
     /// post-diagnostic error branch, so it can never masquerade as a valid
     /// literal `0`: the compile has already failed.
     fn const_number(&mut self, n: &ast::NumberLiteral) -> Value {
-        match number_literal_value(&n.value, &mut self.frozen) {
+        match number_literal_value(&n.digits(), &mut self.frozen) {
             Ok(v) => v.into_value(),
             Err(e) => {
                 self.error(e.message(&n.value), n.span);

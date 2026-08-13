@@ -22,7 +22,14 @@
 //!
 //! A subject dies with its owner: process death drops its mailboxes and every
 //! queued message. Sending to a dead subject silently drops the message —
-//! fire-and-forget, the BEAM rule.
+//! fire-and-forget, the BEAM rule. The exception is a *durable* subject, the
+//! address of a supervised worker ([`super::supervision`]): it is not indexed
+//! under any process, so an incarnation's death leaves it in place for the
+//! next incarnation to be given ([`Runtime::subject_rehome`], which also
+//! empties it — a fresh incarnation does not inherit the backlog that may
+//! have killed the last one), and it is closed explicitly
+//! ([`Runtime::subject_close`]) when the worker's slot is retired. That is
+//! what makes a supervised worker's address stable across restarts.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -72,6 +79,7 @@ pub(super) struct Mailboxes {
     /// Subject ids by owning pid — the death path's index, so ending a
     /// process does not scan every mailbox in the program. Its own lock:
     /// taken at create and death, never per message.
+    /// Durable subjects are absent from it, which is what makes them durable.
     by_owner: Mutex<HashMap<u64, Vec<u64>>>,
 }
 
@@ -120,10 +128,28 @@ impl Mailboxes {
     }
 }
 
+/// Which end of the queue a send lands on. Everything a program sends goes
+/// to the back; only the runtime's own stop requests go to the front.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Delivery {
+    Back,
+    Front,
+}
+
+/// What a subject is the address of; see [`Runtime::subject_place`].
+pub(super) enum SubjectPlace {
+    Worker(u64),
+    Process(u64),
+}
+
 /// One subject's queue. Queued values are exclusively owned deep copies;
 /// dropping the mailbox drops them, on whichever thread ends the owner.
 struct Mailbox {
     owner: u64,
+    /// For a durable subject, the supervised worker it is the address of
+    /// (an entry id in the process table); what `process.supervised(addr)`
+    /// looks up. Named to keep clear of this file's own table slots.
+    worker: Option<u64>,
     queue: VecDeque<Value>,
     /// The owner parked in a receive, as `(scheduler index, wait id)`.
     /// Registered by `VM::park` under the shard lock, taken by the first
@@ -160,8 +186,77 @@ enum TryReceive {
 }
 
 impl Runtime {
-    /// Mint a mailbox owned by `owner` and return its subject id.
+    /// Mint a mailbox owned by `owner`, indexed so it dies with `owner`, and
+    /// return its subject id.
     fn subject_create(&self, owner: u64) -> u64 {
+        let id = self.alloc_mailbox(owner);
+        lock(&self.mailboxes.by_owner)
+            .entry(owner)
+            .or_default()
+            .push(id);
+        id
+    }
+
+    /// Mint a durable mailbox: received on by `receiver` for now, surviving
+    /// its death, closed only by [`Runtime::subject_close`]. The caller owns
+    /// that close.
+    pub(super) fn subject_create_durable(&self, receiver: u64, worker: u64) -> u64 {
+        let id = self.alloc_mailbox(receiver);
+        if let Some(mb) = lock(self.mailboxes.slot(slot_index(id))).mb.as_mut() {
+            mb.worker = Some(worker);
+        }
+        id
+    }
+
+    /// Where a subject sits in the tree: the worker it is the address of, or
+    /// else the process that owns it. `None` once it is dead.
+    pub(super) fn subject_place(&self, id: u64) -> Option<SubjectPlace> {
+        let slot = lock(self.mailboxes.slot(slot_index(id)));
+        let live = slot.serial == slot_serial(id);
+        slot.mb.as_ref().filter(|_| live).map(|mb| match mb.worker {
+            Some(worker) => SubjectPlace::Worker(worker),
+            None => SubjectPlace::Process(mb.owner),
+        })
+    }
+
+    /// Hand a durable subject to a new incarnation, dropping whatever queued
+    /// since the last one and any waiter it left. A subject already closed
+    /// (the slot was retired meanwhile) is a no-op. The dropped queue is
+    /// freed outside the slot lock.
+    pub(super) fn subject_rehome(&self, id: u64, receiver: u64) {
+        let stale = {
+            let mut slot = lock(self.mailboxes.slot(slot_index(id)));
+            let live = slot.serial == slot_serial(id);
+            match slot.mb.as_mut().filter(|_| live) {
+                Some(mb) => {
+                    mb.owner = receiver;
+                    mb.waiter = None;
+                    std::mem::take(&mut mb.queue)
+                }
+                None => VecDeque::new(),
+            }
+        };
+        drop(stale);
+    }
+
+    /// Close one durable subject, dropping its queue. Later sends are
+    /// dropped, as to any dead subject.
+    pub(super) fn subject_close(&self, id: u64) {
+        let dead = {
+            let mut slot = lock(self.mailboxes.slot(slot_index(id)));
+            let live = slot.serial == slot_serial(id);
+            if live { slot.mb.take() } else { None }
+        };
+        if dead.is_some() {
+            self.live_subjects.fetch_sub(1, Ordering::Relaxed);
+            lock(&self.mailboxes.free).push_back(slot_index(id));
+        }
+        drop(dead);
+    }
+
+    /// Take a slot and install an empty mailbox for `owner` in it. Shared by
+    /// both kinds of subject; indexing is the caller's decision.
+    fn alloc_mailbox(&self, owner: u64) -> u64 {
         let index = match lock(&self.mailboxes.free).pop_front() {
             Some(i) => i,
             None => {
@@ -181,22 +276,19 @@ impl Runtime {
             slot.serial = next_serial(slot.serial);
             slot.mb = Some(Mailbox {
                 owner,
+                worker: None,
                 queue: VecDeque::new(),
                 waiter: None,
             });
             (slot.serial << SLOT_BITS) | index
         };
-        lock(&self.mailboxes.by_owner)
-            .entry(owner)
-            .or_default()
-            .push(id);
         self.live_subjects.fetch_add(1, Ordering::Relaxed);
         id
     }
 
     /// Queue `msg` (an exclusively owned graph) on subject `id` and wake a
     /// parked receiver. A dead subject drops the message.
-    fn subject_send(&self, id: u64, msg: Value) {
+    fn subject_send(&self, id: u64, msg: Value, delivery: Delivery) {
         let waiter = {
             let mut slot = lock(self.mailboxes.slot(slot_index(id)));
             let live = slot.serial == slot_serial(id);
@@ -206,7 +298,10 @@ impl Runtime {
                 drop(msg);
                 return;
             };
-            mb.queue.push_back(msg);
+            match delivery {
+                Delivery::Back => mb.queue.push_back(msg),
+                Delivery::Front => mb.queue.push_front(msg),
+            }
             mb.waiter.take()
         };
         if let Some((sched, wait_id)) = waiter {
@@ -309,7 +404,7 @@ impl VM {
 
     /// `Op::SubjectSend`: copy the message to the subject's queue. The charge
     /// covers the graph copy and the registry crossing.
-    pub(super) fn subject_send(&mut self, reds: &mut i32) -> VmResult<()> {
+    pub(super) fn subject_send(&mut self, reds: &mut i32, delivery: Delivery) -> VmResult<()> {
         *reds -= IO_REDUCTION_COST;
         let msg = self.pop()?;
         let subj = self.pop()?;
@@ -320,7 +415,7 @@ impl VM {
         // `msg`. The heap handle is zero-sized, so the root alone carries the
         // graph.
         let (_heap, root) = ProcHeap::spawn(&msg);
-        self.runtime.subject_send(id, root);
+        self.runtime.subject_send(id, root, delivery);
         let nil = self.make_nil()?;
         self.stack.push(nil);
         Ok(())

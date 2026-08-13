@@ -118,6 +118,8 @@ pub enum AbiSlot {
     CrashForeignReceive,
     /// `[op Str, expected Str, got Str]`
     CrashTypeMismatch,
+    /// `[why Str]`
+    CrashSupervision,
 
     /// A port record — `[conn, os_pid Int]`
     Port,
@@ -227,6 +229,7 @@ impl AbiSlot {
             CrashSliceOutOfBounds,
             CrashForeignReceive,
             CrashTypeMismatch,
+            CrashSupervision,
             Port,
             PortExited,
             PortSignaled,
@@ -311,6 +314,7 @@ impl AbiSlot {
             CrashSliceOutOfBounds => "CrashSliceOutOfBounds",
             CrashForeignReceive => "CrashForeignReceive",
             CrashTypeMismatch => "CrashTypeMismatch",
+            CrashSupervision => "CrashSupervision",
             Port => "Port",
             PortExited => "PortExited",
             PortSignaled => "PortSignaled",
@@ -365,8 +369,8 @@ impl AbiSlot {
             | TlsInvalidServerName => 0,
             ResultOk | ResultErr | OptionSome | FsEnoent | FsEacces | FsEexist | FsEnotdir
             | FsEisdir | FsErofs | FsEloop | FsEfbig | FsErrnoOther | NetErrnoOther | IpV4
-            | IpV6 | ReadData | ExitCrashed | PortExited | PortSignaled | H1ParsedBad
-            | H1FramingLength | H1FramingInvalid | H1ChunkedBad | TlsTransport => 1,
+            | IpV6 | ReadData | ExitCrashed | CrashSupervision | PortExited | PortSignaled
+            | H1ParsedBad | H1FramingLength | H1FramingInvalid | H1ChunkedBad | TlsTransport => 1,
             JsonParseError => 2,
             JsonDoc => 3,
             SocketAddr | Socket | Monitor | Down | CrashIndexOutOfBounds | Port | H1Header => 2,
@@ -587,7 +591,9 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::H1ChunkedBad,
             S::H1Header,
         ],
-        Op::HttpHeaderGet | Op::MapGet => &[S::OptionSome, S::OptionNone],
+        Op::HttpHeaderGet | Op::MapGet | Op::FactoryLookup | Op::SupervisedInfo => {
+            &[S::OptionSome, S::OptionNone]
+        }
         Op::JsonParse => &[S::ResultOk, S::ResultErr, S::JsonDoc, S::JsonParseError],
         Op::JsonField | Op::JsonIndex => &[S::OptionSome, S::OptionNone, S::JsonDoc],
         Op::JsonEntries | Op::JsonElements => &[S::JsonDoc],
@@ -596,12 +602,19 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
         }
         // `PushNil` is the value of a block that ends in a statement, and
         // `Print` pushes nothing so the emitter follows it with one.
-        Op::PushNil | Op::Sleep | Op::SpawnOnEach => &[S::Unit],
-        Op::SubjectSend | Op::ProcessDemonitor | Op::ProcessKill | Op::TcpGive => &[S::Unit],
+        Op::PushNil | Op::Sleep | Op::SupervisorWorkerOnEach => &[S::Unit],
+        Op::SubjectSend
+        | Op::SubjectSendUrgent
+        | Op::ProcessDemonitor
+        | Op::ProcessKill
+        | Op::TcpGive
+        | Op::WatchCancel => &[S::Unit],
         // The op itself builds a `Down` only for a target that has already
         // ended; every other reason is built when a monitored process ends,
         // which only a program that emitted this op can arrange.
-        Op::ProcessMonitor => &[
+        // A watch's notices carry the same reasons a monitor's do; `Killed`
+        // and `NoProcess` also stand in for a removed entry and an absent one.
+        Op::ProcessMonitor | Op::WatchNew => &[
             S::Monitor,
             S::Down,
             S::ExitNormal,
@@ -612,6 +625,7 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::CrashSliceOutOfBounds,
             S::CrashForeignReceive,
             S::CrashTypeMismatch,
+            S::CrashSupervision,
         ],
         Op::SubjectReceiveUntil => &[S::ResultOk, S::ResultErr, S::Unit],
         _ => &[],

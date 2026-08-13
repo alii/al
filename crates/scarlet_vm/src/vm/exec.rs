@@ -25,6 +25,7 @@ use crate::heap::ProcHeap;
 use crate::tivec::Idx;
 use smallvec::SmallVec;
 
+use super::mailbox::Delivery;
 use super::poll::{Resume, monotonic_now_ms};
 use super::processes::Link;
 use super::{
@@ -860,10 +861,24 @@ impl VM {
                 Op::ProcessSelf => self.process_self(),
                 Op::ProcessMonitor => self.process_monitor(&mut reds)?,
                 Op::ProcessDemonitor => self.process_demonitor()?,
-                Op::SpawnOnEach => self.process_spawn_on_each(&mut reds)?,
+                Op::SupervisorNew => self.supervisor_new()?,
+                Op::SupervisorWorker => self.supervisor_worker(&mut reds)?,
+                Op::FactoryNew => self.factory_new(&mut reds)?,
+                Op::FactoryLookupOrStart => self.factory_lookup_or_start(&mut reds)?,
+                Op::FactoryLookup => self.factory_lookup()?,
+                Op::SupervisedOf => self.supervised_of()?,
+                Op::SupervisedParent => self.supervised_parent()?,
+                Op::SupervisedChildren => self.supervised_children()?,
+                Op::SupervisedCount => self.supervised_count()?,
+                Op::SupervisedInfo => self.supervised_info()?,
+                Op::WatchNew => self.watch_new(&mut reds)?,
+                Op::WatchCancel => self.watch_cancel()?,
+                Op::SupervisorWorkerOnEach => self.supervisor_worker_on_each(&mut reds)?,
+                Op::FactorySpawn => self.factory_spawn(&mut reds)?,
                 Op::Sleep => park!(self.sleep()),
                 Op::SubjectNew => self.subject_new()?,
-                Op::SubjectSend => self.subject_send(&mut reds)?,
+                Op::SubjectSend => self.subject_send(&mut reds, Delivery::Back)?,
+                Op::SubjectSendUrgent => self.subject_send(&mut reds, Delivery::Front)?,
                 Op::SubjectReceive => park!(self.subject_receive(&mut reds)),
                 Op::SubjectReceiveUntil => park!(self.subject_receive_until(&mut reds)),
                 // String and binary builtins (see `vm::text`).

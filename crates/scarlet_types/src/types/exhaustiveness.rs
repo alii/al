@@ -491,7 +491,7 @@ fn bin_pattern_key(segments: &[ast::BinSegmentPat], has_rest: bool) -> String {
     for seg in segments {
         match &seg.value {
             ast::Pattern::Var { .. } => key.push('_'),
-            ast::Pattern::Literal(ast::PatternLiteral::Number(n)) => key.push_str(&n.value),
+            ast::Pattern::Literal(ast::PatternLiteral::Number(n)) => key.push_str(&n.digits()),
             ast::Pattern::Literal(ast::PatternLiteral::String(s)) => {
                 let _ = write!(key, "s{}:{}", s.value.len(), s.value);
             }
@@ -509,7 +509,7 @@ fn bin_pattern_key(segments: &[ast::BinSegmentPat], has_rest: bool) -> String {
         }
         match seg.spec.size_expr() {
             None => {}
-            Some(ast::Expression::NumberLiteral(n)) => key.push_str(&n.value),
+            Some(ast::Expression::NumberLiteral(n)) => key.push_str(&n.digits()),
             Some(e) => {
                 let sp = e.span();
                 let _ = write!(key, "?{}:{}", sp.start_line, sp.start_column);
@@ -602,7 +602,9 @@ fn lower_pattern(
     match p {
         ast::Pattern::Var { .. } => Pat::Wildcard,
         ast::Pattern::Literal(lit) => match lit {
-            ast::PatternLiteral::Number(n) => nullary(interner.intern(&format!("lit:{}", n.value))),
+            ast::PatternLiteral::Number(n) => {
+                nullary(interner.intern(&format!("lit:{}", n.digits())))
+            }
             ast::PatternLiteral::String(s) => {
                 nullary(interner.intern(&format!("lit:'{}'", s.value)))
             }

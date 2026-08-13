@@ -38,10 +38,23 @@ pub struct InterpolatedString {
     pub(crate) span: Span,
 }
 
+/// A number as written, `_` separators included: `value` is what the
+/// formatter prints back; [`NumberLiteral::digits`] is what everything that
+/// interprets the number reads.
 #[derive(Debug, Clone)]
 pub struct NumberLiteral {
     pub value: String,
     pub span: Span,
+}
+
+impl NumberLiteral {
+    pub fn digits(&self) -> std::borrow::Cow<'_, str> {
+        if self.value.contains('_') {
+            std::borrow::Cow::Owned(self.value.replace('_', ""))
+        } else {
+            std::borrow::Cow::Borrowed(&self.value)
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

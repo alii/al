@@ -551,18 +551,6 @@ impl VM {
         self.stack.push(Value::pid(self.current_pid));
     }
 
-    /// `Op::SpawnOnEach`: pop the closure, start one copy per scheduler, push
-    /// Nil. Charged as `process_spawn` is, once for the whole fan-out.
-    #[inline(never)]
-    pub(super) fn process_spawn_on_each(&mut self, reds: &mut i32) -> VmResult<()> {
-        *reds -= IO_REDUCTION_COST;
-        let f = self.pop()?;
-        self.spawn_on_each(f)?;
-        let nil = self.make_nil()?;
-        self.stack.push(nil);
-        Ok(())
-    }
-
     pub(super) fn sleep(&mut self) -> VmResult<Option<Parked>> {
         let ms = self.pop_int("process.sleep")?;
         let nil = self.make_nil()?;

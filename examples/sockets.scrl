@@ -172,7 +172,7 @@ fn served(bind_addr SocketAddress) Nil {
 		Ok(server) -> match net.local_addr(server) {
 			Err(e) -> println('second local_addr failed: ${string.inspect(e)}')
 			Ok(local) -> {
-				net.serve_on(server, serve_one)
+				_ = net.serve_on(server, serve_one)
 				println(echo_once(local, 'served'))
 				net.close(server) or Nil
 			}
