@@ -114,6 +114,33 @@ fn str_bytes(arena: &[u8], n: TapeNode) -> Option<&[u8]> {
     arena.get(off..off.checked_add(len)?)
 }
 
+/// Tape index of the value of the first member of the object at `idx` whose
+/// key is `needle`. `None` if `idx` is not an object, if the object has no
+/// such member, or if any node the walk touches is out of range.
+fn field_index(tape: &[u8], arena: &[u8], idx: usize, needle: &[u8]) -> Option<usize> {
+    let obj = node_at(tape, idx)?;
+    if obj.kind != K_OBJECT {
+        return None;
+    }
+    let members = usize::try_from(obj.payload).ok()?;
+    let mut cursor = idx.checked_add(1)?;
+    for _ in 0..members {
+        let key = node_at(tape, cursor)?;
+        if key.kind != K_STR {
+            return None;
+        }
+        let value_at = cursor.checked_add(key.skip)?;
+        // Read the value before the key is compared, so a matching key cannot
+        // hand back an index the advancing arm would have refused.
+        let value = node_at(tape, value_at)?;
+        if str_bytes(arena, key)? == needle {
+            return Some(value_at);
+        }
+        cursor = value_at.checked_add(value.skip)?;
+    }
+    None
+}
+
 /// Build the compact tape and the string arena from a parsed `simd-json` tape.
 ///
 /// One linear pass: `simd-json` already emits nodes in document order with a
@@ -578,25 +605,9 @@ impl VM {
             let (arena_v, tape_v, idx) = Self::doc_parts(&doc)?;
             let tape = bin_ref(&tape_v).full_bytes();
             let arena = bin_ref(&arena_v).full_bytes();
-            let obj = node_at(&tape, idx)?;
-            if obj.kind != K_OBJECT {
-                return None;
-            }
             let needle = str_ref(&name_v).as_bytes();
-            let members = usize::try_from(obj.payload).ok()?;
-            let mut cursor = idx.checked_add(1)?;
-            for _ in 0..members {
-                let key = node_at(&tape, cursor)?;
-                if key.kind != K_STR {
-                    return None;
-                }
-                let value_at = cursor.checked_add(key.skip)?;
-                if str_bytes(&arena, key)? == needle {
-                    return Some((arena_v.clone(), tape_v.clone(), value_at));
-                }
-                cursor = value_at.checked_add(node_at(&tape, value_at)?.skip)?;
-            }
-            None
+            let at = field_index(&tape, &arena, idx, needle)?;
+            Some((arena_v.clone(), tape_v.clone(), at))
         })();
 
         let v = match found {
@@ -885,21 +896,11 @@ mod tests {
         build_tape(&t.0).expect("tape fits")
     }
 
-    /// Walk to the value of `name` in the object at node 0, mirroring
-    /// `json_field`'s cursor arithmetic.
+    /// Walk to the value of `name` in the object at node 0. This is
+    /// `json_field`'s own walk, not a copy of it — a copy would have gone on
+    /// passing while the real one returned an unchecked index.
     fn field_at(tape: &[u8], arena: &[u8], name: &str) -> Option<usize> {
-        let obj = node_at(tape, 0)?;
-        assert_eq!(obj.kind, K_OBJECT);
-        let mut cursor = 1;
-        for _ in 0..obj.payload {
-            let key = node_at(tape, cursor)?;
-            let value_at = cursor + key.skip;
-            if str_bytes(arena, key)? == name.as_bytes() {
-                return Some(value_at);
-            }
-            cursor = value_at + node_at(tape, value_at)?.skip;
-        }
-        None
+        field_index(tape, arena, 0, name.as_bytes())
     }
 
     #[test]
@@ -1131,6 +1132,34 @@ mod tests {
             payload: (900u64 << 32) | 4,
         };
         assert!(str_bytes(&arena, forged).is_none());
+    }
+
+    /// Append one hand-forged node. `skip` and `payload` are not checked
+    /// against each other, which is the point: these are the tapes
+    /// `build_tape` would never emit.
+    fn push_node(tape: &mut Vec<u8>, kind: u8, skip: u64, payload: u64) {
+        tape.extend_from_slice(&((skip << 32) | kind as u64).to_le_bytes());
+        tape.extend_from_slice(&payload.to_le_bytes());
+    }
+
+    /// A truncated object: it claims one member and carries the key, but the
+    /// key's value node is off the end of the tape. The matching arm used to
+    /// return that index without reading it, so `json.field` handed back a
+    /// `Doc` pointing past the tape while the non-matching arm next to it
+    /// refused the very same index.
+    #[test]
+    fn a_matching_key_whose_value_is_off_the_tape_is_none() {
+        let arena = b"a".to_vec();
+        let mut tape = Vec::new();
+        push_node(&mut tape, K_OBJECT, 3, 1);
+        push_node(&mut tape, K_STR, 1, 1);
+        assert_eq!(field_index(&tape, &arena, 0, b"a"), None);
+
+        // Control: the same forged object with its value node present is
+        // found, so the `None` above is the absent node and not a tape shape
+        // the walk rejects for some other reason.
+        push_node(&mut tape, K_INT, 1, 7);
+        assert_eq!(field_index(&tape, &arena, 0, b"a"), Some(2));
     }
 
     /// Build a `scarlet/json.Json` variant. The `TypeId` and the variant

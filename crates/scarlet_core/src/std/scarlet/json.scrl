@@ -164,6 +164,13 @@ pub fn parse(src String) Result(Doc, ParseError) {
 }
 
 // What `d` points at.
+//
+// `kind_raw` answers -1 for a tape that does not decode, so the catch-all must
+// be the kind that grants the least, not the most. `ObjectKind` was the worst
+// available answer: it is the one `decode.optional_field` reads as "a
+// well-formed object that simply lacks this member", turning a corrupt
+// document into a successful decode. `is_null` deliberately does not follow
+// this arm — it asks whether the node IS null, and an undecodable one is not.
 pub fn kind(d Doc) Kind {
 	match kind_raw(d) {
 		0 -> NullKind
@@ -172,7 +179,8 @@ pub fn kind(d Doc) Kind {
 		3 -> FloatKind
 		4 -> StringKind
 		5 -> ArrayKind
-		_ -> ObjectKind
+		6 -> ObjectKind
+		_ -> NullKind
 	}
 }
 
