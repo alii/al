@@ -51,7 +51,7 @@ use super::poll::{EPOCH, Parked, Wait, monotonic_now_ms};
 use super::port::ConnIo;
 use super::processes::Link;
 use super::sched::BlockingOp;
-use super::{Crash, IO_REDUCTION_COST, VM, VmError, VmResult, bin_ref, lock, str_ref};
+use super::{IO_REDUCTION_COST, VM, VmError, VmResult, bin_ref, lock, str_ref};
 
 impl VM {
     // Method contract for this family: `ip` is the already-advanced
@@ -549,16 +549,6 @@ impl VM {
     #[inline]
     pub(super) fn process_self(&mut self) {
         self.stack.push(Value::pid(self.current_pid));
-    }
-
-    /// `Op::ProcessPanic`: crash the running process with the caller's
-    /// message. The only error return here that is not a fault — it is what
-    /// the op is for — so it pushes nothing and the `Err` is the result.
-    pub(super) fn process_panic(&mut self) -> VmResult<()> {
-        let message = self.pop_str("process.panic")?;
-        Err(VmError::Crash(Crash::Panicked(
-            str_ref(&message).to_owned(),
-        )))
     }
 
     pub(super) fn sleep(&mut self) -> VmResult<Option<Parked>> {

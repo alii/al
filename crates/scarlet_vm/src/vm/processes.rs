@@ -595,10 +595,6 @@ impl VM {
                 let why = Value::str_in(&mut self.heap, &refusal.to_string());
                 self.abi_make(AbiSlot::CrashSupervision, &[why])
             }
-            Crash::Panicked(message) => {
-                let message = Value::str_in(&mut self.heap, message);
-                self.abi_make(AbiSlot::CrashPanicked, &[message])
-            }
             Crash::TypeMismatch { op, expected, got } => {
                 let fields = [
                     Value::str_in(&mut self.heap, op),

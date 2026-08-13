@@ -140,10 +140,6 @@ pub enum Crash {
     ForeignReceive,
     /// A supervision declaration the tree refused.
     Supervision(supervision::Refusal),
-    /// `process.panic(message)`: the only crash a program raises on itself.
-    /// The message is the caller's, so it is owned, where the runtime's own
-    /// reasons carry `&'static str`.
-    Panicked(String),
 }
 
 impl fmt::Display for Crash {
@@ -168,7 +164,6 @@ impl fmt::Display for Crash {
                 )
             }
             Self::Supervision(refusal) => write!(f, "supervision: {refusal}"),
-            Self::Panicked(message) => write!(f, "panic: {message}"),
         }
     }
 }

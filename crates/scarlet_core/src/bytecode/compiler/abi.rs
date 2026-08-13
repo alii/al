@@ -93,7 +93,6 @@ const BINDINGS: &[Binding] = &[
     (AbiSlot::CrashForeignReceive,   PROCESS, "Crash",   "ForeignReceive"),
     (AbiSlot::CrashTypeMismatch,     PROCESS, "Crash",   "TypeMismatch"),
     (AbiSlot::CrashSupervision,      PROCESS, "Crash",   "Supervision"),
-    (AbiSlot::CrashPanicked,         PROCESS, "Crash",   "Panicked"),
     (AbiSlot::Port,               PORT,    "Port",       "Port"),
     (AbiSlot::PortExited,         PORT,    "ExitStatus", "Exited"),
     (AbiSlot::PortSignaled,       PORT,    "ExitStatus", "Signaled"),

@@ -1,9 +1,8 @@
 //! Fault isolation: a crash ends the process that raised it and nothing
 //! else, is reported to stderr, is observable through monitors as a typed
 //! reason, and spreads over links — up to and including main, which is what
-//! turns an uncontained crash into a failing exit status. That holds
-//! whether the runtime raised the crash or `process.panic` did. The
-//! crash-free half of this (kill, links) is `tests/programs/exits.scrl`.
+//! turns an uncontained crash into a failing exit status. The crash-free
+//! half of this (kill, links) is `tests/programs/exits.scrl`.
 
 mod common;
 
@@ -101,124 +100,6 @@ fn a_main_crash_fails_the_run_and_is_reported_once() {
         "reported exactly once:\n{}",
         out.stderr
     );
-}
-
-/// `process.panic` is the deliberate crash: a program chooses both the
-/// failing exit status and the message, and nothing after the call runs.
-/// Before it existed the only lever on exit status was an out-of-range
-/// slice, so every harness reported its verdict as somebody else's bug.
-#[test]
-fn a_panic_fails_the_run_with_the_callers_own_message() {
-    let out = run(
-        "panic_main",
-        r#"import scarlet/process
-
-pub fn main() {
-	println('before')
-	process.panic('7 checks, 2 FAILED')
-	println('after')
-}
-"#,
-    );
-    assert_failed_with(&out, "7 checks, 2 FAILED");
-    assert_eq!(out.stdout, "before\n", "nothing after the panic runs");
-    assert!(
-        !out.stderr.contains("out of bounds"),
-        "a panic must not read as an out-of-range access:\n{}",
-        out.stderr
-    );
-}
-
-/// The other direction, and the arm that catches a `panic` wired so that
-/// everything fails: a program that does not reach one still succeeds.
-/// Asserting only the failing half would pass against a runtime made to
-/// crash unconditionally.
-#[test]
-fn a_program_that_does_not_panic_still_exits_zero() {
-    let out = run(
-        "panic_unused",
-        r#"import scarlet/process
-
-fn checked(ok Bool) String {
-	if ok {
-		'ok'
-	} else {
-		process.panic('unreachable in this run')
-	}
-}
-
-pub fn main() {
-	println(checked(True))
-}
-"#,
-    );
-    assert!(
-        out.success,
-        "an unexecuted panic must not fail the run\n--- stdout ---\n{}\n--- stderr ---\n{}",
-        out.stdout, out.stderr
-    );
-    assert_eq!(out.stdout, "ok\n");
-}
-
-/// A panic is an ordinary crash in every other respect: contained to an
-/// unlinked process, and delivered to a monitor as a typed reason carrying
-/// the message. `Panicked(message)` is what makes a deliberate abort
-/// distinguishable from the defect it used to imitate.
-#[test]
-fn a_panic_reaches_a_monitor_as_a_typed_reason() {
-    let out = run(
-        "panic_typed",
-        r#"import scarlet/process
-import scarlet/process.{Crashed, Panicked, SliceOutOfBounds}
-
-pub fn main() {
-	downs = process.subject()
-	worker = process.spawn_unlinked(fn() {
-		process.panic('the worker gave up')
-	})
-	_ = process.monitor(worker, downs, fn(d) d)
-	match process.receive(downs).reason {
-		Crashed(Panicked(message)) -> println('panicked: ${message}')
-		Crashed(SliceOutOfBounds(..)) -> println('misreported as a slice')
-		Crashed(_) -> println('crashed some other way')
-		_ -> println('did not crash')
-	}
-}
-"#,
-    );
-    assert!(
-        out.success,
-        "the spawner must survive an unlinked child's panic\n--- stderr ---\n{}",
-        out.stderr
-    );
-    assert_eq!(out.stdout, "panicked: the worker gave up\n");
-}
-
-/// `panic` never returns, so its result type is whatever the call site
-/// needs: it stands in a match arm whose sibling produces an `Int`. Without
-/// that, a caller has to invent a value it will never use, which is how a
-/// deliberate abort ends up behind a plausible-looking default.
-#[test]
-fn a_panic_stands_where_a_value_is_expected() {
-    let out = run(
-        "panic_value_position",
-        r#"import scarlet/process
-
-fn need_port(v Option(Int)) Int {
-	match v {
-		Some(p) -> p
-		None -> process.panic('PORT is not set')
-	}
-}
-
-pub fn main() {
-	println('port ${need_port(Some(8080))}')
-	println('port ${need_port(None)}')
-}
-"#,
-    );
-    assert_failed_with(&out, "PORT is not set");
-    assert_eq!(out.stdout, "port 8080\n");
 }
 
 /// A crash in a linked child kills main: the program fails, promptly, even

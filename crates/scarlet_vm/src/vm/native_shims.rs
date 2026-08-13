@@ -586,7 +586,6 @@ mod opc {
     pub const PREPEND: u8 = Op::Prepend as u8;
     pub const PRINT: u8 = Op::Print as u8;
     pub const PROCESS_DEMONITOR: u8 = Op::ProcessDemonitor as u8;
-    pub const PROCESS_PANIC: u8 = Op::ProcessPanic as u8;
     pub const PROCESS_KILL: u8 = Op::ProcessKill as u8;
     pub const PROCESS_MONITOR: u8 = Op::ProcessMonitor as u8;
     pub const SUPERVISOR_NEW: u8 = Op::SupervisorNew as u8;
@@ -678,7 +677,6 @@ impl VM {
     fn run_try_op(&mut self, op_code: u8, _operand: i32) -> VmResult<()> {
         match op_code {
             opc::ARRAY_SLICE => self.seq_slice(),
-            opc::PROCESS_PANIC => self.process_panic(),
             _ => proof_violation("run_try_op on an op is_native_try_op excludes"),
         }
     }
