@@ -16,14 +16,7 @@ impl crate::core_ir::emit::EmitCtx for Compiler {
         self.const_str(s)
     }
     fn intern_labels(&mut self, tid: TypeId, variant_idx: u16) -> i32 {
-        let Some(vs) = self
-            .env
-            .lookup_type_info_by_id(tid)
-            .and_then(|ti| ti.variants())
-        else {
-            labels_of_variantless_type(tid);
-        };
-        let variant = self.engine.variants_of(vs)[variant_idx as usize];
+        let variant = self.declared_variant(tid, variant_idx);
         let labels: Vec<String> = self
             .engine
             .variant_fields_of(variant.fields)
@@ -33,6 +26,10 @@ impl crate::core_ir::emit::EmitCtx for Compiler {
         let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         let v = self.frozen.str_array(&refs).into_value();
         self.add_constant(v)
+    }
+    fn variant_name(&self, tid: TypeId, variant_idx: u16) -> &str {
+        self.engine
+            .str(self.declared_variant(tid, variant_idx).name)
     }
     fn switch_variant_count(&self, tid: TypeId) -> Option<u8> {
         Compiler::switch_variant_count(self, tid)
@@ -45,19 +42,30 @@ impl crate::core_ir::emit::EmitCtx for Compiler {
     }
 }
 
-/// `emit` asked for the labels of a type with no variants. Aborts in release
-/// too: any constant returned instead ships the wrong labels.
+/// `emit` asked for a constructor of a type with no variants. Aborts in
+/// release too: any name or labels invented here ship the wrong cell.
 #[allow(clippy::unreachable)]
 #[cold]
 #[inline(never)]
-fn labels_of_variantless_type(tid: TypeId) -> ! {
+fn no_variants(tid: TypeId) -> ! {
     unreachable!(
-        "internal compiler error: emit asked for labels of a type with no variants: {tid:?}. \
+        "internal compiler error: emit asked for a variant of a type with no variants: {tid:?}. \
          Report this as a compiler bug."
     )
 }
 
 impl Compiler {
+    fn declared_variant(&self, tid: TypeId, variant_idx: u16) -> crate::types::Variant {
+        let Some(vs) = self
+            .env
+            .lookup_type_info_by_id(tid)
+            .and_then(|ti| ti.variants())
+        else {
+            no_variants(tid);
+        };
+        self.engine.variants_of(vs)[variant_idx as usize]
+    }
+
     /// The variant count a `SwitchTag` over `tid` dispatches on, or `None`
     /// when the type never switches: the bytecode emitter's rule, and — via
     /// [`crate::core_ir::SwitchCounts`] — the native planner's, so the two
@@ -262,24 +270,16 @@ impl ElabCtx for Compiler {
             return None;
         };
         let tn = self.engine.intern(tref.name);
-        use crate::bytecode::prelude_bindings::names as pn;
-        let (okn, failn) = if err_has_payload {
-            (pn::OK, pn::ERR)
-        } else {
-            (pn::SOME, pn::NONE)
-        };
         Some(OrShape {
             fail: VariantRef {
                 type_id: fail.type_id,
                 variant_idx: fail.variant_idx,
                 type_name: tn,
-                variant_name: self.engine.intern(failn),
             },
             ok: VariantRef {
                 type_id: ok.type_id,
                 variant_idx: ok.variant_idx,
                 type_name: tn,
-                variant_name: self.engine.intern(okn),
             },
             err_has_payload,
         })

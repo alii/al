@@ -162,9 +162,10 @@ pub enum Op {
     GetFieldUnchecked,
 
     // Tagged values (enums / custom types)
-    /// `[type_id, enum_name, variant_name, labels, p0, .., p_{b-1}, reuse?] ->
-    /// enum`. `b` = payload arity, `operand` = prehash constant idx. `a` = 1
-    /// when a Perceus reuse token sits on top of the payloads.
+    /// `[packed, enum_name, variant_name, labels, p0, .., p_{b-1}, reuse?] ->
+    /// enum`. `packed` is `pack_variant(type_id, variant_idx)`. `b` = payload
+    /// arity, `operand` = prehash constant idx. `a` = 1 when a Perceus reuse
+    /// token sits on top of the payloads.
     MakeEnumPayload,
     MatchEnum,
     UnwrapEnum,

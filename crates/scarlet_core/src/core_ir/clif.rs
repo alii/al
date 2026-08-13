@@ -4303,6 +4303,9 @@ mod tests {
             let v = self.fb.str_array(&[]).into_value();
             self.pool(v)
         }
+        fn variant_name(&self, _tid: TypeId, _variant_idx: u16) -> &str {
+            "T"
+        }
         fn switch_variant_count(&self, _tid: TypeId) -> Option<u8> {
             None
         }

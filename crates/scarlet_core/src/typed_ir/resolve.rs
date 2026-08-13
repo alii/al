@@ -148,7 +148,6 @@ impl Denotation {
                 type_id,
                 variant_idx,
                 type_name,
-                variant_name,
                 arity,
                 ..
             } => Some(Denotation::ctor(
@@ -156,7 +155,6 @@ impl Denotation {
                     type_id,
                     variant_idx,
                     type_name,
-                    variant_name,
                 },
                 Arity(arity),
             )),
@@ -221,7 +219,6 @@ mod tests {
             type_id: TypeId(3),
             variant_idx: 1,
             type_name: StrId(10),
-            variant_name: StrId(11),
         }
     }
 

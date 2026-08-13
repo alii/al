@@ -113,14 +113,14 @@ impl CoreBind {
 }
 
 /// Resolved constructor identity, captured at lowering so `emit` need not
-/// re-consult the `TypeEnv`. Perceus pairs drops on shape equality:
-/// `type_id`, `variant_idx`, arity.
+/// re-consult the `TypeEnv` for dispatch. Perceus pairs drops on shape
+/// equality: `type_id`, `variant_idx`, arity. Display name is
+/// `variants[variant_idx].name`, looked up at emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VariantRef {
     pub(crate) type_id: TypeId,
     pub(crate) variant_idx: u16,
     pub(crate) type_name: StrId,
-    pub(crate) variant_name: StrId,
 }
 
 /// Heap-cell shape for Perceus reuse pairing. A `Drop` may only hand its cell
@@ -600,7 +600,6 @@ pub(crate) mod testkit {
             type_id: TypeId(tid),
             variant_idx: idx,
             type_name: StrId::NONE,
-            variant_name: StrId::NONE,
         }
     }
 
@@ -653,6 +652,9 @@ pub(crate) mod testkit {
         }
         fn intern_labels(&mut self, _t: TypeId, _v: u16) -> i32 {
             0
+        }
+        fn variant_name(&self, _t: TypeId, _v: u16) -> &str {
+            "T"
         }
         fn switch_variant_count(&self, _t: TypeId) -> Option<u8> {
             self.variant_count
