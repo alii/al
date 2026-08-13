@@ -348,6 +348,124 @@ enum Step {
     Key(Value),
 }
 
+/// Encode the constructible `scarlet/json.Json` tree onto `out`. Iterative:
+/// the work stack is heap, so nesting depth costs memory rather than call
+/// frames.
+///
+/// Variants are matched by name, not by declaration index. An index would be
+/// an identity the source does not promise — reordering the `Json`
+/// constructors would silently re-tag every value.
+///
+/// Every path emits a value, so a container's separators are never left
+/// stranded: a `Json` this encoder does not recognise is written as `null`,
+/// the way an unrepresentable `Number` is.
+fn write_json_value(out: &mut String, root: Value) {
+    let mut stack = vec![Step::Val(root)];
+
+    while let Some(step) = stack.pop() {
+        match step {
+            Step::Punct(p) => out.push_str(p),
+            Step::Key(v) => write_json_string(out, v.as_str().unwrap_or_default()),
+            Step::Val(v) => {
+                let Some(e) = v.as_enum() else {
+                    out.push_str("null");
+                    continue;
+                };
+                let payload = e.payload();
+                match e.variant_name() {
+                    "Boolean" => out.push_str(match payload.first().and_then(Value::as_bool) {
+                        Some(true) => "true",
+                        _ => "false",
+                    }),
+                    "Integer" => {
+                        let i = payload.first().and_then(Value::as_int).unwrap_or(0);
+                        out.push_str(&i.to_string());
+                    }
+                    "Real" => {
+                        let f = payload.first().and_then(Value::as_float).unwrap_or(0.0);
+                        write_json_float(out, f);
+                    }
+                    // A number with no Scarlet representation, verbatim.
+                    // Text that is not a JSON number is written as `null`
+                    // rather than corrupting the document around it.
+                    "Number" => {
+                        let text = payload.first().and_then(Value::as_str).unwrap_or_default();
+                        if is_json_number(text) {
+                            out.push_str(text);
+                        } else {
+                            out.push_str("null");
+                        }
+                    }
+                    "Str" => {
+                        write_json_string(
+                            out,
+                            payload.first().and_then(Value::as_str).unwrap_or_default(),
+                        );
+                    }
+                    "List" => {
+                        let Some(items) = payload.first() else {
+                            out.push_str("[]");
+                            continue;
+                        };
+                        let n = seq::len(items);
+                        stack.push(Step::Punct("]"));
+                        // Pushed back-to-front: the stack pops in emission
+                        // order. A separator is pushed with the element it
+                        // precedes, never on its own. `seq::get` is total
+                        // below `len`, so `null` here is unreachable today —
+                        // it keeps the element count honest if that changes.
+                        for i in (0..n).rev() {
+                            match seq::get(items, i) {
+                                Some(item) => stack.push(Step::Val(item)),
+                                None => stack.push(Step::Punct("null")),
+                            }
+                            if i > 0 {
+                                stack.push(Step::Punct(","));
+                            }
+                        }
+                        out.push('[');
+                    }
+                    "Object" => {
+                        let Some(entries) = payload.first() else {
+                            out.push_str("{}");
+                            continue;
+                        };
+                        let n = seq::len(entries);
+                        // A member that is not a `(String, Json)` pair has no
+                        // key to hang a `null` on, so it is dropped whole —
+                        // its separator with it. `first` is the surviving
+                        // member that takes no separator.
+                        let member = |i: usize| {
+                            let entry = seq::get(entries, i)?;
+                            let Some([k, val]) = entry.as_tuple() else {
+                                return None;
+                            };
+                            Some((k.clone(), val.clone()))
+                        };
+                        let first = (0..n).find(|&i| member(i).is_some());
+                        stack.push(Step::Punct("}"));
+                        for i in (0..n).rev() {
+                            let Some((k, val)) = member(i) else {
+                                continue;
+                            };
+                            stack.push(Step::Val(val));
+                            stack.push(Step::Punct(":"));
+                            stack.push(Step::Key(k));
+                            if Some(i) != first {
+                                stack.push(Step::Punct(","));
+                            }
+                        }
+                        out.push('{');
+                    }
+                    // `Null`, and any variant a future `Json` gains that
+                    // this encoder has not been taught.
+                    _ => out.push_str("null"),
+                }
+            }
+        }
+    }
+}
+
 impl VM {
     /// `[src Binary] -> Result(Doc, ParseError)`
     pub(super) fn json_parse(&mut self) -> VmResult<()> {
@@ -745,106 +863,10 @@ impl VM {
     }
 
     /// `[j Json] -> String`
-    ///
-    /// Encodes the constructible `scarlet/json.Json` tree. Iterative: the work
-    /// stack is heap, so nesting depth costs memory rather than call frames.
-    ///
-    /// Variants are matched by name, not by declaration index. An index would
-    /// be an identity the source does not promise — reordering the `Json`
-    /// constructors would silently re-tag every value.
     pub(super) fn json_encode(&mut self) -> VmResult<()> {
         let root = self.pop()?;
         let mut out = String::new();
-        let mut stack = vec![Step::Val(root)];
-
-        while let Some(step) = stack.pop() {
-            match step {
-                Step::Punct(p) => out.push_str(p),
-                Step::Key(v) => write_json_string(&mut out, v.as_str().unwrap_or_default()),
-                Step::Val(v) => {
-                    let Some(e) = v.as_enum() else {
-                        out.push_str("null");
-                        continue;
-                    };
-                    let payload = e.payload();
-                    match e.variant_name() {
-                        "Boolean" => out.push_str(match payload.first().and_then(Value::as_bool) {
-                            Some(true) => "true",
-                            _ => "false",
-                        }),
-                        "Integer" => {
-                            let i = payload.first().and_then(Value::as_int).unwrap_or(0);
-                            out.push_str(&i.to_string());
-                        }
-                        "Real" => {
-                            let f = payload.first().and_then(Value::as_float).unwrap_or(0.0);
-                            write_json_float(&mut out, f);
-                        }
-                        // A number with no Scarlet representation, verbatim.
-                        // Text that is not a JSON number is written as `null`
-                        // rather than corrupting the document around it.
-                        "Number" => {
-                            let text = payload.first().and_then(Value::as_str).unwrap_or_default();
-                            if is_json_number(text) {
-                                out.push_str(text);
-                            } else {
-                                out.push_str("null");
-                            }
-                        }
-                        "Str" => {
-                            write_json_string(
-                                &mut out,
-                                payload.first().and_then(Value::as_str).unwrap_or_default(),
-                            );
-                        }
-                        "List" => {
-                            let Some(items) = payload.first() else {
-                                out.push_str("[]");
-                                continue;
-                            };
-                            let n = seq::len(items);
-                            stack.push(Step::Punct("]"));
-                            // Pushed back-to-front: the stack pops in emission
-                            // order.
-                            for i in (0..n).rev() {
-                                if let Some(item) = seq::get(items, i) {
-                                    stack.push(Step::Val(item));
-                                }
-                                if i > 0 {
-                                    stack.push(Step::Punct(","));
-                                }
-                            }
-                            out.push('[');
-                        }
-                        "Object" => {
-                            let Some(entries) = payload.first() else {
-                                out.push_str("{}");
-                                continue;
-                            };
-                            let n = seq::len(entries);
-                            stack.push(Step::Punct("}"));
-                            for i in (0..n).rev() {
-                                if let Some(entry) = seq::get(entries, i)
-                                    && let Some([k, val]) = entry.as_tuple()
-                                {
-                                    stack.push(Step::Val(val.clone()));
-                                    stack.push(Step::Punct(":"));
-                                    stack.push(Step::Key(k.clone()));
-                                }
-                                if i > 0 {
-                                    stack.push(Step::Punct(","));
-                                }
-                            }
-                            out.push('{');
-                        }
-                        // `Null`, and any variant a future `Json` gains that
-                        // this encoder has not been taught.
-                        _ => out.push_str("null"),
-                    }
-                }
-            }
-        }
-
+        write_json_value(&mut out, root);
         let v = Value::str_in(&mut self.heap, &out);
         self.stack.push(v);
         Ok(())
@@ -854,6 +876,7 @@ impl VM {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::heap::ProcHeap;
 
     /// Parse with `simd-json` and build the compact tape, without a VM.
     fn tape_of(src: &str) -> (Vec<u8>, Vec<u8>) {
@@ -1108,5 +1131,94 @@ mod tests {
             payload: (900u64 << 32) | 4,
         };
         assert!(str_bytes(&arena, forged).is_none());
+    }
+
+    /// Build a `scarlet/json.Json` variant. The `TypeId` and the variant
+    /// index are arbitrary: the encoder dispatches on the variant name.
+    fn json(h: &mut ProcHeap, variant: &str, labels: &[&str], payload: &[Value]) -> Value {
+        Value::enum_with_names_in(h, crate::TypeId(0), 0, "Json", variant, labels, payload)
+    }
+
+    fn json_int(h: &mut ProcHeap, i: i64) -> Value {
+        json(h, "Integer", &["value"], &[Value::small_int(i)])
+    }
+
+    /// A well-formed `(String, Json)` member.
+    fn member(h: &mut ProcHeap, key: &str, value: Value) -> Value {
+        let k = Value::str_in(h, key);
+        Value::tuple_in(h, &[k, value])
+    }
+
+    fn encoded(root: Value) -> String {
+        let mut out = String::new();
+        write_json_value(&mut out, root);
+        out
+    }
+
+    #[test]
+    fn a_well_formed_document_encodes() {
+        let mut h = ProcHeap::new();
+        let one = json_int(&mut h, 1);
+        let two = json_int(&mut h, 2);
+        let items = seq::from_slice(&mut h, &[one, two]);
+        let list = json(&mut h, "List", &["items"], &[items]);
+        let a = member(&mut h, "a", list);
+        let members = seq::from_slice(&mut h, &[a]);
+        let obj = json(&mut h, "Object", &["members"], &[members]);
+        assert_eq!(encoded(obj), r#"{"a":[1,2]}"#);
+    }
+
+    /// Every list element emits something, so a variant the encoder does not
+    /// know is a `null` element rather than a gap beside a separator.
+    #[test]
+    fn an_unrecognised_variant_is_a_null_element_not_a_gap() {
+        let mut h = ProcHeap::new();
+        let null = json(&mut h, "Null", &[], &[]);
+        let one = json_int(&mut h, 1);
+        let items = seq::from_slice(&mut h, &[null, one]);
+        let list = json(&mut h, "List", &["items"], &[items]);
+        assert_eq!(encoded(list), "[null,1]");
+    }
+
+    /// Regression: the separator used to be pushed independently of the
+    /// member, so a member the `(String, Json)` pattern refused left its
+    /// comma behind and the encoder emitted `{"a":1,,"c":3}` — not JSON.
+    #[test]
+    fn a_member_that_is_not_a_pair_takes_its_separator_with_it() {
+        let mut h = ProcHeap::new();
+        let one = json_int(&mut h, 1);
+        let a = member(&mut h, "a", one);
+        let three = json_int(&mut h, 3);
+        let c = member(&mut h, "c", three);
+        let members = seq::from_slice(&mut h, &[a, Value::small_int(7), c]);
+        let obj = json(&mut h, "Object", &["members"], &[members]);
+        assert_eq!(encoded(obj), r#"{"a":1,"c":3}"#);
+    }
+
+    /// The dropped member is the first one, so the stranded separator would
+    /// lead — `{,"a":1}`. This is the case an `i > 0` guard cannot see.
+    #[test]
+    fn a_dropped_first_member_leaves_no_leading_separator() {
+        let mut h = ProcHeap::new();
+        let one = json_int(&mut h, 1);
+        let a = member(&mut h, "a", one);
+        let members = seq::from_slice(&mut h, &[Value::small_int(7), a]);
+        let obj = json(&mut h, "Object", &["members"], &[members]);
+        assert_eq!(encoded(obj), r#"{"a":1}"#);
+    }
+
+    /// `as_tuple` succeeds at any arity, so it is the `[k, val]` pattern that
+    /// refuses a 3-tuple — a second way to reach the drop that has nothing to
+    /// do with `seq::get`. An object whose every member is refused is `{}`.
+    #[test]
+    fn a_member_tuple_of_the_wrong_arity_is_dropped_whole() {
+        let mut h = ProcHeap::new();
+        let one = json_int(&mut h, 1);
+        let k = Value::str_in(&mut h, "a");
+        let extra = Value::small_int(0);
+        let three = Value::tuple_in(&mut h, &[k, one, extra]);
+        let members = seq::from_slice(&mut h, &[three]);
+        let obj = json(&mut h, "Object", &["members"], &[members]);
+        assert_eq!(encoded(obj), "{}");
     }
 }
