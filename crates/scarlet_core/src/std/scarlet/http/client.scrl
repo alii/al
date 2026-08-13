@@ -79,14 +79,11 @@ import scarlet/result
 // Each is a policy a caller may not want taken on its behalf, and none of them
 // can be added later in a way a caller cannot opt out of.
 //
-// NO READ DEADLINE, on either scheme. `scarlet/net/socket` has `read_within`
-// and `read_until`; `scarlet/net/tls` has neither, so a TLS read parks until
-// plaintext arrives or the peer closes. Giving `Io` a deadline that only the
-// cleartext adapter honours would make liveness depend on the URL's scheme —
-// a worse failure than none, because it is invisible until the one request
-// that hangs is the https one. A caller that needs a deadline today must run
-// the request in its own process and kill it. When `scarlet/net/tls` grows a
-// bounded read, `Io` grows a fourth operation and both adapters implement it.
+// NO READ DEADLINE, on either scheme. `scarlet/net/socket` and
+// `scarlet/net/tls` both have `read_within` and `read_until`; `Io` has not
+// grown the fourth operation that would let `plain` and `secure` honour one,
+// so a read still parks until bytes arrive or the peer closes. A caller that
+// needs a deadline today must run the request in its own process and kill it.
 
 // One transport operation each. Aliases rather than inline function types so
 // the three fields of `Io` cannot be given in the wrong order and typecheck.
