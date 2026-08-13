@@ -122,6 +122,9 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # Published stamp. `crates/scarlet/build.rs` uses this as-is because it
+      # already contains `-canary.`; a local `cargo build` leaves VERSION as
+      # `0.0.1` and appends `+git.<sha>` so `--version` can name the commit.
       - name: Update VERSION file
         run: echo "${{ needs.check-changes.outputs.version }}" > VERSION
 

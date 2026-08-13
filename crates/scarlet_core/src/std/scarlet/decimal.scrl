@@ -324,9 +324,9 @@ fn parse_unsigned(b Binary) Option(Decimal) {
 			Ok(n) -> Some(Decimal(n, 0))
 			Err(Nil) -> None
 		}
-		Some(i) -> match binary.slice_bytes(b, 0, i) {
-			Ok(whole) -> parse_parts(whole, binary.drop_bytes(b, i + 1))
-			Err(Nil) -> None
+		Some(i) -> {
+			(whole, rest) = binary.split_at_bytes(b, i)
+			parse_parts(whole, binary.drop_bytes(rest, 1))
 		}
 	}
 }

@@ -22,6 +22,18 @@ reject_case! {
         "pub fn main() {\n\tprintln(match 1 {\n\t\t99999999999999999999999999..0 -> 0\n\t\t_ -> 1\n\t})\n}\n",
         "out of range for Int",
     ),
+    hex_literal_overflow_is_error: (
+        "pub fn main() {\n\tx = 0x8000000000000000\n}\n",
+        "out of range for Int",
+    ),
+    bin_literal_overflow_is_error: (
+        "pub fn main() {\n\tx = 0b1000000000000000000000000000000000000000000000000000000000000000\n}\n",
+        "out of range for Int",
+    ),
+    hex_and_decimal_are_the_same_match_arm: (
+        "pub fn main() {\n\tprintln(match 255 {\n\t\t0xFF -> 1\n\t\t255 -> 2\n\t})\n}\n",
+        "unreachable",
+    ),
 
     unused_let_binding_is_error: (
         "pub fn main() {\n\tx = 1\n\tprintln('done')\n}\n",

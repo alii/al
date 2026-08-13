@@ -40,7 +40,8 @@ pub struct InterpolatedString {
 
 /// A number as written, `_` separators included: `value` is what the
 /// formatter prints back; [`NumberLiteral::digits`] is what everything that
-/// interprets the number reads.
+/// interprets the number reads. Hex (`0x`/`0X`) and binary (`0b`/`0B`)
+/// prefixes stay in both — [`NumberLiteral::as_int`] is the i64 parse.
 #[derive(Debug, Clone)]
 pub struct NumberLiteral {
     pub value: String,
@@ -55,6 +56,45 @@ impl NumberLiteral {
             std::borrow::Cow::Borrowed(&self.value)
         }
     }
+
+    /// Signed i64 value of this literal. Hex and binary are magnitudes in
+    /// that radix, not two's-complement bit patterns: `0xFF` is 255, and
+    /// `0x8000000000000000` is out of range (same as decimal
+    /// `9223372036854775808`). A leading `-` is accepted so a negative
+    /// pattern literal parses — including `-9223372036854775808` /
+    /// `-0x8000000000000000`, which are i64::MIN. `None` is overflow or
+    /// a non-integer spelling.
+    pub fn as_int(&self) -> Option<i64> {
+        parse_int_literal(&self.digits())
+    }
+}
+
+/// `digits()` of an integer literal: optional leading `-`, then decimal, or
+/// `0x`/`0X` + hex, or `0b`/`0B` + binary. Underscores are already gone.
+fn parse_int_literal(s: &str) -> Option<i64> {
+    let (sign, rest) = match s.strip_prefix('-') {
+        Some(r) => ("-", r),
+        None => ("", s),
+    };
+    if let Some(digits) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+        return int_from_radix(sign, digits, 16);
+    }
+    if let Some(digits) = rest.strip_prefix("0b").or_else(|| rest.strip_prefix("0B")) {
+        return int_from_radix(sign, digits, 2);
+    }
+    s.parse().ok()
+}
+
+fn int_from_radix(sign: &str, digits: &str, radix: u32) -> Option<i64> {
+    if digits.is_empty() {
+        return None;
+    }
+    // `from_str_radix` accepts a leading sign, so the i64::MIN hex/bin
+    // spellings parse the same way decimal `-9223372036854775808` does.
+    let mut signed = String::with_capacity(sign.len() + digits.len());
+    signed.push_str(sign);
+    signed.push_str(digits);
+    i64::from_str_radix(&signed, radix).ok()
 }
 
 #[derive(Debug, Clone)]
@@ -905,5 +945,32 @@ mod tests {
             value: err(span(3, 5, 3, 11)),
         };
         assert_eq!(labeled.span(), span(3, 2, 3, 11));
+    }
+
+    fn num(value: &str) -> NumberLiteral {
+        NumberLiteral {
+            value: value.to_string(),
+            span: span(0, 0, 0, value.len() as i32),
+        }
+    }
+
+    #[test]
+    fn as_int_parses_hex_bin_decimal_and_rejects_overflow() {
+        assert_eq!(num("0xFF").as_int(), Some(255));
+        assert_eq!(num("0xff").as_int(), Some(255));
+        assert_eq!(num("0X10").as_int(), Some(16));
+        assert_eq!(num("0b1010").as_int(), Some(10));
+        assert_eq!(num("0B11").as_int(), Some(3));
+        assert_eq!(num("0xDE_AD_BE_EF").as_int(), Some(3735928559));
+        assert_eq!(num("-0xFF").as_int(), Some(-255));
+        assert_eq!(num("255").as_int(), Some(255));
+        assert_eq!(num("0x7FFFFFFFFFFFFFFF").as_int(), Some(i64::MAX));
+        assert_eq!(num("-0x8000000000000000").as_int(), Some(i64::MIN));
+        assert_eq!(num("-9223372036854775808").as_int(), Some(i64::MIN));
+        // Magnitudes past i64::MAX overflow in every radix; hex is not bits.
+        assert_eq!(num("0x8000000000000000").as_int(), None);
+        assert_eq!(num("0xFFFFFFFFFFFFFFFF").as_int(), None);
+        assert_eq!(num("9223372036854775808").as_int(), None);
+        assert_eq!(num("1.5").as_int(), None);
     }
 }

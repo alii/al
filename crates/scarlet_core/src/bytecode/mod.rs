@@ -43,6 +43,7 @@ fn builtin_op(name: &str) -> Option<Op> {
         "socket__close" => Op::TcpClose,
         "tls__handshake" => Op::TlsHandshake,
         "tls__read" => Op::TlsRead,
+        "tls__read_until" => Op::TlsReadUntil,
         "tls__write" => Op::TlsWrite,
         "tls__close" => Op::TlsClose,
         "port__spawn" => Op::PortSpawn,

@@ -536,8 +536,16 @@
       "match": "\\b([a-z_][a-zA-Z0-9_]*)(\\.)(?=[A-Za-z_])"
     },
     "numbers": {
-      "comment": "Scanner::scan_number. `_` is a digit separator and only valid between two digits, so it is written as a repeated `_\\d+` group rather than folded into the digit class — `1_` and `_1` are not numbers.",
+      "comment": "Scanner::scan_number. Hex (`0x`) and binary (`0b`) first so they are not split into `0` + identifier. `_` is a digit separator only between two digits of that radix.",
       "patterns": [
+        {
+          "match": "\\b0[xX][0-9A-Fa-f]+(?:_[0-9A-Fa-f]+)*\\b",
+          "name": "constant.numeric.hex.scrl"
+        },
+        {
+          "match": "\\b0[bB][01]+(?:_[01]+)*\\b",
+          "name": "constant.numeric.binary.scrl"
+        },
         {
           "match": "\\b\\d+(?:_\\d+)*\\.\\d+(?:_\\d+)*\\b",
           "name": "constant.numeric.float.scrl"

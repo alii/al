@@ -228,7 +228,6 @@ fn enc_variant(e: &mut Enc, v: &VariantRef) {
     e.i32(v.type_id.0);
     e.u32(u32::from(v.variant_idx));
     e.u32(v.type_name.0);
-    e.u32(v.variant_name.0);
 }
 
 fn dec_variant(d: &mut Dec) -> Result<VariantRef> {
@@ -236,7 +235,6 @@ fn dec_variant(d: &mut Dec) -> Result<VariantRef> {
         type_id: TypeId(d.i32()?),
         variant_idx: d.u32()? as u16,
         type_name: StrId(d.u32()?),
-        variant_name: StrId(d.u32()?),
     })
 }
 
@@ -670,7 +668,6 @@ mod tests {
             type_id: TypeId(6656),
             variant_idx: 2,
             type_name: StrId(11),
-            variant_name: StrId(12),
         };
         let l = |i: usize| LocalId::from_usize(i);
         let body = CoreExpr::LetCont {

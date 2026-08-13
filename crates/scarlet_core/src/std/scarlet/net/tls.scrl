@@ -4,6 +4,7 @@ import scarlet/net/error.{NetError, UnexpectedEof}
 import scarlet/net/socket.{Socket, Read, Data, Closed}
 import scarlet/binary
 import scarlet/result
+import scarlet/time.{Instant}
 
 // A TLS client connection, authenticated and encrypted. The value is only ever
 // constructed by the VM and carries no fields; it is an opaque handle into the
@@ -152,6 +153,26 @@ fn read_exact_loop(c TlsSocket, remaining Int, acc Binary) Result(Binary, TlsErr
 		}
 	}
 }
+
+// Read whatever plaintext is available, up to `max` bytes, but wait no longer
+// than `timeout_ms` milliseconds. The deadline is captured once, here in
+// Scarlet, as an absolute monotonic timestamp, so an internal re-run on a
+// spurious wakeup never resets the clock. Returns Ok(Data(b)) once bytes
+// decrypt, Ok(Closed) if the peer closes, or Err(Transport(TimedOut)) once
+// the deadline passes with no plaintext.
+pub fn read_within(c TlsSocket, max Int, timeout_ms Int) Result(Read, TlsError) {
+	read_until(c, max, time.add_ms(time.monotonic(), timeout_ms))
+}
+
+// Read up to `max` bytes of plaintext, parking until data decrypts or the
+// absolute Instant `deadline` (from `time.monotonic()`) is reached, at which
+// point it errs with Transport(TimedOut).
+pub fn read_until(c TlsSocket, max Int, deadline Instant) Result(Read, TlsError) {
+	read_until_ms(c, max, time.to_deadline_ms(deadline))
+}
+
+@vm(tls__read_until)
+fn read_until_ms(c TlsSocket, max Int, deadline_ms Int) Result(Read, TlsError)
 
 // Encrypt `data` and write it. Returns once the ciphertext has been handed to
 // the kernel, not merely buffered in the TLS session: a write that returned

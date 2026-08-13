@@ -158,15 +158,9 @@ fn wire_loop(inbox Subject(Wire), script Binary, written Binary) Nil {
 				process.send(reply, Closed)
 				wire_loop(inbox, script, written)
 			} else {
-				// `n = min(max, byte_size(script))` and `n > 0` here, so
-				// `0..n` is inside `script` and the Err arm cannot fire — an
-				// argument in a comment rather than a type, T-286.
-				chunk = match binary.slice_bytes(script, 0, n) {
-					Ok(v) -> v
-					Err(Nil) -> <<>>
-				}
+				(chunk, rest) = binary.split_at_bytes(script, n)
 				process.send(reply, Data(chunk))
-				wire_loop(inbox, binary.drop_bytes(script, n), written)
+				wire_loop(inbox, rest, written)
 			}
 		}
 		Wrote(bytes) -> wire_loop(inbox, script, binary.append(written, bytes))

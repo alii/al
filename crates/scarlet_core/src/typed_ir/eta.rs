@@ -175,7 +175,6 @@ mod tests {
             type_id: TypeId(9),
             variant_idx: 0,
             type_name: StrId(10),
-            variant_name: NAME,
         }
     }
 

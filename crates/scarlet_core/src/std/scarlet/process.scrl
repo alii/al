@@ -112,9 +112,8 @@ pub type ExitReason {
 	Crashed(crash Crash)
 }
 
-// The runtime errors a process can crash with. Scarlet has no exceptions,
-// and its arithmetic and pattern matching are total, so this list is short
-// and every entry is an out-of-range access of one kind or another.
+// The runtime errors that end a process. Scarlet has no exceptions, and
+// its arithmetic and pattern matching are total, so this list is short.
 pub type Crash {
 	// `xs[i]` with `i` outside `0..length`.
 	IndexOutOfBounds(index Int, length Int)

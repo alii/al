@@ -570,6 +570,10 @@ pub struct Compiler {
     /// ids are stable across `reset_to` (the watermark sits past the static
     /// stdlib), so the memo survives a session's rewinds.
     restricted_gen_cons: Option<HashSet<TypeId>>,
+    /// Length of the ABI prefix of `program.templates`, set by [`Self::bind_abi`].
+    /// `reset_to` truncates the table to this rather than clearing it, so a
+    /// descriptor template appended past the prefix cannot survive a rewind.
+    pub(super) abi_template_count: usize,
     // --- Module state ---
     pub(super) module_table: ModuleTable,
     /// Append-only `ModulePath` ↔ `ModuleId` interner backing every `DefId`.
@@ -1251,6 +1255,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         unused_bindings: UnusedBindings::Report,
         module_scope: ModuleScope::default(),
         restricted_gen_cons: None,
+        abi_template_count: 0,
         module_table: ModuleTable::new(),
         module_display: HashMap::new(),
         ref_interner,
@@ -5562,7 +5567,7 @@ impl Compiler {
     /// post-diagnostic error branch, so it can never masquerade as a valid
     /// literal `0`: the compile has already failed.
     fn const_number(&mut self, n: &ast::NumberLiteral) -> Value {
-        match number_literal_value(&n.digits(), &mut self.frozen) {
+        match number_literal_value(n, &mut self.frozen) {
             Ok(v) => v.into_value(),
             Err(e) => {
                 self.error(e.message(&n.value), n.span);
@@ -5607,13 +5612,13 @@ fn type_defining_span(expr: &ast::Expression) -> Span {
 
 /// Why a numeric literal's source text could not be turned into a `Value`.
 ///
-/// The scanner only ever produces numeric literal text matching
-/// `[0-9]+(\.[0-9]+)?`, and the parser only prepends a leading `-` for
-/// negative pattern literals, so the source is always
-/// `-?[0-9]+(\.[0-9]+)?`. The integer branch can therefore fail only on
-/// i64 overflow; the float branch effectively never fails for scanner
-/// output, but `InvalidFloat` is kept so the function is total over every
-/// `&str` rather than silently depending on that lexical invariant.
+/// The scanner produces decimal (`[0-9]+(\.[0-9]+)?`), hex (`0[xX][0-9A-Fa-f]+`),
+/// or binary (`0[bB][01]+`), and the parser only prepends a leading `-` for
+/// negative pattern literals. The integer branch fails on i64 overflow (hex
+/// and binary are magnitudes, so `0x8000000000000000` is out of range, not
+/// i64::MIN); the float branch effectively never fails for scanner output,
+/// but `InvalidFloat` is kept so the function is total over every `&str`
+/// rather than silently depending on that lexical invariant.
 enum NumLitError {
     IntOutOfRange,
     InvalidFloat,
@@ -5649,14 +5654,18 @@ impl NumLitError {
 /// obtain a fabricated `Value` for out-of-domain input. The only
 /// `Value`-producing path for callers is [`Compiler::const_number`], which
 /// emits a diagnostic before recovering.
-fn number_literal_value(s: &str, frozen: &mut FrozenBuilder) -> Result<FrozenConst, NumLitError> {
+fn number_literal_value(
+    n: &ast::NumberLiteral,
+    frozen: &mut FrozenBuilder,
+) -> Result<FrozenConst, NumLitError> {
+    let s = n.digits();
     if s.contains('.') {
         s.parse()
             .map(|f| frozen.float(f))
             .map_err(|_| NumLitError::InvalidFloat)
     } else {
-        s.parse()
+        n.as_int()
             .map(|i| frozen.int(i))
-            .map_err(|_| NumLitError::IntOutOfRange)
+            .ok_or(NumLitError::IntOutOfRange)
     }
 }

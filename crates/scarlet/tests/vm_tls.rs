@@ -464,6 +464,106 @@ pub fn main() {{
     );
 }
 
+/// `tls.read_within` against a peer that completes the handshake but never
+/// sends application data must hit its deadline as `Transport(TimedOut)`
+/// rather than parking forever. The server stays connected and silent, so
+/// only the deadline timer can wake the parked read.
+///
+/// The deadline is captured once in Scarlet as an absolute Instant; the VM
+/// re-pushes that same monotonic-ms on every park. A re-run that reset the
+/// clock would still look like a timeout here (one park, then the timer),
+/// so this test witnesses the typed timeout, not the re-run discipline.
+#[test]
+fn tls_read_within_times_out_as_transport_timed_out() {
+    let ca = make_ca();
+    let leaf = make_leaf(&ca, "localhost", Validity::Current);
+    // Handshake, then sit unread. The client never writes, so the peer never
+    // replies, and the 100 ms deadline is the only wake.
+    let port = spawn_stalled_tls_server(leaf, 1, std::time::Duration::from_secs(30));
+
+    let src = format!(
+        r#"import scarlet/net
+import scarlet/net/tls.{{Transport}}
+import scarlet/net/error.{{TimedOut}}
+import scarlet/string
+
+pub fn main() {{
+    match net.connect('127.0.0.1', {port}) {{
+        Ok(sock) -> match tls.handshake(sock, 'localhost') {{
+            Ok(conn) -> {{
+                match tls.read_within(conn, 4096, 100) {{
+                    Err(Transport(TimedOut)) -> println('timed-out: Transport(TimedOut)')
+                    Ok(_) -> println('unexpected-data')
+                    Err(e) -> println('other-error: ${{string.inspect(e)}}')
+                }}
+                tls.close(conn) or Nil
+            }}
+            Err(e) -> println('handshake failed: ${{string.inspect(e)}}')
+        }}
+        Err(e) -> println('connect failed: ${{string.inspect(e)}}')
+    }}
+}}
+"#
+    );
+
+    let (code, out) = run_bounded("read_within_timeout", &src, Some(&ca.pem), 30);
+    assert_eq!(
+        code,
+        Some(0),
+        "read_within must return, not hang, got:\n{out}"
+    );
+    assert!(
+        out.contains("timed-out: Transport(TimedOut)"),
+        "read_within must take its Err(Transport(TimedOut)) arm; got:\n{out}"
+    );
+    assert!(
+        !out.contains("unexpected-data"),
+        "read_within must not return Ok when no plaintext ever arrives:\n{out}"
+    );
+}
+
+/// `tls.read_within` returns the plaintext that arrives before the deadline.
+#[test]
+fn tls_read_within_returns_data() {
+    let ca = make_ca();
+    let leaf = make_leaf(&ca, "localhost", Validity::Current);
+    let port = spawn_tls_server(leaf, "hello over tls");
+
+    let src = format!(
+        r#"import scarlet/net
+import scarlet/net/tls
+import scarlet/net/socket.{{Data, Closed}}
+import scarlet/binary
+import scarlet/string
+
+pub fn main() {{
+    match net.connect('127.0.0.1', {port}) {{
+        Ok(sock) -> match tls.handshake(sock, 'localhost') {{
+            Ok(conn) -> {{
+                tls.write(conn, <<'ping'>>) or Nil
+                match tls.read_within(conn, 1024, 5000) {{
+                    Ok(Data(b)) -> println('read: ${{binary.to_string(b) or "<not utf-8>"}}')
+                    Ok(Closed) -> println('closed')
+                    Err(e) -> println('read failed: ${{string.inspect(e)}}')
+                }}
+                tls.close(conn) or Nil
+            }}
+            Err(e) -> println('failed: ${{string.inspect(e)}}')
+        }}
+        Err(e) -> println('connect failed: ${{string.inspect(e)}}')
+    }}
+}}
+"#
+    );
+
+    let out = run_program("read_within_data", &src, Some(&ca.pem));
+    assert!(
+        out.contains("read: hello over tls"),
+        "read_within must return the bytes that arrived before the deadline, \
+         got:\n{out}"
+    );
+}
+
 /// The cleartext handle is stale once the connection has been secured.
 ///
 /// This is the runtime half of the guarantee whose compile-time half is that
@@ -519,12 +619,12 @@ pub fn main() {{
 ///
 /// `NativeTable::WARM_CALLS` is 8, so the ninth call to a function runs
 /// natively and every opcode in its body goes through `native_shims`'
-/// dispatchers instead of the interpreter's own match. All four TLS opcodes
-/// were classified there — `TlsHandshake`, `TlsRead` and `TlsWrite` as `Park`,
-/// `TlsClose` as `Bridge` — and given an arm in NEITHER dispatcher, so the
-/// ninth call fell through to `proof_violation` and killed the program with
-/// `internal invariant violated: run_park_op on an op is_native_park_op
-/// excludes (compiler bug)`.
+/// dispatchers instead of the interpreter's own match. The TLS opcodes
+/// were classified there — `TlsHandshake`, `TlsRead`, `TlsReadUntil` and
+/// `TlsWrite` as `Park`, `TlsClose` as `Bridge` — and given an arm in
+/// NEITHER dispatcher, so the ninth call fell through to `proof_violation`
+/// and killed the program with `internal invariant violated: run_park_op
+/// on an op is_native_park_op excludes (compiler bug)`.
 ///
 /// Nothing caught it because every other test in this file calls TLS from the
 /// top level of `main`, which is interpreted and never warms. The standard
@@ -533,7 +633,7 @@ pub fn main() {{
 /// function body. A program that read a connection in a loop for nine
 /// iterations would have died.
 ///
-/// Each of the four is called TWELVE times, which is what makes this a test of
+/// Each of the five is called TWELVE times, which is what makes this a test of
 /// the dispatch rather than of TLS: three past the threshold, and the outcome
 /// asserted is only that the program finished and reported typed results.
 #[test]
@@ -576,6 +676,19 @@ fn recv_n(c TlsSocket, n Int, acc Int) Int {{
     }}
 }}
 
+// A 1 ms deadline against a peer that has not sent yet. The point is that
+// TlsReadUntil is dispatchable from a compiled body, not the timeout itself.
+fn timeout_n(c TlsSocket, n Int, acc Int) Int {{
+    if n <= 0 {{
+        acc
+    }} else {{
+        match tls.read_within(c, 1, 1) {{
+            Err(_) -> timeout_n(c, n - 1, acc + 1)
+            Ok(_) -> timeout_n(c, n - 1, acc)
+        }}
+    }}
+}}
+
 fn close_n(c TlsSocket, n Int) Nil {{
     if n <= 0 {{
         Nil
@@ -609,6 +722,7 @@ pub fn main() {{
     match net.connect('127.0.0.1', {port}) {{
         Ok(sock) -> match tls.handshake(sock, 'localhost') {{
             Ok(conn) -> {{
+                println('timeouts ${{timeout_n(conn, {REPS}, 0)}}')
                 match send_n(conn, <<'{PATTERN}'>>, {REPS}) {{
                     Ok(Nil) -> println('wrote {REPS}')
                     Err(e) -> println('write failed: ${{string.inspect(e)}}')
@@ -636,6 +750,10 @@ pub fn main() {{
         out.contains(&format!("handshakes refused {REPS}")),
         "every handshake against a peer that hangs up must come back as a \
          typed error, got:\n{out}"
+    );
+    assert!(
+        out.contains(&format!("timeouts {REPS}")),
+        "`tls.read_within` must be dispatchable from a compiled body, got:\n{out}"
     );
     assert!(
         out.contains(&format!("wrote {REPS}")),

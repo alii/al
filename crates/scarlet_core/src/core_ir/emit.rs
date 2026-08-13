@@ -32,6 +32,8 @@ pub trait EmitCtx {
     fn intern_str(&mut self, s: &str) -> i32;
     /// Pool the frozen field-label array for `(tid, variant_idx)`.
     fn intern_labels(&mut self, tid: TypeId, variant_idx: u16) -> i32;
+    /// Declared name of `tid`'s `variant_idx`th constructor.
+    fn variant_name(&self, tid: TypeId, variant_idx: u16) -> &str;
     /// Variant count of `tid` when it is a boxed enum eligible for
     /// `SwitchTag`. `None` forces the `MatchEnum` ladder.
     fn switch_variant_count(&self, tid: TypeId) -> Option<u8>;
@@ -1169,7 +1171,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             return;
         }
         let type_name = self.ctx.resolve_str(v.type_name).to_owned();
-        let variant_name = self.ctx.resolve_str(v.variant_name).to_owned();
+        let variant_name = self.ctx.variant_name(v.type_id, v.variant_idx).to_owned();
 
         let id_c = self.ctx.intern_int(crate::bytecode::value::pack_variant(
             v.type_id,
@@ -1291,7 +1293,10 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                     } else {
                         let id_c = self.ctx.intern_int(variant.type_id.0 as i64);
                         self.push(op_arg(Op::PushConst, id_c));
-                        let vn = self.ctx.resolve_str(variant.variant_name).to_owned();
+                        let vn = self
+                            .ctx
+                            .variant_name(variant.type_id, variant.variant_idx)
+                            .to_owned();
                         let vn_c = self.ctx.intern_str(&vn);
                         self.push(op_arg(Op::PushConst, vn_c));
                         self.push(op(Op::MatchEnum));
@@ -1555,6 +1560,63 @@ mod tests {
         assert_eq!(make.a, 1);
         assert_eq!(make.b, 2);
         assert_eq!(out.code[6].operand, 0); // Reuse slot 0
+    }
+
+    /// Display names come from `(type_id, variant_idx)`, not a string carried
+    /// on `VariantRef`. `resolve_str` answers `"Color"` for every id; the
+    /// declaration name is `"Green"`. Using the carried field would intern
+    /// `"Color"` twice and never `"Green"`.
+    #[test]
+    fn emit_ctor_interns_the_declared_variant_name() {
+        struct NameCtx {
+            interned: Vec<String>,
+        }
+        impl EmitCtx for NameCtx {
+            fn resolve_str(&self, _id: StrId) -> &str {
+                "Color"
+            }
+            fn intern_int(&mut self, _i: i64) -> i32 {
+                0
+            }
+            fn intern_str(&mut self, s: &str) -> i32 {
+                self.interned.push(s.to_string());
+                self.interned.len() as i32 - 1
+            }
+            fn intern_labels(&mut self, _t: TypeId, _v: u16) -> i32 {
+                0
+            }
+            fn variant_name(&self, _t: TypeId, _v: u16) -> &str {
+                "Green"
+            }
+            fn switch_variant_count(&self, _t: TypeId) -> Option<u8> {
+                None
+            }
+            fn bool_variant(&self, _t: TypeId, _v: u16) -> Option<bool> {
+                None
+            }
+        }
+
+        let body = CoreExpr::Tail(Atom::Ctor {
+            variant: vref(3, 1),
+            fields: vec![],
+            reuse: None,
+        });
+        let f = func(vec![], body, RTy(0));
+        let mut cx = NameCtx {
+            interned: Vec::new(),
+        };
+        let _ = emit(&f, &mut cx);
+        assert!(
+            cx.interned.iter().any(|s| s == "Green"),
+            "emit_ctor must intern variants[idx].name, got {:?}",
+            cx.interned
+        );
+        assert_eq!(
+            cx.interned.iter().filter(|s| s.as_str() == "Color").count(),
+            1,
+            "type_name is interned once; a carried variant_name would intern Color twice: {:?}",
+            cx.interned
+        );
     }
 
     #[test]

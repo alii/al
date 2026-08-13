@@ -162,9 +162,10 @@ pub enum Op {
     GetFieldUnchecked,
 
     // Tagged values (enums / custom types)
-    /// `[type_id, enum_name, variant_name, labels, p0, .., p_{b-1}, reuse?] ->
-    /// enum`. `b` = payload arity, `operand` = prehash constant idx. `a` = 1
-    /// when a Perceus reuse token sits on top of the payloads.
+    /// `[packed, enum_name, variant_name, labels, p0, .., p_{b-1}, reuse?] ->
+    /// enum`. `packed` is `pack_variant(type_id, variant_idx)`. `b` = payload
+    /// arity, `operand` = prehash constant idx. `a` = 1 when a Perceus reuse
+    /// token sits on top of the payloads.
     MakeEnumPayload,
     MatchEnum,
     UnwrapEnum,
@@ -344,6 +345,12 @@ pub enum Op {
     /// from `TcpRead` because its failures are `TlsError` values, not
     /// `NetError` ones. (scarlet/net/tls.read)
     TlsRead,
+    /// `[tls_socket, max, deadline_ms] -> Result(Read, TlsError)` — parks until
+    /// plaintext decrypts, the peer closes, or the absolute monotonic-ms
+    /// deadline passes (then `Err(Transport(TimedOut))`). Split from
+    /// `TcpReadUntil` for the same reason `TlsRead` is split from `TcpRead`.
+    /// (scarlet/net/tls.read_until)
+    TlsReadUntil,
     /// `[tls_socket, data] -> Result(Nil, TlsError)` — encrypting write, which
     /// returns only once the ciphertext has reached the kernel rather than the
     /// session's own buffer. (scarlet/net/tls.write)
@@ -719,6 +726,7 @@ impl Op {
             | Op::PortClose
             | Op::TlsHandshake
             | Op::TlsRead
+            | Op::TlsReadUntil
             | Op::TlsWrite
             | Op::TlsClose
             | Op::ProcessSpawn
@@ -938,6 +946,7 @@ impl Op {
             | Op::PortClose
             | Op::TlsHandshake
             | Op::TlsRead
+            | Op::TlsReadUntil
             | Op::TlsWrite
             | Op::TlsClose
             | Op::ProcessSpawn

@@ -539,6 +539,33 @@ fn stdlib_binary_slice_units() {
          }\n",
         "<<1, 2, 3, 4, 5>>\n<<4, 5>>\n<<>>\n<<>>\n<<1, 2, 3, 4, 5>>\n4\n",
     );
+    // split_at_bytes is total because it is given a position, not a length.
+    // append(prefix, suffix) == b at every at, including the ones slice_bytes
+    // would refuse. The mid-cut is the control: a clamp-only stub would pass
+    // the four edges and fail this one.
+    run_outputs(
+        "import scarlet/binary\n\
+         import scarlet/string\n\
+         pub fn main() {\n\
+         \tb = <<1, 2, 3, 4, 5>>\n\
+         \tshow = fn(at) {\n\
+         \t\tpair = binary.split_at_bytes(b, at)\n\
+         \t\tprintln(string.inspect(pair.0))\n\
+         \t\tprintln(string.inspect(pair.1))\n\
+         \t\tprintln(binary.append(pair.0, pair.1) == b)\n\
+         \t}\n\
+         \tshow(0 - 3)\n\
+         \tshow(0)\n\
+         \tshow(2)\n\
+         \tshow(5)\n\
+         \tshow(900)\n\
+         }\n",
+        "<<>>\n<<1, 2, 3, 4, 5>>\nTrue\n\
+         <<>>\n<<1, 2, 3, 4, 5>>\nTrue\n\
+         <<1, 2>>\n<<3, 4, 5>>\nTrue\n\
+         <<1, 2, 3, 4, 5>>\n<<>>\nTrue\n\
+         <<1, 2, 3, 4, 5>>\n<<>>\nTrue\n",
+    );
 }
 
 #[test]

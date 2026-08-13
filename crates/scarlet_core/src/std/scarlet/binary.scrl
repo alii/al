@@ -60,6 +60,37 @@ pub fn drop_bytes(b Binary, at Int) Binary {
 	}
 }
 
+// Cut `b` at byte `at`, returning `(prefix, suffix)`. Total, and honestly so:
+// `at` is a position, not a length, so there is no requested size for either
+// half to fall short of. `at` is clamped to `[0, byte_size(b)]` — a negative
+// `at` takes nothing, past the end takes everything — and
+// `append(prefix, suffix) == b` holds for every `at`.
+//
+// Use it instead of `slice_bytes(b, 0, at)` plus `drop_bytes(b, at)` when a
+// position some other call already proved is inside `b`.
+pub fn split_at_bytes(b Binary, at Int) (Binary, Binary) {
+	total = bit_size(b)
+	// Clamped before the ×8 so a huge `at` cannot wrap into a negative offset.
+	cut = if at <= 0 {
+		0
+	} else if at >= byte_size(b) {
+		total
+	} else {
+		at * 8
+	}
+	prefix = if cut <= 0 {
+		<<>>
+	} else {
+		match slice_bits(b, 0, cut) {
+			Ok(v) -> v
+			// Unreachable: 0 < cut <= total == bit_size(b), so the window is
+			// exactly the head. The arm exists because Result has two of them.
+			Err(Nil) -> <<>>
+		}
+	}
+	(prefix, drop_bytes(b, at))
+}
+
 @vm(binary__append)
 pub fn append(a Binary, b Binary) Binary
 

@@ -431,9 +431,13 @@ impl Formatter {
         d![attrs, prefix, body]
     }
 
-    /// A parameter list the author broke after `(` stays broken. Width alone
-    /// is the wrong signal: a signature can fit and still read worse than
-    /// one-per-line, and reflowing discards the author's choice.
+    /// A named-function parameter list the author broke after `(` stays broken.
+    /// Width alone is the wrong signal: a signature can fit and still read
+    /// worse than one-per-line, and reflowing discards the author's choice.
+    ///
+    /// Lambdas do not consult this. A hard-broken `fn(\n x,\n)` injects
+    /// HardLines that make an enclosing call hug, so the next pass measures a
+    /// different document and is not a fixed point.
     fn params_broken_by_author(&self, header_line: i32, params: &[ast::FunctionParameter]) -> bool {
         params
             .first()
@@ -445,7 +449,7 @@ impl Formatter {
         name: Option<&str>,
         params: &[ast::FunctionParameter],
         ret: &Option<ast::TypeIdentifier>,
-        header_line: i32,
+        author_header_line: Option<i32>,
     ) -> Doc {
         let head = match name {
             Some(n) => text(format!("fn {n}")),
@@ -462,11 +466,12 @@ impl Formatter {
             Some(t) => d![text(" "), self.type_(t)],
             None => nil(),
         };
-        let list = if self.params_broken_by_author(header_line, params) {
-            hard_list("(", ps, ")")
-        } else {
-            delimited("(", ps, ")")
-        };
+        let list =
+            if author_header_line.is_some_and(|line| self.params_broken_by_author(line, params)) {
+                hard_list("(", ps, ")")
+            } else {
+                delimited("(", ps, ")")
+            };
         d![head, list, r]
     }
 
@@ -475,7 +480,7 @@ impl Formatter {
             Some(&f.identifier.name),
             &f.params,
             &f.return_type,
-            f.identifier.span.start_line,
+            Some(f.identifier.span.start_line),
         );
         match &f.body {
             ast::FnBody::Block(b) => d![header, text(" "), self.fn_body(b)],
@@ -485,7 +490,7 @@ impl Formatter {
 
     fn fn_expr(&self, f: &ast::FunctionExpression) -> Doc {
         d![
-            self.fn_header(None, &f.params, &None, f.span.start_line),
+            self.fn_header(None, &f.params, &None, None),
             text(" "),
             self.lambda_body(&f.body),
         ]
@@ -1814,6 +1819,58 @@ mod tests {
             out.contains("(\n\t\taaaaaaaaaaaaaaaaaaaaaaaaaa,\n"),
             "expected the call to break per-argument at the enclosing indent, got:\n{out}"
         );
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn lambda_inside_interpolation_is_idempotent() {
+        // A call inside `${…}` whose last argument is a lambda whose body is
+        // itself an interpolated string. Pass 1 used to emit a broken `read(`
+        // and a hard-broken `fn(\n d,\n)`; pass 2 then hugged the call because
+        // those HardLines made the lambda hug-eligible. fmt(fmt(x)) != fmt(x).
+        let src = "println('b.1 is null   ${read(sample, fn(d) '${option.unwrap(option.map(option.then(json.field(d, 'b'), fn(b) json.index(b, 1)), json.is_null), False)}')}')\n";
+        let out = fmt(src);
+        assert_round_trips(&out);
+    }
+
+    /// The T-155 family: a lambda as the last call argument whose body is a
+    /// bare wrapping expression. Same HardLine-then-hug flip as
+    /// `lambda_inside_interpolation_is_idempotent`, no string involved.
+    fn assert_trailing_lambda_wraps_and_is_fixed(src: &str) {
+        let out = fmt(src);
+        assert!(
+            out.contains("fn(\n"),
+            "expected lambda params to wrap, otherwise this is not the trigger:\n{out}"
+        );
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn trailing_lambda_with_wrapping_constructor_is_idempotent() {
+        assert_trailing_lambda_wraps_and_is_fixed(
+            "update_bucket(limiter, key, fn(held) Bucket(remaining: Known(0), reset_at: clock.now(), last_refill: clock.now(), capacity: held.capacity))\n",
+        );
+    }
+
+    #[test]
+    fn trailing_lambda_with_wrapping_or_chain_is_idempotent() {
+        assert_trailing_lambda_wraps_and_is_fixed(
+            "check(limiter, key, fn(held) held.remaining == 0 || held.reset_at < now || held.capacity < wanted || held.tokens < needed)\n",
+        );
+    }
+
+    #[test]
+    fn trailing_lambda_with_wrapping_call_body_is_idempotent() {
+        assert_trailing_lambda_wraps_and_is_fixed(
+            "array.map(data, fn(opcode) expect.is_false(opcode == websocket.Opcode.Continuation || opcode == websocket.Opcode.Text || opcode == websocket.Opcode.Binary))\n",
+        );
+    }
+
+    #[test]
+    fn hugged_trailing_lambda_form_is_idempotent() {
+        // The second-pass form the bug used to emit, starting already hugged.
+        let hugged = "update_bucket(limiter, key, fn(\n\theld,\n) Bucket(\n\tremaining: Known(0),\n\treset_at: clock.now(),\n\tlast_refill: clock.now(),\n\tcapacity: held.capacity,\n))\n";
+        let out = fmt(hugged);
         assert_round_trips(&out);
     }
 }

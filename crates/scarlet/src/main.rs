@@ -25,7 +25,7 @@ use scarlet::cli::{help, man};
 use scarlet::core_ir::clif;
 use scarlet::{STDLIB, ast, bytecode, diagnostic, formatter, lsp, parser, repl, scanner, vm};
 
-const VERSION: &str = include_str!("../../../VERSION");
+const VERSION: &str = env!("SCARLET_VERSION");
 
 #[derive(Parser)]
 #[command(

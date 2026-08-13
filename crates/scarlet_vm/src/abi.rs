@@ -555,7 +555,7 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::NetEhostunreach,
             S::NetErrnoOther,
         ],
-        Op::TlsRead => &[
+        Op::TlsRead | Op::TlsReadUntil => &[
             S::ResultOk,
             S::ResultErr,
             S::ReadData,

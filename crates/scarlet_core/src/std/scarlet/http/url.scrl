@@ -110,14 +110,7 @@ pub fn authority(u Url) Binary {
 pub fn parse(text String) Result(Url, UrlError) {
 	b = binary.from_string(text)
 	sep <- result.then(scheme_sep(b))
-	// `index_of` answered `sep` as a byte index inside `b` with `://` still to
-	// follow, so `0..sep` is in range and the Err arm cannot fire. That is an
-	// argument in a comment rather than a type — T-286. The fallback is loud
-	// anyway: `scheme_of(EMPTY)` is `UnsupportedScheme`, not a default scheme.
-	scheme_text = match binary.slice_bytes(b, 0, sep) {
-		Ok(s) -> s
-		Err(Nil) -> EMPTY
-	}
+	(scheme_text, _) = binary.split_at_bytes(b, sep)
 	scheme <- result.then(scheme_of(scheme_text))
 	authority_start = sep + 3
 	size = binary.byte_size(b)
@@ -201,14 +194,8 @@ fn split_bracketed(authority Binary) Result(HostPort, UrlError) {
 	match binary.index_of(authority, RBRACKET, 0) {
 		None -> Err(UnclosedIpv6)
 		Some(close) -> {
-			// `split_bracketed` is only reached when `authority` starts with
-			// `[`, so the first `]` is at `close >= 1` and `1..close` is
-			// inside it. The Err arm cannot fire — an argument in a comment
-			// rather than a type, T-286; the fallback reports `EmptyHost`.
-			inside = match binary.slice_bytes(authority, 1, close - 1) {
-				Ok(v) -> v
-				Err(Nil) -> EMPTY
-			}
+			(up_to_close, _) = binary.split_at_bytes(authority, close)
+			(_, inside) = binary.split_at_bytes(up_to_close, 1)
 			rest = binary.drop_bytes(authority, close + 1)
 			// After `]` the authority is over: either nothing, or `:port`.
 			// Anything else (`[::1]x`) is a malformed port region, not a host,
@@ -231,17 +218,10 @@ fn split_bracketed(authority Binary) Result(HostPort, UrlError) {
 fn split_at_colon(authority Binary, colon Option(Int)) HostPort {
 	match colon {
 		None -> HostPort(host: authority, port_text: EMPTY)
-		// `index_of` answered `i` as a byte index inside `authority`, so `0..i`
-		// is in range and the Err arm cannot fire — an argument in a comment
-		// rather than a type, T-286. The fallback reports `EmptyHost`.
-		Some(i) ->
-			HostPort(
-				host: match binary.slice_bytes(authority, 0, i) {
-					Ok(h) -> h
-					Err(Nil) -> EMPTY
-				},
-				port_text: binary.drop_bytes(authority, i),
-			)
+		Some(i) -> {
+			(host, port_text) = binary.split_at_bytes(authority, i)
+			HostPort(host: host, port_text: port_text)
+		}
 	}
 }
 

@@ -212,6 +212,9 @@ impl Compiler {
         self.program.code.truncate(code);
         self.program.functions.truncate(functions);
         self.program.constants.truncate(constants);
+        // ABI templates are a prefix whose length `bind_abi` recorded.
+        // Descriptor templates live only in the suffix and must not survive.
+        self.program.templates.truncate(self.abi_template_count);
         self.local_count = local_count;
         self.global_to_func.retain(|_, fi| fi.index() < functions);
         // Survivors are watermark-preserved entry-frame slots. Depth normalises
@@ -927,5 +930,43 @@ mod tests {
              ({} entries survived) — a stale prefix is indexed by no live ConstId",
             c.core.consts.len()
         );
+    }
+
+    /// Descriptor templates are a suffix past `abi_template_count`. A rewind
+    /// must drop them and keep the ABI prefix: clearing the table would
+    /// invalidate every ABI `TemplateIdx`, and leaving the suffix would leave
+    /// a stale one behind.
+    #[test]
+    fn reset_to_truncates_templates_to_the_abi_prefix() {
+        use scarlet_vm::abi::TemplateIdx;
+        use scarlet_vm::template::EnumTemplate;
+
+        fn dummy(program: &crate::bytecode::Program) -> EnumTemplate {
+            EnumTemplate::build(&mut program.frozen.builder(), TypeId(0), 0, "T", "V", &[])
+        }
+
+        let mut c = new_compiler(None, false);
+        c.program.templates.push(dummy(&c.program));
+        c.program.templates.push(dummy(&c.program));
+        c.abi_template_count = 2;
+
+        let w = c.watermark();
+        let suffix = c.program.templates.push(dummy(&c.program));
+        assert_eq!(c.program.templates.len(), 3);
+        assert_eq!(suffix, TemplateIdx(2));
+
+        c.reset_to(&w);
+
+        assert_eq!(
+            c.program.templates.len(),
+            2,
+            "rewind must keep the ABI prefix, not clear the table"
+        );
+        assert!(
+            c.program.templates.get(suffix).is_none(),
+            "a descriptor TemplateIdx must not survive rewind"
+        );
+        assert!(c.program.templates.get(TemplateIdx(0)).is_some());
+        assert!(c.program.templates.get(TemplateIdx(1)).is_some());
     }
 }

@@ -66,15 +66,17 @@ pub struct WireField {
 
 /// One constructor a decoder may build.
 ///
-/// Carries `VariantRef` plus the declared labels — exactly the arguments
-/// `EnumTemplate::build` consumes — so a decoded variant is built by the same
-/// call that builds a constructed one. It deliberately does **not** carry a
-/// `TemplateIdx`: `bind_abi` rebuilds `Program.templates` from scratch on every
-/// emit, so an index minted here would name a different template, or none, by
-/// the time anything read it.
+/// Carries `VariantRef` plus the declared name and labels — exactly the
+/// arguments `EnumTemplate::build` consumes — so a decoded variant is built
+/// by the same call that builds a constructed one. It deliberately does
+/// **not** carry a `TemplateIdx`: `bind_abi` rebuilds `Program.templates`
+/// from scratch on every emit, so an index minted here would name a
+/// different template, or none, by the time anything read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireVariant {
     variant: VariantRef,
+    /// Declaration name. Fingerprint and refusal paths mix this as text.
+    name: StrId,
     /// Declared order, which is the order a decoder fills the payload in.
     fields: Vec<WireField>,
 }
@@ -167,6 +169,9 @@ pub enum Builtin {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CtorDecl {
     variant: VariantRef,
+    /// `variants[variant_idx].name`. Fingerprint and refusal paths mix this
+    /// as text; it is not a dispatch key.
+    name: StrId,
     /// Declared order. Types are **closed** over the owning type's parameters:
     /// `Bound(i)` is the `i`th argument of the `Con` being described, which is
     /// the form `close_body` stores a `VariantField` in.
@@ -391,7 +396,7 @@ fn fingerprint_of<C: WireCtx + ?Sized>(cx: &C, nodes: &[Node], root: NodeIdx) ->
                     // programs that declare this shape independently, under
                     // whatever name and in whatever module, must agree.
                     h = mix(h, u64::from(v.variant.variant_idx));
-                    h = mix_str(h, &cx.name(v.variant.variant_name));
+                    h = mix_str(h, &cx.name(v.name));
                     h = mix(h, v.fields.len() as u64);
                     for f in &v.fields {
                         h = mix_str(h, &cx.name(f.label));
@@ -593,7 +598,7 @@ impl<C: WireCtx + ?Sized> Build<'_, C> {
             for (label, declared) in c.fields {
                 let at = self.instantiate(declared, args);
                 let step = Step::Field {
-                    variant: c.variant.variant_name,
+                    variant: c.name,
                     label,
                 };
                 fields.push(WireField {
@@ -603,6 +608,7 @@ impl<C: WireCtx + ?Sized> Build<'_, C> {
             }
             variants.push(WireVariant {
                 variant: c.variant,
+                name: c.name,
                 fields,
             });
         }
@@ -731,8 +737,8 @@ mod tests {
                     type_id: ty,
                     variant_idx: idx,
                     type_name,
-                    variant_name,
                 },
+                name: variant_name,
                 fields,
             }
         }
