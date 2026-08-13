@@ -211,8 +211,8 @@ fn parse_head_window(t: &H1, a: &mut ProcHeap, win: &ByteWindow, off: i64) -> Va
         t.head_flags.instantiate(
             a,
             &[
-                Value::bool(flags.conn_close),
-                Value::bool(flags.conn_keep_alive),
+                Value::bool(flags.conn.has_close()),
+                Value::bool(flags.conn.has_keep_alive()),
                 Value::bool(flags.expect_100_continue),
             ],
         )
@@ -230,14 +230,60 @@ fn parse_head_window(t: &H1, a: &mut ProcHeap, win: &ByteWindow, off: i64) -> Va
     )
 }
 
+/// Which of the two persistence options the head's `Connection` fields named.
+/// All four are observable: `Connection` is a token list that may also be
+/// repeated, so a peer can genuinely send both, and `Both` records that
+/// instead of resolving it. RFC 9112 §9.3 gives `close` precedence over
+/// `keep-alive`, and that decision stays in `scarlet/http/h1.should_close`.
+///
+/// One field rather than two bools because the pair is one header's token
+/// set: neither half is separately assignable, and the four cases are the
+/// four the parser can witness.
+#[derive(Default, Clone, Copy, PartialEq)]
+enum ConnTokens {
+    #[default]
+    Neither,
+    Close,
+    KeepAlive,
+    Both,
+}
+
+impl ConnTokens {
+    const fn new(close: bool, keep_alive: bool) -> Self {
+        match (close, keep_alive) {
+            (false, false) => Self::Neither,
+            (true, false) => Self::Close,
+            (false, true) => Self::KeepAlive,
+            (true, true) => Self::Both,
+        }
+    }
+
+    const fn has_close(self) -> bool {
+        matches!(self, Self::Close | Self::Both)
+    }
+
+    const fn has_keep_alive(self) -> bool {
+        matches!(self, Self::KeepAlive | Self::Both)
+    }
+
+    /// A repeated `Connection` field means the same list split across lines,
+    /// so the tokens accumulate. Union, never replacement: `close` on a later
+    /// field must not unsee `keep-alive` on an earlier one.
+    const fn union(self, other: Self) -> Self {
+        Self::new(
+            self.has_close() | other.has_close(),
+            self.has_keep_alive() | other.has_keep_alive(),
+        )
+    }
+}
+
 /// The `Connection`/`Expect` token-list answers an HTTP/1.1 server needs from
 /// every request head, recorded by `parse_header_block` while it already has
 /// each field's trimmed name and value in hand. Raw findings, not decisions:
 /// precedence lives in `scarlet/http/h1.should_close`.
 #[derive(Default, Clone, Copy, PartialEq)]
 struct HeadFlags {
-    conn_close: bool,
-    conn_keep_alive: bool,
+    conn: ConnTokens,
     expect_100_continue: bool,
 }
 
@@ -331,8 +377,10 @@ fn parse_header_block(
         let name_bytes = &bytes[pos..colon];
         if name_bytes.eq_ignore_ascii_case(b"connection") {
             let value_bytes = &bytes[vstart..vend];
-            flags.conn_close |= has_token(value_bytes, b"close");
-            flags.conn_keep_alive |= has_token(value_bytes, b"keep-alive");
+            flags.conn = flags.conn.union(ConnTokens::new(
+                has_token(value_bytes, b"close"),
+                has_token(value_bytes, b"keep-alive"),
+            ));
         } else if name_bytes.eq_ignore_ascii_case(b"expect") {
             flags.expect_100_continue |= has_token(&bytes[vstart..vend], b"100-continue");
         }

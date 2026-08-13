@@ -396,6 +396,18 @@ struct ElabFrame {
     frame_closures: Vec<ClosureSite>,
 }
 
+// `flag_cluster` fires on the four bool fields below, and the answer is that
+// all 16 states are legal: there is no illegal combination for an enum to
+// name. They are knobs on four unrelated subsystems — pipeline truncation,
+// hover-fact collection, namespace scoping, and a marker for one transient
+// walk — and both corners are reachable. All unset is an ordinary `compile`;
+// all set is `IncrementalSession::new_from_source`, which builds a
+// `check_only` compiler, sets `collect_hover_facts`, then calls
+// `register_prelude`, which runs under `with_retained_namespaces`, inside
+// which `analyse_module` sets `walking_module_statements`. The mode bools in
+// this struct that did carry an invariant are already enums — see
+// [`UnusedBindings`] and [`ModuleScope`]; these four carry none between them.
+#[cfg_attr(dylint_lib = "mordant", allow(flag_cluster))]
 pub struct Compiler {
     // --- Codegen state ---
     pub(super) program: Program,
