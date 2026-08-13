@@ -2950,7 +2950,32 @@ impl Compiler {
             self.module_table.record_dependent(&imp, &key);
         }
         self.module_table.record_dependent(&key, &importer);
+        self.bind_late_prelude(&key);
         Some((canon, key))
+    }
+
+    /// Bind any late prelude type `key` defines (see `prelude_bindings`'s
+    /// `late_types`), which `PreludeBindings::capture` could not: it runs
+    /// before any stdlib module loads.
+    ///
+    /// Only the from-source path needs this. A statically seeded compiler gets
+    /// the binding already filled, because `seed_static` clones the baked
+    /// `PRELUDE` — so the `get_or_hydrate` exit above deliberately does *not*
+    /// call this. Repairing the binding there would hide a static stdlib built
+    /// without it; `precompile`'s tests are what hold that end.
+    fn bind_late_prelude(&mut self, key: &ModuleKey) {
+        let Compiler {
+            prelude,
+            module_table,
+            ..
+        } = self;
+        let Some(iface) = module_table.get(key) else {
+            return;
+        };
+        prelude.bind_late(key.as_str(), |name| {
+            let ti = &iface.types.get(name)?.info;
+            Some((ti.id, ti.arity()))
+        });
     }
 
     /// Run `f` with [`Self::retain_namespaces`] set: module compiles inside it

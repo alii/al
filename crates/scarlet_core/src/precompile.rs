@@ -365,6 +365,18 @@ mod tests {
             "Some/None are distinct variants"
         );
 
+        // A late binding is filled by `load_module`, not by `capture`, so this
+        // is the arm that witnesses it: `all_modules` above loaded
+        // `scarlet/map`, and `build.rs` bakes whatever is here into the static
+        // stdlib the CLI and REPL start from.
+        assert!(
+            p.map().is_bound(),
+            "Map is unbound after the whole stdlib loaded; \
+             the static stdlib would ship without it"
+        );
+        assert_eq!(p.map().name, "Map");
+        assert_ne!(p.map().id, p.array().id, "Map/Array share a type id");
+
         // The first user module's ids must sit past every stdlib id.
         assert!(out.next_type_id.0 > 0, "next_type_id should be positive");
 
