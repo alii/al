@@ -638,6 +638,8 @@ mod opc {
     pub const TLS_WRITE: u8 = Op::TlsWrite as u8;
     pub const TO_STRING: u8 = Op::ToString as u8;
     pub const TUPLE_INDEX: u8 = Op::TupleIndex as u8;
+    pub const WIRE_DECODE: u8 = Op::WireDecode as u8;
+    pub const WIRE_ENCODE: u8 = Op::WireEncode as u8;
 }
 
 /// The bridge for [`is_native_try_op`](crate::bytecode::is_native_try_op)
@@ -677,6 +679,8 @@ impl VM {
     fn run_try_op(&mut self, op_code: u8, _operand: i32) -> VmResult<()> {
         match op_code {
             opc::ARRAY_SLICE => self.seq_slice(),
+            opc::WIRE_ENCODE => self.wire_encode(),
+            opc::WIRE_DECODE => self.wire_decode(),
             _ => proof_violation("run_try_op on an op is_native_try_op excludes"),
         }
     }

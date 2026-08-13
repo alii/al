@@ -182,10 +182,21 @@ pub enum AbiSlot {
     TlsInvalidServerName,
     /// The transport under TLS failed — `[cause NetError]`
     TlsTransport,
+
+    /// Fewer bytes than the value needs.
+    WireTruncated,
+    /// Bad magic, or a format version this runtime does not read.
+    WireNotWire,
+    /// Encoded from a type of a different shape — `[expected Int, found Int]`
+    WireSchemaMismatch,
+    /// Well-framed bytes that hold no value of the type — `[offset Int, what Str]`
+    WireMalformed,
+    /// A complete value followed by more bytes — `[count Int]`
+    WireTrailingBytes,
 }
 
 impl AbiSlot {
-    pub(crate) const COUNT: usize = AbiSlot::TlsTransport as usize + 1;
+    pub(crate) const COUNT: usize = AbiSlot::WireTrailingBytes as usize + 1;
 
     pub(crate) const ALL: [AbiSlot; AbiSlot::COUNT] = {
         use AbiSlot::*;
@@ -276,6 +287,11 @@ impl AbiSlot {
             TlsHandshakeFailed,
             TlsInvalidServerName,
             TlsTransport,
+            WireTruncated,
+            WireNotWire,
+            WireSchemaMismatch,
+            WireMalformed,
+            WireTrailingBytes,
         ]
     };
 
@@ -368,6 +384,11 @@ impl AbiSlot {
             TlsHandshakeFailed => "TlsHandshakeFailed",
             TlsInvalidServerName => "TlsInvalidServerName",
             TlsTransport => "TlsTransport",
+            WireTruncated => "WireTruncated",
+            WireNotWire => "WireNotWire",
+            WireSchemaMismatch => "WireSchemaMismatch",
+            WireMalformed => "WireMalformed",
+            WireTrailingBytes => "WireTrailingBytes",
         }
     }
 
@@ -390,15 +411,23 @@ impl AbiSlot {
             | TlsCertUnknownIssuer | TlsCertExpired | TlsCertNotYetValid | TlsCertRevoked
             | TlsHostnameMismatch | TlsBadCertificate | TlsProtocolError | TlsHandshakeFailed
             | TlsInvalidServerName | H1RespNeedMore | H1BadStatusLine | H1BadVersion
-            | H1BadField | H1BadHeadTooLarge => 0,
+            | H1BadField | H1BadHeadTooLarge | WireTruncated | WireNotWire => 0,
             ResultOk | ResultErr | OptionSome | FsEnoent | FsEacces | FsEexist | FsEnotdir
             | FsEisdir | FsErofs | FsEloop | FsEfbig | FsErrnoOther | NetErrnoOther | IpV4
             | IpV6 | ReadData | ExitCrashed | CrashSupervision | PortExited | PortSignaled
             | H1ParsedBad | H1FramingLength | H1FramingInvalid | H1ChunkedBad | TlsTransport
-            | H1RespBad => 1,
+            | H1RespBad | WireTrailingBytes => 1,
             JsonParseError => 2,
             JsonDoc => 3,
-            SocketAddr | Socket | Monitor | Down | CrashIndexOutOfBounds | Port | H1Header => 2,
+            SocketAddr
+            | Socket
+            | Monitor
+            | Down
+            | CrashIndexOutOfBounds
+            | Port
+            | H1Header
+            | WireSchemaMismatch
+            | WireMalformed => 2,
             H1HeadFlags | H1ChunkedDone | CrashSliceOutOfBounds | CrashTypeMismatch | TlsSocket => {
                 3
             }
@@ -666,6 +695,18 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::CrashSupervision,
         ],
         Op::SubjectReceiveUntil => &[S::ResultOk, S::ResultErr, S::Unit],
+        // `WireEncode` builds a plain `Binary`, so it needs no slot at all;
+        // every refusal it could otherwise report is a compile error at the
+        // call. `WireDecode` wraps its outcome and can build any `DecodeError`.
+        Op::WireDecode => &[
+            S::ResultOk,
+            S::ResultErr,
+            S::WireTruncated,
+            S::WireNotWire,
+            S::WireSchemaMismatch,
+            S::WireMalformed,
+            S::WireTrailingBytes,
+        ],
         _ => &[],
     }
 }

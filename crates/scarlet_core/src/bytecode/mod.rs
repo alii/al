@@ -140,6 +140,8 @@ fn builtin_op(name: &str) -> Option<Op> {
         "json__float" => Op::JsonFloat,
         "json__bool" => Op::JsonBool,
         "json__encode" => Op::JsonEncode,
+        "wire__encode" => Op::WireEncode,
+        "wire__decode" => Op::WireDecode,
         _ => return None,
     })
 }

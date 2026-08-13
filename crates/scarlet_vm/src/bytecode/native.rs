@@ -251,7 +251,11 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::JsonFloat
         | Op::JsonBool
         | Op::JsonEncode => OpCoverage::Bridge,
-        Op::ArraySlice => OpCoverage::Try,
+        // `Bridge` is where both of these end up — pure, single-result, and
+        // (with a descriptor the compiler built) unable to fail. They are
+        // `Try` while they have no bodies, because `Bridge`'s failure arm is a
+        // `proof_violation` abort and these are reachable and always fail.
+        Op::ArraySlice | Op::WireEncode | Op::WireDecode => OpCoverage::Try,
         Op::FileRead
         | Op::FileWrite
         | Op::TcpAccept

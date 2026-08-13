@@ -844,3 +844,47 @@ mod ctor_visibility_survives_on_the_type {
         assert_eq!(ctors_public("pub type Name = String\n", "Name"), None);
     }
 }
+
+/// `scarlet/wire`'s declaration surface: the two `@vm` keys reach the two new
+/// opcodes, and a program that calls them binds `DecodeError`'s ABI slots.
+mod wire_surface {
+    use super::super::*;
+
+    /// A clean compile is half the assertion here. `bind_abi` refuses a
+    /// program whose emitted ops construct unbound slots, and `slots_for`
+    /// declares all five `DecodeError` slots against `WireDecode` — so a
+    /// constructor renamed out from under `BINDINGS`, or one whose arity no
+    /// longer matches its slot, is an error in `r.diagnostics`, not a
+    /// mis-built value at runtime.
+    ///
+    /// The ops themselves have no bodies yet; nothing here runs them.
+    #[test]
+    fn a_wire_call_emits_its_op_and_binds_the_decode_error_slots() {
+        let r = super::compile_script(
+            "import scarlet/wire\n\
+             b = wire.encode(1)\n\
+             match wire.decode(b) {\n\
+             \x20 Ok(n) -> n\n\
+             \x20 Err(_) -> 0\n\
+             }\n",
+        );
+        assert!(
+            !crate::diagnostic::has_errors(&r.diagnostics),
+            "snippet failed to compile: {:?}",
+            r.diagnostics,
+        );
+        let code = r
+            .into_runnable()
+            .expect("a non-check compile emits")
+            .program
+            .code;
+        assert!(
+            code.iter().any(|i| i.op == Op::WireEncode),
+            "wire.encode must reach Op::WireEncode",
+        );
+        assert!(
+            code.iter().any(|i| i.op == Op::WireDecode),
+            "wire.decode must reach Op::WireDecode",
+        );
+    }
+}

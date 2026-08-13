@@ -41,6 +41,7 @@ const HDRS: &[&str] = &["scarlet", "http", "headers"];
 const H1: &[&str] = &["scarlet", "http", "h1"];
 const JSON: &[&str] = &["scarlet", "json"];
 const TLS: &[&str] = &["scarlet", "net", "tls"];
+const WIRE: &[&str] = &["scarlet", "wire"];
 
 #[rustfmt::skip]
 const BINDINGS: &[Binding] = &[
@@ -130,6 +131,11 @@ const BINDINGS: &[Binding] = &[
     (AbiSlot::TlsHandshakeFailed, TLS,  "TlsError",      "HandshakeFailed"),
     (AbiSlot::TlsInvalidServerName, TLS, "TlsError",     "InvalidServerName"),
     (AbiSlot::TlsTransport,       TLS,  "TlsError",      "Transport"),
+    (AbiSlot::WireTruncated,      WIRE, "DecodeError",   "Truncated"),
+    (AbiSlot::WireNotWire,        WIRE, "DecodeError",   "NotWire"),
+    (AbiSlot::WireSchemaMismatch, WIRE, "DecodeError",   "SchemaMismatch"),
+    (AbiSlot::WireMalformed,      WIRE, "DecodeError",   "Malformed"),
+    (AbiSlot::WireTrailingBytes,  WIRE, "DecodeError",   "TrailingBytes"),
 ];
 
 impl Compiler {

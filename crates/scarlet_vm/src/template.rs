@@ -506,6 +506,32 @@ pub(crate) mod test_fixture {
             NONE_,
         ),
         (S::TlsTransport, 3585, 9, "TlsError", "Transport", CAUSE),
+        (S::WireTruncated, 7424, 0, "DecodeError", "Truncated", NONE_),
+        (S::WireNotWire, 7424, 1, "DecodeError", "NotWire", NONE_),
+        (
+            S::WireSchemaMismatch,
+            7424,
+            2,
+            "DecodeError",
+            "SchemaMismatch",
+            &["expected", "found"],
+        ),
+        (
+            S::WireMalformed,
+            7424,
+            3,
+            "DecodeError",
+            "Malformed",
+            &["offset", "what"],
+        ),
+        (
+            S::WireTrailingBytes,
+            7424,
+            4,
+            "DecodeError",
+            "TrailingBytes",
+            &["count"],
+        ),
     ];
 
     /// Intern every fixture constructor into `fb` and bind its slot.

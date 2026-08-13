@@ -530,6 +530,18 @@ pub enum Op {
     /// `[j Json] -> String` — encode the constructible tree.
     JsonEncode,
 
+    /// `[value] -> Binary` — the value's bytes under the descriptor of the
+    /// type the call site was inferred at. (scarlet/wire.encode)
+    ///
+    /// Declared ahead of its body: reachable, and traps until the encoder and
+    /// its descriptor operand land together.
+    WireEncode,
+    /// `[bytes Binary] -> Result(a, DecodeError)` — the value those bytes
+    /// hold, checked against the same descriptor. (scarlet/wire.decode)
+    ///
+    /// Declared ahead of its body, as [`Op::WireEncode`].
+    WireDecode,
+
     /// Not an opcode: one past the last real variant, so [`Op::from_u8`] can
     /// bound its check without a hand-maintained count. Never emitted, never
     /// executed; every consumer of real ops rejects it.
@@ -765,7 +777,9 @@ impl Op {
             | Op::JsonIntText
             | Op::JsonFloat
             | Op::JsonBool
-            | Op::JsonEncode => false,
+            | Op::JsonEncode
+            | Op::WireEncode
+            | Op::WireDecode => false,
         }
     }
 
@@ -982,7 +996,9 @@ impl Op {
             | Op::JsonIntText
             | Op::JsonFloat
             | Op::JsonBool
-            | Op::JsonEncode => false,
+            | Op::JsonEncode
+            | Op::WireEncode
+            | Op::WireDecode => false,
         }
     }
 }

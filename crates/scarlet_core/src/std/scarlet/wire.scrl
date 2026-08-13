@@ -1,0 +1,46 @@
+/**
+ * Values as bytes: encode turns a value into a Binary, decode reads one back
+ * at the type the call site is used at.
+ *
+ * Both are type-directed. The compiler knows the concrete type at every call
+ * and emits a descriptor of it into the program, so decode never infers
+ * anything from the bytes: Ok(x) is a value of exactly the type asked for, and
+ * bad bytes are a DecodeError, never a wrong-shaped value and never a crash.
+ *
+ * That is also why encode is total and returns a plain Binary rather than a
+ * Result. A type with no byte representation - one containing a fn, Subject,
+ * Pid, Socket, Port, or an opaque type from another module - is a compile
+ * error at the encode/decode call, not a runtime failure.
+ *
+ * Bytes are tied to a type's shape, not to its name. Two programs that declare
+ * the same shape independently interoperate, and any change to the shape is a
+ * SchemaMismatch rather than a silent misread.
+ */
+
+// A value of any encodable type as bytes. Total: a type this cannot encode
+// is rejected when the program is compiled.
+@vm(wire__encode)
+pub fn encode(value a) Binary
+
+// The value `bytes` holds, as the type this call is used at. The type must
+// be known where `decode` is called; `Ok` is a well-formed value of it.
+@vm(wire__decode)
+pub fn decode(bytes Binary) Result(a, DecodeError)
+
+pub type DecodeError {
+	// Fewer bytes than the value needs.
+	Truncated
+	// Not produced by `wire.encode` (bad magic), or by a format version this
+	// runtime does not read.
+	NotWire
+	// Encoded from a type of a different shape. Both fingerprints, so a log
+	// line can say which side changed.
+	SchemaMismatch(expected Int, found Int)
+	// Well-framed bytes that do not hold a value of the type: a variant tag
+	// out of range, a string that is not UTF-8, a count larger than the
+	// remaining input. `offset` is the byte it went wrong at.
+	Malformed(offset Int, what String)
+	// A complete value followed by more bytes. Reported rather than ignored,
+	// because a caller that framed its own messages has lost sync.
+	TrailingBytes(count Int)
+}

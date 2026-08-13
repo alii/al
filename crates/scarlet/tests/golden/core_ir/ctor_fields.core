@@ -1,7 +1,7 @@
 fn s0() -> :t0
   let %0:t1 = c0
   let %1:t1 = c1
-  let %2:t2 = ctor 8448.0(%0, %1)
+  let %2:t2 = ctor 8705.0(%0, %1)
   let %3:t0 = GetFieldUnchecked#0(%2)
   let %4:t3 = GetFieldUnchecked#1(%2)
   drop %2 [Enum:2]

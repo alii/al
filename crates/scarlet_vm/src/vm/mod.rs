@@ -103,6 +103,7 @@ mod templates;
 mod tests;
 mod text;
 mod tls;
+mod wire;
 
 pub use inspect::inspect;
 use inspect::value_type_name;
