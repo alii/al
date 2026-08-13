@@ -57,11 +57,13 @@ fn pipeline() Result(Int, Step) {
 	Ok(chunks(8, per, 0))
 }
 
-match pipeline() {
-	Ok(v) -> println('ok ${v}')
-	Err(Boom) -> println('short-circuited')
+pub fn main() {
+	match pipeline() {
+		Ok(v) -> println('ok ${v}')
+		Err(Boom) -> println('short-circuited')
+	}
+	println('done')
 }
-println('done')
 "#;
 
 /// Two consecutive `_ <-` steps, neither mentioning the other's binder — the
@@ -84,9 +86,11 @@ fn both() Result(Nil, Step) {
 	Ok(Nil)
 }
 
-match both() {
-	Ok(Nil) -> println('ok')
-	Err(Boom) -> println('short-circuited')
+pub fn main() {
+	match both() {
+		Ok(Nil) -> println('ok')
+		Err(Boom) -> println('short-circuited')
+	}
 }
 "#;
 
