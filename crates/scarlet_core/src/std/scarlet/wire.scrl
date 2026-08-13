@@ -15,6 +15,49 @@
  * Bytes are tied to a type's shape, not to its name. Two programs that declare
  * the same shape independently interoperate, and any change to the shape is a
  * SchemaMismatch rather than a silent misread.
+ *
+ * # The fingerprint
+ *
+ * "The same shape" is decided by a 64-bit fingerprint carried in every encoded
+ * value and reported by SchemaMismatch. It is a compatibility surface between
+ * separately compiled programs, so it is specified here rather than left to
+ * the implementation: a second implementation that follows this section
+ * produces the same numbers.
+ *
+ * The compiler describes a type as a finite table of nodes, each node a scalar
+ * (Int, Float, String, Binary), a container (Array, Map, Tuple) or a Data node
+ * listing the constructors. A child is an index into that table, which is how a
+ * recursive type is finite: List(Int)'s Cons.tail is the index of the List(Int)
+ * node itself. The table is laid out by a walk from the root, and the
+ * fingerprint hashes it in index order, so nothing recurses.
+ *
+ * The hash is FNV-1a over 64-bit words:
+ *
+ *   mix(h, v) = (h XOR v) * 0x100000001b3, mod 2^64
+ *
+ * starting from h = mix(0xcbf29ce484222325, VERSION), where VERSION is 1.
+ * Then mix in the node count, then the root's index, then each node in index
+ * order. A name is mixed as its length followed by its UTF-8 bytes, one byte
+ * per mix - length first, so ('ab', 'c') and ('a', 'bc') do not collide.
+ *
+ * Each node mixes a kind tag first: Int 1, Float 2, String 3, Binary 4,
+ * Array 5 then the element's index, Map 6 then key and value indices, Tuple 7
+ * then the element count and each index, Data 8 then the constructor count and,
+ * per constructor in declared order: its tag, its name, its field count, and
+ * per field the label and the field type's index.
+ *
+ * INCLUDED, so each of these is a schema change: node kinds, the order of
+ * constructors, constructor names, field labels, and field types.
+ *
+ * EXCLUDED, so none of these is: the type's own name, and the module it is
+ * declared in. Renaming a type or moving it between modules leaves every peer
+ * talking, and two programs that declare the same shape under different names
+ * agree without ever having shared a declaration.
+ *
+ * CHANGING THIS ALGORITHM MEANS BUMPING THE FORMAT VERSION BYTE, and bumping
+ * VERSION above with it. The fingerprint travels in every message: an
+ * algorithm change that left the version alone would surface at a peer as a
+ * SchemaMismatch on a type nobody had touched.
  */
 
 // A value of any encodable type as bytes. Total: a type this cannot encode
