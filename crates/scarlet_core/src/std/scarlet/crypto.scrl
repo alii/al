@@ -1,18 +1,22 @@
 /**
- * Cryptographic hashes.
+ * Cryptographic primitives a protocol the stdlib speaks names by name.
  *
- * SHA-1 ONLY, and only because two protocols the stdlib speaks require it by
- * name. It is NOT collision-resistant — a chosen-prefix collision has been
- * public since 2017 — so it must never be used for signatures, certificates,
- * password storage, or deduplicating attacker-supplied content. Its one
- * legitimate use is a protocol that specifies it as a fixed handshake
- * constant, where the security argument does not rest on collision
- * resistance: the WebSocket opening handshake (RFC 6455 §1.3), where
- * `Sec-WebSocket-Accept` is `base64(sha1(key <> GUID))` and its job is to
- * prove the server understood the upgrade, not to authenticate anyone.
+ * SHA-1 is here ONLY because two of those protocols require it. It is NOT
+ * collision-resistant — a chosen-prefix collision has been public since
+ * 2017 — so it must never be used for signatures, certificates, password
+ * storage, or deduplicating attacker-supplied content. Its one legitimate
+ * use is a protocol that specifies it as a fixed handshake constant, where
+ * the security argument does not rest on collision resistance: the
+ * WebSocket opening handshake (RFC 6455 §1.3), where `Sec-WebSocket-Accept`
+ * is `base64(sha1(key <> GUID))` and its job is to prove the server
+ * understood the upgrade, not to authenticate anyone.
  *
- * For anything where the choice of hash is actually yours, this module is the
- * wrong import.
+ * `random_bytes` is the OS CSPRNG. RFC 6455's frame mask and the client's
+ * `Sec-WebSocket-Key` have to be unpredictable; a userspace PRNG, even a
+ * good one seeded once at boot, is not this function.
+ *
+ * For anything where the choice of hash is actually yours, this module is
+ * the wrong import.
  */
 
 import scarlet/base64
@@ -194,3 +198,9 @@ pub fn sha1(m Binary) Binary {
 pub fn websocket_accept(key Binary) Binary {
 	base64.encode(sha1(binary.append(key, websocket_guid)))
 }
+
+// `n` bytes from the OS CSPRNG (`getrandom` / equivalent). `Err(Nil)` if
+// `n` is negative or the host source fails. Never a userspace generator,
+// and never silent zeros (or any other stand-in) on failure.
+@vm(crypto__random_bytes)
+pub fn random_bytes(n Int) Result(Binary, Nil)

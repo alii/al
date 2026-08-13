@@ -453,6 +453,11 @@ pub enum Op {
     SubjectReceiveUntil,
     /// Push milliseconds elapsed since a process-global monotonic epoch (Int).
     Monotonic,
+    /// `[n Int] -> Result(Binary, Nil)` — `n` bytes from the OS CSPRNG.
+    /// `Err(Nil)` if `n` is negative or the OS source fails. Never a
+    /// userspace PRNG, and never silent stand-in bytes.
+    /// (scarlet/crypto.random_bytes)
+    RandomBytes,
 
     /// Push an `Array(String)` of the entrypoint path followed by every
     /// argument after it on the command line. (scarlet/os.argv)
@@ -756,6 +761,7 @@ impl Op {
             | Op::SubjectReceive
             | Op::SubjectReceiveUntil
             | Op::Monotonic
+            | Op::RandomBytes
             | Op::Argv
             | Op::EnvMap
             | Op::MapGet
@@ -976,6 +982,7 @@ impl Op {
             | Op::SubjectReceive
             | Op::SubjectReceiveUntil
             | Op::Monotonic
+            | Op::RandomBytes
             | Op::Argv
             | Op::EnvMap
             | Op::MapGet

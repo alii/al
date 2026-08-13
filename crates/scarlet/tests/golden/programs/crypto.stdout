@@ -31,3 +31,9 @@ sha1 length: PASS PASS
 ws accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
 ws accept matches: PASS
 ws accept manual: PASS
+csprng empty: PASS
+csprng 16: PASS
+csprng 64: PASS
+csprng reject negative: PASS
+csprng two 16 differ: PASS
+csprng 16 not uniform byte: PASS

@@ -219,6 +219,7 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::SubjectSend
         | Op::SubjectSendUrgent
         | Op::Monotonic
+        | Op::RandomBytes
         | Op::Argv
         | Op::EnvMap
         | Op::MapGet

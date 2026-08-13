@@ -747,6 +747,7 @@ impl VM {
                 Op::StackDepth => self.stack_depth()?,
                 Op::LiveSubjects => self.live_subjects()?,
                 Op::Monotonic => self.monotonic()?,
+                Op::RandomBytes => self.random_bytes()?,
                 Op::Argv => self.argv()?,
                 Op::EnvMap => self.env_map()?,
                 Op::MapGet => self.map_get()?,
@@ -1326,6 +1327,30 @@ impl VM {
     /// the other pure ops.
     pub(super) fn monotonic(&mut self) -> VmResult<()> {
         self.stack.push(Value::small_int(monotonic_now_ms()));
+        Ok(())
+    }
+
+    /// `Op::RandomBytes` — `n` bytes from the OS CSPRNG. A host read that
+    /// never parks: compiled code shares this body through the bridge.
+    ///
+    /// `Err(Nil)` covers a negative `n` and a failed `getrandom`. The second
+    /// arm is the one that must not invent bytes — returning the zeroed
+    /// `buf` on failure would be a working CSPRNG that is not.
+    pub(super) fn random_bytes(&mut self) -> VmResult<()> {
+        let n = self.pop_int("crypto.random_bytes")?;
+        let v = if let Ok(n) = usize::try_from(n) {
+            let mut buf = vec![0u8; n];
+            match getrandom::fill(&mut buf) {
+                Ok(()) => {
+                    let bin = Value::binary_in(&mut self.heap, buf);
+                    self.make_ok(bin)?
+                }
+                Err(_) => self.make_err_nil()?,
+            }
+        } else {
+            self.make_err_nil()?
+        };
+        self.stack.push(v);
         Ok(())
     }
 

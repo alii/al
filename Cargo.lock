@@ -1264,6 +1264,7 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
+ "getrandom 0.4.3",
  "indexmap",
  "libc",
  "libmimalloc-sys",

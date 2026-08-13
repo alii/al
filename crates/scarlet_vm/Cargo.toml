@@ -27,6 +27,9 @@ cranelift-module = { workspace = true }
 cranelift-jit = { workspace = true }
 cranelift-native = { workspace = true }
 libc = "0.2"
+# OS CSPRNG for `Op::RandomBytes`. getrandom(2) on Linux, getentropy on
+# macOS — not a userspace generator and not rustls's RNG.
+getrandom = "0.4"
 memchr = "2"
 mio = { version = "1", features = ["os-poll", "os-ext"] }
 smallvec = "1.15"

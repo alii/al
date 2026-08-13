@@ -11,10 +11,12 @@
 // this implementation would agree with itself and witness nothing.
 //
 // What this does NOT witness: the JIT. These run through the interpreter, so a
-// native-backend disagreement on the bitwise ops would not show up here — that
-// belongs with the bridge-op coverage in tests/native_backend.rs. Nor is there
-// any randomness: `scarlet/crypto` has no CSPRNG yet, so the handshake's
-// client half (a random `Sec-WebSocket-Key`) cannot be built in-language.
+// native-backend disagreement on the bitwise ops or on `random_bytes` would
+// not show up here — that belongs with the bridge-op coverage in
+// tests/native_backend.rs. The CSPRNG checks below also do not witness
+// cryptographic quality, that the source is getrandom rather than another
+// CSPRNG, or independence across processes (native_backend runs the program
+// twice for that last one).
 
 import scarlet/base64
 import scarlet/binary
@@ -234,4 +236,56 @@ pub fn main() {
 		),
 	)
 	println('ws accept manual: ${ok(manual == accept)}')
+
+	// --- CSPRNG: what a single run can honestly assert -----------------------
+	//
+	// Length, a negative request is Err, two 16-byte draws differ, and a
+	// 16-byte draw is not all one byte (the stand-in a broken fill would
+	// return). A fixed-seed userspace PRNG would still pass every line
+	// here; the two-process check in native_backend is what refuses that.
+
+	println('csprng empty: ${ok(random_len(0))}')
+	println('csprng 16: ${ok(random_len(16))}')
+	println('csprng 64: ${ok(random_len(64))}')
+	println('csprng reject negative: ${ok(random_rejects(0 - 1))}')
+	println('csprng two 16 differ: ${ok(two_differ())}')
+	println('csprng 16 not uniform byte: ${ok(not_uniform_byte())}')
+}
+
+fn random_len(n Int) Bool {
+	match crypto.random_bytes(n) {
+		Ok(b) -> binary.byte_size(b) == n
+		Err(Nil) -> False
+	}
+}
+
+fn random_rejects(n Int) Bool {
+	match crypto.random_bytes(n) {
+		Ok(_) -> False
+		Err(Nil) -> True
+	}
+}
+
+fn two_differ() Bool {
+	match (crypto.random_bytes(16), crypto.random_bytes(16)) {
+		(Ok(a), Ok(b)) -> a != b
+		(_, _) -> False
+	}
+}
+
+fn not_uniform_byte() Bool {
+	match crypto.random_bytes(16) {
+		Ok(b) -> differs_from_first(b, 1, binary.byte_size(b), binary.byte_at(b, 0))
+		Err(Nil) -> False
+	}
+}
+
+fn differs_from_first(b Binary, i Int, size Int, first Int) Bool {
+	if i >= size {
+		False
+	} else if binary.byte_at(b, i) != first {
+		True
+	} else {
+		differs_from_first(b, i + 1, size, first)
+	}
 }

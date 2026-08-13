@@ -715,6 +715,7 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::CrashSupervision,
         ],
         Op::SubjectReceiveUntil => &[S::ResultOk, S::ResultErr, S::Unit],
+        Op::RandomBytes => &[S::ResultOk, S::ResultErr, S::Unit],
         // `WireEncode` builds a plain `Binary`, so it needs no slot at all;
         // every refusal it could otherwise report is a compile error at the
         // call. `WireDecode` wraps its outcome and can build any `DecodeError`.
@@ -833,7 +834,12 @@ mod tests {
 
     #[test]
     fn fallible_ops_declare_their_result_wrappers() {
-        for op in [Op::FileRead, Op::TcpConnect, Op::DnsResolve] {
+        for op in [
+            Op::FileRead,
+            Op::TcpConnect,
+            Op::DnsResolve,
+            Op::RandomBytes,
+        ] {
             let slots = slots_for(op);
             assert!(slots.contains(&AbiSlot::ResultOk), "{op:?}");
             assert!(slots.contains(&AbiSlot::ResultErr), "{op:?}");

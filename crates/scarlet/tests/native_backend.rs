@@ -424,6 +424,117 @@ pub fn main() {
     assert_warmed(&out.stderr, "mixer");
 }
 
+/// `crypto.random_bytes` across the interp→native switch. Length is the
+/// observable that separates this arm from a sibling that returns some other
+/// `Result(Binary, Nil)` of a fixed size; two post-warmup draws must differ
+/// so a constant fill is not an identity the way `0` was for OR/XOR in the
+/// bitwise test above.
+///
+/// What this does NOT witness: cryptographic quality, or that the source is
+/// getrandom rather than another CSPRNG. The two-process test below is what
+/// refuses a fixed-seed userspace generator.
+#[test]
+fn random_bytes_survives_the_native_bridge() {
+    let src = "import scarlet/binary
+import scarlet/crypto
+
+fn take(n Int) Int {
+\tmatch crypto.random_bytes(n) {
+\t\tOk(b) -> binary.byte_size(b)
+\t\tErr(Nil) -> 0 - 1
+\t}
+}
+
+fn walk(i Int, n Int) Int {
+\tgot = take(n)
+\tif got != n {
+\t\tgot
+\t} else if i <= 1 {
+\t\tn
+\t} else {
+\t\twalk(i - 1, n)
+\t}
+}
+
+fn pair(_n Int) Bool {
+\tmatch (crypto.random_bytes(16), crypto.random_bytes(16)) {
+\t\t(Ok(a), Ok(b)) -> a != b
+\t\t(_, _) -> False
+\t}
+}
+
+fn all_differ(i Int) Bool {
+\tif i <= 0 {
+\t\tTrue
+\t} else if pair(i) {
+\t\tall_differ(i - 1)
+\t} else {
+\t\tFalse
+\t}
+}
+
+pub fn main() {
+\tprintln(walk(32, 0))
+\tprintln(walk(32, 1))
+\tprintln(walk(32, 16))
+\tprintln(walk(32, 64))
+\tprintln(all_differ(32))
+}
+";
+    let proj = Project::new("random_bytes_bridge");
+    let path = proj.dir.join("prog.scrl");
+    std::fs::write(&path, src).unwrap();
+    let path = path.to_string_lossy().into_owned();
+    let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
+    assert!(out.success, "run failed:\n{}", out.stderr);
+    assert_eq!(
+        out.stdout, "0\n1\n16\n64\nTrue\n",
+        "stderr:\n{}",
+        out.stderr
+    );
+    assert_warmed(&out.stderr, "take");
+    assert_warmed(&out.stderr, "pair");
+}
+
+/// Two process runs must not produce the same 16 bytes. A `StdRng` seeded
+/// once in the source would pass every in-process check and fail here.
+/// Collision of two honest 16-byte CSPRNG draws is 2^-128.
+#[test]
+fn random_bytes_is_not_a_fixed_seed() {
+    let src = "import scarlet/binary
+import scarlet/crypto
+
+fn dump(b Binary, i Int, size Int) {
+\tif i < size {
+\t\tprintln(binary.byte_at(b, i))
+\t\tdump(b, i + 1, size)
+\t} else {
+\t\tNil
+\t}
+}
+
+pub fn main() {
+\tmatch crypto.random_bytes(16) {
+\t\tOk(b) -> dump(b, 0, binary.byte_size(b))
+\t\tErr(Nil) -> println('FAIL')
+\t}
+}
+";
+    let proj = Project::new("random_bytes_seed");
+    let a = run(&proj, "a.scrl", src, None);
+    let b = run(&proj, "b.scrl", src, None);
+    assert!(a.success, "first run failed:\n{}", a.stderr);
+    assert!(b.success, "second run failed:\n{}", b.stderr);
+    assert_ne!(
+        a.stdout, "FAIL\n",
+        "first run's OS CSPRNG failed; this test cannot witness a seed"
+    );
+    assert_ne!(
+        a.stdout, b.stdout,
+        "two process runs produced the same 16 bytes"
+    );
+}
+
 /// xorshift64 — deterministic, seedable, no dependency.
 struct Rng(u64);
 
