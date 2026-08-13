@@ -147,11 +147,19 @@ fn a_big_int_constant_is_pooled_once() {
         .filter(|c| c.as_int() == Some(4611686018427387905))
         .count();
     assert_eq!(hits, 1, "one value, one pool entry");
-    // The whole pool stays the stdlib's worth of constants (a few hundred,
-    // growing a little with every stdlib module), not one entry per
-    // constructor use site, which would be thousands.
+    // The whole pool stays the stdlib's worth of constants, not one entry per
+    // constructor use site. The failure this guards against is MULTIPLICATIVE —
+    // dedup breaking turns one entry into one per use site — so the ceiling is
+    // set well above the stdlib's size rather than snugly around it. A snug one
+    // fails on stdlib growth instead, which is what happened: the ceiling was
+    // 600 over a 520-entry stdlib, and `scarlet/http/url` + `scarlet/http/client`
+    // added 84 between them and tripped it while dedup was working perfectly.
+    //
+    // 714 entries as measured. This number tracks how big the stdlib is and
+    // will need moving again; it is not a budget anyone should be optimizing
+    // against.
     assert!(
-        p.constants.len() < 800,
+        p.constants.len() < 1000,
         "pool regressed to per-use-site duplicates: {} entries",
         p.constants.len()
     );

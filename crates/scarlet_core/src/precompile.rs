@@ -273,6 +273,8 @@ mod tests {
             "scarlet/http/headers",
             "scarlet/http/body",
             "scarlet/http/h1",
+            "scarlet/http/url",
+            "scarlet/http/client",
         ] {
             assert!(
                 out.blob.interfaces.contains_key(key),
@@ -308,7 +310,18 @@ mod tests {
             ),
             (
                 "scarlet/http/h1",
-                &["should_close", "want_100_continue", "serialize_head"],
+                &[
+                    "should_close",
+                    "want_100_continue",
+                    "serialize_head",
+                    "parse_response",
+                    "response_framing",
+                ],
+            ),
+            ("scarlet/http/url", &["parse", "authority", "default_port"]),
+            (
+                "scarlet/http/client",
+                &["get", "fetch", "send", "connect", "plain", "secure"],
             ),
         ];
         for (module, fns) in expected_exports {

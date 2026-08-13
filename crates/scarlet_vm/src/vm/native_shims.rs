@@ -541,6 +541,7 @@ mod opc {
     pub const HTTP_HEADER_HAS: u8 = Op::HttpHeaderHas as u8;
     pub const HTTP_HEADERS_VALID: u8 = Op::HttpHeadersValid as u8;
     pub const HTTP_PARSE_HEAD: u8 = Op::HttpParseHead as u8;
+    pub const HTTP_PARSE_RESPONSE_HEAD: u8 = Op::HttpParseResponseHead as u8;
     pub const HTTP_SERIALIZE_HEAD: u8 = Op::HttpSerializeHead as u8;
     pub const INDEX: u8 = Op::Index as u8;
     pub const INDEX_OR: u8 = Op::IndexOr as u8;
@@ -836,6 +837,7 @@ impl VM {
             opc::MONOTONIC => self.monotonic(),
             opc::IP_PARSE => self.ip_parse(),
             opc::HTTP_CHUNK_DECODE => self.http_chunk_decode(),
+            opc::HTTP_PARSE_RESPONSE_HEAD => self.http_parse_response_head(),
             opc::ADD => self.add(),
             opc::SUB => self.sub(),
             opc::MUL => self.mul(),

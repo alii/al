@@ -82,6 +82,66 @@ pub type ChunkBody {
 	ChunkedBad(status Int)
 }
 
+// Why a RESPONSE head was refused. Deliberately not a status code: `Parsed.Bad`
+// carries one because a server that rejects a request answers with it, and a
+// client reading a reply has nobody to answer. A number here would be a status
+// the caller could only invent.
+pub type BadResponse {
+	// The status line is not `HTTP/1.x SP <3 digits> [SP reason]`. Includes a
+	// three-byte code that is not three digits, and a line with no space.
+	BadStatusLine
+	// The version is well-formed but is neither HTTP/1.0 nor HTTP/1.1.
+	BadVersion
+	// A header field is malformed: no colon, whitespace before the colon, or an
+	// obs-fold continuation line. Same grammar and same rejects as the request
+	// head — one scanner answers both.
+	BadField
+	// The head exceeded the 64 KiB cap rather than being buffered forever.
+	HeadTooLarge
+	// Content-Length and Transfer-Encoding disagree, or a transfer coding other
+	// than `chunked` was used. Raised by `response_framing`, never by the head
+	// parser, which does not look at framing fields.
+	BadFraming
+}
+
+// The outcome of parsing one response head out of `buf` at an offset. Mirrors
+// `Parsed`'s incremental contract and threads `consumed` the same way, so a
+// client can find the body's first byte without rescanning.
+//
+// `reason` is the reason phrase exactly as it arrived, and may be empty: RFC
+// 9112 §4 allows an empty phrase and says a client MUST ignore its content.
+// It is carried because a proxy has to forward it, not because a decision may
+// be made on it.
+pub type ParsedResponse {
+	ResponseDone(
+		version Version
+		code Int
+		reason Binary
+		headers Headers
+		flags HeadFlags
+		consumed Int
+	)
+	ResponseNeedMore
+	ResponseBad(err BadResponse)
+}
+
+// How a RESPONSE body is framed (RFC 9112 §6.3). A response is not a request
+// with the arrow reversed: absent framing fields mean "no body" on a request
+// and "body runs until the connection closes" on a response, so reusing
+// `Framing` here would silently truncate every close-framed reply to empty.
+// That is the whole reason this is a separate type.
+pub type ResponseFraming {
+	// No body may follow, whatever the fields said: 1xx, 204 and 304.
+	BodyNone
+	BodyLength(n Int)
+	BodyChunked
+	// No framing fields: the body ends when the peer closes. The connection
+	// cannot be reused, and a truncated read is indistinguishable from a
+	// complete one — which is why a client should prefer a framed reply.
+	BodyUntilClose
+	BodyInvalid(err BadResponse)
+}
+
 // Parse a request head out of `buf` starting at `off`. Incomplete input yields
 // NeedMore (read more and call again with the same offset); a malformed head
 // yields Bad(status). A leading empty line before the request line is skipped
@@ -106,6 +166,50 @@ pub fn parse_request(buf Binary, off Int) Parsed
 // rejected (400).
 @vm(http__framing)
 pub fn framing(hs Headers) Framing
+
+// Parse a response head out of `buf` starting at `off`. Incomplete input
+// yields ResponseNeedMore (read more and call again with the SAME offset); a
+// malformed head yields ResponseBad.
+//
+// The status line is `HTTP/1.x SP <3 digits> [SP reason]`; the header block
+// after it is the same block, scanned by the same native code, as a request
+// head's — so obs-fold, whitespace before the field colon and a 64 KiB head
+// are refused here for the same reasons and at the same byte offsets. Header
+// names/values and `reason` are zero-copy views into `buf`.
+//
+// Unlike `parse_request` this does NOT skip leading empty lines. The leniency
+// there is RFC 7230 §3.5's allowance for a client that sends a stray CRLF
+// after a previous request's body; a server sending one before a status line
+// is a framing error, and swallowing it would hide a desynchronized
+// connection — the exact failure a pipelining client must notice.
+@vm(http__parse_response_head)
+pub fn parse_response(buf Binary, off Int) ParsedResponse
+
+// Body framing for a RESPONSE with status `code` and header fields `hs`,
+// applying RFC 9112 §6.3 on top of the shared §3.3.3 precedence that
+// `framing` already enforces (so the smuggling conflicts are rejected once,
+// in one place, for both directions).
+//
+// The rules that differ from a request: 1xx, 204 and 304 never have a body
+// whatever the fields claim, and a response with no framing field at all is
+// framed by connection close rather than being empty.
+//
+// The remaining §6.3 rule — a response to a HEAD request has no body, however
+// it is framed — is deliberately NOT here: h1 never sees the request, and
+// taking a bare `Bool` for it would let a caller answer the wrong question
+// silently. The client that sent the method applies that rule itself.
+pub fn response_framing(hs Headers, code Int) ResponseFraming {
+	if code >= 100 && code < 200 || code == 204 || code == 304 {
+		BodyNone
+	} else {
+		match framing(hs) {
+			Chunked -> BodyChunked
+			Length(n) -> BodyLength(n)
+			NoBody -> BodyUntilClose
+			Invalid(_) -> BodyInvalid(BadFraming)
+		}
+	}
+}
 
 // Decode a chunked transfer-encoded body from `buf` starting at `off`,
 // refusing to decode more than `max` body bytes (413). Each chunk is

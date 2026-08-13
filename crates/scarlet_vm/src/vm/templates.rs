@@ -41,6 +41,17 @@ pub(super) struct H1 {
     pub(super) chunked_done: EnumTemplate,
     pub(super) chunked_need_more: Value,
     pub(super) chunked_bad: EnumTemplate,
+    pub(super) resp_done: EnumTemplate,
+    pub(super) resp_need_more: Value,
+    pub(super) resp_bad: EnumTemplate,
+    /// The four `BadResponse` reasons the head scanner can reach, pre-built:
+    /// each is nullary, so a reject costs a word copy plus the `ResponseBad`
+    /// box. `BadFraming` is absent on purpose — `h1.response_framing` builds
+    /// it in Scarlet, and the head scanner never looks at framing fields.
+    pub(super) bad_status_line: Value,
+    pub(super) bad_version: Value,
+    pub(super) bad_field: Value,
+    pub(super) bad_head_too_large: Value,
 }
 
 impl Templates {
@@ -78,6 +89,13 @@ impl Templates {
                 chunked_done: get(AbiSlot::H1ChunkedDone)?,
                 chunked_need_more: nullary(AbiSlot::H1ChunkedNeedMore)?,
                 chunked_bad: get(AbiSlot::H1ChunkedBad)?,
+                resp_done: get(AbiSlot::H1RespDone)?,
+                resp_need_more: nullary(AbiSlot::H1RespNeedMore)?,
+                resp_bad: get(AbiSlot::H1RespBad)?,
+                bad_status_line: nullary(AbiSlot::H1BadStatusLine)?,
+                bad_version: nullary(AbiSlot::H1BadVersion)?,
+                bad_field: nullary(AbiSlot::H1BadField)?,
+                bad_head_too_large: nullary(AbiSlot::H1BadHeadTooLarge)?,
             })
         })();
 

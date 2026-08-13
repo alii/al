@@ -1,0 +1,128 @@
+== status line ==
+minimal: Done version=Http11 code=200 reason="OK" headers=0 consumed=19
+http/1.0: Done version=Http10 code=404 reason="Not Found" headers=0 consumed=26
+empty reason after space: Done version=Http11 code=204 reason="" headers=0 consumed=17
+no reason and no space: Done version=Http11 code=204 reason="" headers=0 consumed=16
+reason with spaces: Done version=Http11 code=418 reason="I am a teapot" headers=0 consumed=30
+
+== status line rejects ==
+truncated mid-line (no CRLF yet): NeedMore
+truncated: line ends before the code: Bad BadStatusLine
+truncated: two-digit code: Bad BadStatusLine
+code is not digits: Bad BadStatusLine
+no space after version: Bad BadStatusLine
+junk before the reason: Bad BadStatusLine
+not HTTP at all: Bad BadStatusLine
+binary junk (a TLS record header): Bad BadStatusLine
+http/2: Bad BadVersion
+http/0.9: Bad BadVersion
+bare LF in reason: Bad BadStatusLine
+bare CR in reason: Bad BadStatusLine
+leading CRLF is NOT skipped: Bad BadStatusLine
+
+== header block: the same grammar as a request head ==
+two fields: Done version=Http11 code=200 reason="OK" headers=2 consumed=46
+field with no colon: Bad BadField
+space before colon: Bad BadField
+obs-fold continuation: Bad BadField
+empty field name: Bad BadField
+head not terminated: NeedMore
+head over 64 KiB: Bad HeadTooLarge
+no CRLF anywhere, over cap: Bad HeadTooLarge
+
+== consumed threads to the body ==
+body starts at 38: "hello"
+
+== response framing ==
+no framing fields -> until close: BodyUntilClose
+content-length: BodyLength 7
+chunked: BodyChunked
+204 with a content-length: BodyNone
+304 with a content-length: BodyNone
+100 continue: BodyNone
+199 is still 1xx: BodyNone
+200 is not: BodyLength 4
+content-length AND chunked: BodyInvalid BadFraming
+unknown transfer coding: BodyInvalid BadFraming
+two disagreeing content-lengths: BodyInvalid BadFraming
+
+== url ==
+http://example.com -> Http host=example.com port=80 target="/" host-field="example.com"
+https://example.com -> Https host=example.com port=443 target="/" host-field="example.com"
+https://example.com/ -> Https host=example.com port=443 target="/" host-field="example.com"
+http://example.com/a/b?q=1 -> Http host=example.com port=80 target="/a/b?q=1" host-field="example.com"
+http://example.com?q=1 -> Http host=example.com port=80 target="/?q=1" host-field="example.com"
+http://example.com/a#frag -> Http host=example.com port=80 target="/a" host-field="example.com"
+http://example.com/a?q=1#frag -> Http host=example.com port=80 target="/a?q=1" host-field="example.com"
+http://example.com:8080/a -> Http host=example.com port=8080 target="/a" host-field="example.com:8080"
+https://example.com:443/a -> Https host=example.com port=443 target="/a" host-field="example.com"
+https://example.com:8443/a -> Https host=example.com port=8443 target="/a" host-field="example.com:8443"
+HTTPS://Example.COM/a -> Https host=Example.COM port=443 target="/a" host-field="Example.COM"
+http://[::1]:9000/a -> Http host=::1 port=9000 target="/a" host-field="[::1]:9000"
+http://[::1]/a -> Http host=::1 port=80 target="/a" host-field="[::1]"
+
+== url rejects ==
+/just/a/path -> Err MissingScheme
+example.com/a -> Err MissingScheme
+ftp://example.com/a -> Err UnsupportedScheme(<<102, 116, 112>>)
+ws://example.com/a -> Err UnsupportedScheme(<<119, 115>>)
+http:///a -> Err EmptyHost
+http://:8080/a -> Err EmptyHost
+http://example.com:/a -> Err BadPort(<<58>>)
+http://example.com:0/a -> Err BadPort(<<58, 48>>)
+http://example.com:65536/a -> Err BadPort(<<58, 54, 53, 53, 51, 54>>)
+http://example.com:-1/a -> Err BadPort(<<58, 45, 49>>)
+http://example.com:80x/a -> Err BadPort(<<58, 56, 48, 120>>)
+http://user:pw@example.com/a -> Err UserInfoUnsupported
+http://[::1/a -> Err UnclosedIpv6
+http://[::1]x/a -> Err BadPort(<<120>>)
+
+== client round trips (in-memory transport) ==
+content-length body: 200 reason="OK" headers=1 body="hello"
+content-length body, one byte per read: 200 reason="OK" headers=1 body="hello"
+chunked body: 200 reason="OK" headers=1 body="hello world"
+close-framed body: 200 reason="OK" headers=0 body="no framing fields here"
+HEAD: content-length but no body: 200 reason="OK" headers=1 body=""
+204 has no body whatever it says: 204 reason="No Content" headers=1 body=""
+100 Continue before the real reply: 201 reason="Created" headers=1 body="hi"
+two interim responses: 200 reason="OK" headers=1 body="hi"
+
+== client round trips that must FAIL ==
+body shorter than content-length: Err Transport(UnexpectedEof)
+peer closes mid-head: Err Transport(UnexpectedEof)
+peer closes with nothing at all: Err Transport(UnexpectedEof)
+malformed status line: Err MalformedResponse(BadStatusLine)
+header with no colon: Err MalformedResponse(BadField)
+framing conflict: Err MalformedResponse(BadFraming)
+chunked body with a lying size: Err MalformedResponse(BadFraming)
+
+== the body budget ==
+content-length over budget: Err BodyTooLarge(10)
+content-length exactly at budget: 200 body="abcd"
+close-framed body over budget: Err BodyTooLarge(64)
+
+== what the client actually wrote ==
+GET /: sent, got 200
+  wrote: "GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+GET with query and port: sent, got 200
+  wrote: "GET /a?q=1 HTTP/1.1\r\nHost: example.com:8080\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+GET https default port omits it: sent, got 200
+  wrote: "GET /a HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+GET ipv6 host is bracketed: sent, got 200
+  wrote: "GET /a HTTP/1.1\r\nHost: [::1]:9000\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+POST with a body: sent, got 200
+  wrote: "POST /e HTTP/1.1\r\nContent-Type: text/plain\r\nHost: example.com\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"
+caller-set Content-Length is replaced: sent, got 200
+  wrote: "POST /e HTTP/1.1\r\ncontent-length: 2\r\nHost: example.com\r\nConnection: close\r\n\r\nhi"
+caller-set Host is replaced: sent, got 200
+  wrote: "GET /e HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+CRLF in a header value is refused: Err BadRequestHeaders
+  wrote: ""
+a header name that is not a token is refused: Err BadRequestHeaders
+  wrote: ""
+
+== url errors reach the client surface ==
+client.get of a non-URL: Err BadUrl(MissingScheme)
+client.get of ftp: Err BadUrl(
+  UnsupportedScheme(<<102, 116, 112>>)
+)
