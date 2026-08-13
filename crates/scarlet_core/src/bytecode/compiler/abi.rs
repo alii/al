@@ -177,8 +177,12 @@ impl Compiler {
 
     /// Fill `program.templates`/`program.abi` from the modules this compile
     /// loaded, then require a binding for every slot an emitted op constructs.
-    /// Rebuilt from scratch each emit so a session's watermark rewind can
-    /// never leave a stale `TemplateIdx` behind.
+    ///
+    /// ABI templates are the prefix `[0, abi_template_count)`. Rebuilt from
+    /// scratch each emit: which modules resolved can change, and a newly
+    /// bound row would otherwise shift later indices. A rewind truncates to
+    /// that count, so a descriptor template appended after this call cannot
+    /// survive into the next emit.
     pub(super) fn bind_abi(&mut self) {
         self.program.templates = TiVec::new();
         self.program.abi = Default::default();
@@ -233,6 +237,7 @@ impl Compiler {
             let idx = self.program.templates.push(tpl);
             self.program.abi.bind(slot, idx);
         }
+        self.abi_template_count = self.program.templates.len();
 
         let missing = self
             .program

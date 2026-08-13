@@ -570,6 +570,10 @@ pub struct Compiler {
     /// ids are stable across `reset_to` (the watermark sits past the static
     /// stdlib), so the memo survives a session's rewinds.
     restricted_gen_cons: Option<HashSet<TypeId>>,
+    /// Length of the ABI prefix of `program.templates`, set by [`Self::bind_abi`].
+    /// `reset_to` truncates the table to this rather than clearing it, so a
+    /// descriptor template appended past the prefix cannot survive a rewind.
+    pub(super) abi_template_count: usize,
     // --- Module state ---
     pub(super) module_table: ModuleTable,
     /// Append-only `ModulePath` ↔ `ModuleId` interner backing every `DefId`.
@@ -1251,6 +1255,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         unused_bindings: UnusedBindings::Report,
         module_scope: ModuleScope::default(),
         restricted_gen_cons: None,
+        abi_template_count: 0,
         module_table: ModuleTable::new(),
         module_display: HashMap::new(),
         ref_interner,

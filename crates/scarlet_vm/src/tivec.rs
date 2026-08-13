@@ -69,6 +69,11 @@ impl<I: Idx, T> TiVec<I, T> {
         &self.raw
     }
 
+    /// Drop every element at `len` and after. No-op when `len >= self.len()`.
+    pub fn truncate(&mut self, len: usize) {
+        self.raw.truncate(len);
+    }
+
     /// The elements at `start..`, for consumers that walk a suffix.
     pub fn tail_from(&self, start: I) -> &[T] {
         &self.raw[start.index()..]
@@ -198,6 +203,22 @@ mod tests {
         v[A(0)] = 1;
         v.resize_at_least(A(1), 9);
         assert_eq!(v.as_slice(), &[1, 9, 9]);
+    }
+
+    #[test]
+    fn truncate_drops_the_suffix() {
+        let mut v: TiVec<A, &str> = TiVec::new();
+        v.push("a");
+        v.push("b");
+        v.push("c");
+        v.truncate(1);
+        assert_eq!(v.as_slice(), &["a"]);
+        assert_eq!(v.next_idx(), A(1));
+        v.truncate(1);
+        assert_eq!(v.as_slice(), &["a"]);
+        v.truncate(0);
+        assert_eq!(v.as_slice(), &[] as &[&str]);
+        assert_eq!(v.next_idx(), A(0));
     }
 
     /// `B` cannot subscript a `TiVec<A, _>`. The type checker enforces that, so
