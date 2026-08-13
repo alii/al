@@ -1468,7 +1468,12 @@ fn bound_subst(pool: &ResolvedPool, ret: RTy, at: RTy) -> HashMap<u32, RTy> {
 /// Rebuild `t` with every `Bound(i)` in `m` replaced. A node containing no
 /// substituted variable is returned as-is, so a concrete field type costs no
 /// allocation.
-fn subst_rty(pool: &mut ResolvedPool, t: RTy, m: &HashMap<u32, RTy>) -> RTy {
+///
+/// Visible to `typed_ir` because [`super::wire`] instantiates a constructor's
+/// declared field types the same way, off a positional map rather than a
+/// [`bound_subst`] alignment: a second implementation would be a second thing
+/// to keep in step with [`ResolvedNode`]'s arms.
+pub(super) fn subst_rty(pool: &mut ResolvedPool, t: RTy, m: &HashMap<u32, RTy>) -> RTy {
     if m.is_empty() {
         return t;
     }
