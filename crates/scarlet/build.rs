@@ -406,8 +406,14 @@ fn typeinfo(ti: &TypeInfo) -> String {
             "build.rs: stdlib type has Unresolved body after precompile — hydration missed it"
         ),
         TypeBody::Alias { target } => format!("TypeBody::Alias {{ target: {target:?} }}"),
-        TypeBody::Custom { variants } => {
-            format!("TypeBody::Custom {{ variants: {} }}", aslice(variants))
+        TypeBody::Custom {
+            variants,
+            ctors_public,
+        } => {
+            format!(
+                "TypeBody::Custom {{ variants: {}, ctors_public: {ctors_public} }}",
+                aslice(variants)
+            )
         }
     };
     lit!(TypeInfo: id = tid(ti.id), name = format_args!("{:?}", ti.name), module = aslice(ti.module),

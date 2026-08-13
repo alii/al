@@ -792,3 +792,55 @@ mod runnable_programs {
         );
     }
 }
+
+mod ctor_visibility_survives_on_the_type {
+    //! `analyse_type_decl` computes `is_public && !opaque` to decide what goes
+    //! in the module interface, then dropped it. `wire`'s descriptor builder
+    //! asks the same question of a type it did not declare — `decode` builds
+    //! values by constructor without running any of the declaring module's
+    //! code — so the bit has to survive on the body.
+    //!
+    //! Each case is asserted on its own. The four answers come from three
+    //! independent inputs (`pub`, `opaque`, having a body at all), and one
+    //! aggregate over them would be carried by whichever happened to be
+    //! wrong last.
+
+    use super::collect;
+
+    fn ctors_public(src: &str, ty: &str) -> Option<bool> {
+        collect(src).env.lookup_type_info(ty)?.ctors_public()
+    }
+
+    #[test]
+    fn a_pub_type_exposes_its_constructors() {
+        assert_eq!(
+            ctors_public("pub type Colour {\n\tRed\n\tBlue\n}\n", "Colour"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn an_opaque_type_hides_them() {
+        assert_eq!(
+            ctors_public("pub opaque type Id {\n\tId(n Int)\n}\n", "Id"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn a_private_type_hides_them() {
+        assert_eq!(
+            ctors_public("type Hidden {\n\tHidden(n Int)\n}\n", "Hidden"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn an_alias_has_no_constructors_to_report() {
+        // `None`, never `Some(false)`: a caller building values by
+        // constructor must look through an alias, not refuse it. Collapsing
+        // this into `false` is how an alias to an encodable type would come
+        // back as "opaque".
+        assert_eq!(ctors_public("pub type Name = String\n", "Name"), None);
+    }
+}

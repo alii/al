@@ -958,8 +958,13 @@ impl Compiler {
         });
 
         let variants = self.engine.push_variants(&variants);
-        self.env
-            .set_type_body(type_id, TypeBody::Custom { variants });
+        self.env.set_type_body(
+            type_id,
+            TypeBody::Custom {
+                variants,
+                ctors_public,
+            },
+        );
 
         let ti = self.env.lookup_type_info_by_id(type_id);
         let def = DefinitionLocation::new(

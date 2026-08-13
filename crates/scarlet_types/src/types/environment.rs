@@ -126,6 +126,13 @@ pub enum TypeBody {
     /// `type Name(params) { Ctor(label Type, ...) ... }`
     Custom {
         variants: ArenaSlice<pool::Variants>,
+        /// Whether a module other than the declaring one may name these
+        /// constructors: `pub` and not `opaque`. Lives on the body rather
+        /// than the head because only a body with constructors can answer
+        /// it, and travels with `TypeInfo` into module interfaces and the
+        /// precompiled stdlib blob so an importer reads the same answer the
+        /// declaring module computed.
+        ctors_public: bool,
     },
     /// `type Name(params) = Target`
     Alias { target: Ty },
@@ -156,7 +163,22 @@ impl TypeInfo {
     /// The variant slice when the body is `Custom`.
     pub fn variants(&self) -> Option<ArenaSlice<pool::Variants>> {
         match self.body {
-            TypeBody::Custom { variants } => Some(variants),
+            TypeBody::Custom { variants, .. } => Some(variants),
+            _ => None,
+        }
+    }
+
+    /// Whether importers may name this type's constructors, or `None` when
+    /// the type has none to name (alias, external, or not yet hydrated).
+    ///
+    /// The three states are all distinct to a caller that builds values by
+    /// constructor: an alias must be looked through, an external type has no
+    /// representation at all, and a hydrated-but-private body must be
+    /// refused. Collapsing "no constructors" into `false` would let the
+    /// first two be reported as the third.
+    pub fn ctors_public(&self) -> Option<bool> {
+        match self.body {
+            TypeBody::Custom { ctors_public, .. } => Some(ctors_public),
             _ => None,
         }
     }
