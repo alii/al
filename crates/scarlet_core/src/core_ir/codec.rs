@@ -747,6 +747,32 @@ mod tests {
         assert_eq!(format!("{f}"), format!("{back}"));
     }
 
+    /// A wire op's descriptor rides in `Imm::Const`, and the codec is the one
+    /// place a `.core` blob can lose it. Asserted structurally rather than
+    /// through the golden renderer, which is the equality the test above uses:
+    /// a decode that produced `Imm::Index(5)` instead would render `#5` where
+    /// `Imm::Const(ConstId(5))` renders `#c5`, but only the tag proves which
+    /// pool the operand indexes.
+    #[test]
+    fn a_wire_op_descriptor_round_trips() {
+        let f = CoreFn {
+            name: StrId(1),
+            params: vec![bind(0)],
+            body: CoreExpr::Tail(Atom::PrimOp {
+                op: Op::WireEncode,
+                args: vec![LocalId::from_usize(0)],
+                imm: Imm::Const(ConstId(5)),
+            }),
+            ret_ty: RTy(7),
+        };
+        let back = decode_fn(&encode_fn(&f)).expect("round trip decodes");
+        let CoreExpr::Tail(Atom::PrimOp { op, imm, .. }) = back.body else {
+            panic!("expected a Tail PrimOp");
+        };
+        assert_eq!(op, Op::WireEncode);
+        assert_eq!(imm, Imm::Const(ConstId(5)));
+    }
+
     #[test]
     fn layout_round_trips() {
         let mut slots = crate::tivec::TiVec::new();

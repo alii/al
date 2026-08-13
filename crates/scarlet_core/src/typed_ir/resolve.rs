@@ -15,7 +15,7 @@
 //! a real closure frame and `PushSelf` is correct.
 
 use crate::bytecode::Op;
-use crate::core_ir::{FuncIdx, VariantRef};
+use crate::core_ir::{FuncIdx, Imm, VariantRef};
 use crate::types::ValueKind;
 
 use super::{Arity, CaptureIdx, FrameSlot, GlobalSlot, RTy, TypedCallee, TypedExpr, ValueRef};
@@ -195,7 +195,7 @@ impl Denotation {
                 place,
             }))),
             Den::Ctor { .. } => CallForm::Ctor,
-            Den::Builtin { op } => CallForm::Callee(TypedCallee::Builtin(op)),
+            Den::Builtin { op } => CallForm::Callee(TypedCallee::Builtin { op, imm: Imm::None }),
         }
     }
 
@@ -324,7 +324,10 @@ mod tests {
         let d = Denotation::builtin(Op::Add);
         assert_eq!(
             d.as_callee(TY),
-            CallForm::Callee(TypedCallee::Builtin(Op::Add))
+            CallForm::Callee(TypedCallee::Builtin {
+                op: Op::Add,
+                imm: Imm::None,
+            })
         );
         assert_eq!(
             d.as_value(),

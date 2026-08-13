@@ -247,15 +247,18 @@ fn redeclared_join(id: JoinId) -> ! {
     )
 }
 
-/// Flatten a typed [`Imm`] to the raw `i32` operand. `Op::IndexOr` is the only
-/// op whose operand encodes a constant default (or `-1` for "default was
-/// pushed"); any other pairing aborts rather than emit an operand the VM would
-/// misread.
+/// Flatten a typed [`Imm`] to the raw `i32` operand. Three ops read a
+/// [`ConstId`] out of it: `Op::IndexOr`'s default, and the two wire ops'
+/// descriptor. `-1` ("default was pushed") stays `Op::IndexOr`'s alone. Any
+/// other pairing aborts rather than emit an operand the VM would misread —
+/// keep the op/immediate arms spelled out, because a catch-all would hand a
+/// `ConstId` to an op that reads its operand as an index or an argc.
 #[allow(clippy::panic)]
 pub(super) fn imm_operand(op: Op, imm: Imm) -> i32 {
     match (op, imm) {
         (Op::IndexOr, Imm::Const(c)) => c.0 as i32,
         (Op::IndexOr, Imm::PushedDefault) => -1,
+        (Op::WireEncode | Op::WireDecode, Imm::Const(c)) => c.0 as i32,
         (Op::IndexOr, Imm::None | Imm::Index(_) | Imm::Argc(_))
         | (_, Imm::Const(_) | Imm::PushedDefault) => panic!(
             "internal compiler error: {op:?} cannot carry immediate {imm:?}. \
@@ -1357,6 +1360,65 @@ mod tests {
 
     fn bind(id: u32) -> CoreBind {
         super::super::testkit::bind(id, RTy(0))
+    }
+
+    /// The wire ops' descriptor is a constant-pool entry, so it flattens the
+    /// same way `Op::IndexOr`'s default does.
+    #[test]
+    fn a_wire_op_flattens_its_descriptor_to_the_const_id() {
+        assert_eq!(imm_operand(Op::WireEncode, Imm::Const(ConstId(3))), 3);
+        assert_eq!(imm_operand(Op::WireDecode, Imm::Const(ConstId(9))), 9);
+    }
+
+    /// The permitted set is exactly three ops, and the value of the abort is
+    /// that it is exhaustive: widening the match to a catch-all would pass
+    /// every other test in this file while handing a `ConstId` to an op that
+    /// reads its operand as an index or an argc.
+    #[test]
+    #[should_panic(expected = "cannot carry immediate")]
+    fn a_third_op_carrying_a_const_still_aborts() {
+        imm_operand(Op::AddInt, Imm::Const(ConstId(3)));
+    }
+
+    /// `-1` means "the default is on the stack", which only `Op::IndexOr`
+    /// reads. The wire ops were permitted `Imm::Const` and nothing else.
+    #[test]
+    #[should_panic(expected = "cannot carry immediate")]
+    fn a_wire_op_carrying_a_pushed_default_aborts() {
+        imm_operand(Op::WireEncode, Imm::PushedDefault);
+    }
+
+    /// A wire op with no descriptor attached yet stays legal and emits 0, so
+    /// this change is inert until something sets the immediate.
+    #[test]
+    fn a_wire_op_without_a_descriptor_is_operand_zero() {
+        assert_eq!(imm_operand(Op::WireEncode, Imm::None), 0);
+        assert_eq!(imm_operand(Op::WireDecode, Imm::None), 0);
+    }
+
+    /// `emit` is the only place the typed immediate becomes the `i32` the VM
+    /// reads, so the descriptor arriving on the atom is not the same claim as
+    /// it arriving in the instruction.
+    #[test]
+    fn a_wire_op_emits_its_descriptor_as_the_instruction_operand() {
+        let body = CoreExpr::Let {
+            bind: bind(1),
+            rhs: Atom::PrimOp {
+                op: Op::WireEncode,
+                args: vec![LocalId(0)],
+                imm: Imm::Const(ConstId(5)),
+            },
+            body: Box::new(CoreExpr::Tail(Atom::Local(LocalId(1)))),
+        };
+        let f = func(vec![bind(0)], body, RTy(0));
+        let mut cx = ctx(None);
+        let out = emit(&f, &mut cx);
+        let ins = out
+            .code
+            .iter()
+            .find(|i| i.op == Op::WireEncode)
+            .expect("WireEncode emitted");
+        assert_eq!(ins.operand, 5);
     }
 
     #[test]

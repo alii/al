@@ -12,7 +12,7 @@
 //! only `&mut FnTable` and returns a [`FuncIdx`], never an address; the wrapper
 //! is an ordinary [`TypedFn`] emitted by the same loop as every other function.
 
-use crate::core_ir::FuncIdx;
+use crate::core_ir::{FuncIdx, Imm};
 use crate::tivec::TiVec;
 use crate::types::StrId;
 
@@ -129,7 +129,7 @@ pub(crate) fn eta_wrapper(
         }
         EtaTarget::Builtin { op } => TypedExpr::Call {
             ty: ret,
-            callee: TypedCallee::Builtin(op),
+            callee: TypedCallee::Builtin { op, imm: Imm::None },
             args,
         },
     };
@@ -278,7 +278,10 @@ mod tests {
             fns[FuncIdx(0)].body,
             TypedExpr::Call {
                 ty: int,
-                callee: TypedCallee::Builtin(Op::Add),
+                callee: TypedCallee::Builtin {
+                    op: Op::Add,
+                    imm: Imm::None,
+                },
                 args: vec![
                     TypedExpr::Var {
                         ty: int,

@@ -31,7 +31,7 @@ pub use rty::{Arity, RSlice, RTy, ResolvedNode, ResolvedPool};
 pub(crate) use zonk::{Zonker, pool_for};
 
 use crate::bytecode::{Op, Value};
-use crate::core_ir::{ConstId, FuncIdx, VariantRef};
+use crate::core_ir::{ConstId, FuncIdx, Imm, VariantRef};
 use crate::types::StrId;
 
 /// A binding introduced by a `TypedFn`'s parameter list, a `let`, or a
@@ -102,8 +102,11 @@ pub enum TypedCallee {
     Known(FuncIdx),
     /// The function currently being lowered.
     SelfRec,
-    /// A `@vm` builtin: the call *is* the opcode.
-    Builtin(Op),
+    /// A `@vm` builtin: the call *is* the opcode. `imm` is the operand the
+    /// instruction carries; every builtin resolved from a name takes
+    /// [`Imm::None`], and only a site that has a constant to attach — a wire
+    /// op's descriptor — sets anything else.
+    Builtin { op: Op, imm: Imm },
     /// A closure value computed at runtime.
     Dynamic(Box<TypedExpr>),
 }
@@ -685,6 +688,43 @@ mod tests {
         assert_eq!(
             p.consts.get(ConstId(1).0 as usize).map(Value::to_bits),
             Some(out.consts[1].to_bits())
+        );
+    }
+
+    /// `lower` copies the callee's immediate onto the atom. Dropping it would
+    /// be silent — the op still emits, with operand 0, and decodes against
+    /// whatever schema that names.
+    #[test]
+    fn a_builtin_immediate_reaches_the_core_atom() {
+        let (pool, temps) = pool_and_temps();
+        let binary = temps.binary;
+        let p = TypedProgram {
+            fns: Vec::new(),
+            toplevel: nullary(
+                StrId::NONE,
+                binary,
+                TypedExpr::Call {
+                    ty: binary,
+                    callee: TypedCallee::Builtin {
+                        op: Op::WireEncode,
+                        imm: Imm::Const(ConstId(1)),
+                    },
+                    args: vec![TypedExpr::Const {
+                        ty: binary,
+                        value: ConstId(0),
+                    }],
+                },
+            ),
+            consts: vec![Value::small_int(7), Value::small_int(42)],
+            pool,
+            temps,
+        };
+
+        let out = lower::lower(&p);
+        let rendered = out.toplevel.to_string();
+        assert!(
+            rendered.contains("WireEncode#c1"),
+            "the descriptor must survive lowering, got: {rendered}"
         );
     }
 
