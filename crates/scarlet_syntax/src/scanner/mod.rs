@@ -452,6 +452,18 @@ impl Scanner {
 
     fn scan_number(&mut self) -> Token {
         let start = self.pos - 1;
+
+        // `0x` / `0b` (either case) starts a radix literal. Commit on the
+        // prefix: a following non-digit is a lexical error, not `0` plus an
+        // identifier (`0xFF` used to lex as `0` `xFF`).
+        if self.byte_at(start) == b'0' {
+            match self.peek_char() {
+                b'x' | b'X' => return self.scan_radix_number(start, 16),
+                b'b' | b'B' => return self.scan_radix_number(start, 2),
+                _ => {}
+            }
+        }
+
         let mut has_dot = false;
 
         loop {
@@ -473,6 +485,51 @@ impl Scanner {
             } else {
                 break;
             }
+        }
+
+        let text = self.slice(start, self.pos);
+        self.new_token(Kind::LiteralNumber(text.into()))
+    }
+
+    fn scan_radix_number(&mut self, start: i32, radix: u32) -> Token {
+        self.incr_pos(); // consume x/X or b/B
+        let mut digits = 0u32;
+
+        loop {
+            let next = self.peek_char();
+            if is_radix_digit(next, radix) {
+                digits += 1;
+                self.incr_pos();
+            } else if next == b'_' && is_radix_digit(self.byte_at(self.pos + 1), radix) {
+                self.incr_pos();
+            } else {
+                break;
+            }
+        }
+
+        let name = if radix == 16 { "hex" } else { "binary" };
+        if digits == 0 {
+            // Swallow a following name or digit run so `0xZ` / `0b2` is one
+            // error, not `0x` plus a stray identifier.
+            if token::is_name_start(self.peek_char()) || self.peek_char().is_ascii_digit() {
+                while token::is_name_continue(self.peek_char()) {
+                    self.incr_pos();
+                }
+            }
+            self.add_error(format!("{name} literal has no digits"));
+            let text = self.slice(start, self.pos);
+            return self.new_token(Kind::Error(text.into()));
+        }
+
+        // `0xFFG` / `0b102`: an alphanumeric after the digits is an invalid
+        // digit, not a new token.
+        if self.peek_char().is_ascii_alphanumeric() {
+            while self.peek_char().is_ascii_alphanumeric() || self.peek_char() == b'_' {
+                self.incr_pos();
+            }
+            self.add_error(format!("invalid digit in {name} literal"));
+            let text = self.slice(start, self.pos);
+            return self.new_token(Kind::Error(text.into()));
         }
 
         let text = self.slice(start, self.pos);
@@ -616,6 +673,14 @@ impl Scanner {
 #[inline]
 fn is_quote(c: u8) -> bool {
     c == b'\'' || c == b'"'
+}
+
+fn is_radix_digit(ch: u8, radix: u32) -> bool {
+    match radix {
+        16 => ch.is_ascii_hexdigit(),
+        2 => ch == b'0' || ch == b'1',
+        _ => false,
+    }
 }
 
 fn utf8(bytes: Vec<u8>) -> String {
@@ -897,6 +962,49 @@ mod tests {
         assert_tok(&toks, 2, num("1"));
         assert_tok(&toks, 3, PuncDotdot);
         assert_tok(&toks, 4, num("5"));
+    }
+
+    #[test]
+    fn hex_and_binary_literals() {
+        assert_eq!(
+            kinds_clean("0xFF 0xff 0X10"),
+            vec![num("0xFF"), num("0xff"), num("0X10"), Eof]
+        );
+        assert_eq!(
+            kinds_clean("0b1010 0B11"),
+            vec![num("0b1010"), num("0B11"), Eof]
+        );
+        assert_eq!(
+            kinds_clean("0xDE_AD_BE_EF"),
+            vec![num("0xDE_AD_BE_EF"), Eof]
+        );
+        assert_eq!(kinds_clean("0b1111_0000"), vec![num("0b1111_0000"), Eof]);
+        assert_eq!(
+            kinds_clean("0x10..0x20"),
+            vec![num("0x10"), PuncDotdot, num("0x20"), Eof]
+        );
+        // `08` is still decimal — there is no octal prefix.
+        assert_eq!(kinds_clean("08"), vec![num("08"), Eof]);
+        // A `.` after hex/bin digits ends the number; hex floats are not a thing.
+        assert_eq!(
+            kinds_clean("0xFF.5"),
+            vec![num("0xFF"), PuncDot, num("5"), Eof]
+        );
+
+        let (toks, diags) = scan("0x");
+        assert!(matches!(toks[0].kind, Error(_)));
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("hex literal has no digits"));
+
+        let (toks, diags) = scan("0b2");
+        assert!(matches!(toks[0].kind, Error(_)));
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("binary literal has no digits"));
+
+        let (toks, diags) = scan("0xFFG");
+        assert!(matches!(toks[0].kind, Error(_)));
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("invalid digit in hex literal"));
     }
 
     #[test]

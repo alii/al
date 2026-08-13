@@ -497,8 +497,16 @@ fn tm_language() -> String {
                 "patterns": [string_body("'"), string_body("\"")]
             },
             "numbers": {
-                "comment": "Scanner::scan_number. `_` is a digit separator and only valid between two digits, so it is written as a repeated `_\\d+` group rather than folded into the digit class — `1_` and `_1` are not numbers.",
+                "comment": "Scanner::scan_number. Hex (`0x`) and binary (`0b`) first so they are not split into `0` + identifier. `_` is a digit separator only between two digits of that radix.",
                 "patterns": [
+                    {
+                        "name": "constant.numeric.hex.scrl",
+                        "match": "\\b0[xX][0-9A-Fa-f]+(?:_[0-9A-Fa-f]+)*\\b"
+                    },
+                    {
+                        "name": "constant.numeric.binary.scrl",
+                        "match": "\\b0[bB][01]+(?:_[01]+)*\\b"
+                    },
                     {
                         "name": "constant.numeric.float.scrl",
                         "match": "\\b\\d+(?:_\\d+)*\\.\\d+(?:_\\d+)*\\b"
@@ -1006,11 +1014,11 @@ module.exports = {{
   keywords: [{keywords}],
   // token::is_name_start / is_name_continue.
   identifier: /[A-Za-z_][A-Za-z0-9_]*/,
-  // Scanner::scan_number: digits, optionally one '.' followed by digits, with
-  // `_` accepted anywhere it sits between two digits (`1_000.000_1`). A `_`
-  // with no digit after it ends the token, and so does a '.' with no digit
-  // after it.
-  number: /\\d+(_\\d+)*(\\.\\d+(_\\d+)*)?/,
+  // Scanner::scan_number: hex (`0x`), binary (`0b`), or decimal with an
+  // optional fraction. `_` sits between two digits of that radix. A `_` or
+  // `.` with no digit after it ends the token. Hex/bin are listed first so
+  // `0xFF` is not consumed as decimal `0`.
+  number: /(0[xX][0-9A-Fa-f]+(_[0-9A-Fa-f]+)*|0[bB][01]+(_[01]+)*|\\d+(_\\d+)*(\\.\\d+(_\\d+)*)?)/,
   // scanner::ESCAPES; anything else after a backslash is an error.
   escape: /\\\\[{escape_class}]/,
   // Contextual identifiers in << >> segment specs (parse_bin_spec).
@@ -1053,6 +1061,16 @@ mod tests {
             ("1.", &["1"]),
             // Range bounds: the scanner must not fuse `0..10` into one token.
             ("0..10", &["0", "10"]),
+            ("0xFF", &["0xFF"]),
+            ("0Xff", &["0Xff"]),
+            ("0b1010", &["0b1010"]),
+            ("0B11", &["0B11"]),
+            ("0xDE_AD", &["0xDE_AD"]),
+            ("0b1111_0000", &["0b1111_0000"]),
+            ("0x10..0x20", &["0x10", "0x20"]),
+            // A prefix with no digits is an Error token, not a LiteralNumber.
+            ("0x", &[]),
+            ("0b", &[]),
         ];
         for (source, want) in cases {
             let (tokens, _) = new_scanner(*source).scan_all();

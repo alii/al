@@ -1,0 +1,10 @@
+hex: 255 255 16
+bin: 10 3 0
+sep: 3735928559 240
+eq: PASS PASS PASS
+neg: -255 PASS PASS
+max: PASS PASS
+boxed: 140737488355328 PASS PASS
+match: hex neg bin
+min pattern: min
+ws: 3735928559 222 PASS
