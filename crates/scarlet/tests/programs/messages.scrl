@@ -70,6 +70,27 @@ fn fresh() Subject(msg) {
 	process.subject()
 }
 
+// --- timers ---------------------------------------------------------------------
+// A timed send is observed through receive_within. The positive case gets a
+// deadline hundreds of times its delay, so only a timer that never fires can
+// fail it; the negative gets one several times the delay it cancelled, so a
+// cancel that did nothing fails it. Neither witnesses that a timer waits the
+// delay it was given — that is a duration, and nothing here measures one.
+
+fn arrived(r Result(Int, Nil)) Bool {
+	match r {
+		Ok(_) -> True
+		Err(Nil) -> False
+	}
+}
+
+fn carried(r Result(Int, Nil), want Int) Bool {
+	match r {
+		Ok(v) -> v == want
+		Err(Nil) -> False
+	}
+}
+
 pub fn main() {
 	// --- identity and FIFO on one subject -----------------------------------------
 	// A subject equals only itself, and messages from one sender arrive in order.
@@ -173,6 +194,24 @@ pub fn main() {
 	stopped = process.subject()
 	process.send(counter, Stop(stopped))
 	_ = process.receive(stopped)
+
+	// --- send_after fires, and cancel_timer stops one that has not ------------------
+
+	timed = fresh()
+	_ = process.send_after(timed, 5, 7)
+	check('send_after delivers', True, carried(process.receive_within(timed, 2000), 7))
+
+	quiet = fresh()
+	process.cancel_timer(process.send_after(quiet, 40, 9))
+	check('cancel_timer stops it', False, arrived(process.receive_within(quiet, 200)))
+
+	// A zero delay still crosses between two processes, and cancelling a timer
+	// that has already fired does nothing.
+	instant = fresh()
+	spent = process.send_after(instant, 0, 1)
+	check('a zero delay still arrives', True, carried(process.receive_within(instant, 2000), 1))
+	process.cancel_timer(spent)
+	println('cancel after firing: ok')
 }
 
 fn ask_repeatedly(server Subject(Msg), left Int, last Int) Int {

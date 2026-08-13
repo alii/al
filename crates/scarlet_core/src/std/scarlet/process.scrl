@@ -40,7 +40,8 @@
  * itself is a value — capture it in a spawned closure or send it inside a
  * message (a reply address) — and any process holding it may send.
  * receive(s) blocks until a message arrives; receive_within adds a timeout.
- * Messages on one subject arrive in the order they were sent.
+ * Messages on one subject arrive in the order they were sent. send_after
+ * delivers a message once a delay has passed, parking nobody in the meantime.
  *
  * The program exits when every process has finished — which, for a program
  * built as a tree under `root`, is when the tree has failed for good.
@@ -228,6 +229,42 @@ pub fn receive_until(s Subject(msg), deadline Instant) Result(msg, Nil) {
 @vm(process__receive_until)
 fn receive_until_ms(s Subject(msg), deadline_ms Int) Result(msg, Nil)
 
+// A timed send that has not fired yet, for `cancel_timer`.
+pub opaque type Timer {
+	waiting Pid
+}
+
+// Send `m` to `s` once `delay_ms` milliseconds have passed, without parking
+// the caller: what arms a timeout or a periodic tick in a process that has to
+// go on receiving meanwhile. `delay_ms <= 0` sends straight away. The wait is
+// a process of its own, so a timer costs what a process costs.
+//
+//	timeout = process.send_after(inbox, 5000, GiveUp)
+//
+// The waiting process is deliberately unlinked. A linked one could not be
+// cancelled — killing it would kill the caller with it — and an ordinary
+// timeout would become the caller's failure to unwind. The cost is that a
+// timer outlives a caller that ended before it fired: it holds a process for
+// the rest of the delay and then sends into a reclaimed subject, where the
+// message is dropped. A program ends only once every process has finished, so
+// a pending timer also keeps the program running until it fires — cancel one
+// whose answer has already arrived.
+pub fn send_after(s Subject(msg), delay_ms Int, m msg) Timer {
+	Timer(waiting: spawn_unlinked(fn() {
+		sleep(delay_ms)
+		send(s, m)
+	}))
+}
+
+// Stop a timer that has not fired. As with `demonitor`, a message already on
+// its way still arrives: a receiver that cancels a timer and goes on
+// receiving must still be prepared to see its message, exactly as with any
+// message sent just before it stopped caring. Cancelling a timer that has
+// already fired is harmless.
+pub fn cancel_timer(t Timer) Nil {
+	kill(t.waiting)
+}
+
 // ---- Supervision -----------------------------------------------------------------
 //
 // A supervision tree is declared as a sequence of ordinary bindings:
@@ -249,6 +286,20 @@ fn receive_until_ms(s Subject(msg), deadline_ms Int) Result(msg, Nil)
 // process that was merely slow.) Line order is declaration order: a worker
 // can only capture the addresses bound above it, which is also the order
 // they are started in and the reverse of the order they are stopped in.
+//
+// Finding a process again later is these two things and no third. A worker's
+// address is the binding above, and it survives every restart. A factory is a
+// registry keyed by whatever identifies a member, and any process holding it
+// may ask: `lookup_or_start(rooms, 'lobby')` makes the room the first time
+// that name is seen and finds it every time after, at the same address across
+// its own restarts.
+//
+// There is no global name-to-process registry. A Subject carries the type of
+// the messages it takes; a name looked up in a global table cannot, so two
+// processes claiming one name for different message types would be a mismatch
+// nothing could catch. An address is therefore always handed over — captured
+// in a start function, sent in a message, or found through a factory that was
+// itself handed over.
 //
 // Restarting is the supervisor's job. Its Strategy carries its budget: more
 // than `restarts` restarts within `within_ms` and it gives up — stops all of

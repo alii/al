@@ -15,3 +15,7 @@ fresh subjects: 1 text
 send to a dead subject: ok
 PASS a thousand request/replies add up
 PASS and leave no mailboxes behind
+PASS send_after delivers
+PASS cancel_timer stops it
+PASS a zero delay still arrives
+cancel after firing: ok
