@@ -125,6 +125,15 @@ type User {
 	nickname field.Field(String)
 }
 
+// One line per member, and the same shape at four members as at forty.
+fn user_decoder() decode.Decoder(User) {
+	id <- decode.take('id', decode.int_string())
+	name <- decode.take('username', decode.string_value())
+	bot <- decode.also(decode.with_default('bot', decode.bool(), False))
+	nick <- decode.take_optional('nickname', decode.string_value())
+	decode.succeed(User(id, name, bot, nick))
+}
+
 type Event {
 	Message(content String)
 	Heartbeat(seq Int)
@@ -250,23 +259,15 @@ pub fn main() {
 	println('')
 	println('-- typed records --')
 
-	user_decoder = decode.map4(
-		decode.field('id', decode.int_string()),
-		decode.field('username', decode.string_value()),
-		decode.with_default('bot', decode.bool(), False),
-		decode.optional_field('nickname', decode.string_value()),
-		fn(id, name, bot, nick) User(id, name, bot, nick),
-	)
-
 	// A Discord snowflake arrives quoted precisely because a JSON number cannot
 	// carry 64 bits through a double.
 	null_nick = '{"id":"1070000000000000001","username":"ada","nickname":null}'
 	absent_nick = '{"id":"1070000000000000001","username":"ada"}'
 	set_nick = '{"id":"1070000000000000001","username":"ada","nickname":"c","bot":true}'
 
-	line('null nick     ', shown(null_nick, user_decoder))
-	line('absent nick   ', shown(absent_nick, user_decoder))
-	line('set nick      ', shown(set_nick, user_decoder))
+	line('null nick     ', shown(null_nick, user_decoder()))
+	line('absent nick   ', shown(absent_nick, user_decoder()))
+	line('set nick      ', shown(set_nick, user_decoder()))
 
 	// ------------------------------------------------- failures name their path --
 
@@ -400,7 +401,7 @@ pub fn main() {
 
 	guild_ids = decode.at(['d', 'guilds'], decode.list(decode.field('id', decode.int_string())))
 
-	line('ready user    ', shown(ready, decode.at(['d', 'user'], user_decoder)))
+	line('ready user    ', shown(ready, decode.at(['d', 'user'], user_decoder())))
 	line('ready v       ', shown(ready, decode.at(['d', 'v'], decode.int())))
 	line('ready guilds  ', shown(ready, guild_ids))
 	line('ready session ', shown(ready, decode.at(['d', 'session_id'], decode.string_value())))

@@ -271,6 +271,13 @@ suite! {
         // adversarial answers: 1e400, a lone surrogate, invalid UTF-8, the
         // 64-bit boundary, duplicate keys and deep nesting.
         json,
+        // scarlet/json/decode's own shape: a forty-member record written one
+        // flat line per member, independent members accumulating their failures
+        // past the old five-member ceiling, three-way presence under that
+        // accumulation, one_of over 2 vs 2.0, and the two places where
+        // accumulation is deliberately given up — `fail`, and `then`'s
+        // dependent continuation.
+        decoders,
     ],
 
     // No golden, because there is no fixed output: `http_server` ends in an
