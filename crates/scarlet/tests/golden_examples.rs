@@ -278,6 +278,11 @@ suite! {
         // accumulation is deliberately given up — `fail`, and `then`'s
         // dependent continuation.
         decoders,
+        // base64 and SHA-1, both pure Scarlet over the bitwise ops: the RFC
+        // 4648 and FIPS 180-1 vectors, the SHA-1 block/length padding edges,
+        // base64's rejection of every non-canonical spelling, and the RFC 6455
+        // §1.3 handshake example the two combine to produce.
+        crypto,
     ],
 
     // No golden, because there is no fixed output: `http_server` ends in an

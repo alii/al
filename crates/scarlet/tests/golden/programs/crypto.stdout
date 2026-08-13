@@ -1,0 +1,33 @@
+b64 empty: ""
+b64 f: Zg==
+b64 fo: Zm8=
+b64 foo: Zm9v
+b64 foob: Zm9vYg==
+b64 fooba: Zm9vYmE=
+b64 foobar: Zm9vYmFy
+b64 roundtrip: PASS PASS PASS PASS PASS
+b64 all256 roundtrip: PASS
+b64 all256 head: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g
+b64 reject bad length: PASS
+b64 reject non-alphabet: PASS
+b64 reject interior pad 2: PASS
+b64 reject interior pad 1: PASS
+b64 reject whitespace: PASS
+b64 reject nonzero fill 2: PASS PASS
+b64 reject nonzero fill 1: PASS PASS
+sha1 empty: da39a3ee5e6b4b0d3255bfef95601890afd80709
+sha1 abc: a9993e364706816aba3e25717850c26c9cd0d89d
+sha1 fox: 2fd4e1c67a2d28fced849ee1bb76e7391b93eb12
+sha1 55a: c1c8bbdc22796e28c0e15163d20899b65621d65a
+sha1 56a: c2db330f6083854c99d4b5bfb6e8f29f201be699
+sha1 57a: f08f24908d682555111be7ff6f004e78283d989a
+sha1 63a: 03f09f5b158a7a8cdad920bddc29b81c18a551f5
+sha1 64a: 0098ba824b5c16427bd7a1122a5a442a25ec644d
+sha1 65a: 11655326c708d70319be2610e8a57d9a5b959d3b
+sha1 119a: ee971065aaa017e0632a8ca6c77bb3bf8b1dfc56
+sha1 120a: f34c1488385346a55709ba056ddd08280dd4c6d6
+sha1 all256: 4916d6bdb7f78e6803698cab32d1586ea457dfc8
+sha1 length: PASS PASS
+ws accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+ws accept matches: PASS
+ws accept manual: PASS

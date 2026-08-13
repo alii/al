@@ -1,18 +1,18 @@
 fn s0(%0:t0) -> :t1
   match %0 :t1
-    | 8705.0(%1) ->
+    | 9217.0(%1) ->
       drop %0 [Enum:1]
       let %2:t1 = MulInt(%1, %1)
       let %3:t2 = c0
       ret MulInt(%2, %3)
-    | 8705.1(%4, %5) ->
+    | 9217.1(%4, %5) ->
       drop %0 [Enum:2]
       ret MulInt(%4, %5)
 
 fn s1() -> :t1
   let %0:t2 = c1
   let %1:t2 = c2
-  let %2:t3 = ctor 8705.1(%0, %1)
+  let %2:t3 = ctor 9217.1(%0, %1)
   ret call fn#0(%2)
 
 toplevel:

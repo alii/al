@@ -1,0 +1,196 @@
+/**
+ * Cryptographic hashes.
+ *
+ * SHA-1 ONLY, and only because two protocols the stdlib speaks require it by
+ * name. It is NOT collision-resistant — a chosen-prefix collision has been
+ * public since 2017 — so it must never be used for signatures, certificates,
+ * password storage, or deduplicating attacker-supplied content. Its one
+ * legitimate use is a protocol that specifies it as a fixed handshake
+ * constant, where the security argument does not rest on collision
+ * resistance: the WebSocket opening handshake (RFC 6455 §1.3), where
+ * `Sec-WebSocket-Accept` is `base64(sha1(key <> GUID))` and its job is to
+ * prove the server understood the upgrade, not to authenticate anyone.
+ *
+ * For anything where the choice of hash is actually yours, this module is the
+ * wrong import.
+ */
+
+import scarlet/base64
+import scarlet/binary
+import scarlet/int
+
+// 2^32 - 1. Every intermediate here is a 32-bit unsigned quantity held in a
+// 64-bit signed Int, so each step that can carry past bit 31 masks with this.
+// Int has no unsigned counterpart and no 32-bit width, so the masking is the
+// only thing keeping the arithmetic inside SHA-1's word size.
+const MASK32 = 4294967295
+
+// The RFC 6455 §1.3 handshake constant, appended to the client's
+// `Sec-WebSocket-Key` before hashing. Fixed by the spec; not a secret, and not
+// a salt.
+pub const websocket_guid = <<'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'>>
+
+// SHA-1's five-word chaining state, and the same shape as the working
+// variables a-e inside the compression function.
+type State {
+	a Int
+	b Int
+	c Int
+	d Int
+	e Int
+}
+
+// Rotate left within 32 bits. `x` must already be masked to 32 bits: the
+// right shift is arithmetic, so a value with bit 63 set would smear the sign
+// into the bits being rotated in.
+fn rotl32(x Int, n Int) Int {
+	int.bitwise_and(
+		int.bitwise_or(int.bitwise_shift_left(x, n), int.bitwise_shift_right(x, 32 - n)),
+		MASK32,
+	)
+}
+
+// The big-endian 32-bit word at word index `i`. Reads bytes rather than
+// slicing so it stays allocation-free: `byte_at` is total and the callers
+// below only ever index inside a 64-byte block.
+fn word_at(b Binary, i Int) Int {
+	at = i * 4
+	int.bitwise_or(
+		int.bitwise_or(
+			int.bitwise_shift_left(binary.byte_at(b, at), 24),
+			int.bitwise_shift_left(binary.byte_at(b, at + 1), 16),
+		),
+		int.bitwise_or(
+			int.bitwise_shift_left(binary.byte_at(b, at + 2), 8),
+			binary.byte_at(b, at + 3),
+		),
+	)
+}
+
+fn zeros(n Int, acc Binary) Binary {
+	if n <= 0 {
+		acc
+	} else {
+		zeros(n - 1, binary.append(acc, <<0:8>>))
+	}
+}
+
+// The message with SHA-1's padding: a 1 bit (as the byte 128), then zero bits
+// until the length is 56 mod 64, then the original length in BITS as a
+// big-endian 64-bit integer. The result is always a whole number of 64-byte
+// blocks, which is the invariant `blocks` relies on.
+fn pad(m Binary) Binary {
+	size = binary.byte_size(m)
+	rem = { size + 1 } % 64
+	fill = if rem <= 56 {
+		56 - rem
+	} else {
+		120 - rem
+	}
+	bits = size * 8
+	binary.append(binary.append(binary.append(m, <<128:8>>), zeros(fill, <<>>)), <<bits:64>>)
+}
+
+// One 80-round compression over `win`, the 16-word message schedule window.
+//
+// At round `i`, `win` holds w[i]..w[i+15], so the round's own word is always
+// word 0 and the word appended is w[i+16]. That is the standard rolling-window
+// form of the schedule: it keeps 16 words instead of 80, and the last 16
+// rounds compute words nothing reads, which is harmless and cheaper than
+// branching to avoid it.
+fn compress(win Binary, i Int, w State) State {
+	if i >= 80 {
+		w
+	} else {
+		f = if i < 20 {
+			int.bitwise_or(int.bitwise_and(w.b, w.c), int.bitwise_and(int.bitwise_not(w.b), w.d))
+		} else if i < 40 {
+			int.bitwise_xor(int.bitwise_xor(w.b, w.c), w.d)
+		} else if i < 60 {
+			int.bitwise_or(
+				int.bitwise_or(int.bitwise_and(w.b, w.c), int.bitwise_and(w.b, w.d)),
+				int.bitwise_and(w.c, w.d),
+			)
+		} else {
+			int.bitwise_xor(int.bitwise_xor(w.b, w.c), w.d)
+		}
+		k = if i < 20 {
+			1518500249
+		} else if i < 40 {
+			1859775393
+		} else if i < 60 {
+			2400959708
+		} else {
+			3395469782
+		}
+		// Five 32-bit addends sum to at most 5 * (2^32 - 1) < 2^35, so the sum
+		// cannot reach Int's range before it is masked back to 32 bits.
+		t = int.bitwise_and(rotl32(w.a, 5) + f + w.e + k + word_at(win, 0), MASK32)
+		next = rotl32(
+			int.bitwise_xor(
+				int.bitwise_xor(word_at(win, 13), word_at(win, 8)),
+				int.bitwise_xor(word_at(win, 2), word_at(win, 0)),
+			),
+			1,
+		)
+		compress(
+			binary.append(binary.drop_bytes(win, 4), <<next:32>>),
+			i + 1,
+			State(t, w.a, rotl32(w.b, 30), w.c, w.d),
+		)
+	}
+}
+
+fn blocks(p Binary, at Int, size Int, h State) State {
+	if at >= size {
+		h
+	} else {
+		match binary.slice_bytes(p, at, 64) {
+			Ok(block) -> {
+				w = compress(block, 0, State(h.a, h.b, h.c, h.d, h.e))
+				blocks(
+					p,
+					at + 64,
+					size,
+					State(
+						int.bitwise_and(h.a + w.a, MASK32),
+						int.bitwise_and(h.b + w.b, MASK32),
+						int.bitwise_and(h.c + w.c, MASK32),
+						int.bitwise_and(h.d + w.d, MASK32),
+						int.bitwise_and(h.e + w.e, MASK32),
+					),
+				)
+			}
+			// Unreachable: `pad` returns a whole number of 64-byte blocks and
+			// `at` steps by 64 from 0, so the window is always inside `p`. The
+			// arm exists because Result has two of them.
+			Err(Nil) -> h
+		}
+	}
+}
+
+// The SHA-1 digest of `m`: 20 bytes, big-endian. Total — every input has a
+// digest, including the empty binary.
+//
+// Read the module doc before reaching for this.
+pub fn sha1(m Binary) Binary {
+	p = pad(m)
+	h = blocks(
+		p,
+		0,
+		binary.byte_size(p),
+		State(1732584193, 4023233417, 2562383102, 271733878, 3285377520),
+	)
+	<<h.a:32, h.b:32, h.c:32, h.d:32, h.e:32>>
+}
+
+// The `Sec-WebSocket-Accept` value a server owes for the client's
+// `Sec-WebSocket-Key`, per RFC 6455 §4.2.2: base64(sha1(key <> GUID)).
+//
+// `key` is the raw header value as it appeared on the wire, still base64 — it
+// is concatenated as text and is NOT decoded first. A client compares this
+// against the header it received; a client that skips the comparison accepts
+// any server that answers 101.
+pub fn websocket_accept(key Binary) Binary {
+	base64.encode(sha1(binary.append(key, websocket_guid)))
+}

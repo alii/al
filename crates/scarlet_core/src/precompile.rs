@@ -262,6 +262,8 @@ mod tests {
             "scarlet/float",
             "scarlet/decimal",
             "scarlet/binary",
+            "scarlet/base64",
+            "scarlet/crypto",
             "scarlet/bool",
             "scarlet/net",
             "scarlet/io",

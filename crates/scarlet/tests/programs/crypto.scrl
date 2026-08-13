@@ -1,0 +1,237 @@
+// scarlet/base64 and scarlet/crypto: the encoding and the one hash.
+//
+// Both are pure Scarlet over `scarlet/int`'s bitwise ops and `<<>>` segments,
+// so this program is also the widest exercise of 32-bit arithmetic emulated on
+// a 64-bit signed Int — every value here is masked back to 32 bits by hand and
+// a missing mask shows up as a wrong digest rather than a crash.
+//
+// The expected values are NOT computed here. They are the published vectors:
+// RFC 4648 §10 for base64, FIPS 180-1 / the usual `shasum -a 1` corpus for
+// SHA-1, and RFC 6455 §1.3 for the handshake. A test that derived them from
+// this implementation would agree with itself and witness nothing.
+//
+// What this does NOT witness: the JIT. These run through the interpreter, so a
+// native-backend disagreement on the bitwise ops would not show up here — that
+// belongs with the bridge-op coverage in tests/native_backend.rs. Nor is there
+// any randomness: `scarlet/crypto` has no CSPRNG yet, so the handshake's
+// client half (a random `Sec-WebSocket-Key`) cannot be built in-language.
+
+import scarlet/base64
+import scarlet/binary
+import scarlet/crypto
+import scarlet/int
+
+fn ok(b Bool) String {
+	if b { 'PASS' } else { 'FAIL' }
+}
+
+fn nibble(v Int) Int {
+	if v < 10 {
+		48 + v
+	} else {
+		87 + v
+	}
+}
+
+fn hex_from(b Binary, at Int, size Int, acc Binary) Binary {
+	if at >= size {
+		acc
+	} else {
+		v = binary.byte_at(b, at)
+		hex_from(
+			b,
+			at + 1,
+			size,
+			binary.append(
+				acc,
+				<<nibble(int.bitwise_shift_right(v, 4)):8, nibble(int.bitwise_and(v, 15)):8>>,
+			),
+		)
+	}
+}
+
+// Digests are compared as lowercase hex because that is the form every
+// published vector is written in; comparing raw binaries would make a
+// mismatch unreadable in the golden.
+fn hex(b Binary) String {
+	text(hex_from(b, 0, binary.byte_size(b), <<>>))
+}
+
+fn text(b Binary) String {
+	match binary.to_string(b) {
+		Ok(s) -> s
+		Err(Nil) -> 'NOT-UTF8'
+	}
+}
+
+fn head(b Binary, n Int) String {
+	match binary.slice_bytes(b, 0, n) {
+		Ok(h) -> text(h)
+		Err(Nil) -> 'SHORT'
+	}
+}
+
+fn repeat(n Int, unit Binary, acc Binary) Binary {
+	if n <= 0 {
+		acc
+	} else {
+		repeat(n - 1, unit, binary.append(acc, unit))
+	}
+}
+
+fn a_times(n Int) Binary {
+	repeat(n, <<'a'>>, <<>>)
+}
+
+// Every byte 0..255, which is the only input that exercises all 64 base64
+// digits and both halves of the alphabet's discontinuities.
+fn all_bytes(n Int, acc Binary) Binary {
+	if n > 255 {
+		acc
+	} else {
+		all_bytes(n + 1, binary.append(acc, <<n:8>>))
+	}
+}
+
+fn decodes_to(encoded Binary, expected Binary) Bool {
+	match base64.decode(encoded) {
+		Ok(got) -> got == expected
+		Err(Nil) -> False
+	}
+}
+
+fn rejects(encoded Binary) Bool {
+	match base64.decode(encoded) {
+		Ok(_) -> False
+		Err(Nil) -> True
+	}
+}
+
+fn round_trips(b Binary) Bool {
+	decodes_to(base64.encode(b), b)
+}
+
+pub fn main() {
+	// --- base64: RFC 4648 §10 -------------------------------------------------
+	//
+	// The whole point of these seven is the padding: they walk every input
+	// length mod 3, so a `=` miscounted by one shows up immediately.
+
+	println('b64 empty: "${text(base64.encode(<<>>))}"')
+	println('b64 f: ${text(base64.encode(<<'f'>>))}')
+	println('b64 fo: ${text(base64.encode(<<'fo'>>))}')
+	println('b64 foo: ${text(base64.encode(<<'foo'>>))}')
+	println('b64 foob: ${text(base64.encode(<<'foob'>>))}')
+	println('b64 fooba: ${text(base64.encode(<<'fooba'>>))}')
+	println('b64 foobar: ${text(base64.encode(<<'foobar'>>))}')
+
+	// --- base64: decode is encode's inverse -----------------------------------
+
+	println(
+		'b64 roundtrip: ${ok(
+			round_trips(<<>>),
+		)} ${ok(
+			round_trips(<<'f'>>),
+		)} ${ok(
+			round_trips(<<'fo'>>),
+		)} ${ok(round_trips(<<'foo'>>))} ${ok(round_trips(<<'foobar'>>))}',
+	)
+
+	// All 256 byte values, so every digit of the alphabet is produced and read
+	// back. `+` and `/` (digits 62 and 63) appear nowhere in the ASCII vectors
+	// above — this is the only case that covers them.
+	every = all_bytes(0, <<>>)
+	println('b64 all256 roundtrip: ${ok(round_trips(every))}')
+	println('b64 all256 head: ${head(base64.encode(every), 44)}')
+
+	// --- base64: decode is strict ---------------------------------------------
+	//
+	// Each of these is a shape a lenient decoder accepts. Accepting any of them
+	// means two different inputs decode to the same bytes, which is how a
+	// signature or a nonce check gets bypassed.
+
+	// Each vector is a multiple of four EXCEPT the length one, so every other
+	// line here fails on the rule it names rather than on the length check.
+	println('b64 reject bad length: ${ok(rejects(<<'Zm9vYmE'>>))}')
+	println('b64 reject non-alphabet: ${ok(rejects(<<'Zm9v*mFy'>>))}')
+	// Both interior-pad groups are individually well-formed — 'Zg==' is 'f' and
+	// 'Zm8=' is 'fo' — so position is the ONLY thing wrong with them. A vector
+	// whose fill bits were also wrong would be rejected by the fill rule and
+	// would witness nothing about position; that mistake was made here first
+	// and caught by planting the missing check.
+	println('b64 reject interior pad 2: ${ok(rejects(<<'Zg==YmFy'>>))}')
+	println('b64 reject interior pad 1: ${ok(rejects(<<'Zm8=YmFy'>>))}')
+	// Whitespace is not skipped: MIME base64 arrives wrapped at 76 columns and
+	// the caller, not this decoder, decides to strip it.
+	println('b64 reject whitespace: ${ok(rejects(<<'Zm9v YmF'>>))}')
+	// 'Zg==' is the SOLE encoding of 'f'. 'Zh==' differs only in the four fill
+	// bits, so a decoder that ignores them maps two inputs to one output.
+	println(
+		'b64 reject nonzero fill 2: ${ok(
+			rejects(<<'Zh=='>>),
+		)} ${ok(decodes_to(<<'Zg=='>>, <<'f'>>))}',
+	)
+	// Same for the two fill bits of a one-pad group: 'Zm8=' is 'fo', 'Zm9=' is
+	// the same two bytes with a bit set that nothing reads.
+	println(
+		'b64 reject nonzero fill 1: ${ok(
+			rejects(<<'Zm9='>>),
+		)} ${ok(decodes_to(<<'Zm8='>>, <<'fo'>>))}',
+	)
+
+	// --- sha1: published vectors ----------------------------------------------
+
+	println('sha1 empty: ${hex(crypto.sha1(<<>>))}')
+	println('sha1 abc: ${hex(crypto.sha1(<<'abc'>>))}')
+	println('sha1 fox: ${hex(crypto.sha1(<<'The quick brown fox jumps over the lazy dog'>>))}')
+
+	// --- sha1: the padding boundary -------------------------------------------
+	//
+	// The block is 64 bytes and the length occupies the last 8, so a message of
+	// 56..63 bytes needs a whole extra block that a naive `pad` does not add.
+	// 55 and 56 straddle that; 63/64/65 straddle the block itself; 119/120
+	// straddle it one block further out, where an off-by-one in the block walk
+	// rather than in the padding would show.
+
+	println('sha1 55a: ${hex(crypto.sha1(a_times(55)))}')
+	println('sha1 56a: ${hex(crypto.sha1(a_times(56)))}')
+	println('sha1 57a: ${hex(crypto.sha1(a_times(57)))}')
+	println('sha1 63a: ${hex(crypto.sha1(a_times(63)))}')
+	println('sha1 64a: ${hex(crypto.sha1(a_times(64)))}')
+	println('sha1 65a: ${hex(crypto.sha1(a_times(65)))}')
+	println('sha1 119a: ${hex(crypto.sha1(a_times(119)))}')
+	println('sha1 120a: ${hex(crypto.sha1(a_times(120)))}')
+
+	// A non-ASCII input, so the digest is over bytes and not over anything
+	// text-shaped.
+	println('sha1 all256: ${hex(crypto.sha1(every))}')
+
+	// Digest length is fixed at 20 bytes regardless of input size.
+	println(
+		'sha1 length: ${ok(
+			binary.byte_size(crypto.sha1(<<>>)) == 20,
+		)} ${ok(binary.byte_size(crypto.sha1(every)) == 20)}',
+	)
+
+	// --- RFC 6455 §1.3: the worked example ------------------------------------
+	//
+	// The spec's own key and its expected `Sec-WebSocket-Accept`. This is the
+	// vector that ties both modules together, and the reason SHA-1 is here at
+	// all.
+
+	accept = crypto.websocket_accept(<<'dGhlIHNhbXBsZSBub25jZQ=='>>)
+	println('ws accept: ${text(accept)}')
+	println('ws accept matches: ${ok(accept == <<'s3pPLMBiTxaQ9kYGzzhZRbK+xOo='>>)}')
+
+	// The GUID is spelled once, in the module. A caller that appends its own
+	// copy must get the same answer.
+	manual = base64.encode(
+		crypto.sha1(
+			binary.append(
+				<<'dGhlIHNhbXBsZSBub25jZQ=='>>,
+				<<'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'>>,
+			),
+		),
+	)
+	println('ws accept manual: ${ok(manual == accept)}')
+}
