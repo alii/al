@@ -123,7 +123,17 @@ impl Desc {
     /// The 64-bit hash of this type's shape. Two peers agree they are talking
     /// about the same shape by comparing these; `wire.scrl`'s module doc
     /// specifies how it is computed and what moves it.
-    pub fn fingerprint(&self) -> u64 {
+    // Private and suppressed for the same reason as the accessors above, and on
+    // its own attribute for the same reason: elaboration is what will compare two
+    // of these, and it does not call `build_desc` yet. Widen with that caller.
+    //
+    // Not `#[expect(dead_code)]`, which would retire itself and is the obvious
+    // improvement: the tests below call this and the library does not, so the
+    // expectation is fulfilled in the lib target and *unfulfilled* in lib test —
+    // `cargo clippy --all-targets` then fails with "this lint expectation is
+    // unfulfilled". `expect` cannot express a test-only helper.
+    #[allow(dead_code)]
+    fn fingerprint(&self) -> u64 {
         self.fingerprint
     }
 
