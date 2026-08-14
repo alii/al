@@ -209,10 +209,16 @@ pub fn main() {
 /// process, with no error on either stream.
 ///
 /// `hit` is a separate body so it warms on call count, and 20,000 iterations
-/// put both sides of the threshold in the sum: 20,000 is reachable only if
-/// every iteration took the aliased arm, whichever engine ran it. The debug
-/// line is the witness that the compile fired at all — without it a green
-/// result could mean the body never left the interpreter.
+/// put both sides of the threshold in the sum.
+///
+/// `make` alternates the two constructors so the count pins the arm in both
+/// directions: a comparison that is wrongly false loses `Green`s and comes in
+/// under 10,000, and one that is wrongly true picks `Red`s up and comes in
+/// over. A `make` that returned `Green` every time would print 20,000 under a
+/// comparison that always said yes, so only false negatives would be caught.
+/// `assert_warmed` pins the warmth to `hit` by its own fn index — `drive` and
+/// `make` warm here too, so a bare "some body warmed" witness is satisfied
+/// even when the body holding the match never leaves the interpreter.
 #[test]
 fn a_warmed_aliased_match_agrees_across_the_warmup_boundary() {
     let src = "import ./color
@@ -236,23 +242,20 @@ pub fn main() {
     let proj = Project::new("alias_warm");
     proj.write(
         "color.scrl",
-        "pub type Color {\n\tRed\n\tGreen(shade Int)\n}\n\npub fn make(n Int) Color {\n\tGreen(n)\n}\n",
+        "pub type Color {\n\tRed\n\tGreen(shade Int)\n}\n\npub fn make(n Int) Color {\n\tif n % 2 == 0 { Red } else { Green(n) }\n}\n",
     );
     let path = proj.dir.join("prog.scrl");
     std::fs::write(&path, src).unwrap();
     let path = path.to_string_lossy().into_owned();
     let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
     assert!(out.success, "run failed:\n{}", out.stderr);
+    // 10,000 odd `i` in 1..=20,000, so every `Green` and no `Red`.
     assert_eq!(
-        out.stdout, "20000\n",
-        "an aliased arm must match under both engines; stderr:\n{}",
+        out.stdout, "10000\n",
+        "an aliased arm must match the same constructors under both engines; stderr:\n{}",
         out.stderr
     );
-    assert!(
-        out.stderr.contains("warmed fn"),
-        "the match must be compiled, or this only tests the interpreter; stderr:\n{}",
-        out.stderr
-    );
+    assert_warmed(&out.stderr, "hit");
 }
 
 /// (d) Int overflow spill past ±2^47, where Ints leave the NaN-box payload,

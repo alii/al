@@ -1291,14 +1291,16 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                         self.push(op(if b { Op::PushTrue } else { Op::PushFalse }));
                         self.push(op(Op::Eq));
                     } else {
-                        let id_c = self.ctx.intern_int(variant.type_id.0 as i64);
-                        self.push(op_arg(Op::PushConst, id_c));
-                        let vn = self
-                            .ctx
-                            .variant_name(variant.type_id, variant.variant_idx)
-                            .to_owned();
-                        let vn_c = self.ctx.intern_str(&vn);
-                        self.push(op_arg(Op::PushConst, vn_c));
+                        // The same key the native ladder compares, from the
+                        // same `pack_variant`: one packed word, never the
+                        // variant's name. Dispatching the one arm on two keys
+                        // is what let an aliased match answer differently
+                        // either side of the warmup threshold.
+                        let tag_c = self.ctx.intern_int(crate::bytecode::value::pack_variant(
+                            variant.type_id,
+                            variant.variant_idx,
+                        ));
+                        self.push(op_arg(Op::PushConst, tag_c));
                         self.push(op(Op::MatchEnum));
                     }
                     let f = self.jump(Op::JumpIfFalse);

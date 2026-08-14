@@ -2468,6 +2468,15 @@ impl<'a> EnumRef<'a> {
         // SAFETY: constructed from a tag-checked Enum value.
         unsafe { (payload_word(self.obj, 0) >> 32) as u16 }
     }
+    /// The whole packed [`pack_variant`] word — the constructor identity both
+    /// match ladders compare. Returns the stored word rather than rebuilding
+    /// it from [`Self::type_id`] and [`Self::variant_idx`], so `Op::MatchEnum`
+    /// tests the same bits the native ladder loads.
+    #[inline]
+    pub fn variant_tag(&self) -> i64 {
+        // SAFETY: constructed from a tag-checked Enum value.
+        unsafe { payload_word(self.obj, 0) as i64 }
+    }
     /// The raw stored hash word; `0` means "not computed yet". Heap cells
     /// defer hashing to first use. Frozen cells always carry a build-time
     /// hash, because [`freeze_enum_hash`] runs before they are marked

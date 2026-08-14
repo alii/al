@@ -778,30 +778,21 @@ impl VM {
                     self.make_enum_payload(instr.operand, instr.b as usize, instr.a != 0)?
                 }
                 Op::MatchEnum => {
-                    let variant_name = self.pop()?;
-                    let type_id_val = self.pop()?;
+                    let tag_val = self.pop()?;
                     let val = self.pop()?;
 
-                    let Some(variant_str) = variant_name.as_str() else {
-                        return Err(VmError::internal("enum/variant names must be strings"));
+                    let Some(tag) = tag_val.as_int() else {
+                        return Err(VmError::internal("enum variant tag must be int"));
                     };
-                    let Some(type_id) = type_id_val.as_int() else {
-                        return Err(VmError::internal("enum type id must be int"));
-                    };
-                    let type_id = crate::TypeId(type_id as i32);
 
                     if let Some(ev) = val.as_enum() {
-                        // For enums built by `MakeEnumPayload` the stored
-                        // variant-name word IS the constant the match header
-                        // pushed, so a bits compare decides the arm. The
-                        // content compare is the fallback for enums built by
-                        // prelude templates, where the same name interns to a
-                        // different address.
-                        self.stack.push(Value::bool(
-                            ev.type_id() == type_id
-                                && (ev.variant_name_value().to_bits() == variant_name.to_bits()
-                                    || ev.variant_name() == variant_str),
-                        ));
+                        // Payload word 0, which is the word the native ladder
+                        // compares and the word every constructor writes
+                        // through `pack_variant`. Name interning differs
+                        // between `MakeEnumPayload` and the prelude templates,
+                        // so keeping it out of the decision is what stops the
+                        // two engines resolving one arm differently.
+                        self.stack.push(Value::bool(ev.variant_tag() == tag));
                     } else {
                         self.stack.push(Value::bool(false));
                     }

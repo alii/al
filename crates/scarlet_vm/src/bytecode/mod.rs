@@ -167,6 +167,9 @@ pub enum Op {
     /// arity, `operand` = prehash constant idx. `a` = 1 when a Perceus reuse
     /// token sits on top of the payloads.
     MakeEnumPayload,
+    /// `[enum, tag] -> bool` — `tag` is a [`value::pack_variant`] constant.
+    /// Tests payload word 0, the key the native ladder compares, so the two
+    /// engines cannot resolve one arm differently.
     MatchEnum,
     UnwrapEnum,
     /// `[enum] -> ` — computed jump by variant index. `a` = variant count,

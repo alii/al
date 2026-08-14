@@ -3397,9 +3397,11 @@ impl<'a> BodyGen<'a> {
                         self.b.switch_to_block(tag_b);
                         let obj = self.b.ins().band_imm(sw, NATIVE_PTR_MASK as i64);
                         let w0 = self.load_payload_word(obj, 0);
-                        let packed = (variant.type_id.0 as u32 as u64)
-                            | ((variant.variant_idx as u64) << 32);
-                        let hit = self.b.ins().icmp_imm(IntCC::Equal, w0, packed as i64);
+                        let packed = crate::bytecode::value::pack_variant(
+                            variant.type_id,
+                            variant.variant_idx,
+                        );
+                        let hit = self.b.ins().icmp_imm(IntCC::Equal, w0, packed);
                         self.b.ins().brif(hit, arm_b, &[], next_b, &[]);
                         self.b.seal_block(arm_b);
                         self.b.seal_block(next_b);
