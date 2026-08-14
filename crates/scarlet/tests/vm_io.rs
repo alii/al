@@ -1,7 +1,7 @@
 // Exercises the VM's I/O opcodes. Server tests spawn the `scarlet` binary directly
 // because the server must run concurrently with the Rust client driving it.
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 mod common;
@@ -1126,18 +1126,30 @@ pub fn main() {
     assert_eq!(n, 0, "expected EOF after the handler returned");
 }
 
-/// A listener that never accepts, with its backlog already full.
+/// How many connections `full_accept_queue` will open before concluding this
+/// platform answers whatever the accept queue holds. Darwin stops after one,
+/// measured; the rest is headroom for platforms that admit more.
+const MAX_FILL_ATTEMPTS: usize = 16;
+
+/// A listener that never accepts, filled until the platform stops answering.
 ///
-/// This is the peer an unbounded connect has no answer for. `listen(1)` is the
-/// smallest backlog the kernel will honour and one completed connection fills
-/// it; the SYN after that is dropped rather than refused, so the client waits
+/// This is the peer an unbounded connect has no answer for: once the accept
+/// queue is full the SYN is dropped rather than refused, so the client waits
 /// with no answer and no error ever coming back. std's `TcpListener` always
 /// listens with a backlog of 128, which is why this goes through `socket2`.
 ///
-/// Both the listener and the connection that fills it are returned so the
-/// caller holds them for the life of the test: dropping either one empties the
-/// queue, and the connect under test then completes instead of hanging.
-fn full_accept_queue() -> (socket2::Socket, std::net::TcpStream, u16) {
+/// How many connections a `listen(1)` socket admits before that happens is
+/// platform-specific — one on Darwin, measured; more than one on Linux, where
+/// CI watched the connect complete — so the fill stops on the observation that
+/// a connect no longer completes, never on a count. Assuming a count is what
+/// made this test fail on Linux CI: the queue was still short, the connect
+/// under test completed, and nothing about the deadline was witnessed.
+///
+/// The listener is returned because dropping it closes the port outright. The
+/// fillers come with it because whether a closed-but-still-queued connection
+/// keeps its slot is platform-specific — on Darwin it does, measured — and
+/// holding them for the life of the test removes the question.
+fn full_accept_queue() -> (socket2::Socket, Vec<std::net::TcpStream>, u16) {
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("addr");
     let listener = socket2::Socket::new(
         socket2::Domain::IPV4,
@@ -1153,13 +1165,34 @@ fn full_accept_queue() -> (socket2::Socket, std::net::TcpStream, u16) {
         .as_socket_ipv4()
         .expect("v4")
         .port();
-    let filler = std::net::TcpStream::connect(("127.0.0.1", port)).expect("fill the accept queue");
-    (listener, filler, port)
+
+    // A loopback connect the listener queues completes in about a millisecond,
+    // so a filler that reaches this bound is a SYN that went unanswered.
+    let fill_timeout = std::time::Duration::from_millis(300);
+    let target = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut fillers = Vec::new();
+    for _ in 0..MAX_FILL_ATTEMPTS {
+        match std::net::TcpStream::connect_timeout(&target, fill_timeout) {
+            Ok(filler) => fillers.push(filler),
+            Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                return (listener, fillers, port);
+            }
+            Err(e) => panic!("filling the accept queue failed with {e:?}, not a dropped SYN"),
+        }
+    }
+    panic!(
+        "{MAX_FILL_ATTEMPTS} connections to a listen(1) socket all completed: this platform \
+         does not drop the SYN when the accept queue is full, so there is no way here to \
+         make a connect hang"
+    );
 }
 
 /// The deadline `connect_addr_within` is given below, and the floor the kernel
-/// enforces on the same call without it. Measured on this host: a loopback
-/// connect to a full accept queue fails by itself with ETIMEDOUT after 7.836 s.
+/// enforces on the same call without it. Measured on aarch64-apple-darwin: a
+/// loopback connect to a full accept queue fails by itself with ETIMEDOUT
+/// after 7.836 s. Linux's floor is its SYN retransmission schedule and is far
+/// longer — not measured here — so this is the tighter of the two and the
+/// bound below holds on both.
 ///
 /// The gap between these two is the whole of what the test can see. An earlier
 /// version asserted only the `TimedOut` arm and the exit code, and passed
@@ -1182,12 +1215,13 @@ const KERNEL_LOOPBACK_FLOOR_MS: u64 = 7_836;
 /// once. Any bound between the two constants produces this output, so a re-run
 /// that reset the clock would still pass.
 ///
-/// Portability: this rests on a full accept queue dropping the SYN, which is
-/// BSD behaviour. A platform that completes the connection instead would take
-/// the `connected` arm and fail here rather than silently passing.
+/// Portability: this rests on a full accept queue dropping the SYN, which
+/// Linux and Darwin both do at queue depths they do not agree on — hence the
+/// observed fill in `full_accept_queue`. A platform that answers regardless
+/// panics there rather than reaching this assertion.
 #[test]
 fn connect_addr_within_times_out_against_a_full_accept_queue() {
-    let (_listener, _filler, port) = full_accept_queue();
+    let (_listener, _fillers, port) = full_accept_queue();
 
     let src = format!(
         r#"import scarlet/net
