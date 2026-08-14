@@ -50,7 +50,11 @@ jobs:
         run: bun install
 
       # src/ is committed because grammar consumers build from it; editing
-      # grammar.js without regenerating must fail here.
+      # grammar.js without regenerating must fail here. lexical.js is read by
+      # this step but never written by it, so a stale copy regenerates a
+      # matching src/ and this diff stays clean. It comes from
+      # crates/scarlet_syntax and is gated in the `test` job by xtask's
+      # generated_files_are_up_to_date — `cargo xtask gen-editor-syntax --check`.
       - name: Generated parser is current
         run: bun run generate && git diff --exit-code src grammar.js
 
