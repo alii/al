@@ -55,8 +55,9 @@ pub(super) enum WakeAction {
     /// Resume wherever the op left `ip`. Retry waits set `ip - 1` to re-run;
     /// `Sleep` leaves `ip` past itself with its result already on the stack.
     Rerun,
-    /// `VM::finish_connect` builds the result and pushes it onto the process's
-    /// stack instead of re-running the instruction.
+    /// `VM::finish_connect` (I/O wake) or `VM::timeout_connect` (deadline)
+    /// builds the result and pushes it onto the process's stack instead of
+    /// re-running the instruction.
     CompleteConnect,
 }
 
