@@ -301,6 +301,14 @@ pub enum Op {
     /// pinning that subjects are reclaimed when their owners let go of them.
     /// (scarlet/internal.live_subjects)
     LiveSubjects,
+    /// `[] -> Int` — blocking-pool worker threads alive right now, busy plus
+    /// parked. Introspection for pinning that the pool grows on demand, and
+    /// the only reading of its depth from inside a program. Reports `total`,
+    /// not `idle`: a worker increments `idle` before parking and decrements it
+    /// only once `cond.wait` has returned, so `idle` counts a notified worker
+    /// as parked until it re-acquires the queue lock.
+    /// (scarlet/internal.blocking_threads)
+    BlockingThreads,
     Halt,
 
     // I/O operations
@@ -735,6 +743,7 @@ impl Op {
             | Op::Print
             | Op::StackDepth
             | Op::LiveSubjects
+            | Op::BlockingThreads
             | Op::Halt
             | Op::FileRead
             | Op::FileWrite
@@ -959,6 +968,7 @@ impl Op {
             | Op::FloatToString
             | Op::StackDepth
             | Op::LiveSubjects
+            | Op::BlockingThreads
             | Op::Halt
             | Op::FileRead
             | Op::FileWrite

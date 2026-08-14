@@ -26,6 +26,7 @@ fn builtin_op(name: &str) -> Option<Op> {
         "string__inspect" => Op::ToString,
         "internal__stack_depth" => Op::StackDepth,
         "internal__live_subjects" => Op::LiveSubjects,
+        "internal__blocking_threads" => Op::BlockingThreads,
         "io__read_file" => Op::FileRead,
         "io__write_file" => Op::FileWrite,
         "net__listen" => Op::TcpListen,

@@ -746,6 +746,7 @@ impl VM {
                 Op::Print => self.print_op(&mut reds)?,
                 Op::StackDepth => self.stack_depth()?,
                 Op::LiveSubjects => self.live_subjects()?,
+                Op::BlockingThreads => self.blocking_threads()?,
                 Op::Monotonic => self.monotonic()?,
                 Op::RandomBytes => self.random_bytes()?,
                 Op::Argv => self.argv()?,
@@ -1312,6 +1313,13 @@ impl VM {
             .runtime
             .live_subjects
             .load(std::sync::atomic::Ordering::Relaxed);
+        self.stack.push(Value::small_int(n as i64));
+        Ok(())
+    }
+
+    /// `Op::BlockingThreads` — see the opcode's docs.
+    pub(super) fn blocking_threads(&mut self) -> VmResult<()> {
+        let n = self.runtime.blocking_threads();
         self.stack.push(Value::small_int(n as i64));
         Ok(())
     }

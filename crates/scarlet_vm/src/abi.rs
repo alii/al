@@ -883,6 +883,7 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
         | Op::FloatToString
         | Op::StackDepth
         | Op::LiveSubjects
+        | Op::BlockingThreads
         | Op::Halt
         | Op::ProcessSpawn
         | Op::ProcessSpawnUnlinked

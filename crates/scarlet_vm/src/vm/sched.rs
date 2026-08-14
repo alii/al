@@ -761,6 +761,13 @@ impl Runtime {
         }
     }
 
+    /// Blocking-pool worker threads alive right now, busy plus parked: what
+    /// `internal.blocking_threads` reports, so a test can pin that the pool
+    /// grows on demand. `total` rather than `idle` — see [`Op::BlockingThreads`].
+    pub(super) fn blocking_threads(&self) -> usize {
+        self.blocking.total.load(Ordering::Acquire)
+    }
+
     fn spawn_blocking_worker(self: &Arc<Self>) {
         self.blocking.total.fetch_add(1, Ordering::AcqRel);
         let rt = Arc::clone(self);

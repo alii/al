@@ -1,3 +1,4 @@
+pool starts empty: True
 write: Ok(Nil)
 read back: ledger v1
 round trip: True
@@ -7,6 +8,7 @@ write bytes: Ok(Nil)
 snapshot: v1, 2 samples
 unaligned: UnalignedBinary
 snapshot survived: True
+pool grew for file io: True
 add_ms then since_ms: 250
 since_ms is signed: -250
 monotonic never rewinds: True

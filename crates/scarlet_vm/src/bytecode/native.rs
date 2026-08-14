@@ -188,6 +188,7 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::Print
         | Op::StackDepth
         | Op::LiveSubjects
+        | Op::BlockingThreads
         | Op::TcpListen
         | Op::TcpClose
         | Op::TlsClose

@@ -12,3 +12,12 @@ pub fn stack_depth() Int
 // any number of request/reply exchanges — see tests/programs/messages.scrl.
 @vm(internal__live_subjects)
 pub fn live_subjects() Int
+
+// Blocking-pool worker threads alive across the whole program: the OS threads
+// that carry file, DNS and subprocess operations so a scheduler thread never
+// blocks. The pool is elastic — it starts empty, grows on demand up to
+// SCARLET_BLOCKING_THREADS (512), and lets idle workers above a warm floor
+// exit — so this is a live number, not a constant. Reports threads that exist,
+// busy plus parked; see tests/programs/effects.scrl.
+@vm(internal__blocking_threads)
+pub fn blocking_threads() Int

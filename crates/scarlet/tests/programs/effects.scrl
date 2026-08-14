@@ -8,6 +8,7 @@
 // so a relative path would not be a fixed input.
 
 import scarlet/array
+import scarlet/internal
 import scarlet/io.{IsADirectory, NotFound, UnalignedBinary}
 import scarlet/map
 import scarlet/option
@@ -24,6 +25,11 @@ pub fn main() {
 	// --- scarlet/io -----------------------------------------------------------------
 	// Every operation returns a Result whose error is the typed IoError sum, so a
 	// caller pattern-matches the failure instead of decoding an errno.
+	//
+	// Each one also runs on a blocking-pool thread rather than a scheduler thread,
+	// and the pool is built lazily: no io has happened yet, so it has no threads.
+
+	println('pool starts empty: ${internal.blocking_threads() == 0}')
 
 	println('write: ${io.write_text(PATH, 'ledger v1')}')
 	println('read back: ${io.read_text(PATH) or '<failed>'}')
@@ -60,6 +66,13 @@ pub fn main() {
 		Err(e) -> println('unaligned: ${e}')
 	}
 	println('snapshot survived: ${io.read_file(SNAPSHOT) == Ok(<<'ALSNAP', 1:8, 2:16>>)}')
+
+	// Those reads and writes built the pool, so it is no longer empty. Only the
+	// growth is pinned: how many threads it took is the machine's business, and
+	// the pool is free to reuse one worker for every operation above. Nothing
+	// here witnesses the SCARLET_BLOCKING_THREADS ceiling being reached — that
+	// needs operations that stay outstanding, and every one of these completes.
+	println('pool grew for file io: ${internal.blocking_threads() > 0}')
 
 	// --- scarlet/time ---------------------------------------------------------------
 	// An Instant is opaque and its numeric value is nobody's business; what the

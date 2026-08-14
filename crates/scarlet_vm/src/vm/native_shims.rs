@@ -616,6 +616,7 @@ mod opc {
     pub const FACTORY_SPAWN: u8 = Op::FactorySpawn as u8;
     pub const STACK_DEPTH: u8 = Op::StackDepth as u8;
     pub const LIVE_SUBJECTS: u8 = Op::LiveSubjects as u8;
+    pub const BLOCKING_THREADS: u8 = Op::BlockingThreads as u8;
     pub const STR_CONCAT_N: u8 = Op::StrConcatN as u8;
     pub const STR_CONTAINS: u8 = Op::StrContains as u8;
     pub const STR_LEN: u8 = Op::StrLen as u8;
@@ -901,6 +902,7 @@ impl VM {
             opc::HTTP_HEADER_GET => self.http_header_get(),
             opc::STACK_DEPTH => self.stack_depth(),
             opc::LIVE_SUBJECTS => self.live_subjects(),
+            opc::BLOCKING_THREADS => self.blocking_threads(),
             opc::TCP_LOCAL_ADDR => self.tcp_local_addr(),
             opc::PROCESS_SPAWN => self.process_spawn(reds, Link::ToParent),
             opc::PROCESS_SPAWN_UNLINKED => self.process_spawn(reds, Link::None),
