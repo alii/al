@@ -37,6 +37,11 @@
 //!   which happened. Its consumers are *read off those arms* rather than named:
 //!   the set was one function until `Op::TcpConnectUntil` made it two, and a
 //!   name written down here is a blind spot the day it grows again.
+//!   A monitor and a watch are the third: the op stores a closure, returns a
+//!   handle, and the reason that closure is applied to is built when the
+//!   target ends. [`NOTICE_REGISTRARS`] is that link's minting end, and it is
+//!   keyed on the two handlers rather than on the reason's type because every
+//!   other body naming an `Ended` is on the delivery side.
 //! - **Arm selection.** Where a caller names `E::V` and its callee dispatches on
 //!   `E`, only that arm counts. `tls_read` reaches `tls_error_value` only as
 //!   `TlsFail::Io`, so it cannot build `TlsInvalidServerName`.
@@ -50,10 +55,10 @@
 //!   not required — an arm may list any subset of them. An errno this crate
 //!   mints *itself* is the exception: [`ERRNO_MINTS`] carries it, and the slot
 //!   it classifies to is required of every op that reaches the mint.
-//! - **Values the runtime builds after the op has returned.** Exit and crash
-//!   reasons are built when a monitored process ends, on a path the sweep cuts
-//!   at [`REENTRY`]. `Op::ProcessMonitor`'s arm declares them and this sweep
-//!   does not check that declaration; [`UNATTRIBUTED`] records it.
+//! - **Which reason a given notice will carry.** The notice link gives a
+//!   registrar every reason its consumers can build, because the op chooses
+//!   neither when its target ends nor how. That a particular program's
+//!   monitored process can only ever return normally is not in these sources.
 //! - **An arm that overstates.** The check is one-directional: declaring a slot
 //!   the handler cannot build costs a binding, not a crash.
 //!
@@ -115,27 +120,11 @@ const REENTRY: &[&str] = &[
 /// Construction sites no op reaches, each with the reason it does not. A site
 /// that is not here and not reachable fails
 /// [`every_construction_site_is_attributed_to_an_op`].
-const UNATTRIBUTED: &[(&str, &str)] = &[
-    (
-        "resolve",
-        "Templates::resolve binds the H1 bundle once at VM start; it is the \
-         binding step, not an op's outcome",
-    ),
-    (
-        "exit_reason",
-        "built when a monitored process ends, past REENTRY — Op::ProcessMonitor \
-         declares these and this sweep does not check that",
-    ),
-    (
-        "crash_value",
-        "as exit_reason: the crash is built where the process fails, not in the \
-         op that placed the monitor",
-    ),
-    (
-        "fire_watch",
-        "as exit_reason: a watch's notice is built when the watched entry goes",
-    ),
-];
+const UNATTRIBUTED: &[(&str, &str)] = &[(
+    "resolve",
+    "Templates::resolve binds the H1 bundle once at VM start; it is the \
+     binding step, not an op's outcome",
+)];
 
 /// The blocking pool's mint/consume pair. A handler returns
 /// `BlockingOp::V`; the poller builds the value in `completion_result`'s
@@ -156,6 +145,30 @@ const WAKE_FILE: &str = "poll.rs";
 /// Every other wake re-runs the op's own handler, which the call walk already
 /// covers. Asserted so a third action fails here.
 const WAKE_RERUN: &str = "Rerun";
+
+/// The notice link's minting end. Both handlers store a closure to be started
+/// when their target ends; the value it is applied to is built there and then,
+/// past [`REENTRY`], so neither op reaches it by call.
+///
+/// Keyed on the two handlers rather than on the registration's type because
+/// every *other* body naming an `Ended` — `incarnation_exited`,
+/// `request_restart`, `free_entry` — is on the delivery side, and linking
+/// those would hand the same eleven reasons to every supervision op, which is
+/// what [`REENTRY`] exists to prevent. Nothing but the two dispatch ladders
+/// calls either registrar, and that is what keeps the link this narrow:
+/// [`the_continuation_model_still_matches_the_runtime`] asserts it.
+const NOTICE_REGISTRARS: &[&str] = &["process_monitor", "watch_new"];
+
+/// What builds a notice's payload, with the enum each is total over. Walked
+/// with every arm live: a registrar chooses neither when its target ends nor
+/// how, so it reaches all of them. Totality is asserted, which is what bounds
+/// the set to these three — a fourth reason cannot be added to `Exit`,
+/// `Crash` or `Ended` without failing that check.
+const NOTICE_CONSUMERS: &[(&str, &str)] = &[
+    ("exit_reason", "Exit"),
+    ("crash_value", "Crash"),
+    ("fire_watch", "Ended"),
+];
 
 /// Slot mentions that name a slot without building one.
 const NAMING_ONLY: &[&str] = &["unbound", "is_abi"];
@@ -1104,6 +1117,22 @@ fn reach(g: &Graph, op: Op) -> (BTreeSet<AbiSlot>, BTreeSet<AbiSlot>, BTreeSet<S
             minted.insert(*slot);
         }
 
+        // Registration is the token: take each payload builder whole, arms and
+        // all. Going through the stack instead would let an arm-selected edge
+        // reach the same function first and mark it seen, leaving the walk with
+        // only the one arm the registrar happened to name — `watch_new` calls
+        // `fire_watch` directly as `Ended::AlreadyGone`.
+        if NOTICE_REGISTRARS.contains(&name.as_str()) {
+            for (consumer, _) in NOTICE_CONSUMERS {
+                let Some(c) = g.nodes.get(*consumer) else {
+                    continue;
+                };
+                seen.insert((*consumer).to_string());
+                strict.extend(c.slots.iter().copied());
+                stack.extend(c.calls.iter().cloned());
+            }
+        }
+
         for (e, v) in &node.mints {
             if e == BLOCKING_MINT
                 && let Some((s, c)) = blocking_arms.and_then(|a| a.get(v))
@@ -1203,6 +1232,58 @@ fn the_continuation_model_still_matches_the_runtime() {
         g.wake_complete
     );
 
+    // The notice link. Each consumer is total over the enum it dispatches on,
+    // so a new way for a process to end reaches this file rather than becoming
+    // a reason no op is checked against.
+    for (f, en) in NOTICE_CONSUMERS {
+        let arms = g
+            .nodes
+            .get(*f)
+            .and_then(|n| n.arms.get(*en))
+            .unwrap_or_else(|| panic!("{f} no longer dispatches on {en}"));
+        let variants = enum_variants(&g.sources, en);
+        let armed: BTreeSet<&String> = arms.keys().collect();
+        let expect: BTreeSet<&String> = variants.iter().collect();
+        assert_eq!(armed, expect, "{f} does not build every {en}");
+    }
+    // A registrar is a written-down name, so it can rot two ways: the handler
+    // is renamed, or it stops being what its ladder arm calls. Either leaves
+    // the link minting nothing and the reasons unattributed again.
+    let linked: BTreeSet<String> = [Op::ProcessMonitor, Op::WatchNew]
+        .into_iter()
+        .flat_map(|o| reach(&g, o).2)
+        .collect();
+    for r in NOTICE_REGISTRARS {
+        assert!(
+            g.nodes.contains_key(*r),
+            "notice registrar {r} is not in this crate any more"
+        );
+        assert!(
+            linked.contains(*r),
+            "{r} is no longer reached from Op::ProcessMonitor or Op::WatchNew, \
+             so the notice link mints nothing for it"
+        );
+    }
+    // And the link stays narrow only because nothing else calls a registrar.
+    // A third caller would give its op all eleven reasons silently.
+    let stray: Vec<String> = (0..=u8::MAX)
+        .filter_map(Op::from_u8)
+        .filter(|o| !matches!(o, Op::ProcessMonitor | Op::WatchNew))
+        .flat_map(|o| {
+            let seen = reach(&g, o).2;
+            NOTICE_REGISTRARS
+                .iter()
+                .filter(move |r| seen.contains(**r))
+                .map(move |r| format!("{o:?} reaches {r}"))
+        })
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "a notice registrar is reachable from an op that did not place the \
+         monitor, so the notice link now spreads exit and crash reasons over \
+         it: {stray:?}"
+    );
+
     for c in CLASSIFIERS {
         assert!(g.nodes.contains_key(*c), "classifier {c} is gone");
     }
@@ -1262,6 +1343,16 @@ fn the_sweep_witnesses_each_kind_of_construction_path() {
             Op::TlsHandshake,
             AbiSlot::TlsSocket,
             "the native bridge's ladder",
+        ),
+        (
+            Op::ProcessMonitor,
+            AbiSlot::CrashTypeMismatch,
+            "the notice continuation, two functions deep",
+        ),
+        (
+            Op::WatchNew,
+            AbiSlot::ExitNormal,
+            "the notice continuation, through a watch",
         ),
     ];
     let missed: Vec<String> = cases
