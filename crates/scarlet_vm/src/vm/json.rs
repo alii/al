@@ -141,6 +141,25 @@ fn field_index(tape: &[u8], arena: &[u8], idx: usize, needle: &[u8]) -> Option<u
     None
 }
 
+/// Tape index of element `want` of the array at `idx`. `None` if `idx` is not
+/// an array, if it has no such element, or if any node the walk touches —
+/// including the element itself — is out of range.
+fn element_index(tape: &[u8], idx: usize, want: usize) -> Option<usize> {
+    let arr = node_at(tape, idx)?;
+    if arr.kind != K_ARRAY || want as u64 >= arr.payload {
+        return None;
+    }
+    let mut cursor = idx.checked_add(1)?;
+    for _ in 0..want {
+        cursor = cursor.checked_add(node_at(tape, cursor)?.skip)?;
+    }
+    // The walk reads every node it steps over but not the one it stops on, and
+    // for `want == 0` it steps nowhere. `payload` is read off the tape, so on a
+    // forged tape it is the only remaining guard and it bounds nothing.
+    node_at(tape, cursor)?;
+    Some(cursor)
+}
+
 /// Build the compact tape and the string arena from a parsed `simd-json` tape.
 ///
 /// One linear pass: `simd-json` already emits nodes in document order with a
@@ -629,15 +648,9 @@ impl VM {
         let found = (|| {
             let (arena_v, tape_v, idx) = Self::doc_parts(&doc)?;
             let tape = bin_ref(&tape_v).full_bytes();
-            let arr = node_at(&tape, idx)?;
-            if arr.kind != K_ARRAY || want < 0 || want as u64 >= arr.payload {
-                return None;
-            }
-            let mut cursor = idx.checked_add(1)?;
-            for _ in 0..want {
-                cursor = cursor.checked_add(node_at(&tape, cursor)?.skip)?;
-            }
-            Some((arena_v.clone(), tape_v.clone(), cursor))
+            let want = usize::try_from(want).ok()?;
+            let at = element_index(&tape, idx, want)?;
+            Some((arena_v.clone(), tape_v.clone(), at))
         })();
 
         let v = match found {
@@ -1160,6 +1173,36 @@ mod tests {
         // the walk rejects for some other reason.
         push_node(&mut tape, K_INT, 1, 7);
         assert_eq!(field_index(&tape, &arena, 0, b"a"), Some(2));
+    }
+
+    /// An array claiming an element the tape does not carry. Element 0 is the
+    /// walk's worst case: the loop body never runs, so the index it returns is
+    /// `idx + 1` unread, and `payload` — the only other guard — is read off the
+    /// same forged tape.
+    #[test]
+    fn element_zero_off_the_end_of_the_tape_is_none() {
+        let mut tape = Vec::new();
+        push_node(&mut tape, K_ARRAY, 2, 1);
+        assert_eq!(element_index(&tape, 0, 0), None);
+
+        // Control: the same forged array with its element present is found, so
+        // the `None` above is the absent node and not a tape shape the walk
+        // rejects for some other reason.
+        push_node(&mut tape, K_INT, 1, 7);
+        assert_eq!(element_index(&tape, 0, 0), Some(1));
+    }
+
+    /// The same defect one step along: the walk reads the node it steps over
+    /// and still not the one it lands on.
+    #[test]
+    fn a_later_element_off_the_end_of_the_tape_is_none() {
+        let mut tape = Vec::new();
+        push_node(&mut tape, K_ARRAY, 3, 2);
+        push_node(&mut tape, K_INT, 1, 7);
+        assert_eq!(element_index(&tape, 0, 1), None);
+
+        push_node(&mut tape, K_INT, 1, 9);
+        assert_eq!(element_index(&tape, 0, 1), Some(2));
     }
 
     /// Build a `scarlet/json.Json` variant. The `TypeId` and the variant
