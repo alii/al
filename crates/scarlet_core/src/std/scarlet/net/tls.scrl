@@ -95,6 +95,16 @@ pub type TlsError {
 // is never written to disk: a session ticket is key material, and persisting it
 // is not a decision a runtime should take on a program's behalf. Nothing is
 // therefore resumed across separate runs of a program.
+//
+// There is deliberately no `connect_within`. This call is three steps — resolve
+// the name, open the TCP connection, complete the handshake — and only the
+// third has a deadline today; `net.resolve` and `net.connect_addr` have none.
+// A `connect_within` could therefore bound the last third of its own work and
+// park for ever in the first two, which is a worse failure than no deadline at
+// all: the signature would promise a bound the call does not carry. When
+// `scarlet/net` grows a bounded connect, this grows one too. Until then, a
+// caller that needs the whole thing bounded writes the two steps out —
+// `net.connect` then `handshake_within` — and can see which half is unbounded.
 pub fn connect(host String, port Int) Result(TlsSocket, TlsError) {
 	sock <- result.then(result.map_err(net.connect(host, port), Transport))
 	handshake(sock, host)
@@ -112,8 +122,38 @@ pub fn connect(host String, port Int) Result(TlsSocket, TlsError) {
 // It is public because `connect` is not the only way to arrive at a socket
 // that must be secured — a proxied `CONNECT` tunnel and a `STARTTLS` upgrade
 // both hand you a live cleartext socket that has to become a TLS one.
+// It parks until the exchange finishes, with no deadline of its own. A peer
+// that accepts the TCP connection and then never answers the ClientHello — a
+// line protocol whose parser swallows the bytes, a middlebox that opens the
+// connection before it has a backend — parks the calling process for the life
+// of the program. `handshake_within` is the bounded form, and is what to reach
+// for against anything that is not known to speak TLS.
 @vm(tls__handshake)
 pub fn handshake(sock Socket, server_name String) Result(TlsSocket, TlsError)
+
+// Complete a TLS handshake as `handshake`, but wait no longer than
+// `timeout_ms` milliseconds. The deadline is captured once, here in Scarlet, as
+// an absolute monotonic timestamp, so an internal re-run on a spurious wakeup
+// never resets the clock. Errs with `Transport(TimedOut)` once it passes.
+//
+// A timeout closes the connection, exactly as a failed handshake does: the
+// `Socket` passed in was already stale from the first attempt, and the TLS
+// handle is only ever handed out by success, so there is nothing left to retry
+// with. Reaching this means opening a new connection, not calling again.
+pub fn handshake_within(sock Socket, server_name String, timeout_ms Int) Result(TlsSocket, TlsError) {
+	handshake_until(sock, server_name, time.add_ms(time.monotonic(), timeout_ms))
+}
+
+// Complete a TLS handshake as `handshake`, giving up at the absolute Instant
+// `deadline` (from `time.monotonic()`). Use this rather than `handshake_within`
+// when one deadline covers several steps, so the handshake gets what is left of
+// the budget instead of a fresh copy of it.
+pub fn handshake_until(sock Socket, server_name String, deadline Instant) Result(TlsSocket, TlsError) {
+	handshake_until_ms(sock, server_name, time.to_deadline_ms(deadline))
+}
+
+@vm(tls__handshake_until)
+fn handshake_until_ms(sock Socket, server_name String, deadline_ms Int) Result(TlsSocket, TlsError)
 
 // Read whatever plaintext is available, up to `max` bytes. Parks the calling
 // process until at least one byte is decrypted or the peer closes.

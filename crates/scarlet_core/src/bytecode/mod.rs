@@ -42,6 +42,7 @@ fn builtin_op(name: &str) -> Option<Op> {
         "socket__write_parts" => Op::TcpWriteParts,
         "socket__close" => Op::TcpClose,
         "tls__handshake" => Op::TlsHandshake,
+        "tls__handshake_until" => Op::TlsHandshakeUntil,
         "tls__read" => Op::TlsRead,
         "tls__read_until" => Op::TlsReadUntil,
         "tls__write" => Op::TlsWrite,

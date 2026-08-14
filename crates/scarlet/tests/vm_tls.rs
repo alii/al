@@ -203,6 +203,28 @@ fn spawn_hangup_server(n: usize) -> u16 {
     port
 }
 
+/// Accept one connection and then say nothing at all, holding it open.
+///
+/// This is the peer an unbounded `tls.handshake` has no answer for: the TCP
+/// connection completes, the ClientHello goes out, and no byte ever comes back.
+/// A line protocol whose parser swallows the ClientHello looks exactly like
+/// this from the client side.
+///
+/// The accepted stream is parked rather than dropped, and that is the whole rig:
+/// dropping it closes the connection, which fails the handshake promptly and
+/// tests something else entirely.
+fn spawn_silent_peer() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    thread::spawn(move || {
+        if let Ok((sock, _)) = listener.accept() {
+            thread::park();
+            drop(sock);
+        }
+    });
+    port
+}
+
 /// Serve exactly one TLS connection, echoing back a fixed reply, and return the
 /// port it bound. The thread is detached: a test that fails the handshake on
 /// purpose leaves it waiting, and the process exiting collects it.
@@ -613,6 +635,112 @@ pub fn main() {{
     assert!(
         !out.contains("unexpected-data"),
         "read_within must not return Ok when no plaintext ever arrives:\n{out}"
+    );
+}
+
+/// `tls.handshake_within` against a peer that accepts the connection and then
+/// says nothing must hit its deadline as `Transport(TimedOut)`.
+///
+/// This is the wedge itself, not a proxy for it. `tls.handshake` parks on
+/// readability alone; the peer never becomes readable, so no event and no timer
+/// can wake the process, and the program never ends. The exit code is therefore
+/// asserted as hard as the arm taken — `run_bounded` reports a killed child as
+/// no exit code at all, which is the discriminator between a program that hung
+/// and one that ran and printed nothing.
+///
+/// No trust root is installed, and none is needed: the deadline must fire
+/// before a certificate is ever offered. That also keeps the test independent
+/// of the certificate machinery every other test here depends on.
+///
+/// What it does NOT witness: the deadline surviving a re-run. One park and then
+/// the timer produces this output, and a re-run that reset the clock would look
+/// identical.
+#[test]
+fn tls_handshake_within_times_out_against_a_silent_peer() {
+    let port = spawn_silent_peer();
+
+    let src = format!(
+        r#"import scarlet/net
+import scarlet/net/tls.{{Transport}}
+import scarlet/net/error.{{TimedOut}}
+import scarlet/string
+
+pub fn main() {{
+    match net.connect('127.0.0.1', {port}) {{
+        Ok(sock) -> match tls.handshake_within(sock, 'localhost', 200) {{
+            Err(Transport(TimedOut)) -> println('timed-out: Transport(TimedOut)')
+            Ok(_) -> println('connected')
+            Err(e) -> println('other-error: ${{string.inspect(e)}}')
+        }}
+        Err(e) -> println('connect failed: ${{string.inspect(e)}}')
+    }}
+}}
+"#
+    );
+
+    let (code, out) = run_bounded("handshake_within_timeout", &src, None, 30);
+    assert_eq!(
+        code,
+        Some(0),
+        "handshake_within must return against a silent peer, not hang, got:\n{out}"
+    );
+    assert!(
+        out.contains("timed-out: Transport(TimedOut)"),
+        "handshake_within must take its Err(Transport(TimedOut)) arm; got:\n{out}"
+    );
+    assert!(
+        !out.contains("connected"),
+        "a peer that never spoke TLS must not be reported as a TLS connection:\n{out}"
+    );
+}
+
+/// Control for the test above: `tls.handshake_within` against a peer that does
+/// speak TLS completes, and the connection carries bytes afterwards.
+///
+/// Without this the timeout test is an instrument that cannot fail — a
+/// `handshake_within` hard-wired to return `Transport(TimedOut)` would satisfy
+/// it. The deadline here is 10 s against loopback, generous on purpose: this
+/// arm is about the deadline NOT firing, so it must not become a timing test of
+/// a host that may be busy.
+#[test]
+fn tls_handshake_within_completes_against_a_live_peer() {
+    let ca = make_ca();
+    let leaf = make_leaf(&ca, "localhost", Validity::Current);
+    let port = spawn_tls_server(leaf, "hello inside the deadline");
+
+    let src = format!(
+        r#"import scarlet/net
+import scarlet/net/tls
+import scarlet/net/socket.{{Data, Closed}}
+import scarlet/binary
+import scarlet/string
+
+pub fn main() {{
+    match net.connect('127.0.0.1', {port}) {{
+        Ok(sock) -> match tls.handshake_within(sock, 'localhost', 10000) {{
+            Ok(conn) -> {{
+                tls.write(conn, <<'ping'>>) or Nil
+                match tls.read(conn, 1024) {{
+                    Ok(Data(b)) -> println('read: ${{binary.to_string(b) or "<not utf-8>"}}')
+                    Ok(Closed) -> println('closed')
+                    Err(e) -> println('read failed: ${{string.inspect(e)}}')
+                }}
+                tls.close(conn) or Nil
+            }}
+            Err(e) -> println('failed: ${{string.inspect(e)}}')
+        }}
+        Err(e) -> println('connect failed: ${{string.inspect(e)}}')
+    }}
+}}
+"#
+    );
+
+    let out = run_program("handshake_within_ok", &src, Some(&ca.pem));
+
+    assert!(
+        out.contains("read: hello inside the deadline"),
+        "handshake_within must complete a handshake that finishes inside its \
+         deadline, and carry bytes afterwards, got:\n{out}"
     );
 }
 

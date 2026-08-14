@@ -847,6 +847,7 @@ impl VM {
                 Op::PortSpawn => park!(self.port_spawn(&mut reds)),
                 Op::PortClose => park!(self.port_close(&mut reds)),
                 Op::TlsHandshake => park!(self.tls_handshake(&mut reds)),
+                Op::TlsHandshakeUntil => park!(self.tls_handshake_until(&mut reds)),
                 Op::TlsRead => park!(self.tls_read(&mut reds)),
                 Op::TlsReadUntil => park!(self.tls_read_until(&mut reds)),
                 Op::TlsWrite => park!(self.tls_write(&mut reds)),

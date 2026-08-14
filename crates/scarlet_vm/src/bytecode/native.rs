@@ -269,6 +269,7 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::PortSpawn
         | Op::PortClose
         | Op::TlsHandshake
+        | Op::TlsHandshakeUntil
         | Op::TlsRead
         | Op::TlsReadUntil
         | Op::TlsWrite

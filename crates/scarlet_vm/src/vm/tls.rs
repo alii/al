@@ -374,7 +374,44 @@ impl VM {
     /// Parks and re-runs while the handshake is in flight. On a re-run the
     /// entry is already `ConnIo::Tls`, so the session is continued rather than
     /// started again.
+    ///
+    /// The park has no timer on it, so a peer that accepts the connection and
+    /// then never answers the ClientHello parks the calling process for the
+    /// life of the program. `Op::TlsHandshakeUntil` is the bounded form.
     pub(super) fn tls_handshake(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
+        self.tls_handshake_step(reds, None)
+    }
+
+    /// `Op::TlsHandshakeUntil`:
+    /// `[socket, server_name, deadline_ms] -> Result(TlsSocket, TlsError)`.
+    ///
+    /// The same shape as `Op::TlsReadUntil`, including the deadline-captured-
+    /// once-in-Scarlet discipline: a re-run re-reads the absolute monotonic ms
+    /// and never resets the clock.
+    ///
+    /// A peer that completes the TCP connection and then says nothing is the
+    /// case this exists for. `tls_handshake`'s park waits on readability alone,
+    /// and no readiness event is ever coming, so without a deadline the process
+    /// never runs again.
+    pub(super) fn tls_handshake_until(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
+        // Top of the stack: the deadline as an absolute monotonic ms. Scarlet
+        // captures it once, so a re-run after a wake re-reads it rather than
+        // restarting the clock.
+        let deadline_ms = self.pop_int("tls.handshake_within")?;
+        self.tls_handshake_step(reds, Some(deadline_ms))
+    }
+
+    /// One attempt at the handshake, shared by both handshake opcodes.
+    ///
+    /// `deadline_ms` is the absolute monotonic ms `Op::TlsHandshakeUntil`
+    /// carries, and `None` for the unbounded opcode. It is re-pushed on a park
+    /// only when it is present, so the operand stack left behind is the one the
+    /// opcode about to re-run expects.
+    fn tls_handshake_step(
+        &mut self,
+        reds: &mut i32,
+        deadline_ms: Option<i64>,
+    ) -> VmResult<Option<Parked>> {
         *reds -= IO_REDUCTION_COST;
         let name_v = self.pop_str("tls.handshake")?;
         let sock_val = self.pop()?;
@@ -429,6 +466,22 @@ impl VM {
                 Ok(None)
             }
             Err(fail) if fail.is_would_block() => {
+                // The deadline is read only after an attempt that could not
+                // finish, so a handshake that completed on the slice the clock
+                // ran out on is still the `Ok` above.
+                if deadline_ms.is_some_and(|d| monotonic_now_ms() >= d) {
+                    // Drop the connection for the same reason the failure arm
+                    // below does, and one more: nothing can name it. The
+                    // caller's `Socket` was retired by `begin_tls`, and the TLS
+                    // id is only ever handed out by the `Ok` arm, so an entry
+                    // left here is an fd no Scarlet value could ever close.
+                    drop(self.evict_connection(id));
+                    let timed_out = self.abi_nullary(AbiSlot::NetEtimedout)?;
+                    let err = self.abi_make(AbiSlot::TlsTransport, &[timed_out])?;
+                    let v = self.make_err(err)?;
+                    self.stack.push(v);
+                    return Ok(None);
+                }
                 // Re-push the operands with the handle now naming the TLS
                 // entry, so the re-run continues this session.
                 self.stack.push(Value::socket(SocketValue {
@@ -436,7 +489,16 @@ impl VM {
                     kind: SocketKind::Tls,
                 }));
                 self.stack.push(name_v);
-                Ok(Some(Parked::retry(Wait::readable(id))))
+                let wait = match deadline_ms {
+                    Some(d) => {
+                        self.stack.push(Value::small_int(d));
+                        let deadline = *EPOCH.get_or_init(Instant::now)
+                            + Duration::from_millis(d.max(0) as u64);
+                        Wait::read_with_deadline(id, deadline)
+                    }
+                    None => Wait::readable(id),
+                };
+                Ok(Some(Parked::retry(wait)))
             }
             Err(fail) => {
                 // A failed handshake leaves nothing usable. Drop the connection

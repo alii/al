@@ -55,7 +55,8 @@ pub enum AbiSlot {
     /// Any errno with no class above — `[code Int]`
     FsErrnoOther,
 
-    /// `ETIMEDOUT`. Also `TcpReadUntil` passing its deadline.
+    /// `ETIMEDOUT`. Also `TcpReadUntil`, `TlsReadUntil` and
+    /// `TlsHandshakeUntil` passing their deadline.
     NetEtimedout,
     /// `ECONNREFUSED`
     NetEconnrefused,
@@ -541,7 +542,7 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
         ],
         // Every TLS op can report a transport cause, so each carries the
         // `NetError` slots that `TlsTransport` wraps as well as its own.
-        Op::TlsHandshake => &[
+        Op::TlsHandshake | Op::TlsHandshakeUntil => &[
             S::ResultOk,
             S::ResultErr,
             S::TlsSocket,

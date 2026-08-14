@@ -13,11 +13,16 @@
 //! 3. `Program` is `Send + Sync` (asserted below), so a worker scheduler
 //!    thread takes a plain `clone()` of the shared program.
 //!
-//! Adding an opcode touches five places: [`Op::has_jump_target`] and
-//! [`Op::pushes_extra`] (both exhaustive, so they fail to compile until you
-//! classify the new op), emission in `scarlet_core`'s compiler, dispatch in
-//! [`crate::vm::exec`], and `scarlet_core::bytecode::builtin_op` if it is exposed
-//! as a `@vm` intrinsic.
+//! Adding an opcode touches seven places: [`Op::has_jump_target`],
+//! [`Op::pushes_extra`] and `native::op_coverage` (all exhaustive, so they
+//! fail to compile until you classify the new op), emission in `scarlet_core`'s
+//! compiler, dispatch in [`crate::vm::exec`], `scarlet_core::bytecode::builtin_op`
+//! if it is exposed as a `@vm` intrinsic, and `crate::abi::slots_for`.
+//!
+//! `slots_for` is the one with no compile enforcement: it ends in a `_ => &[]`
+//! arm, so an op omitted from it gets an empty slot list and fails at runtime,
+//! when it first tries to build a value, rather than at build time. A new op
+//! that constructs anything needs a test that reaches the construction.
 
 pub(crate) mod bits;
 pub(crate) mod hamt;
@@ -344,6 +349,12 @@ pub enum Op {
     /// connection is re-keyed under a new id, so the `Socket` handed in is
     /// stale afterwards. (scarlet/net/tls.handshake)
     TlsHandshake,
+    /// `[socket, server_name, deadline_ms] -> Result(TlsSocket, TlsError)` — as
+    /// `TlsHandshake`, but gives up with `Err(Transport(TimedOut))` once the
+    /// absolute monotonic-ms deadline passes. A peer that accepts the TCP
+    /// connection and then never answers the ClientHello is otherwise a park
+    /// with no wake. (scarlet/net/tls.handshake_until)
+    TlsHandshakeUntil,
     /// `[tls_socket, max] -> Result(Read, TlsError)` — decrypting read. Split
     /// from `TcpRead` because its failures are `TlsError` values, not
     /// `NetError` ones. (scarlet/net/tls.read)
@@ -733,6 +744,7 @@ impl Op {
             | Op::PortSpawn
             | Op::PortClose
             | Op::TlsHandshake
+            | Op::TlsHandshakeUntil
             | Op::TlsRead
             | Op::TlsReadUntil
             | Op::TlsWrite
@@ -954,6 +966,7 @@ impl Op {
             | Op::PortSpawn
             | Op::PortClose
             | Op::TlsHandshake
+            | Op::TlsHandshakeUntil
             | Op::TlsRead
             | Op::TlsReadUntil
             | Op::TlsWrite
