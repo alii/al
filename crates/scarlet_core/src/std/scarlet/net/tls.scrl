@@ -71,9 +71,11 @@ pub type TlsError {
 	// The peer sent a fatal alert, or the handshake failed for a reason that is
 	// not a certificate problem.
 	HandshakeFailed
-	// `server_name` is not a DNS name a certificate can be issued for. An IP
-	// literal lands here: certificate verification is by name, so connecting by
-	// address alone has nothing to verify against.
+	// `server_name` is neither a DNS name nor an IP address — an empty or
+	// malformed name such as `bad_name!` — so there is nothing a certificate
+	// could be checked against. An IP literal does NOT land here: it is
+	// verified against the certificate's IP SANs, and an address the
+	// certificate does not carry is a `HostnameMismatch` like any other name.
 	InvalidServerName
 	// The TCP connection underneath failed, before or during the exchange.
 	Transport(cause NetError)

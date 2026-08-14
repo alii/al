@@ -419,6 +419,100 @@ fn a_hostname_mismatch_is_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// An address is a name to verify, not a name to refuse
+// ---------------------------------------------------------------------------
+//
+// `ServerName::try_from` parses an IP literal into `ServerName::IpAddress`
+// rather than rejecting it, so rustls checks it against the certificate's IP
+// SANs like any other name. Three comments used to say the opposite — that an
+// address has nothing to verify against and lands on `InvalidServerName` — and
+// nothing in this file could tell the difference, which is why they survived.
+// The pair below is what separates the two stories: same address, same trusted
+// issuer, and only the certificate's SAN differs.
+
+#[test]
+fn an_ip_literal_against_a_certificate_without_it_is_a_hostname_mismatch() {
+    let ca = make_ca();
+    // `DNS:localhost` and no IP SAN, so 127.0.0.1 is simply not on this
+    // certificate — the ordinary wrong-name case, reached by an address.
+    let leaf = make_leaf(&ca, "localhost", Validity::Current);
+    let port = spawn_tls_server(leaf, "HTTP/1.1 200 OK\r\n\r\n");
+
+    let out = run_program(
+        "ip_no_san",
+        &connect_program("127.0.0.1", port),
+        Some(&ca.pem),
+    );
+
+    assert!(
+        out.contains("HostnameMismatch"),
+        "an address is verified against the certificate like any other name, \
+         so one carrying no matching IP SAN is a HostnameMismatch, got:\n{out}"
+    );
+    assert!(
+        !out.contains("InvalidServerName"),
+        "refusing the address before the certificate is examined is the \
+         behaviour the old comments described, and it is not what happens:\n{out}"
+    );
+    assert!(
+        !out.contains("connected"),
+        "the handshake must not succeed against a certificate that does not \
+         carry this address:\n{out}"
+    );
+}
+
+#[test]
+fn an_ip_literal_against_a_matching_ip_san_completes_the_handshake() {
+    let ca = make_ca();
+    // `CertificateParams::new` sorts a SAN that parses as an address into
+    // `SanType::IpAddress`, so this leaf carries `IP:127.0.0.1` — the class of
+    // certificate a refusal of IP literals would make unusable.
+    let leaf = make_leaf(&ca, "127.0.0.1", Validity::Current);
+    let port = spawn_tls_server(leaf, "HTTP/1.1 200 OK\r\n\r\n");
+
+    let out = run_program("ip_san", &connect_program("127.0.0.1", port), Some(&ca.pem));
+
+    assert!(
+        out.contains("connected"),
+        "an address matching the certificate's IP SAN verifies, and the \
+         handshake completes, got:\n{out}"
+    );
+    assert!(
+        !out.contains("failed:"),
+        "no TLS error is expected when the address is on the certificate:\n{out}"
+    );
+}
+
+/// The variant keeps a witness: `InvalidServerName` is alive, and this is the
+/// whole of what reaches it — a name that is neither a DNS name nor an address.
+///
+/// Only the split `net.connect` + `tls.handshake` form can get here.
+/// `tls.connect` resolves the host first and fails as `Transport(NetError)`
+/// before the name is ever handed to rustls.
+#[test]
+fn a_name_that_is_neither_dns_nor_address_is_an_invalid_server_name() {
+    let ca = make_ca();
+    let leaf = make_leaf(&ca, "localhost", Validity::Current);
+    let port = spawn_tls_server(leaf, "HTTP/1.1 200 OK\r\n\r\n");
+
+    let out = run_program(
+        "bad_name",
+        &connect_program("bad_name!", port),
+        Some(&ca.pem),
+    );
+
+    assert!(
+        out.contains("InvalidServerName"),
+        "a name that parses as neither a DNS name nor an address has nothing \
+         a certificate could be checked against, got:\n{out}"
+    );
+    assert!(
+        !out.contains("connected"),
+        "the handshake must not succeed with an unusable name:\n{out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The positive test, so the negatives are not passing by never connecting
 // ---------------------------------------------------------------------------
 

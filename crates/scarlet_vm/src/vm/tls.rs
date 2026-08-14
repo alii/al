@@ -98,7 +98,8 @@ pub(super) enum TlsFail {
     /// The TLS session failed: a certificate that did not verify, an alert, a
     /// version or suite mismatch.
     Session(rustls::Error),
-    /// The requested name is not one a certificate can be issued for.
+    /// The requested name is neither a DNS name nor an IP address, so there is
+    /// nothing a certificate could be checked against.
     InvalidServerName,
 }
 
@@ -423,9 +424,12 @@ impl VM {
     /// Returns the new id.
     fn begin_tls(&mut self, id: i32, server_name: &str) -> Result<i32, TlsFail> {
         let config = client_config().map_err(|e| TlsFail::Io(io::Error::other(e)))?;
-        // An IP literal has no name to verify, and `ServerName` rejects it for
-        // exactly that reason. Surfaced as its own variant rather than as a
-        // certificate error, because the certificate is not the problem.
+        // `ServerName` parses an IP literal into `ServerName::IpAddress` rather
+        // than rejecting it, so an address is verified against the certificate's
+        // IP SANs like any other name and a certificate carrying none fails as
+        // `HostnameMismatch`. This arm is only reached by a name that is neither
+        // a DNS name nor an address, which no certificate could be checked
+        // against — a caller error rather than a certificate one.
         let name = ServerName::try_from(server_name.to_string())
             .map_err(|_| TlsFail::InvalidServerName)?;
         let session = ClientConnection::new(config, name).map_err(TlsFail::Session)?;
