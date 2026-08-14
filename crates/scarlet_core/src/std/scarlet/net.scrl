@@ -181,15 +181,43 @@ fn accept_loop(server Server, connections Factory(Nil, Socket)) Nil {
 @vm(net__resolve)
 pub fn resolve(host String) Result(IpAddress, NetError)
 
+// Resolve as `resolve`, but wait no longer than `timeout_ms` milliseconds,
+// erring with `TimedOut` once it passes.
+//
+// Unlike `connect_addr_within`, this is the only bound a resolve has: whether
+// `getaddrinfo` ever gives up is the platform resolver's business, not the
+// caller's, and it is not configurable from here. Measured on macOS 26.5.2
+// (arm64): a name that no resolver answers costs 5.0 s on the mDNS path, and a
+// nameserver that answers nothing at all was not reproducible without root, so
+// no upper bound on the unicast path is claimed.
+//
+// The wait is what ends at the deadline — the lookup itself is not cancellable
+// and runs to completion on its pool thread, holding it for the remainder.
+pub fn resolve_within(host String, timeout_ms Int) Result(IpAddress, NetError) {
+	resolve_until(host, time.add_ms(time.monotonic(), timeout_ms))
+}
+
+// Resolve as `resolve_within`, giving up at the absolute Instant `deadline`
+// (from `time.monotonic()`). Use this rather than `resolve_within` when one
+// deadline covers several steps, so the resolve gets what is left of the
+// budget instead of a fresh copy of it.
+pub fn resolve_until(host String, deadline Instant) Result(IpAddress, NetError) {
+	resolve_until_ms(host, time.to_deadline_ms(deadline))
+}
+
+@vm(net__resolve_until)
+fn resolve_until_ms(host String, deadline_ms Int) Result(IpAddress, NetError)
+
 // Open a connection to a remote host. `host` may be an IP address or a
 // hostname; the hostname is resolved off-scheduler via `resolve`, then the
 // connection is established with the calling process parked — neither step
 // blocks the scheduler.
 //
-// This has no bounded sibling, and `connect_addr_within` is the reason: a
-// deadline here could not cover the `resolve`, so it would bound one of two
-// steps. An IP literal skips resolution entirely, so a caller holding one
-// reaches for `connect_addr_within` and gets a deadline over the whole call.
+// This has no bounded sibling yet. Both of its steps can now carry a deadline
+// — `resolve_until` and `connect_addr_until`, sharing one Instant so the
+// connect gets what the resolve left — but that call has not been written. An
+// IP literal skips resolution entirely, so a caller holding one reaches for
+// `connect_addr_within` and gets a deadline over the whole call today.
 pub fn connect(host String, port Int) Result(Socket, NetError) {
 	ip <- result.then(resolve(host))
 	addr <- result.then(result.replace_err(address.socket_address(ip, port), InvalidPort))
@@ -212,10 +240,10 @@ pub fn connect_addr(addr SocketAddress) Result(Socket, NetError)
 // `connect_addr` reports that as `Err(TimedOut)`. A `timeout_ms` above the
 // kernel's own is therefore inert. Short deadlines are what this adds.
 //
-// There is deliberately no `connect_within` taking a host: that would have to
-// resolve the name first, and `resolve` has no deadline, so the bound would
-// cover only the second of its two steps. `connect_addr_within` takes an
-// address because that is the call whose whole work it can actually bound.
+// There is no `connect_within` taking a host: that would have to resolve the
+// name first, and until `resolve_until` existed the bound could cover only the
+// second of its two steps. `connect_addr_within` takes an address because that
+// is the call whose whole work it has always been able to bound.
 pub fn connect_addr_within(addr SocketAddress, timeout_ms Int) Result(Socket, NetError) {
 	connect_addr_until(addr, time.add_ms(time.monotonic(), timeout_ms))
 }

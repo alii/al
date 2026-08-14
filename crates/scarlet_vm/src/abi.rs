@@ -653,7 +653,7 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::IpV6,
             S::NetErrnoOther,
         ],
-        Op::DnsResolve => &[
+        Op::DnsResolve | Op::DnsResolveUntil => &[
             S::ResultOk,
             S::ResultErr,
             S::IpV4,

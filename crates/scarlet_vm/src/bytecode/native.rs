@@ -267,6 +267,7 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::TcpWrite
         | Op::TcpWriteParts
         | Op::DnsResolve
+        | Op::DnsResolveUntil
         | Op::PortSpawn
         | Op::PortClose
         | Op::TlsHandshake

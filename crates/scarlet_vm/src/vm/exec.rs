@@ -844,6 +844,7 @@ impl VM {
                 Op::TcpCloseServer => self.tcp_close_server()?,
                 Op::TcpLocalAddr => self.tcp_local_addr()?,
                 Op::DnsResolve => park!(self.dns_resolve(&mut reds)),
+                Op::DnsResolveUntil => park!(self.dns_resolve_until(&mut reds)),
                 Op::IpParse => self.ip_parse()?,
                 Op::PortSpawn => park!(self.port_spawn(&mut reds)),
                 Op::PortClose => park!(self.port_close(&mut reds)),

@@ -47,7 +47,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::abi::{self, AbiSlot};
 use crate::bytecode::{BinaryRef, SocketKind, SocketValue, Value};
 
-use super::poll::{EPOCH, Parked, Wait, deadline_instant, monotonic_now_ms};
+use super::poll::{EPOCH, OffloadTimeout, Parked, Wait, deadline_instant, monotonic_now_ms};
 use super::port::ConnIo;
 use super::processes::Link;
 use super::sched::BlockingOp;
@@ -549,21 +549,48 @@ impl VM {
     }
 
     pub(super) fn dns_resolve(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
+        self.dns_resolve_step(reds, None)
+    }
+
+    /// `Op::DnsResolveUntil`: `[host, deadline_ms] -> Result(IpAddress, NetError)`.
+    ///
+    /// Unlike a connect, there is no lower ceiling for this to reach under:
+    /// `getaddrinfo` keeps its own counsel and the caller cannot set it, so
+    /// this is the only bound a resolve has. It ends the wait, not the resolve
+    /// — see [`OffloadTimeout`].
+    pub(super) fn dns_resolve_until(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
+        // Top of the stack: the deadline as an absolute monotonic ms, captured
+        // once in Scarlet. This opcode parks with `Parked::cont`, so like the
+        // bounded connect it is never re-run and never re-reads it.
+        let deadline_ms = self.pop_int("net.resolve_within")?;
+        self.dns_resolve_step(reds, Some(deadline_ms))
+    }
+
+    /// One resolve, shared by both resolve opcodes. `deadline_ms` is the
+    /// absolute monotonic ms `Op::DnsResolveUntil` carries, `None` for the
+    /// unbounded opcode.
+    fn dns_resolve_step(
+        &mut self,
+        reds: &mut i32,
+        deadline_ms: Option<i64>,
+    ) -> VmResult<Option<Parked>> {
         *reds -= IO_REDUCTION_COST;
         let host_v = self.pop_str("net.resolve")?;
         let host = str_ref(&host_v);
         if let Ok(addr) = host.parse::<std::net::IpAddr>() {
-            // An IP literal needs no resolution.
+            // An IP literal needs no resolution, so no deadline can bite.
             let ip_val = self.templates.ip_address(&mut self.heap, addr)?;
             let v = self.make_ok(ip_val)?;
             self.stack.push(v);
             return Ok(None);
         }
         // getaddrinfo has no readiness signal, so offload it to the pool.
-        let host = host.to_string();
-        Ok(Some(Parked::cont(Wait::offloaded(BlockingOp::ResolveDns(
-            host,
-        )))))
+        let op = BlockingOp::ResolveDns(host.to_string());
+        let wait = match deadline_ms {
+            Some(d) => Wait::offloaded_until(op, deadline_instant(d), OffloadTimeout::Resolve),
+            None => Wait::offloaded(op),
+        };
+        Ok(Some(Parked::cont(wait)))
     }
 
     /// `Op::ProcessSpawn` / `Op::ProcessSpawnUnlinked`: pop the closure,

@@ -36,6 +36,7 @@ fn builtin_op(name: &str) -> Option<Op> {
         "net__give" => Op::TcpGive,
         "net__local_addr" => Op::TcpLocalAddr,
         "net__resolve" => Op::DnsResolve,
+        "net__resolve_until" => Op::DnsResolveUntil,
         "address__parse" => Op::IpParse,
         "socket__read" => Op::TcpRead,
         "socket__read_until" => Op::TcpReadUntil,

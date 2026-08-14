@@ -60,6 +60,27 @@ pub(super) enum WakeAction {
     CompleteConnect,
 }
 
+/// What an offloaded job owes its process when a deadline beats it.
+///
+/// A deadline on an offload abandons the *wait*, never the job. `getaddrinfo`
+/// has no cancellation — POSIX gives none and Darwin's resolver is reached
+/// through a system daemon — so the pool thread runs on until the resolver
+/// itself gives up, and the completion it finally delivers finds no park and is
+/// dropped by [`VM::drain_completions`]. A bound therefore costs one pool
+/// thread for the remainder of the resolve, capped by the pool's worker
+/// ceiling; the process gets its bound either way. Waiting and resolving are
+/// separate here in a way they are not for a socket, where dropping the fd ends
+/// the attempt.
+///
+/// [`VM::park`] has handed the [`BlockingOp`] to the pool before any deadline
+/// can fire, so the wait cannot re-read which job it was: this names the
+/// completion to synthesise in its place.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum OffloadTimeout {
+    /// `Op::DnsResolveUntil`, reported as an `ETIMEDOUT` resolve.
+    Resolve,
+}
+
 /// What a parked process is waiting for. Exactly one wake source per wait.
 #[derive(Debug)]
 pub(super) enum Wait {
@@ -72,9 +93,13 @@ pub(super) enum Wait {
     },
     /// A pure timer: wake at this instant, resume at the next instruction.
     Timer(Instant),
-    /// A blocking-pool job. `Some` on the way into [`VM::park`], which hands
-    /// the op to the pool keyed by the wait id and leaves `None` behind.
-    Offload(Option<BlockingOp>),
+    /// A blocking-pool job. `op` is `Some` on the way into [`VM::park`], which
+    /// hands it to the pool keyed by the wait id and leaves `None` behind. Only
+    /// the bounded opcodes set `deadline`; see [`OffloadTimeout`].
+    Offload {
+        op: Option<BlockingOp>,
+        deadline: Option<(Instant, OffloadTimeout)>,
+    },
     /// An empty-mailbox receive: wake when a send targets the subject
     /// (delivered through the slot's wake queue), or at the deadline.
     Mailbox {
@@ -146,7 +171,23 @@ impl Wait {
     /// Park until the blocking pool finishes a job. Nothing else can wake it.
     /// The job id is the wait id.
     pub(super) fn offloaded(op: BlockingOp) -> Self {
-        Wait::Offload(Some(op))
+        Wait::Offload {
+            op: Some(op),
+            deadline: None,
+        }
+    }
+
+    /// As `offloaded`, but giving up the wait at `deadline`. The job itself
+    /// runs to completion regardless — see [`OffloadTimeout`].
+    pub(super) fn offloaded_until(
+        op: BlockingOp,
+        deadline: Instant,
+        on_timeout: OffloadTimeout,
+    ) -> Self {
+        Wait::Offload {
+            op: Some(op),
+            deadline: Some((deadline, on_timeout)),
+        }
     }
 
     /// Park until a message lands on `subject`, then re-run the instruction.
@@ -172,7 +213,7 @@ impl Wait {
         match self {
             Wait::Io { deadline, .. } | Wait::Mailbox { deadline, .. } => *deadline,
             Wait::Timer(d) => Some(*d),
-            Wait::Offload(_) => None,
+            Wait::Offload { deadline, .. } => deadline.map(|(at, _)| at),
         }
     }
 }
@@ -379,10 +420,13 @@ impl VM {
                     self.timer_heap.push(Reverse((d, id)));
                 }
             }
-            Wait::Offload(op) => {
-                // `Wait::offloaded` is the only constructor and always yields
-                // `Some`. A `None` would dispatch no job and hang the process
-                // forever, so panic instead of swallowing it.
+            Wait::Offload { op, deadline } => {
+                if let Some((d, _)) = *deadline {
+                    self.timer_heap.push(Reverse((d, id)));
+                }
+                // Both `Wait::offloaded` constructors always yield `Some`. A
+                // `None` would dispatch no job and hang the process forever,
+                // so panic instead of swallowing it.
                 #[allow(clippy::expect_used)]
                 let op = op.take().expect("offload park carries an op");
                 self.runtime.offload(self.scheduler_index, id, op);
@@ -596,12 +640,22 @@ impl VM {
                     action: WakeAction::CompleteConnect,
                     ..
                 } => self.wake_with(p, |vm| vm.timeout_connect(fd))?,
+                // Same shape as the connect above: an offload resumes past its
+                // instruction, so the result has to be pushed here rather than
+                // left to the job that is still running.
+                Wait::Offload {
+                    deadline: Some((_, kind)),
+                    ..
+                } => self.wake_with(p, |vm| vm.timed_out_offload(kind))?,
+                // An unbounded offload never entered the timer heap, so it
+                // cannot reach this arm: the deadline check above admits only
+                // waits that named this instant.
                 Wait::Io {
                     action: WakeAction::Rerun,
                     ..
                 }
                 | Wait::Timer(_)
-                | Wait::Offload(_)
+                | Wait::Offload { deadline: None, .. }
                 | Wait::Mailbox { .. } => self.run_queue.push_back(p),
             }
             woke = true;
@@ -646,7 +700,7 @@ impl VM {
                         ..
                     }
                     | Wait::Timer(_)
-                    | Wait::Offload(_)
+                    | Wait::Offload { .. }
                     | Wait::Mailbox { .. } => self.run_queue.push_back(p),
                 }
                 // The fd stays registered: the registration belongs to the
@@ -678,6 +732,23 @@ impl VM {
         drop(socket);
         let timed_out = self.abi_nullary(AbiSlot::NetEtimedout)?;
         self.make_err(timed_out)
+    }
+
+    /// The completion an abandoned offload owes its process, synthesised
+    /// because the real one is still on a pool thread and may be for a while.
+    /// `failed_blocking_result` does the same for a job no worker could run.
+    ///
+    /// Built through `completion_result` so a timed-out resolve is the same
+    /// value a resolver-side timeout produces; `classify_net` reads the raw
+    /// errno, so an `ErrorKind`-only error would land on the `Other(-1)`
+    /// residual instead of `TimedOut`.
+    fn timed_out_offload(&mut self, kind: OffloadTimeout) -> VmResult<Value> {
+        let result = match kind {
+            OffloadTimeout::Resolve => BlockingResult::ResolveDns {
+                result: Err(io::Error::from_raw_os_error(libc::ETIMEDOUT)),
+            },
+        };
+        self.completion_result(result)
     }
 
     /// Complete a pending non-blocking connect whose socket became writable:

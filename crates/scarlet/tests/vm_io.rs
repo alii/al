@@ -1273,3 +1273,50 @@ pub fn main() {{
          deadline: the deadline did not fire\n--- output ---\n{out}"
     );
 }
+
+/// `net.resolve_within` gives up on a lookup its deadline outlives.
+///
+/// The two calls differ in *outcome*, not merely in timing, which is what lets
+/// this assert without a stopwatch: a deadline made inert leaves `localhost` to
+/// resolve and the first match prints `resolved` instead. The second call is
+/// the honest control — the same host on a budget it cannot miss — so a change
+/// that broke resolution outright could not pass by timing everything out.
+///
+/// `localhost` comes from the hosts file, so no nameserver and no network are
+/// involved. The timer wins by construction rather than by being faster: the
+/// deadline is already past when the process parks, while the completion racing
+/// it cannot arrive until a pool thread has been spawned and `getaddrinfo` has
+/// run.
+///
+/// What this does not witness: that the bound helps against a resolver that is
+/// genuinely slow, only that it fires while the lookup is outstanding. No
+/// fixture for the former is portable — a nameserver that answers nothing needs
+/// root to configure, and the one path that stalls without it (mDNS, measured
+/// at 5.0 s on Darwin) resolves differently on Linux.
+#[test]
+fn resolve_within_gives_up_on_a_deadline_that_beats_the_lookup() {
+    let proj = Project::new("resolve_within");
+    let src = r#"import scarlet/net
+import scarlet/net/error.{TimedOut}
+import scarlet/string
+
+pub fn main() {
+	match net.resolve_within('localhost', 0) {
+		Err(TimedOut) -> println('timed-out')
+		Ok(_) -> println('resolved')
+		Err(e) -> println('other-error: ${string.inspect(e)}')
+	}
+	match net.resolve_within('localhost', 60000) {
+		Ok(_) -> println('control-resolved')
+		Err(e) -> println('control-error: ${string.inspect(e)}')
+	}
+}
+"#;
+    let out = proj.run(src);
+    assert!(out.success, "program should run, stderr: {}", out.stderr);
+    assert_eq!(
+        out.stdout, "timed-out\ncontrol-resolved\n",
+        "a passed deadline should time out while a generous one resolves; got: {:?}",
+        out.stdout
+    );
+}

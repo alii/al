@@ -335,6 +335,12 @@ pub enum Op {
     /// immediately; hostnames offload to the blocking pool so the syscall
     /// never stalls the scheduler. (scarlet/net.resolve)
     DnsResolve,
+    /// `[host, deadline_ms] -> Result(IpAddress, NetError)` — as `DnsResolve`,
+    /// but giving up at the absolute monotonic-ms deadline with
+    /// `Err(TimedOut)`. The offloaded lookup is abandoned, not cancelled: it
+    /// runs to completion on its pool thread and its result is discarded.
+    /// (scarlet/net.resolve_within)
+    DnsResolveUntil,
     /// `[String] -> Option(IpAddress)` — the only constructor for
     /// `IpAddress`. (scarlet/net/address.parse)
     IpParse,
@@ -745,6 +751,7 @@ impl Op {
             | Op::TcpCloseServer
             | Op::TcpLocalAddr
             | Op::DnsResolve
+            | Op::DnsResolveUntil
             | Op::IpParse
             | Op::PortSpawn
             | Op::PortClose
@@ -968,6 +975,7 @@ impl Op {
             | Op::TcpCloseServer
             | Op::TcpLocalAddr
             | Op::DnsResolve
+            | Op::DnsResolveUntil
             | Op::IpParse
             | Op::PortSpawn
             | Op::PortClose

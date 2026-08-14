@@ -519,6 +519,7 @@ mod opc {
     pub const DIV: u8 = Op::Div as u8;
     pub const DIV_FLOAT: u8 = Op::DivFloat as u8;
     pub const DNS_RESOLVE: u8 = Op::DnsResolve as u8;
+    pub const DNS_RESOLVE_UNTIL: u8 = Op::DnsResolveUntil as u8;
     pub const ELEM_AT: u8 = Op::ElemAt as u8;
     pub const ENV_MAP: u8 = Op::EnvMap as u8;
     pub const EQ: u8 = Op::Eq as u8;
@@ -764,6 +765,7 @@ impl VM {
             opc::TLS_READ_UNTIL => self.tls_read_until(reds),
             opc::TLS_WRITE => self.tls_write(reds),
             opc::DNS_RESOLVE => self.dns_resolve(reds),
+            opc::DNS_RESOLVE_UNTIL => self.dns_resolve_until(reds),
             opc::SLEEP => self.sleep(),
             opc::PORT_SPAWN => self.port_spawn(reds),
             opc::PORT_CLOSE => self.port_close(reds),
