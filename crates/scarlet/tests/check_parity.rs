@@ -7,7 +7,7 @@
 //! is mode-independent, which is what these tests pin.
 
 mod common;
-use common::parse;
+use common::{Project, parse};
 
 /// `(name, arity, capture_count)`, one per registered function.
 type FnShape = Vec<(String, i32, i32)>;
@@ -357,6 +357,47 @@ pub fn main() {
 	println(array.length(ws) + ident(1))
 }
 "#,
+    ));
+}
+
+/// [`layout_of`] for a program that imports from a project directory, so the
+/// emitted stream carries an imported module's region as well as the entry's.
+fn layout_in(proj: &Project, source: &str) -> scarlet::bytecode::Program {
+    let ast = parse(source);
+    let built = scarlet::bytecode::compile(&ast, Some(&proj.dir), Some(&scarlet::STDLIB));
+    assert!(
+        built.success(),
+        "compile failed:\n{source}\n{:#?}",
+        built.diagnostics
+    );
+    built.into_runnable().expect("compile emits").program
+}
+
+/// A module's leading jump-over is what `append_toplevel_init` overwrites, and
+/// that write is in place — so the instruction at `code_mark` is destroyed
+/// whatever owns it. A module declaring no function and no module-scope lambda
+/// parks no body, so the walk emits no jump-over of its own and the leading eta
+/// wrapper's is the only expendable instruction at the mark.
+///
+/// Stop emitting it and the overwrite lands on the wrapper's first real
+/// instruction: its `Function.code_start` slides onto the mark, the absolute
+/// `Jump base` written there resolves against the wrapper's own frame, and the
+/// address-space pin in [`assert_no_jump_into_a_foreign_body`] is what reports
+/// it. The three tests above cannot reach this shape — they are single-file,
+/// and an entry file needs `pub fn main`, whose jump-over takes the mark first.
+///
+/// Watched failing with the wrapper's jump-over suppressed. It does not witness
+/// the jump being taken; none of them do (T-192).
+#[test]
+fn a_module_that_declares_no_body_keeps_its_leading_jump_over() {
+    let proj = Project::new("eta_no_decl");
+    proj.write(
+        "lib.scrl",
+        "import scarlet/array\n\npub type W {\n\tW(v Int)\n}\n\npub const ws = array.map([1, 2, 3], W)\n",
+    );
+    assert_no_jump_into_a_foreign_body(&layout_in(
+        &proj,
+        "import ./lib\nimport scarlet/array\n\npub fn main() {\n\tprintln(array.length(lib.ws))\n}\n",
     ));
 }
 

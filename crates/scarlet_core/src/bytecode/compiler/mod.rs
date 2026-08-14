@@ -717,6 +717,18 @@ pub struct Compiler {
     /// either splice is ever executed, because `append_toplevel_init` overwrites
     /// the head of the region with a `Jump` to the init and control reaches a
     /// body only by `CallKnown`.
+    ///
+    /// Never executed is not the same as removable, which T-192 asked and
+    /// measured. That overwrite writes *in place*, so whatever holds the
+    /// region's first address is destroyed by it, and a module that declares no
+    /// function and no module-scope lambda parks no body — leaving the leading
+    /// eta wrapper's own jump-over as the only expendable instruction there.
+    /// Drop it and the overwrite truncates the wrapper's first real
+    /// instruction; the wrapper then builds nothing and the program exits 0
+    /// having printed nothing. `tests/check_parity.rs`'s
+    /// `a_module_that_declares_no_body_keeps_its_leading_jump_over` is that
+    /// case, and it is the only one of the layout tests an entry file cannot
+    /// express — `pub fn main` always claims the mark first.
     region_jump_overs: Option<Vec<i32>>,
     /// Native-backend hook, installed by [`compile_with_native`] and fired by
     /// `elaborate_body` / `materialize_eta_wrappers` once per lowered body —
@@ -3282,6 +3294,11 @@ impl Compiler {
         // This is the one place an operand is ever rewritten.
         emit::relocate(&mut out.code, base);
         self.local_count = self.local_count.max(out.locals);
+        // In place, not an insert: the instruction at `code_mark` is destroyed.
+        // The analysis pass guarantees an expendable one is there — a declared
+        // body's jump-over, or the leading eta wrapper's when the module
+        // declares no body — so nothing may stop emitting one without moving
+        // this write. See [`Compiler::region_jump_overs`] (T-192).
         if code_mark < base as usize {
             self.program.code[code_mark] = op_arg(Op::Jump, base);
         }
@@ -4849,6 +4866,10 @@ impl Compiler {
                 // at a foreign frame's first instruction. The drain patches it
                 // past the whole region instead.
                 Some(region) => region.push(jump_over),
+                // Dead as a jump and still load-bearing as an instruction: no
+                // body was parked ahead of this wrapper when the module
+                // declares none, so it is what `append_toplevel_init`
+                // overwrites. See [`Self::region_jump_overs`].
                 None => self.program.code[jump_over as usize].operand = end,
             }
             let f = &mut self.program.functions[base + i];
