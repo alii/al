@@ -699,6 +699,19 @@ fn vm_attribute_stdlib_only() {
     check_rejects("@nope\nfn f() Nil { Nil }\n", "Unknown attribute '@nope'");
 }
 
+/// Rejected deliberately, not just incidentally as one more unknown name:
+/// Scarlet has no package boundary to give `@internal` a meaning and no docs
+/// generator to withhold a name from, so accepting it would leave the function
+/// exactly as `pub` as it was (`docs/visibility.md`). Witnesses the rejection
+/// only; it says nothing about `pub`, which this decision leaves unchanged.
+#[test]
+fn internal_attribute_is_not_a_scarlet_attribute() {
+    check_rejects(
+        "@internal\npub fn reveal() Nil { Nil }\n",
+        "Unknown attribute '@internal'",
+    );
+}
+
 #[test]
 fn bool_is_a_normal_two_ctor_type() {
     run_outputs(
