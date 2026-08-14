@@ -451,6 +451,11 @@ impl AbiSlot {
 
 /// Every slot `op` may construct. A front end need only bind the slots for the
 /// ops it actually emits.
+///
+/// Exhaustive over [`Op`] with no `_` arm, so a new opcode fails to compile
+/// until its slots are stated. The arms are what [`crate::template::AbiTable`]
+/// checks a program against, so an op missing from here is a slot nothing
+/// verifies is bound — a runtime `unbound slot` instead of a compile error.
 pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
     use AbiSlot as S;
     match op {
@@ -729,7 +734,165 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::WireMalformed,
             S::WireTrailingBytes,
         ],
-        _ => &[],
+        // `arr[i]`, `binary.index_of` and `binary.parse_int` answer with an
+        // `Option`; `binary.to_string` and `binary.slice_bits` with a `Result`
+        // whose error carries no payload.
+        Op::Index | Op::BinIndexOf | Op::BinParseInt => &[S::OptionSome, S::OptionNone],
+        Op::BinToString | Op::BinSlice => &[S::ResultOk, S::ResultErr, S::Unit],
+        // The rest construct no stdlib value: they push a prim, move the
+        // stack, branch, or build a plain aggregate. `Count` is not an opcode
+        // — `Op::from_u8` refuses it and no program contains it.
+        Op::Count
+        | Op::PushConst
+        | Op::PushLocal
+        | Op::PushGlobal
+        | Op::StoreLocal
+        | Op::PushTrue
+        | Op::PushFalse
+        | Op::Pop
+        | Op::Dup
+        | Op::Add
+        | Op::Sub
+        | Op::Mul
+        | Op::Div
+        | Op::Mod
+        | Op::Neg
+        | Op::AddInt
+        | Op::SubInt
+        | Op::MulInt
+        | Op::DivInt
+        | Op::ModInt
+        | Op::NegInt
+        | Op::AddFloat
+        | Op::SubFloat
+        | Op::MulFloat
+        | Op::DivFloat
+        | Op::NegFloat
+        | Op::AddStr
+        | Op::Eq
+        | Op::Neq
+        | Op::Lt
+        | Op::Gt
+        | Op::Lte
+        | Op::Gte
+        | Op::LtInt
+        | Op::GtInt
+        | Op::LteInt
+        | Op::GteInt
+        | Op::EqInt
+        | Op::NeqInt
+        | Op::LtFloat
+        | Op::GtFloat
+        | Op::LteFloat
+        | Op::GteFloat
+        | Op::Not
+        | Op::Jump
+        | Op::JumpIfFalse
+        | Op::Call
+        | Op::TailCall
+        | Op::CallSelf
+        | Op::TailCallSelf
+        | Op::CallKnown
+        | Op::TailCallKnown
+        | Op::Ret
+        | Op::SubIntLC
+        | Op::AddIntLC
+        | Op::JumpGeIntLC
+        | Op::JumpNeIntLC
+        | Op::Nop
+        | Op::MakeArray
+        | Op::MakeTuple
+        | Op::TupleIndex
+        | Op::MakeRange
+        | Op::IndexOr
+        | Op::ElemAt
+        | Op::ArrayLen
+        | Op::ArraySlice
+        | Op::ArrayConcat
+        | Op::Prepend
+        | Op::SeqDrop
+        | Op::Append
+        | Op::GetField
+        | Op::GetFieldUnchecked
+        | Op::MakeEnumPayload
+        | Op::MatchEnum
+        | Op::UnwrapEnum
+        | Op::SwitchTag
+        | Op::MakeClosure
+        | Op::PushCapture
+        | Op::PushSelf
+        | Op::Drop
+        | Op::Reuse
+        | Op::ToString
+        | Op::StrConcatN
+        | Op::StrSplit
+        | Op::StrLen
+        | Op::StrContains
+        | Op::StrTrim
+        | Op::IntToString
+        | Op::BinFromString
+        | Op::BinBitSize
+        | Op::BinByteSize
+        | Op::BinAppend
+        | Op::BinConcatN
+        | Op::BinFromInt
+        | Op::BinReadInt
+        | Op::BinTake
+        | Op::BinReadUtf8
+        | Op::BinMatchPrefix
+        | Op::BinView
+        | Op::BinByteAt
+        | Op::BinEqIgnoreAsciiCase
+        | Op::BinToAsciiLower
+        | Op::BinFromIntAscii
+        | Op::HttpHeaderHas
+        | Op::HttpHeadersValid
+        | Op::HttpSerializeHead
+        | Op::FloatFloor
+        | Op::FloatCeil
+        | Op::FloatRound
+        | Op::FloatTruncate
+        | Op::FloatFromInt
+        | Op::FloatToString
+        | Op::Print
+        | Op::StackDepth
+        | Op::LiveSubjects
+        | Op::Halt
+        | Op::ProcessSpawn
+        | Op::ProcessSpawnUnlinked
+        | Op::ProcessSelf
+        | Op::SupervisorNew
+        | Op::SupervisorWorker
+        | Op::FactoryNew
+        | Op::FactoryLookupOrStart
+        | Op::SupervisedOf
+        | Op::SupervisedParent
+        | Op::SupervisedChildren
+        | Op::SupervisedCount
+        | Op::FactorySpawn
+        | Op::SubjectNew
+        | Op::SubjectReceive
+        | Op::Monotonic
+        | Op::Argv
+        | Op::EnvMap
+        | Op::MapHas
+        | Op::MapKeys
+        | Op::MapValues
+        | Op::MapSize
+        | Op::MapNew
+        | Op::MapSet
+        | Op::MapDelete
+        | Op::MapToList
+        | Op::BitAnd
+        | Op::BitOr
+        | Op::BitXor
+        | Op::BitNot
+        | Op::BitShl
+        | Op::BitShr
+        | Op::JsonKind
+        | Op::JsonLen
+        | Op::JsonEncode
+        | Op::WireEncode => &[],
     }
 }
 

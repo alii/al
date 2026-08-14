@@ -14,15 +14,15 @@
 //!    thread takes a plain `clone()` of the shared program.
 //!
 //! Adding an opcode touches seven places: [`Op::has_jump_target`],
-//! [`Op::pushes_extra`] and `native::op_coverage` (all exhaustive, so they
-//! fail to compile until you classify the new op), emission in `scarlet_core`'s
-//! compiler, dispatch in [`crate::vm::exec`], `scarlet_core::bytecode::builtin_op`
-//! if it is exposed as a `@vm` intrinsic, and `crate::abi::slots_for`.
+//! [`Op::pushes_extra`], `native::op_coverage` and `crate::abi::slots_for`
+//! (all exhaustive, so they fail to compile until you classify the new op),
+//! emission in `scarlet_core`'s compiler, dispatch in [`crate::vm::exec`], and
+//! `scarlet_core::bytecode::builtin_op` if it is exposed as a `@vm` intrinsic.
 //!
-//! `slots_for` is the one with no compile enforcement: it ends in a `_ => &[]`
-//! arm, so an op omitted from it gets an empty slot list and fails at runtime,
-//! when it first tries to build a value, rather than at build time. A new op
-//! that constructs anything needs a test that reaches the construction.
+//! `slots_for` states the ABI slots an op constructs, and `&[]` is a claim that
+//! it constructs none — the compiler checks a program's bindings against it, so
+//! an op whose slots are understated fails at runtime, when it first tries to
+//! build a value, rather than at build time.
 
 pub(crate) mod bits;
 pub(crate) mod hamt;
