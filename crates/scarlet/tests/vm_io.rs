@@ -1210,13 +1210,15 @@ pub fn main() {{
 /// that broke resolution outright could not pass by timing everything out.
 ///
 /// `localhost` comes from the hosts file, so no nameserver and no network are
-/// involved. The timer wins by construction rather than by being faster: the
-/// deadline is already past when the process parks, while the completion racing
-/// it cannot arrive until a pool thread has been spawned and `getaddrinfo` has
-/// run.
+/// involved. No race decides this: a budget already spent is refused before the
+/// lookup is dispatched, so there is no completion for the timer to beat. That
+/// refusal is what this rests on — while the lookup was dispatched first the
+/// assertion was a genuine race, and it lost whenever the scheduler had other
+/// work to run, which is what
+/// `resolve_within_refuses_a_spent_budget_before_dispatching` pins down.
 ///
 /// What this does not witness: that the bound helps against a resolver that is
-/// genuinely slow, only that it fires while the lookup is outstanding. No
+/// genuinely slow — only that a spent budget refuses without starting one. No
 /// fixture for the former is portable — a nameserver that answers nothing needs
 /// root to configure, and the one path that stalls without it (mDNS, measured
 /// at 5.0 s on Darwin) resolves differently on Linux.
@@ -1245,5 +1247,69 @@ pub fn main() {
         out.stdout, "timed-out\ncontrol-resolved\n",
         "a passed deadline should time out while a generous one resolves; got: {:?}",
         out.stdout
+    );
+}
+
+/// The end-to-end arm of the spent-budget rule: a `resolve_within(host, 0)`
+/// must time out even when the scheduler has other work to run.
+///
+/// The spawned process is the whole fixture. It leaves the scheduler something
+/// runnable, so a lookup handed to the blocking pool has time to finish and be
+/// queued before the parked process is polled again; `poll_parked` drains
+/// completions before it wakes due timers, so a dispatched lookup then beats
+/// its own expired deadline and the program prints `resolved`. One scheduler is
+/// pinned because `try_donate` would otherwise hand the spinner to an idle
+/// peer, leaving this scheduler free to poll at once and the fixture inert.
+///
+/// This test is probabilistic — it rests on the spinner still spinning and on
+/// the pool winning a real race. The deterministic discriminator is the unit
+/// test `vm::io::tests::a_spent_resolve_deadline_is_refused_before_the_lookup_is_dispatched`,
+/// which drives the opcode directly and needs no scheduling at all. Measured
+/// with the refusal removed, aarch64-apple-darwin, debug (`test` profile),
+/// host busy with a live build fleet: 30 of 30 runs printed `resolved`, while
+/// the unspawned form passed 20 of 20 and witnessed nothing. The window is one
+/// reduction slice, so a release build or a quieter host may shrink it.
+///
+/// The `127.0.0.1` arm pins the other half of the rule: the deadline bounds the
+/// wait, not the work, so an address needing no lookup is still `Ok` on a spent
+/// budget. It is what fails if the refusal is ever hoisted above the
+/// IP-literal case.
+#[test]
+fn resolve_within_refuses_a_spent_budget_before_dispatching() {
+    let src = r#"import scarlet/net
+import scarlet/net/error.{TimedOut}
+import scarlet/process
+import scarlet/string
+
+fn burn(n Int) Nil {
+	match n <= 0 {
+		True -> Nil
+		False -> burn(n - 1)
+	}
+}
+
+pub fn main() {
+	_ = process.spawn(fn() { burn(400000) })
+	match net.resolve_within('localhost', 0) {
+		Err(TimedOut) -> println('timed-out')
+		Ok(_) -> println('resolved')
+		Err(e) -> println('other-error: ${string.inspect(e)}')
+	}
+	match net.resolve_within('127.0.0.1', 0) {
+		Ok(_) -> println('literal-ok')
+		Err(e) -> println('literal-error: ${string.inspect(e)}')
+	}
+}
+"#;
+    let (code, out) = run_with_schedulers("resolve_within_spent", src, 1, 30);
+    assert_eq!(
+        code,
+        Some(0),
+        "expected a clean exit; no exit code means it was killed\n--- output ---\n{out}"
+    );
+    assert_eq!(
+        out, "timed-out\nliteral-ok\n",
+        "a spent budget should refuse a lookup before dispatching it, and still \
+         admit an address that needs none"
     );
 }

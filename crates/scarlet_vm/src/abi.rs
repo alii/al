@@ -58,8 +58,8 @@ pub enum AbiSlot {
     /// Any errno with no class above — `[code Int]`
     FsErrnoOther,
 
-    /// `ETIMEDOUT`. Also `TcpReadUntil`, `TlsReadUntil` and
-    /// `TlsHandshakeUntil` passing their deadline.
+    /// `ETIMEDOUT`. Also `TcpReadUntil`, `TlsReadUntil`,
+    /// `TlsHandshakeUntil` and `DnsResolveUntil` passing their deadline.
     NetEtimedout,
     /// `ECONNREFUSED`
     NetEconnrefused,

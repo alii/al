@@ -556,8 +556,11 @@ impl VM {
     ///
     /// Unlike a connect, there is no lower ceiling for this to reach under:
     /// `getaddrinfo` keeps its own counsel and the caller cannot set it, so
-    /// this is the only bound a resolve has. It ends the wait, not the resolve
-    /// — see [`OffloadTimeout`].
+    /// this is the only bound a resolve has. A deadline already past is refused
+    /// before dispatch and costs no pool thread. Once dispatched the deadline
+    /// ends the wait rather than the resolve — see [`OffloadTimeout`] — and it
+    /// only competes with the completion, because `drain_completions` wakes the
+    /// process before `wake_due_timers` runs: a late answer is still delivered.
     pub(super) fn dns_resolve_until(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
         // Top of the stack: the deadline as an absolute monotonic ms, captured
         // once in Scarlet. This opcode parks with `Parked::cont`, so like the
@@ -582,6 +585,24 @@ impl VM {
             let ip_val = self.templates.ip_address(&mut self.heap, addr)?;
             let v = self.make_ok(ip_val)?;
             self.stack.push(v);
+            return Ok(None);
+        }
+        // A deadline bounds the wait, not the work: the IP literal above needs
+        // no wait and is never refused, but a lookup cannot start without one,
+        // so a spent budget refuses here instead of dispatching.
+        //
+        // The bounded connect declines to special-case a past deadline and is
+        // right to: its `Wait::Io` deadline is swept by `wake_due_timers`
+        // before `drain_io_events`, so the timer wins. An offload is the other
+        // way round — `drain_completions` runs first — so a dispatched lookup
+        // beats its own expired deadline. Do not drop this guard by analogy
+        // with that one.
+        if let Some(d) = deadline_ms
+            && monotonic_now_ms() >= d
+        {
+            let timed_out = self.abi_nullary(AbiSlot::NetEtimedout)?;
+            let err = self.make_err(timed_out)?;
+            self.stack.push(err);
             return Ok(None);
         }
         // getaddrinfo has no readiness signal, so offload it to the pool.
@@ -1067,6 +1088,9 @@ mod tests {
     //! The listener-identity invariant: one `Server` id denotes one kernel
     //! socket on every scheduler, and retiring it reaches every scheduler.
     //! The end-to-end deadlock regression lives in `tests/vm_io.rs`.
+    //!
+    //! Also the deadline invariants that a scheduled test can only witness
+    //! probabilistically, driven here through the opcode instead.
 
     use std::net::SocketAddr;
     use std::os::fd::AsRawFd;
@@ -1264,5 +1288,84 @@ mod tests {
         };
         assert!(saw(&mut p1), "poller 1 must see the shared fd's readiness");
         assert!(saw(&mut p2), "poller 2 must see the shared fd's readiness");
+    }
+
+    /// One bounded resolve step against `deadline_ms`, as `Op::DnsResolveUntil`
+    /// runs it. Nothing here reaches the network: a job is handed to the pool
+    /// only by `VM::park`, which these never call, so a dispatched step ends as
+    /// a dropped `Parked`.
+    fn resolve_step(vm: &mut VM, host: &str, deadline_ms: i64) -> Option<Parked> {
+        let v = Value::str_in(&mut vm.heap, host);
+        vm.stack.push(v);
+        let mut reds = 0;
+        vm.dns_resolve_step(&mut reds, Some(deadline_ms))
+            .expect("resolve")
+    }
+
+    /// The variant names of a `Result` and, for an `Err`, of its payload.
+    fn result_names(v: Value) -> (String, Option<String>) {
+        let e = v.as_enum().expect("a Result value");
+        let inner = e
+            .payload()
+            .first()
+            .and_then(|p| p.as_enum())
+            .map(|p| p.variant_name().to_string());
+        (e.variant_name().to_string(), inner)
+    }
+
+    /// A spent resolve budget is refused in the opcode, before the lookup
+    /// reaches the pool, so no completion exists to beat the deadline.
+    ///
+    /// Driving `dns_resolve_step` directly is the point. The end-to-end arm in
+    /// `tests/vm_io.rs` can only expose this with a busy sibling holding the
+    /// scheduler, which makes it a property of the host and the build profile;
+    /// this holds on every host and profile, and the two tests below are the
+    /// controls that keep it from passing for the wrong reason.
+    #[test]
+    fn a_spent_resolve_deadline_is_refused_before_the_lookup_is_dispatched() {
+        use super::super::halt_test_vm;
+
+        let mut vm = halt_test_vm();
+        let parked = resolve_step(&mut vm, "example.invalid", 0);
+        assert!(
+            parked.is_none(),
+            "a spent budget must refuse in place, not park on a dispatched lookup"
+        );
+        let (outer, inner) = result_names(vm.stack.pop().expect("a Result must be pushed"));
+        assert_eq!(outer, "Err", "a spent budget must not answer Ok");
+        assert_eq!(inner.as_deref(), Some("TimedOut"));
+    }
+
+    /// The control on the guard's condition: a budget that has not been spent
+    /// must still dispatch. Without this, refusing every deadline would satisfy
+    /// the test above.
+    #[test]
+    fn a_live_resolve_deadline_still_dispatches_the_lookup() {
+        use super::super::halt_test_vm;
+
+        let mut vm = halt_test_vm();
+        let live = monotonic_now_ms() + 60_000;
+        assert!(
+            resolve_step(&mut vm, "example.invalid", live).is_some(),
+            "a live budget must still dispatch the lookup"
+        );
+    }
+
+    /// The control on the guard's placement: the deadline bounds the wait, not
+    /// the work, so an address that needs no lookup is answered even on a spent
+    /// budget. This is what fails if the guard is hoisted above the IP-literal
+    /// case in `dns_resolve_step`.
+    #[test]
+    fn a_spent_resolve_deadline_still_answers_an_ip_literal() {
+        use super::super::halt_test_vm;
+
+        let mut vm = halt_test_vm();
+        let parked = resolve_step(&mut vm, "127.0.0.1", 0);
+        assert!(parked.is_none(), "an IP literal never parks");
+        let (outer, _) = result_names(vm.stack.pop().expect("a Result must be pushed"));
+        assert_eq!(
+            outer, "Ok",
+            "a spent budget must not refuse work that needs no wait"
+        );
     }
 }
