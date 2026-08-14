@@ -1,6 +1,6 @@
 import scarlet/net
 import scarlet/net/address.{SocketAddress}
-import scarlet/net/error.{NetError, UnexpectedEof}
+import scarlet/net/error.{NetError, InvalidPort, UnexpectedEof}
 import scarlet/net/socket.{Socket, Read, Data, Closed}
 import scarlet/binary
 import scarlet/result
@@ -96,26 +96,47 @@ pub type TlsError {
 // is not a decision a runtime should take on a program's behalf. Nothing is
 // therefore resumed across separate runs of a program.
 //
-// There is deliberately no `connect_within`. This call is three steps — resolve
-// the name, open the TCP connection, complete the handshake — and the first has
-// no deadline: `net.resolve` runs on the blocking pool, where giving up waiting
-// would not stop the work. The other two are bounded now
-// (`net.connect_addr_until`, `handshake_until`), so a `connect_within` would
-// promise a bound across a step that does not carry one.
-//
-// "Unbounded" does not mean "for ever" here, and the distinction is the whole
-// of why this paragraph is shorter than it was. An unanswered TCP connect is
-// bounded by the kernel — measured at 75.0 s on Darwin, the
-// `net.inet.tcp.keepinit` timer — and `net.connect` reports it as
-// `Err(TimedOut)` rather than parking. The objection to a `connect_within` is
-// that 75 s is a floor a caller cannot lower, not that the call never returns.
-//
-// A caller that needs the whole thing bounded writes the steps out —
-// `net.resolve`, then `net.connect_addr_until` and `handshake_until` sharing
-// one deadline — and can see that the resolve is the part still unbounded.
+// This call carries no deadline of its own, and each of its three steps is
+// left to whatever floor the platform imposes: an unanswered TCP connect gives
+// up after 75.0 s on Darwin (the `net.inet.tcp.keepinit` timer, measured), and
+// a peer that accepts and then never speaks TLS parks the handshake for the
+// life of the program. `connect_within` is the bounded form, and is what to
+// reach for against anything not known to be healthy.
 pub fn connect(host String, port Int) Result(TlsSocket, TlsError) {
 	sock <- result.then(result.map_err(net.connect(host, port), Transport))
 	handshake(sock, host)
+}
+
+// Open a TLS connection as `connect`, but wait no longer than `timeout_ms`
+// milliseconds for all three steps together. The deadline is captured once,
+// here in Scarlet, as an absolute monotonic timestamp, so an internal re-run on
+// a spurious wakeup never resets the clock. Errs with `Transport(TimedOut)`
+// once it passes, whichever step was outstanding.
+pub fn connect_within(host String, port Int, timeout_ms Int) Result(TlsSocket, TlsError) {
+	connect_until(host, port, time.add_ms(time.monotonic(), timeout_ms))
+}
+
+// Open a TLS connection as `connect`, giving up at the absolute Instant
+// `deadline` (from `time.monotonic()`).
+//
+// All three steps share this one Instant, so each gets what the steps before it
+// left rather than a fresh copy of the budget. That is why this exists
+// alongside `connect_within`: three `_within` calls chained would bound each
+// step separately, and the call as a whole at three times the number the caller
+// wrote.
+pub fn connect_until(host String, port Int, deadline Instant) Result(TlsSocket, TlsError) {
+	sock <- result.then(result.map_err(connect_socket_until(host, port, deadline), Transport))
+	handshake_until(sock, host, deadline)
+}
+
+// The bounded twin of `net.connect`, written out here because `scarlet/net` has
+// no `connect_until` of its own yet: the resolve and the connect share
+// `deadline`, so the connect gets what the resolve left. It collapses to a call
+// to that function once it exists.
+fn connect_socket_until(host String, port Int, deadline Instant) Result(Socket, NetError) {
+	ip <- result.then(net.resolve_until(host, deadline))
+	addr <- result.then(result.replace_err(address.socket_address(ip, port), InvalidPort))
+	net.connect_addr_until(addr, deadline)
 }
 
 // Complete a TLS handshake over an already-connected socket, verifying the

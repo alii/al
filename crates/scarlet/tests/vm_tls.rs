@@ -34,6 +34,7 @@ use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 mod common;
+use common::net::{CONNECT_DEADLINE_MS, KERNEL_LOOPBACK_FLOOR_MS, full_accept_queue};
 use common::{CHILD_TIMEOUT_SECS, wait_or_kill};
 
 // ---------------------------------------------------------------------------
@@ -741,6 +742,181 @@ pub fn main() {{
         out.contains("read: hello inside the deadline"),
         "handshake_within must complete a handshake that finishes inside its \
          deadline, and carry bytes afterwards, got:\n{out}"
+    );
+}
+
+/// `tls.connect_within` against a listener that never accepts must hit its own
+/// deadline rather than the kernel's.
+///
+/// This is the witness for the middle of the three steps: a full accept queue
+/// leaves the call inside the TCP connect, so the deadline has to have survived
+/// the resolve and reached `net.connect_addr_until` for this to return early.
+///
+/// The elapsed time is the assertion, not the error variant. Both the bounded
+/// and the unbounded call end in `Transport(TimedOut)` here — the kernel gives
+/// up on its own after `KERNEL_LOOPBACK_FLOOR_MS` — so only *when* it returns
+/// says whose clock produced it. The sibling test in `vm_io.rs` was once
+/// written the other way and passed with its deadline made inert.
+///
+/// What it does NOT witness: that the three steps share one Instant rather than
+/// a fresh copy each. An IP literal resolves for free and the handshake is
+/// never reached, so only one step spends any of the budget, and any bound
+/// between the two constants produces this output.
+///
+/// Portability: this rests on a full accept queue dropping the SYN. A platform
+/// that answers regardless panics inside `full_accept_queue` rather than
+/// reaching this assertion.
+#[test]
+fn tls_connect_within_times_out_against_a_peer_that_never_accepts() {
+    let (_listener, _fillers, port) = full_accept_queue();
+
+    let src = format!(
+        r#"import scarlet/net/tls.{{Transport}}
+import scarlet/net/error.{{TimedOut}}
+import scarlet/time
+import scarlet/string
+
+pub fn main() {{
+    started = time.monotonic()
+    outcome = tls.connect_within('127.0.0.1', {port}, {CONNECT_DEADLINE_MS})
+    ms = time.since_ms(time.monotonic(), started)
+    match outcome {{
+        Err(Transport(TimedOut)) -> println('timed-out ${{ms}}')
+        Ok(_) -> println('connected ${{ms}}')
+        Err(e) -> println('other-error: ${{string.inspect(e)}}')
+    }}
+}}
+"#
+    );
+
+    let (code, out) = run_bounded("connect_within_timeout", &src, None, 30);
+    assert_eq!(
+        code,
+        Some(0),
+        "expected a clean exit; no exit code means it was killed\n--- output ---\n{out}"
+    );
+    // Parsed rather than substring-matched, and it panics on a missing line:
+    // an absent number and a slow one must not read the same.
+    let elapsed_ms: u64 = out
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("timed-out "))
+        .unwrap_or_else(|| panic!("expected the Transport(TimedOut) arm\n--- output ---\n{out}"))
+        .trim()
+        .parse()
+        .expect("elapsed ms should be an integer");
+    assert!(
+        elapsed_ms < KERNEL_LOOPBACK_FLOOR_MS / 2,
+        "returned after {elapsed_ms} ms, which is the kernel's floor \
+         ({KERNEL_LOOPBACK_FLOOR_MS} ms) rather than the {CONNECT_DEADLINE_MS} ms \
+         deadline: the deadline did not fire\n--- output ---\n{out}"
+    );
+}
+
+/// `tls.connect_within` against a peer that accepts and then never speaks TLS
+/// must hit its deadline in the handshake.
+///
+/// This is the witness for the last of the three steps, and its unbounded floor
+/// is not a kernel timer but infinity: `tls.connect` parks on readability alone
+/// against this peer, so a deadline that never reached `handshake_until` leaves
+/// the program to be killed by `run_bounded`. The exit code is therefore
+/// asserted as hard as the elapsed time — a killed child has no exit code at
+/// all, which is what separates a wedge from a program that printed nothing.
+///
+/// No trust root is installed and none is needed: the deadline must fire before
+/// a certificate is ever offered.
+#[test]
+fn tls_connect_within_times_out_against_a_peer_that_never_speaks_tls() {
+    let port = spawn_silent_peer();
+
+    let src = format!(
+        r#"import scarlet/net/tls.{{Transport}}
+import scarlet/net/error.{{TimedOut}}
+import scarlet/time
+import scarlet/string
+
+pub fn main() {{
+    started = time.monotonic()
+    outcome = tls.connect_within('127.0.0.1', {port}, {CONNECT_DEADLINE_MS})
+    ms = time.since_ms(time.monotonic(), started)
+    match outcome {{
+        Err(Transport(TimedOut)) -> println('timed-out ${{ms}}')
+        Ok(_) -> println('connected ${{ms}}')
+        Err(e) -> println('other-error: ${{string.inspect(e)}}')
+    }}
+}}
+"#
+    );
+
+    let (code, out) = run_bounded("connect_within_silent", &src, None, 30);
+    assert_eq!(
+        code,
+        Some(0),
+        "connect_within must return against a silent peer, not hang\n--- output ---\n{out}"
+    );
+    let elapsed_ms: u64 = out
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("timed-out "))
+        .unwrap_or_else(|| panic!("expected the Transport(TimedOut) arm\n--- output ---\n{out}"))
+        .trim()
+        .parse()
+        .expect("elapsed ms should be an integer");
+    assert!(
+        elapsed_ms < KERNEL_LOOPBACK_FLOOR_MS / 2,
+        "returned after {elapsed_ms} ms against a peer that never speaks TLS, \
+         far past the {CONNECT_DEADLINE_MS} ms deadline\n--- output ---\n{out}"
+    );
+}
+
+/// Control for the two tests above, and the only test of `connect_until`'s own
+/// signature: an absolute deadline the connection comfortably beats completes,
+/// and the connection carries bytes afterwards.
+///
+/// Without this the timeout tests are instruments that cannot fail — a
+/// `connect_within` hard-wired to return `Transport(TimedOut)`, or one whose
+/// resolve step rejected every host, would satisfy both. The deadline is 10 s
+/// against loopback, generous on purpose: this arm is about the deadline NOT
+/// firing, so it must not become a timing test of a host that may be busy.
+///
+/// The certificate carries `IP:127.0.0.1` because `connect_until` verifies
+/// against the same string it connects to. `localhost` cannot be used here: it
+/// resolves to `::1` on this host, where nothing is bound.
+#[test]
+fn tls_connect_until_completes_against_a_live_peer() {
+    let ca = make_ca();
+    let leaf = make_leaf(&ca, "127.0.0.1", Validity::Current);
+    let port = spawn_tls_server(leaf, "hello inside the deadline");
+
+    let src = format!(
+        r#"import scarlet/net/tls
+import scarlet/net/socket.{{Data, Closed}}
+import scarlet/binary
+import scarlet/time
+import scarlet/string
+
+pub fn main() {{
+    deadline = time.add_ms(time.monotonic(), 10000)
+    match tls.connect_until('127.0.0.1', {port}, deadline) {{
+        Ok(conn) -> {{
+            tls.write(conn, <<'ping'>>) or Nil
+            match tls.read(conn, 1024) {{
+                Ok(Data(b)) -> println('read: ${{binary.to_string(b) or "<not utf-8>"}}')
+                Ok(Closed) -> println('closed')
+                Err(e) -> println('read failed: ${{string.inspect(e)}}')
+            }}
+            tls.close(conn) or Nil
+        }}
+        Err(e) -> println('failed: ${{string.inspect(e)}}')
+    }}
+}}
+"#
+    );
+
+    let out = run_program("connect_until_ok", &src, Some(&ca.pem));
+
+    assert!(
+        out.contains("read: hello inside the deadline"),
+        "connect_until must complete every step inside a deadline none of them \
+         comes close to, and carry bytes afterwards, got:\n{out}"
     );
 }
 

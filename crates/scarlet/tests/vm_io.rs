@@ -1,11 +1,13 @@
 // Exercises the VM's I/O opcodes. Server tests spawn the `scarlet` binary directly
 // because the server must run concurrently with the Rust client driving it.
 
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 mod common;
-use common::net::spawn_al_server;
+use common::net::{
+    CONNECT_DEADLINE_MS, KERNEL_LOOPBACK_FLOOR_MS, full_accept_queue, spawn_al_server,
+};
 use common::{Project, run_outputs, wait_or_kill};
 
 /// A Scarlet program whose `main` binds `127.0.0.1:0`, prints the `listening
@@ -1125,81 +1127,6 @@ pub fn main() {
     let n = conn.read_to_end(&mut rest).expect("clean EOF");
     assert_eq!(n, 0, "expected EOF after the handler returned");
 }
-
-/// How many connections `full_accept_queue` will open before concluding this
-/// platform answers whatever the accept queue holds. Darwin stops after one,
-/// measured; the rest is headroom for platforms that admit more.
-const MAX_FILL_ATTEMPTS: usize = 16;
-
-/// A listener that never accepts, filled until the platform stops answering.
-///
-/// This is the peer an unbounded connect has no answer for: once the accept
-/// queue is full the SYN is dropped rather than refused, so the client waits
-/// with no answer and no error ever coming back. std's `TcpListener` always
-/// listens with a backlog of 128, which is why this goes through `socket2`.
-///
-/// How many connections a `listen(1)` socket admits before that happens is
-/// platform-specific — one on Darwin, measured; more than one on Linux, where
-/// CI watched the connect complete — so the fill stops on the observation that
-/// a connect no longer completes, never on a count. Assuming a count is what
-/// made this test fail on Linux CI: the queue was still short, the connect
-/// under test completed, and nothing about the deadline was witnessed.
-///
-/// The listener is returned because dropping it closes the port outright. The
-/// fillers come with it because whether a closed-but-still-queued connection
-/// keeps its slot is platform-specific — on Darwin it does, measured — and
-/// holding them for the life of the test removes the question.
-fn full_accept_queue() -> (socket2::Socket, Vec<std::net::TcpStream>, u16) {
-    let addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("addr");
-    let listener = socket2::Socket::new(
-        socket2::Domain::IPV4,
-        socket2::Type::STREAM,
-        Some(socket2::Protocol::TCP),
-    )
-    .expect("socket");
-    listener.bind(&addr.into()).expect("bind");
-    listener.listen(1).expect("listen");
-    let port = listener
-        .local_addr()
-        .expect("local_addr")
-        .as_socket_ipv4()
-        .expect("v4")
-        .port();
-
-    // A loopback connect the listener queues completes in about a millisecond,
-    // so a filler that reaches this bound is a SYN that went unanswered.
-    let fill_timeout = std::time::Duration::from_millis(300);
-    let target = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let mut fillers = Vec::new();
-    for _ in 0..MAX_FILL_ATTEMPTS {
-        match std::net::TcpStream::connect_timeout(&target, fill_timeout) {
-            Ok(filler) => fillers.push(filler),
-            Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
-                return (listener, fillers, port);
-            }
-            Err(e) => panic!("filling the accept queue failed with {e:?}, not a dropped SYN"),
-        }
-    }
-    panic!(
-        "{MAX_FILL_ATTEMPTS} connections to a listen(1) socket all completed: this platform \
-         does not drop the SYN when the accept queue is full, so there is no way here to \
-         make a connect hang"
-    );
-}
-
-/// The deadline `connect_addr_within` is given below, and the floor the kernel
-/// enforces on the same call without it. Measured on aarch64-apple-darwin: a
-/// loopback connect to a full accept queue fails by itself with ETIMEDOUT
-/// after 7.836 s. Linux's floor is its SYN retransmission schedule and is far
-/// longer — not measured here — so this is the tighter of the two and the
-/// bound below holds on both.
-///
-/// The gap between these two is the whole of what the test can see. An earlier
-/// version asserted only the `TimedOut` arm and the exit code, and passed
-/// identically with the deadline made inert — both arms end in `TimedOut`, so
-/// neither witnessed which clock produced it.
-const CONNECT_DEADLINE_MS: u64 = 200;
-const KERNEL_LOOPBACK_FLOOR_MS: u64 = 7_836;
 
 /// `net.connect_addr_within` against a listener that never accepts must hit its
 /// own deadline rather than the kernel's.
