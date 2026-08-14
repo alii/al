@@ -11,6 +11,9 @@
 use crate::bytecode::Op;
 use crate::newtype_index;
 
+#[cfg(test)]
+mod audit;
+
 newtype_index!(
     /// Index into [`Program::templates`](crate::bytecode::Program::templates).
     pub struct TemplateIdx("tpl#")
@@ -603,7 +606,21 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::NetUnalignedBinary,
             S::NetErrnoOther,
         ],
-        Op::TlsClose => &[S::ResultOk, S::ResultErr, S::Unit],
+        // Closing writes the `close_notify` alert, so it reports a transport
+        // failure the same way `TlsWrite` does. It carries no plaintext, so
+        // there is no unaligned-binary refusal, and it never reaches the
+        // `InvalidData` branch that turns a session failure into a protocol
+        // error — the alert is written, not parsed.
+        Op::TlsClose => &[
+            S::ResultOk,
+            S::ResultErr,
+            S::Unit,
+            S::TlsTransport,
+            S::NetEconnreset,
+            S::NetEpipe,
+            S::NetEnotconn,
+            S::NetErrnoOther,
+        ],
         Op::PortSpawn => &[
             S::ResultOk,
             S::ResultErr,
@@ -697,9 +714,11 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
         Op::JsonString | Op::JsonInt | Op::JsonIntText | Op::JsonFloat | Op::JsonBool => {
             &[S::OptionSome, S::OptionNone]
         }
-        // `PushNil` is the value of a block that ends in a statement, and
-        // `Print` pushes nothing so the emitter follows it with one.
-        Op::PushNil | Op::Sleep | Op::SupervisorWorkerOnEach => &[S::Unit],
+        // `PushNil` is the value of a block that ends in a statement. In the
+        // interpreter `Print` pushes nothing and the emitter follows it with a
+        // `PushNil`; the native bridge returns exactly one value per op, so its
+        // shim builds the `Unit` itself and `Print` constructs one there.
+        Op::PushNil | Op::Print | Op::Sleep | Op::SupervisorWorkerOnEach => &[S::Unit],
         Op::SubjectSend
         | Op::SubjectSendUrgent
         | Op::ProcessDemonitor
@@ -858,7 +877,6 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
         | Op::FloatTruncate
         | Op::FloatFromInt
         | Op::FloatToString
-        | Op::Print
         | Op::StackDepth
         | Op::LiveSubjects
         | Op::Halt
