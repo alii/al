@@ -1125,3 +1125,117 @@ pub fn main() {
     let n = conn.read_to_end(&mut rest).expect("clean EOF");
     assert_eq!(n, 0, "expected EOF after the handler returned");
 }
+
+/// A listener that never accepts, with its backlog already full.
+///
+/// This is the peer an unbounded connect has no answer for. `listen(1)` is the
+/// smallest backlog the kernel will honour and one completed connection fills
+/// it; the SYN after that is dropped rather than refused, so the client waits
+/// with no answer and no error ever coming back. std's `TcpListener` always
+/// listens with a backlog of 128, which is why this goes through `socket2`.
+///
+/// Both the listener and the connection that fills it are returned so the
+/// caller holds them for the life of the test: dropping either one empties the
+/// queue, and the connect under test then completes instead of hanging.
+fn full_accept_queue() -> (socket2::Socket, std::net::TcpStream, u16) {
+    let addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("addr");
+    let listener = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )
+    .expect("socket");
+    listener.bind(&addr.into()).expect("bind");
+    listener.listen(1).expect("listen");
+    let port = listener
+        .local_addr()
+        .expect("local_addr")
+        .as_socket_ipv4()
+        .expect("v4")
+        .port();
+    let filler = std::net::TcpStream::connect(("127.0.0.1", port)).expect("fill the accept queue");
+    (listener, filler, port)
+}
+
+/// The deadline `connect_addr_within` is given below, and the floor the kernel
+/// enforces on the same call without it. Measured on this host: a loopback
+/// connect to a full accept queue fails by itself with ETIMEDOUT after 7.836 s.
+///
+/// The gap between these two is the whole of what the test can see. An earlier
+/// version asserted only the `TimedOut` arm and the exit code, and passed
+/// identically with the deadline made inert — both arms end in `TimedOut`, so
+/// neither witnessed which clock produced it.
+const CONNECT_DEADLINE_MS: u64 = 200;
+const KERNEL_LOOPBACK_FLOOR_MS: u64 = 7_836;
+
+/// `net.connect_addr_within` against a listener that never accepts must hit its
+/// own deadline rather than the kernel's.
+///
+/// The elapsed time is the assertion, not the error variant. Both the bounded
+/// and the unbounded call end in `Err(TimedOut)` here — the kernel gives up on
+/// its own — so only *when* it returns says whose deadline fired. The bound is
+/// set an order of magnitude above the deadline and well under the kernel
+/// floor, which is wide enough to survive a loaded host: this was measured with
+/// the build fleet running.
+///
+/// What it does NOT witness: that the deadline is the one Scarlet captured
+/// once. Any bound between the two constants produces this output, so a re-run
+/// that reset the clock would still pass.
+///
+/// Portability: this rests on a full accept queue dropping the SYN, which is
+/// BSD behaviour. A platform that completes the connection instead would take
+/// the `connected` arm and fail here rather than silently passing.
+#[test]
+fn connect_addr_within_times_out_against_a_full_accept_queue() {
+    let (_listener, _filler, port) = full_accept_queue();
+
+    let src = format!(
+        r#"import scarlet/net
+import scarlet/net/address
+import scarlet/net/error.{{TimedOut}}
+import scarlet/time
+import scarlet/string
+
+pub fn main() {{
+	match address.parse('127.0.0.1') {{
+		Ok(ip) -> match address.socket_address(ip, {port}) {{
+			Ok(addr) -> {{
+				started = time.monotonic()
+				outcome = net.connect_addr_within(addr, {CONNECT_DEADLINE_MS})
+				ms = time.since_ms(time.monotonic(), started)
+				match outcome {{
+					Err(TimedOut) -> println('timed-out ${{ms}}')
+					Ok(_) -> println('connected ${{ms}}')
+					Err(e) -> println('other-error: ${{string.inspect(e)}}')
+				}}
+			}}
+			Err(Nil) -> println('bad address')
+		}}
+		Err(Nil) -> println('bad ip')
+	}}
+}}
+"#
+    );
+
+    let (code, out) = run_with_schedulers("connect_addr_within_timeout", &src, 1, 30);
+    assert_eq!(
+        code,
+        Some(0),
+        "expected a clean exit; no exit code means it was killed\n--- output ---\n{out}"
+    );
+    // Parsed rather than substring-matched, and it panics on a missing line:
+    // an absent number and a slow one must not read the same.
+    let elapsed_ms: u64 = out
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("timed-out "))
+        .unwrap_or_else(|| panic!("expected the TimedOut arm\n--- output ---\n{out}"))
+        .trim()
+        .parse()
+        .expect("elapsed ms should be an integer");
+    assert!(
+        elapsed_ms < KERNEL_LOOPBACK_FLOOR_MS / 2,
+        "returned after {elapsed_ms} ms, which is the kernel's floor \
+         ({KERNEL_LOOPBACK_FLOOR_MS} ms) rather than the {CONNECT_DEADLINE_MS} ms \
+         deadline: the deadline did not fire\n--- output ---\n{out}"
+    );
+}

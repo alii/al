@@ -47,7 +47,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::abi::{self, AbiSlot};
 use crate::bytecode::{BinaryRef, SocketKind, SocketValue, Value};
 
-use super::poll::{EPOCH, Parked, Wait, monotonic_now_ms};
+use super::poll::{EPOCH, Parked, Wait, deadline_instant, monotonic_now_ms};
 use super::port::ConnIo;
 use super::processes::Link;
 use super::sched::BlockingOp;
@@ -146,6 +146,30 @@ impl VM {
     }
 
     pub(super) fn tcp_connect(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
+        self.tcp_connect_step(reds, None)
+    }
+
+    /// `Op::TcpConnectUntil`: `[addr, deadline_ms] -> Result(Socket, NetError)`.
+    ///
+    /// The kernel already bounds a connect — 75 s on Darwin, `keepinit` — so
+    /// this exists to lower that ceiling, not to create one. A deadline past it
+    /// never fires.
+    pub(super) fn tcp_connect_until(&mut self, reds: &mut i32) -> VmResult<Option<Parked>> {
+        // Top of the stack: the deadline as an absolute monotonic ms, captured
+        // once in Scarlet. This opcode parks with `Parked::cont`, so unlike the
+        // read/handshake pair it is never re-run and never re-reads it.
+        let deadline_ms = self.pop_int("net.connect_within")?;
+        self.tcp_connect_step(reds, Some(deadline_ms))
+    }
+
+    /// One connect attempt, shared by both connect opcodes. `deadline_ms` is
+    /// the absolute monotonic ms `Op::TcpConnectUntil` carries, `None` for the
+    /// unbounded opcode.
+    fn tcp_connect_step(
+        &mut self,
+        reds: &mut i32,
+        deadline_ms: Option<i64>,
+    ) -> VmResult<Option<Parked>> {
         *reds -= IO_REDUCTION_COST;
         // The hostname was already resolved off-scheduler by scarlet/net.connect.
         let addr_v = self.pop()?;
@@ -170,7 +194,17 @@ impl VM {
                 let id = self.alloc_socket_id();
                 match self.track_pending(id, socket) {
                     Ok(()) => {
-                        return Ok(Some(Parked::cont(Wait::connecting(id))));
+                        // A deadline already in the past is not special-cased:
+                        // it sits at the head of the timer heap and fires on
+                        // the first sweep, through the same arm that drops the
+                        // socket. The success arm above is unguarded for the
+                        // same reason the bounded read's is — a connect that
+                        // completed immediately is not late.
+                        let wait = match deadline_ms {
+                            Some(d) => Wait::connecting_until(id, deadline_instant(d)),
+                            None => Wait::connecting(id),
+                        };
+                        return Ok(Some(Parked::cont(wait)));
                     }
                     // Unwatchable means unwakeable: report instead of parking.
                     Err(e) => self.push_net(Err(e))?,

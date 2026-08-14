@@ -97,14 +97,22 @@ pub type TlsError {
 // therefore resumed across separate runs of a program.
 //
 // There is deliberately no `connect_within`. This call is three steps — resolve
-// the name, open the TCP connection, complete the handshake — and only the
-// third has a deadline today; `net.resolve` and `net.connect_addr` have none.
-// A `connect_within` could therefore bound the last third of its own work and
-// park for ever in the first two, which is a worse failure than no deadline at
-// all: the signature would promise a bound the call does not carry. When
-// `scarlet/net` grows a bounded connect, this grows one too. Until then, a
-// caller that needs the whole thing bounded writes the two steps out —
-// `net.connect` then `handshake_within` — and can see which half is unbounded.
+// the name, open the TCP connection, complete the handshake — and the first has
+// no deadline: `net.resolve` runs on the blocking pool, where giving up waiting
+// would not stop the work. The other two are bounded now
+// (`net.connect_addr_until`, `handshake_until`), so a `connect_within` would
+// promise a bound across a step that does not carry one.
+//
+// "Unbounded" does not mean "for ever" here, and the distinction is the whole
+// of why this paragraph is shorter than it was. An unanswered TCP connect is
+// bounded by the kernel — measured at 75.0 s on Darwin, the
+// `net.inet.tcp.keepinit` timer — and `net.connect` reports it as
+// `Err(TimedOut)` rather than parking. The objection to a `connect_within` is
+// that 75 s is a floor a caller cannot lower, not that the call never returns.
+//
+// A caller that needs the whole thing bounded writes the steps out —
+// `net.resolve`, then `net.connect_addr_until` and `handshake_until` sharing
+// one deadline — and can see that the resolve is the part still unbounded.
 pub fn connect(host String, port Int) Result(TlsSocket, TlsError) {
 	sock <- result.then(result.map_err(net.connect(host, port), Transport))
 	handshake(sock, host)

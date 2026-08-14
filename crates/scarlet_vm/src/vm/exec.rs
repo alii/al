@@ -834,6 +834,7 @@ impl VM {
                 Op::TcpListen => self.tcp_listen()?,
                 Op::TcpAccept => park!(self.tcp_accept(&mut reds)),
                 Op::TcpConnect => park!(self.tcp_connect(&mut reds)),
+                Op::TcpConnectUntil => park!(self.tcp_connect_until(&mut reds)),
                 Op::TcpRead => park!(self.tcp_read(&mut reds)),
                 Op::TcpReadUntil => park!(self.tcp_read_until(&mut reds)),
                 Op::TcpWrite => park!(self.tcp_write(&mut reds)),

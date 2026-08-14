@@ -309,6 +309,10 @@ pub enum Op {
     TcpListen,
     TcpAccept,
     TcpConnect,
+    /// `[addr, deadline_ms] -> Result(Socket, NetError)` — parks until the
+    /// connect completes or the absolute monotonic-ms deadline passes (then
+    /// `Err(TimedOut)`, with the half-open socket dropped).
+    TcpConnectUntil,
     TcpRead,
     /// `[sock, max, deadline_ms] -> Result(Binary, NetError)` — parks until
     /// data arrives, the peer closes, or the absolute monotonic-ms deadline
@@ -731,6 +735,7 @@ impl Op {
             | Op::TcpListen
             | Op::TcpAccept
             | Op::TcpConnect
+            | Op::TcpConnectUntil
             | Op::TcpRead
             | Op::TcpReadUntil
             | Op::TcpWrite
@@ -953,6 +958,7 @@ impl Op {
             | Op::TcpListen
             | Op::TcpAccept
             | Op::TcpConnect
+            | Op::TcpConnectUntil
             | Op::TcpRead
             | Op::TcpReadUntil
             | Op::TcpWrite

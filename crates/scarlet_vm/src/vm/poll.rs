@@ -116,6 +116,17 @@ impl Wait {
         }
     }
 
+    /// As `connecting`, but giving up at `deadline`. Both wakes land on
+    /// `WakeAction::CompleteConnect`; which one fired is read from whether the
+    /// socket is still pending, not from the wait.
+    pub(super) fn connecting_until(id: i32, deadline: Instant) -> Self {
+        Wait::Io {
+            fd: id,
+            deadline: Some(deadline),
+            action: WakeAction::CompleteConnect,
+        }
+    }
+
     /// Park until `deadline`, then resume at the next instruction (the result
     /// is already on the stack).
     pub(super) fn until(deadline: Instant) -> Self {
@@ -222,6 +233,13 @@ impl Parked {
             resume: Resume::Continue,
         }
     }
+}
+
+/// The `Instant` an absolute monotonic-ms deadline names, on the same epoch
+/// `monotonic_now_ms` reads. A negative value clamps to the epoch rather than
+/// wrapping, so a deadline already past fires on the next sweep.
+pub(super) fn deadline_instant(ms: i64) -> Instant {
+    *EPOCH.get_or_init(Instant::now) + Duration::from_millis(ms.max(0) as u64)
 }
 
 pub(super) fn monotonic_now_ms() -> i64 {
@@ -437,7 +455,7 @@ impl VM {
         // blocking below would strand it behind an idle poller.
         let mut woke = retired_woke | self.drain_completions()?;
         woke |= self.drain_wakes();
-        woke |= self.wake_due_timers();
+        woke |= self.wake_due_timers()?;
 
         let waiting_on_io = !self.io_waiters.is_empty();
 
@@ -462,7 +480,7 @@ impl VM {
         };
         let timeout = next_deadline.map(|d| d.saturating_duration_since(Instant::now()));
         self.drain_io_events(timeout)?;
-        self.wake_due_timers();
+        self.wake_due_timers()?;
         // A completion or send notify may be what ended the wait above.
         self.drain_completions()?;
         self.drain_wakes();
@@ -552,7 +570,7 @@ impl VM {
 
     /// Wake parked processes whose deadline has passed. A popped entry whose id
     /// is gone, or whose live deadline no longer matches, already woke on I/O.
-    pub(super) fn wake_due_timers(&mut self) -> bool {
+    pub(super) fn wake_due_timers(&mut self) -> VmResult<bool> {
         let now = Instant::now();
         let mut woke = false;
         while let Some(&Reverse((deadline, id))) = self.timer_heap.peek() {
@@ -563,15 +581,32 @@ impl VM {
             if !matches!(self.parked.get(&id), Some((w, _)) if w.deadline() == Some(deadline)) {
                 continue;
             }
-            let Some((_wait, p)) = self.park_remove(id) else {
+            let Some((wait, p)) = self.park_remove(id) else {
                 continue;
             };
             // Nothing to disarm: an fd's registration belongs to the socket,
             // not to this wait.
-            self.run_queue.push_back(p);
+            match wait {
+                // A connect that ran out of time resumes *past* the
+                // instruction, like the one that completed, so the result it
+                // reads has to be pushed here. Waking it bare would resume it
+                // with whatever was underneath on the stack.
+                Wait::Io {
+                    fd,
+                    action: WakeAction::CompleteConnect,
+                    ..
+                } => self.wake_with(p, |vm| vm.timeout_connect(fd))?,
+                Wait::Io {
+                    action: WakeAction::Rerun,
+                    ..
+                }
+                | Wait::Timer(_)
+                | Wait::Offload(_)
+                | Wait::Mailbox { .. } => self.run_queue.push_back(p),
+            }
             woke = true;
         }
-        woke
+        Ok(woke)
     }
 
     /// Wait on the poller for at most `timeout` (None = until something
@@ -620,6 +655,29 @@ impl VM {
         }
         self.poll_events = events;
         Ok(())
+    }
+
+    /// Give up on a pending connect whose deadline passed: drop the socket and
+    /// report `TimedOut`.
+    ///
+    /// Dropping it is what makes the deadline mean anything. The fd is still
+    /// mid-handshake in the kernel, and nothing in Scarlet can name it — the
+    /// `Socket` value is only ever minted by `finish_connect`'s success arm —
+    /// so an entry left behind is an fd no program could ever close.
+    ///
+    /// An absent entry means the connect completed and was already taken by
+    /// `finish_connect` on an I/O wake; the timer then lost a race it cannot
+    /// win, and the process has its result. Waking it a second time would push
+    /// a second value, so this reports the loss rather than fabricating one.
+    fn timeout_connect(&mut self, id: i32) -> VmResult<Value> {
+        let Some(socket) = self.pending_connects.remove(&id) else {
+            let aborted = self.abi_nullary(AbiSlot::NetEconnaborted)?;
+            return self.make_err(aborted);
+        };
+        self.poller_deregister(socket.as_raw_fd());
+        drop(socket);
+        let timed_out = self.abi_nullary(AbiSlot::NetEtimedout)?;
+        self.make_err(timed_out)
     }
 
     /// Complete a pending non-blocking connect whose socket became writable:

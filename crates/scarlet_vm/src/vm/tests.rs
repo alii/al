@@ -576,7 +576,10 @@ fn deadline_only_wait_wakes_after_its_duration() {
         &mut vm,
         Wait::until(Instant::now() + Duration::from_secs(3600)),
     );
-    assert!(!vm.wake_due_timers(), "a future deadline must not wake");
+    assert!(
+        !vm.wake_due_timers().expect("timer sweep"),
+        "a future deadline must not wake"
+    );
     assert_eq!(vm.run_queue.len(), 0);
 
     // A short timer wakes only once its duration has elapsed.
@@ -585,7 +588,10 @@ fn deadline_only_wait_wakes_after_its_duration() {
         Wait::until(Instant::now() + Duration::from_millis(50)),
     );
     std::thread::sleep(Duration::from_millis(150));
-    assert!(vm.wake_due_timers(), "an elapsed deadline must wake");
+    assert!(
+        vm.wake_due_timers().expect("timer sweep"),
+        "an elapsed deadline must wake"
+    );
     assert_eq!(
         vm.run_queue.len(),
         1,
@@ -622,7 +628,7 @@ fn fd_wake_leaves_stale_timer_entry_that_wake_due_timers_discards() {
     std::thread::sleep(Duration::from_millis(150));
     let before = vm.run_queue.len();
     assert!(
-        !vm.wake_due_timers(),
+        !vm.wake_due_timers().expect("timer sweep"),
         "a stale timer entry must not report a wake"
     );
     assert_eq!(

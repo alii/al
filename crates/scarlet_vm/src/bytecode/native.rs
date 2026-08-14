@@ -261,6 +261,7 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::FileWrite
         | Op::TcpAccept
         | Op::TcpConnect
+        | Op::TcpConnectUntil
         | Op::TcpRead
         | Op::TcpReadUntil
         | Op::TcpWrite

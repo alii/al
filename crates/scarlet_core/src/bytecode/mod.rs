@@ -31,6 +31,7 @@ fn builtin_op(name: &str) -> Option<Op> {
         "net__listen" => Op::TcpListen,
         "net__accept" => Op::TcpAccept,
         "net__connect" => Op::TcpConnect,
+        "net__connect_until" => Op::TcpConnectUntil,
         "net__close" => Op::TcpCloseServer,
         "net__give" => Op::TcpGive,
         "net__local_addr" => Op::TcpLocalAddr,

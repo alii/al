@@ -476,7 +476,11 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::FsUnalignedBinary,
             S::FsErrnoOther,
         ],
-        Op::TcpListen | Op::TcpConnect | Op::TcpCloseServer | Op::TcpClose => &[
+        Op::TcpListen
+        | Op::TcpConnect
+        | Op::TcpConnectUntil
+        | Op::TcpCloseServer
+        | Op::TcpClose => &[
             S::ResultOk,
             S::ResultErr,
             S::Unit,

@@ -626,6 +626,7 @@ mod opc {
     pub const TCP_CLOSE: u8 = Op::TcpClose as u8;
     pub const TCP_CLOSE_SERVER: u8 = Op::TcpCloseServer as u8;
     pub const TCP_CONNECT: u8 = Op::TcpConnect as u8;
+    pub const TCP_CONNECT_UNTIL: u8 = Op::TcpConnectUntil as u8;
     pub const TCP_GIVE: u8 = Op::TcpGive as u8;
     pub const TCP_LISTEN: u8 = Op::TcpListen as u8;
     pub const TCP_LOCAL_ADDR: u8 = Op::TcpLocalAddr as u8;
@@ -752,6 +753,7 @@ impl VM {
             opc::FILE_WRITE => self.file_write(reds),
             opc::TCP_ACCEPT => self.tcp_accept(reds),
             opc::TCP_CONNECT => self.tcp_connect(reds),
+            opc::TCP_CONNECT_UNTIL => self.tcp_connect_until(reds),
             opc::TCP_READ => self.tcp_read(reds),
             opc::TCP_READ_UNTIL => self.tcp_read_until(reds),
             opc::TCP_WRITE => self.tcp_write(reds),
