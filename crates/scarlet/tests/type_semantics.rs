@@ -712,6 +712,24 @@ fn internal_attribute_is_not_a_scarlet_attribute() {
     );
 }
 
+/// The `AttrTarget::Type` arm, which is named rather than negated so a new
+/// attribute target has to decide whether `@vm` is legal on it.
+///
+/// A test source is never in the stdlib, so `'@vm' is only allowed in the
+/// standard library` fires on this same attribute — the two checks are
+/// sequential, not exclusive, and `al check` prints both. That is why the
+/// expected diagnostic is spelled out in full and passed alone: `check_rejects`
+/// matches one of the strings it is given, so naming both would let the
+/// stdlib-only error satisfy it. The bare rejection is likewise not the
+/// witness, since the stdlib-only error already produces one on its own.
+#[test]
+fn vm_attribute_may_not_be_used_on_a_type() {
+    check_rejects(
+        "@vm(tcp_listen)\ntype Handle { Handle(fd Int) }\n",
+        "'@vm' may only be used on functions",
+    );
+}
+
 #[test]
 fn bool_is_a_normal_two_ctor_type() {
     run_outputs(
