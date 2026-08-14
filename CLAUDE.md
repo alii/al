@@ -1,6 +1,6 @@
 Build with `cargo build`. Run tests with `cargo test`. Production build with `cargo build --release`.
 
-Before committing, `cargo fmt` and `cargo clippy --all-targets` should both be clean — CI enforces this.
+Before committing, run the two gates in the spelling CI runs them: `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`. Judge each by its exit code, and only in those spellings — `cargo clippy --all-targets` without `-D warnings` exits 0 while printing the warnings, so it reports success on a tree CI will reject, and bare `cargo fmt` rewrites the files instead of reporting on them, so it cannot fail on formatting at all.
 
 Be sparse when adding comments in the code. Do not add unnecessary comments. Do add comments when explaining larger, more complicated code paths. Especially in things like the parser and compiler or vm.
 
