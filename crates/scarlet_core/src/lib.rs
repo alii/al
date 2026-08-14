@@ -15,6 +15,7 @@
 
 pub mod bytecode;
 pub mod core_ir;
+pub mod lint;
 pub mod module;
 pub mod precompile;
 pub mod reference;

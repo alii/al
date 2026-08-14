@@ -1,4 +1,4 @@
-//! `cargo xtask scrl-census` — the `.scrl` half of the illegal-state sweep.
+//! `scarlet lint` — the `.scrl` half of the illegal-state sweep.
 //!
 //! Mordant's `flag_cluster` reads Rust and reports a struct whose `n` `bool`
 //! fields admit `2^n` states when fewer are legal. `wildcard_local_enum` flags
@@ -10,21 +10,33 @@
 //! This is a census, not a lint: it prints what the corpus contains and exits 0
 //! either way. Every finding is a candidate for reading, not a defect.
 //!
-//! It is deliberately not a CI gate. Shape 1's first sweep read 3 constructors
-//! out of 469 declarations across five repos and only one was a genuine
-//! illegal state (`HeadFlags`, then T-310); the other two are decoder test
-//! fixtures whose width is the property under test. Shape 2 over the same
-//! five-repo corpus (264 files, 476 type declarations, 1799 matches, 0
-//! uninspected) printed 141 catch-alls over a local sum type and 251 others.
-//! Reading them: extractors (`_ -> None`/`False`), fail-closed protocol
-//! errors (redis `Value`), identity defaults (`Phase`, `Status`), and tests.
-//! T-148's types (`Field`, `Parsed`, `Framing`, `ChunkBody`) have no catch-all
-//! in their defining modules — `Field`'s matches already name every variant.
-//! Scarlet has no per-item suppression, so gating either shape would mean a
-//! baseline file the genuine class does not justify, or a red build on
-//! extractors that are correct. It runs in the hardening sweep instead.
-//! T-148's opt-in `@exhaustive` is still the language mechanism; this census
-//! says a blanket lint is not.
+//! It is deliberately not a CI gate, and deliberately not a default-on
+//! compiler warning. Shape 1's first sweep read 3 constructors out of 469
+//! declarations across five repos and only one was a genuine illegal state
+//! (`HeadFlags`, then T-310); the other two are decoder test fixtures whose
+//! width is the property under test. Shape 2 over the same five-repo corpus
+//! (264 files, 476 type declarations, 1799 matches, 0 uninspected) printed 141
+//! catch-alls over a local sum type and 251 others. Reading them: extractors
+//! (`_ -> None`/`False`), fail-closed protocol errors (redis `Value`),
+//! identity defaults (`Phase`, `Status`), and tests. T-148's types (`Field`,
+//! `Parsed`, `Framing`, `ChunkBody`) have no catch-all in their defining
+//! modules — `Field`'s matches already name every variant. Scarlet has no
+//! per-item suppression, so gating either shape would mean a baseline file the
+//! genuine class does not justify, or a red build on extractors that are
+//! correct. T-148's opt-in `@exhaustive` is still the language mechanism; this
+//! census says a blanket lint is not.
+//!
+//! Re-measured on this repo alone when the census moved here (97 files, 177
+//! type declarations, 524 matches, 0 uninspected): shape 1 is 2 findings, both
+//! in `tests/programs/decoders.scrl`, and both are the fixture case above.
+//! Shape 2 is 39, of which 15 are extractors and the remaining 24 are ordinary
+//! dispatches with a default arm — `Method` (8 variants) in the stdlib's own
+//! `http.scrl`, `Result` in `bench_service.scrl`. So the precision of a
+//! default-on warning here would be 0/2 and at best 0/24. Diagnostics print to
+//! stderr, and the golden harness asserts a clean run writes none, so turning
+//! either shape on by default also takes `golden_examples` red on correct
+//! code. That is the measurement behind keeping this a command you run, not a
+//! warning you receive.
 //!
 //! It parses with the compiler's own scanner and parser rather than matching
 //! text, because the text-matching version of this question has been wrong here
@@ -76,10 +88,10 @@
 
 use std::path::{Path, PathBuf};
 
-use scarlet_syntax::ast;
-use scarlet_syntax::parser::new_parser;
-use scarlet_syntax::scanner::new_scanner;
-use scarlet_syntax::token::{Keyword, Kind};
+use crate::ast;
+use crate::parser::new_parser;
+use crate::scanner::new_scanner;
+use crate::token::{Keyword, Kind};
 
 /// Mordant's `FlagCluster::FLOOR`. Held equal to it deliberately: `HeadFlags`
 /// and the `ConnTokens` it faces across the ABI are one boundary in two
@@ -87,52 +99,55 @@ use scarlet_syntax::token::{Keyword, Kind};
 /// compared with the Rust side's.
 pub const DEFAULT_MIN_BOOLS: usize = 2;
 
+/// The census types are opaque: their fields are private because [`report`] is
+/// the only reader, so a caller outside this module takes the rendered text
+/// rather than picking the census apart.
 pub struct Finding {
-    pub path: PathBuf,
-    pub line: i32,
-    pub type_name: String,
+    path: PathBuf,
+    line: i32,
+    type_name: String,
     /// The constructor carrying the bools. Equal to `type_name` for the
     /// single-constructor types that are the Rust `struct` analogue.
-    pub ctor_name: String,
-    pub opaque: bool,
-    pub bools: Vec<String>,
+    ctor_name: String,
+    opaque: bool,
+    bools: Vec<String>,
 }
 
 /// A `_` or bare-binding arm whose sibling arms name a multi-constructor type
 /// declared in the same walk root. The type is inferred from those constructor
 /// heads — there is no typechecker here.
 pub struct CatchAll {
-    pub path: PathBuf,
-    pub line: i32,
+    path: PathBuf,
+    line: i32,
     /// `_` or the binding's written name.
-    pub pattern: String,
-    pub type_name: String,
-    pub variants: usize,
-    pub sibling_ctors: Vec<String>,
+    pattern: String,
+    type_name: String,
+    variants: usize,
+    sibling_ctors: Vec<String>,
     /// Body is `None` / `False` / `Nil` / `Err(..)` / `[]` — mordant's
     /// extractor exemption, reported as a column rather than filtered.
-    pub extractor: bool,
+    extractor: bool,
 }
 
 /// A file the walk could not account for in full, and why. Kept apart from the
 /// findings because "nothing found here" and "not looked at properly here"
 /// print the same empty list otherwise.
 pub struct Uninspected {
-    pub path: PathBuf,
-    pub reason: String,
+    path: PathBuf,
+    reason: String,
 }
 
 #[derive(Default)]
 pub struct Census {
-    pub findings: Vec<Finding>,
-    pub catch_alls: Vec<CatchAll>,
-    pub uninspected: Vec<Uninspected>,
-    pub files: usize,
-    pub type_decls: usize,
-    pub matches: usize,
+    findings: Vec<Finding>,
+    catch_alls: Vec<CatchAll>,
+    uninspected: Vec<Uninspected>,
+    files: usize,
+    type_decls: usize,
+    matches: usize,
     /// Catch-all arms whose sibling heads did not name an in-root sum type
     /// (literals, arrays, tuples, or constructors declared elsewhere).
-    pub other_catch_alls: usize,
+    other_catch_alls: usize,
     sums: Vec<LocalSum>,
     raw_catch_alls: Vec<RawCatchAll>,
 }
@@ -153,6 +168,11 @@ struct RawCatchAll {
     extractor: bool,
 }
 
+/// Roots are taken as given, so the census can be pointed at the other `.scrl`
+/// corpora (`madder`, `website`) without the tool knowing they exist. The
+/// driver defaults them to the working directory: as an xtask this defaulted to
+/// `CARGO_MANIFEST_DIR`'s repo root, which in a released binary would name the
+/// build machine's checkout rather than the caller's.
 pub fn run(roots: &[PathBuf], min_bools: usize) -> Census {
     let mut census = Census::default();
     let mut paths = Vec::new();
@@ -707,7 +727,7 @@ fn is_prelude_bool(typ: &ast::TypeIdentifier) -> bool {
 
 /// `2^n`, or the unevaluated power when it does not fit — the same contract as
 /// `flag_cluster`'s message, so the two sides print comparable numbers.
-pub fn states(n: usize) -> String {
+pub(crate) fn states(n: usize) -> String {
     match u32::try_from(n).ok().and_then(|n| 2u64.checked_pow(n)) {
         Some(n) => n.to_string(),
         None => format!("2^{n}"),

@@ -20,8 +20,6 @@ use scarlet_syntax::scanner::ESCAPES;
 use scarlet_syntax::token::{Keyword, Kind};
 use serde_json::{Value, json};
 
-mod scrl_census;
-
 /// The contextual identifiers accepted as `<< expr:spec >>` segment specs.
 /// They are not keywords; the parser matches them by text in
 /// `parse_bin_spec` (`parser/mod.rs`), which its error message enumerates.
@@ -41,81 +39,9 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Some("scrl-census") => {
-            let rest = &args[1..];
-            match scrl_census_args(rest) {
-                Ok((roots, min_bools)) => {
-                    let census = scrl_census::run(&roots, min_bools);
-                    print!("{}", scrl_census::report(&census, min_bools));
-                    ExitCode::SUCCESS
-                }
-                Err(err) => {
-                    eprintln!("{err}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
         _ => {
-            eprintln!(
-                "usage: cargo xtask gen-editor-syntax [--check]\n\
-                        cargo xtask scrl-census [--min-bools N] [path ...]"
-            );
+            eprintln!("usage: cargo xtask gen-editor-syntax [--check]");
             ExitCode::FAILURE
-        }
-    }
-}
-
-/// `[--min-bools N] [path ...]`. Paths default to this repo, and are taken as
-/// given so the census can be pointed at the other two `.scrl` corpora
-/// (`madder`, `website`) without the tool knowing they exist.
-fn scrl_census_args(args: &[String]) -> Result<(Vec<PathBuf>, usize), CensusArgsError> {
-    let mut roots = Vec::new();
-    let mut min_bools = scrl_census::DEFAULT_MIN_BOOLS;
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
-        if arg == "--min-bools" {
-            let value = rest.next().ok_or(CensusArgsError::MissingValue)?;
-            min_bools = value
-                .parse()
-                .map_err(|source| CensusArgsError::NotANumber {
-                    value: value.clone(),
-                    source,
-                })?;
-            if min_bools < 2 {
-                return Err(CensusArgsError::BelowMin);
-            }
-        } else if let Some(flag) = arg.strip_prefix("--") {
-            return Err(CensusArgsError::UnknownFlag(flag.to_string()));
-        } else {
-            roots.push(PathBuf::from(arg));
-        }
-    }
-    if roots.is_empty() {
-        roots.push(repo_root());
-    }
-    Ok((roots, min_bools))
-}
-
-#[derive(Debug)]
-enum CensusArgsError {
-    MissingValue,
-    NotANumber {
-        value: String,
-        source: std::num::ParseIntError,
-    },
-    BelowMin,
-    UnknownFlag(String),
-}
-
-impl std::fmt::Display for CensusArgsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CensusArgsError::MissingValue => write!(f, "--min-bools needs a value"),
-            CensusArgsError::NotANumber { value, source } => {
-                write!(f, "--min-bools: not a number: {value}: {source}")
-            }
-            CensusArgsError::BelowMin => write!(f, "--min-bools below 2 is meaningless"),
-            CensusArgsError::UnknownFlag(flag) => write!(f, "unknown flag: --{flag}"),
         }
     }
 }
@@ -1035,7 +961,7 @@ mod tests {
     use scarlet_syntax::scanner::new_scanner;
     use scarlet_syntax::token::Kind;
 
-    use super::{CensusArgsError, outputs, scrl_census_args};
+    use super::outputs;
 
     /// Number literals are the one part of the lexical layer written as a
     /// hand-copied regex rather than derived from a table, so
@@ -1088,44 +1014,6 @@ mod tests {
                  then regenerate with `cargo xtask gen-editor-syntax`"
             );
         }
-    }
-
-    /// `--min-bools` with a non-number wraps `ParseIntError`. Collapsing it
-    /// into a `String` is mordant's `stringified_error`.
-    #[test]
-    fn min_bools_not_a_number_wraps_parse_int_error() {
-        let args = ["--min-bools".into(), "xyz".into()];
-        match scrl_census_args(&args) {
-            Err(CensusArgsError::NotANumber { value, source }) => {
-                assert_eq!(value, "xyz");
-                assert_eq!(source.to_string(), "invalid digit found in string");
-            }
-            other => panic!("expected NotANumber, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn min_bools_missing_value_and_below_floor() {
-        match scrl_census_args(&["--min-bools".into()]) {
-            Err(CensusArgsError::MissingValue) => {}
-            other => panic!("expected MissingValue, got {other:?}"),
-        }
-        match scrl_census_args(&["--min-bools".into(), "1".into()]) {
-            Err(CensusArgsError::BelowMin) => {}
-            other => panic!("expected BelowMin, got {other:?}"),
-        }
-        match scrl_census_args(&["--nope".into()]) {
-            Err(CensusArgsError::UnknownFlag(flag)) => assert_eq!(flag, "nope"),
-            other => panic!("expected UnknownFlag, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn min_bools_and_paths_parse() {
-        let (roots, min_bools) =
-            scrl_census_args(&["--min-bools".into(), "3".into(), "examples".into()]).unwrap();
-        assert_eq!(min_bools, 3);
-        assert_eq!(roots, [std::path::PathBuf::from("examples")]);
     }
 
     /// Regenerating must be a no-op against the checked-in files, so CI fails

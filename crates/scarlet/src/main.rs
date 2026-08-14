@@ -23,7 +23,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use scarlet::cli::{help, man};
 use scarlet::core_ir::clif;
-use scarlet::{STDLIB, ast, bytecode, diagnostic, formatter, lsp, parser, repl, scanner, vm};
+use scarlet::{STDLIB, ast, bytecode, diagnostic, formatter, lint, lsp, parser, repl, scanner, vm};
 
 const VERSION: &str = env!("SCARLET_VERSION");
 
@@ -54,6 +54,8 @@ enum Commands {
     Build { entrypoint: String },
     /// Format Scarlet source files
     Fmt(FmtArgs),
+    /// Survey source files for illegal-state shapes
+    Lint(LintArgs),
     /// Upgrade to a specific version (default: canary)
     Upgrade { version: Option<String> },
     /// Print the compiled bytecode
@@ -84,6 +86,31 @@ struct RunArgs {
     /// Arguments passed through to the program, readable via `os.argv`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
+}
+
+#[derive(Args)]
+struct LintArgs {
+    /// Paths to survey (default: the working directory). Taken as given, so
+    /// this can be pointed at another `.scrl` corpus.
+    paths: Vec<PathBuf>,
+    /// Report constructors carrying at least this many `Bool` fields.
+    #[arg(
+        long = "min-bools",
+        value_name = "N",
+        default_value_t = lint::DEFAULT_MIN_BOOLS,
+        value_parser = parse_min_bools,
+    )]
+    min_bools: usize,
+}
+
+/// Below the floor every constructor with a `Bool` qualifies, so the census
+/// would report its own corpus back rather than a shape worth reading.
+fn parse_min_bools(text: &str) -> Result<usize, String> {
+    match text.parse::<usize>() {
+        Ok(n) if n >= lint::DEFAULT_MIN_BOOLS => Ok(n),
+        Ok(n) => Err(format!("{n} is below {}", lint::DEFAULT_MIN_BOOLS)),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// What `al fmt` does with each file it formatted.
@@ -432,8 +459,25 @@ fn main() -> process::ExitCode {
         Some(Commands::Fmt(args)) => {
             cmd_fmt(args);
         }
+        Some(Commands::Lint(args)) => {
+            cmd_lint(args);
+        }
     }
     process::ExitCode::SUCCESS
+}
+
+/// The `.scrl` illegal-state census. It prints what the corpus contains and
+/// exits 0 either way — `scarlet_core::lint`'s module doc carries the
+/// measurement behind this being a command you run rather than a warning the
+/// compiler emits by default.
+fn cmd_lint(args: LintArgs) {
+    let roots = if args.paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        args.paths
+    };
+    let census = lint::run(&roots, args.min_bools);
+    print!("{}", lint::report(&census, args.min_bools));
 }
 
 fn cmd_run(args: RunArgs) {
