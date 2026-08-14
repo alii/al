@@ -147,22 +147,33 @@ fn a_big_int_constant_is_pooled_once() {
         .filter(|c| c.as_int() == Some(4611686018427387905))
         .count();
     assert_eq!(hits, 1, "one value, one pool entry");
-    // The whole pool stays the stdlib's worth of constants, not one entry per
-    // constructor use site. The failure this guards against is MULTIPLICATIVE —
-    // dedup breaking turns one entry into one per use site — so the ceiling is
-    // set well above the stdlib's size rather than snugly around it. A snug one
-    // fails on stdlib growth instead, which is what happened: the ceiling was
-    // 600 over a 520-entry stdlib, and `scarlet/http/url` + `scarlet/http/client`
-    // added 84 between them and tripped it while dedup was working perfectly.
-    //
-    // 755 entries as measured, up from 714 when `scarlet/base64` and
-    // `scarlet/crypto` added 41 between them. This number tracks how big the
-    // stdlib is and will need moving again; it is not a budget anyone should be
-    // optimizing against.
-    assert!(
-        p.constants.len() < 1000,
-        "pool regressed to per-use-site duplicates: {} entries",
-        p.constants.len()
+}
+
+/// Dedup fails MULTIPLICATIVELY — one pool entry per use site rather than one
+/// per value — so the whole-pool witness is a differential: two programs that
+/// differ only in how many times they name one literal must pool to the same
+/// size. The stdlib contributes the same constants to both sides and cancels,
+/// which is what keeps this from measuring how big the stdlib is. An absolute
+/// ceiling here did measure that, and had to be raised by hand three times.
+///
+/// What it does not witness: a regression confined to constants only the
+/// stdlib names moves both sides equally and cancels with them. The literal
+/// this varies is the one it can see.
+#[test]
+fn pooling_is_per_value_not_per_use_site() {
+    let pool_size = |uses: usize| {
+        let lits = vec!["4611686018427387905"; uses].join(", ");
+        program_of(&format!(
+            "pub fn main() {{\n\txs = [{lits}]\n\tprintln(xs)\n}}\n"
+        ))
+        .constants
+        .len()
+    };
+    let few = pool_size(2);
+    let many = pool_size(32);
+    assert_eq!(
+        few, many,
+        "pool grew with use count ({few} -> {many}): dedup is pooling per use site"
     );
 }
 
