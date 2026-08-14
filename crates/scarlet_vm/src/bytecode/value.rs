@@ -116,6 +116,9 @@ const SMALL_INT_MAX: i64 = (1i64 << 47) - 1;
 /// [`SocketKind`] discriminant.
 const SOCKET_KIND_SHIFT: u32 = 32;
 const SOCKET_KIND_MASK: u64 = 0b11 << SOCKET_KIND_SHIFT;
+/// Largest discriminant the kind field can hold. Bits 34-47 of the payload are
+/// unused, so a fifth kind widens the field rather than renumbering anything.
+const SOCKET_KIND_MAX: u64 = SOCKET_KIND_MASK >> SOCKET_KIND_SHIFT;
 
 /// Decode the socket immediate payload; caller must have checked `is_socket`.
 #[inline]
@@ -1341,6 +1344,52 @@ pub enum SocketKind {
     Tls = 3,
 }
 
+impl SocketKind {
+    /// Every kind, in discriminant order.
+    const ALL: [SocketKind; 4] = [
+        SocketKind::Connection,
+        SocketKind::Listener,
+        SocketKind::Port,
+        SocketKind::Tls,
+    ];
+
+    /// A discriminant the kind field can hold. Every arm below reaches it from
+    /// a `const` block, so an arm that overflows the field is a build error.
+    const fn fits(d: u64) -> u64 {
+        assert!(
+            d <= SOCKET_KIND_MAX,
+            "SocketKind discriminant overflows the kind field"
+        );
+        d
+    }
+
+    /// The value [`Value::socket`] writes into the two-bit kind field.
+    ///
+    /// Exhaustive by hand rather than `self as u64`: this is the seam a fifth
+    /// kind cannot get past. `is_stream` and `inspect` match exhaustively too,
+    /// but neither names the field, so satisfying only those would leave
+    /// `Value::socket` writing a bit `decode_socket` masks off — and the handle
+    /// reads back as `Connection`.
+    const fn discriminant(self) -> u64 {
+        match self {
+            SocketKind::Connection => const { Self::fits(0) },
+            SocketKind::Listener => const { Self::fits(1) },
+            SocketKind::Port => const { Self::fits(2) },
+            SocketKind::Tls => const { Self::fits(3) },
+        }
+    }
+}
+
+/// The `repr(u8)` discriminant and the value written to the kind field are two
+/// spellings of one number; neither may drift from the other.
+const _: () = {
+    let mut i = 0;
+    while i < SocketKind::ALL.len() {
+        assert!(SocketKind::ALL[i] as u64 == SocketKind::ALL[i].discriminant());
+        i += 1;
+    }
+};
+
 impl SocketValue {
     /// Whether this handle lives in a scheduler's connection table (and so
     /// moves with its process), as opposed to naming the shared listener.
@@ -1567,7 +1616,7 @@ impl Value {
     }
     #[inline]
     pub(crate) fn socket(s: SocketValue) -> Value {
-        let kind = (s.kind as u64) << SOCKET_KIND_SHIFT;
+        let kind = s.kind.discriminant() << SOCKET_KIND_SHIFT;
         Value(HDR_SOCKET | kind | s.id as u32 as u64)
     }
 
@@ -3510,6 +3559,26 @@ mod tests {
             assert_eq!(Value::socket(c).as_socket(), Some(c));
         }
         assert!(matches!(v.kind(), ValueView::Socket(x) if x == s));
+    }
+
+    /// The kind field holds exactly the kinds that exist — no spare pattern to
+    /// grow into, and no kind without a pattern. Widening the field without
+    /// adding kinds fails here; adding a kind fails to compile before it
+    /// reaches this, at `SocketKind::discriminant` (the match stops being
+    /// exhaustive) and at `SocketKind::fits` (the discriminant no longer fits
+    /// the field). `id: -1` fills the low 32 bits, so an id that bled past its
+    /// own 32 would land in the kind field and break the round-trip.
+    ///
+    /// This does NOT witness the decoder's `proof_violation` arm: nothing this
+    /// side of a corrupt word can reach it.
+    #[test]
+    fn socket_kind_field_is_saturated() {
+        assert_eq!(SocketKind::ALL.len() as u64, SOCKET_KIND_MAX + 1);
+        for (i, &kind) in SocketKind::ALL.iter().enumerate() {
+            assert_eq!(kind.discriminant(), i as u64);
+            let s = SocketValue { id: -1, kind };
+            assert_eq!(Value::socket(s).as_socket(), Some(s));
+        }
     }
 
     #[test]

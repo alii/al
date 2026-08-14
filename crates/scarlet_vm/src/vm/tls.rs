@@ -11,16 +11,21 @@
 //! OS thread.
 //!
 //! OpenSSL, BoringSSL and SChannel all want to do their own I/O. Bending one of
-//! them into this loop means either a BIO pair — which is the same sans-IO
-//! design with an extra copy through a C buffer and an unaudited C library
-//! underneath — or a thread per connection, which gives up the property the
-//! scheduler exists to provide. `native-tls` is worse again for a language
-//! standard library: three implementations behind one API, so a certificate
-//! error a Scarlet program matches on would mean three different things on
-//! three platforms, and `TlsError` would have to degrade to a string.
+//! them into this loop means either a BIO pair — the same sans-IO design
+//! rebuilt by hand, with an extra copy through a C buffer — or a thread per
+//! connection, which gives up the property the scheduler exists to provide.
+//! `native-tls` is worse again for a language standard library: three
+//! implementations behind one API, so a certificate error a Scarlet program
+//! matches on would mean three different things on three platforms, and
+//! `TlsError` would have to degrade to a string.
 //!
-//! The backend is `aws-lc-rs`, rustls's default, which is faster than `ring`
-//! on both handshake and bulk throughput.
+//! The backend is `aws-lc-rs`, rustls's default, taken as the default rather
+//! than chosen on a measurement made here. It is worth being straight about
+//! what that does and does not buy: it is not a no-C build. `aws-lc-sys`
+//! compiles AWS-LC from C through cmake, so "C underneath" does not separate
+//! this from a BIO pair and is not the reason for the choice. The reason is
+//! where the I/O boundary sits — rustls hands us records and never touches the
+//! fd — and that holds whichever crypto backend rustls links.
 //!
 //! # How it maps onto the park protocol
 //!
@@ -309,6 +314,12 @@ static CLIENT_CONFIG: OnceLock<Result<Arc<ClientConfig>, String>> = OnceLock::ne
 /// CA, a locally trusted test root. The bundled set is the fallback so that a
 /// container with no certificate store still reaches the public internet
 /// instead of failing every connection at the first handshake.
+///
+/// `Cargo.lock` carries two `webpki-roots` versions, which reads as two trust
+/// bundles compiled into one binary and is not: the 0.26 line is a semver-trick
+/// shim whose entire library is `pub use parent::TLS_SERVER_ROOTS`, `parent`
+/// being a rename of the 1.x this crate depends on. `ureq` pulls the shim, so
+/// the certificates are 1.x's either way and are compiled in once.
 ///
 /// Session resumption is left at rustls's default, which is enabled: TLS 1.3
 /// tickets and TLS 1.2 session ids, in an in-memory store on this config. It is
