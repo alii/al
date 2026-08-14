@@ -5,7 +5,7 @@
 
 use crate::TypeId;
 use crate::abi::{AbiSlot, TemplateIdx};
-use crate::bytecode::{Arena, Op, Value};
+use crate::bytecode::{Arena, EnumRef, Op, Value};
 use crate::frozen::FrozenBuilder;
 
 /// One constructor, ready to instantiate.
@@ -68,6 +68,14 @@ impl EnumTemplate {
     #[inline]
     pub(crate) fn nullary(&self) -> Option<&Value> {
         self.nullary.as_ref()
+    }
+
+    /// Whether `e` was built from this template. The constructor's identity is
+    /// `(type_id, variant_idx)`, not its name: names are a front end's to
+    /// choose and two of its types may share one.
+    #[inline]
+    pub(crate) fn is_instance(&self, e: &EnumRef<'_>) -> bool {
+        e.type_id() == self.type_id && e.variant_idx() == self.variant_idx
     }
 
     fn arity(&self) -> usize {

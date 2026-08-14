@@ -222,6 +222,21 @@ type Patch {
 	b field.Field(Int)
 }
 
+// A stand-in for a request body: the arena behind this document holds a
+// credential, and printing a `Doc` must not put it on stdout.
+fn secret_doc() String {
+	'{"token":"hunter2","n":2,"xs":[1],"f":1.5,"z":null}'
+}
+
+// The image of one member, so the printed form can be seen at a node other
+// than the root.
+fn shown_member(d json.Doc, name String) String {
+	match json.field(d, name) {
+		None -> 'no such member'
+		Some(m) -> '${m}'
+	}
+}
+
 pub fn main() {
 	// ---------------------------------------------------------------- parsing --
 
@@ -466,4 +481,20 @@ pub fn main() {
 	line('alt quoted    ', shown('"5"', id_decoder))
 	line('alt neither   ', shown('true', id_decoder))
 	line('alt sole      ', shown('true', decode.one_of(decode.int(), [])))
+
+	// --------------------------------------------------------- printing a doc --
+
+	println('')
+	println('-- printing a doc --')
+
+	// `Doc` is opaque and carries the whole string arena. Its image names what
+	// the cursor points at and where it sits, and stays this short whatever the
+	// document holds. Rendering it as the record it is would print the arena and
+	// the tape instead — every key and every string value, as bytes.
+	line('doc root      ', read(secret_doc(), fn(d) '${d}'))
+	line('doc string    ', read(secret_doc(), fn(d) shown_member(d, 'token')))
+	line('doc int       ', read(secret_doc(), fn(d) shown_member(d, 'n')))
+	line('doc array     ', read(secret_doc(), fn(d) shown_member(d, 'xs')))
+	line('doc float     ', read(secret_doc(), fn(d) shown_member(d, 'f')))
+	line('doc null      ', read(secret_doc(), fn(d) shown_member(d, 'z')))
 }

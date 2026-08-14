@@ -116,3 +116,11 @@ alt quoted    5
 alt neither   decode error: <root>: expected an integer, found a boolean
 <root>: expected a quoted integer, found a boolean
 alt sole      decode error: <root>: expected an integer, found a boolean
+
+-- printing a doc --
+doc root      <json object#0>
+doc string    <json string#2>
+doc int       <json int#4>
+doc array     <json array#6>
+doc float     <json float#9>
+doc null      <json null#11>

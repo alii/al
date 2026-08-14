@@ -108,6 +108,62 @@ fn node_at(tape: &[u8], i: usize) -> Option<TapeNode> {
     })
 }
 
+/// The `Kind` ordinal of the node at `idx`, or `None` for a tape that does not
+/// decode. The `json.kind` builtin and the `inspect` image both read it, so
+/// the two can never disagree about what a node is.
+fn kind_ordinal(tape: &[u8], idx: usize) -> Option<i64> {
+    Some(match node_at(tape, idx)?.kind {
+        K_NULL => KIND_NULL,
+        K_BOOL => KIND_BOOL,
+        K_INT | K_UINT_BIG => KIND_INT,
+        K_FLOAT => KIND_FLOAT,
+        K_STR => KIND_STRING,
+        K_ARRAY => KIND_ARRAY,
+        K_OBJECT => KIND_OBJECT,
+        _ => return None,
+    })
+}
+
+fn kind_name(ordinal: i64) -> &'static str {
+    match ordinal {
+        KIND_NULL => "null",
+        KIND_BOOL => "bool",
+        KIND_INT => "int",
+        KIND_FLOAT => "float",
+        KIND_STRING => "string",
+        KIND_ARRAY => "array",
+        KIND_OBJECT => "object",
+        // `kind_ordinal` yields only the seven above. The remaining case is a
+        // tape that does not decode, which `json.kind` reports as -1.
+        _ => "invalid",
+    }
+}
+
+/// What a `Doc` cursor points at and where, for `inspect`.
+///
+/// Never the document's contents. A `Doc` carries the whole string arena —
+/// every key and every string value, for a body that may be megabytes — and
+/// printing one is the first thing a caller reaches for while debugging, so
+/// this image stays bounded however large the document is.
+fn doc_image(tape: &[u8], idx: usize) -> String {
+    format!(
+        "<json {}#{}>",
+        kind_name(kind_ordinal(tape, idx).unwrap_or(-1)),
+        idx
+    )
+}
+
+/// The `inspect` image of a `Doc` value. Total: a printer must not panic, so a
+/// payload that is not the shape the parser builds still renders bounded.
+pub(super) fn inspect_doc(doc: &Value) -> String {
+    (|| {
+        let (_, tape_v, idx) = VM::doc_parts(doc)?;
+        let bin = tape_v.as_binary()?;
+        Some(doc_image(&bin.full_bytes(), idx))
+    })()
+    .unwrap_or_else(|| "<json invalid>".to_string())
+}
+
 /// The bytes of a `K_STR` node. `None` if the span escapes the arena.
 fn str_bytes(arena: &[u8], n: TapeNode) -> Option<&[u8]> {
     let (off, len) = n.str_span();
@@ -578,17 +634,7 @@ impl VM {
         let doc = self.pop()?;
         let kind = (|| {
             let (_, tape_v, idx) = Self::doc_parts(&doc)?;
-            let n = node_at(&bin_ref(&tape_v).full_bytes(), idx)?;
-            Some(match n.kind {
-                K_NULL => KIND_NULL,
-                K_BOOL => KIND_BOOL,
-                K_INT | K_UINT_BIG => KIND_INT,
-                K_FLOAT => KIND_FLOAT,
-                K_STR => KIND_STRING,
-                K_ARRAY => KIND_ARRAY,
-                K_OBJECT => KIND_OBJECT,
-                _ => return None,
-            })
+            kind_ordinal(&bin_ref(&tape_v).full_bytes(), idx)
         })()
         .unwrap_or(-1);
         self.stack.push(Value::small_int(kind));
@@ -965,6 +1011,55 @@ mod tests {
         let (tape, _) = tape_of(&src);
         assert_eq!(tape.len(), 10_000 * NODE_BYTES);
         assert_eq!(node_at(&tape, 0).unwrap().skip, 10_000);
+    }
+
+    /// The image names the node's kind and its index. The assertion that
+    /// matters is the last one: no node's image quotes the arena, whose whole
+    /// point is that it holds the caller's payload.
+    #[test]
+    fn doc_image_names_kind_and_position_never_contents() {
+        let (tape, arena) = tape_of(r#"{"secret":"hunter2","n":2,"xs":[1],"f":1.5}"#);
+        assert_eq!(doc_image(&tape, 0), "<json object#0>");
+
+        let at = |name| field_at(&tape, &arena, name).expect("member is on the tape");
+        assert_eq!(
+            doc_image(&tape, at("secret")),
+            format!("<json string#{}>", at("secret"))
+        );
+        assert_eq!(doc_image(&tape, at("n")), format!("<json int#{}>", at("n")));
+        assert_eq!(
+            doc_image(&tape, at("xs")),
+            format!("<json array#{}>", at("xs"))
+        );
+        assert_eq!(
+            doc_image(&tape, at("f")),
+            format!("<json float#{}>", at("f"))
+        );
+    }
+
+    /// The property the ticket is about: the image is bounded by nothing the
+    /// document controls. Grepping the image for the payload would not witness
+    /// this — the record rendering prints a `Binary` as decimal bytes, so a
+    /// leaked arena carries no readable text to find. Its length is the tell.
+    #[test]
+    fn doc_image_stays_bounded_however_large_the_document() {
+        let (tape, _) = tape_of(&format!(r#"{{"k":"{}"}}"#, "x".repeat(100_000)));
+        for i in 0..tape.len() / NODE_BYTES {
+            let image = doc_image(&tape, i);
+            assert!(
+                image.len() < 32,
+                "image scales with the document: {} bytes",
+                image.len()
+            );
+        }
+    }
+
+    /// An index off the end of the tape is what a `Doc` over a mismatched tape
+    /// would carry. The image stays bounded rather than panicking the printer.
+    #[test]
+    fn doc_image_of_an_undecodable_node_is_still_bounded() {
+        let (tape, _) = tape_of("{}");
+        assert_eq!(doc_image(&tape, 99), "<json invalid#99>");
     }
 
     #[test]

@@ -12,9 +12,21 @@
 
 use std::fmt::Write;
 
-use crate::bytecode::{MapBacking, Program, SocketKind, Value, ValueView, hamt};
+use crate::abi::AbiSlot;
+use crate::bytecode::{EnumRef, MapBacking, Program, SocketKind, Value, ValueView, hamt};
 
-use super::{binary, str_ref};
+use super::{binary, json, str_ref};
+
+/// Whether `e` is an instance of the constructor the program bound to `slot`.
+/// The binding is the constructor's identity; its name is not, and a front end
+/// may spell it however it likes.
+fn is_abi(program: &Program, slot: AbiSlot, e: &EnumRef<'_>) -> bool {
+    program
+        .abi
+        .get(slot)
+        .and_then(|i| program.templates.get(i))
+        .is_some_and(|t| t.is_instance(e))
+}
 
 pub(super) fn value_type_name(v: &Value) -> String {
     match v.kind() {
@@ -244,6 +256,11 @@ fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut S
                 out.push('}');
             }
         },
+        // `Doc` is opaque, and the record arm below would print its payload —
+        // the document's whole string arena, every key and every string value.
+        ValueView::Enum(e) if is_abi(program, AbiSlot::JsonDoc, &e) => {
+            out.push_str(&json::inspect_doc(v));
+        }
         ValueView::Enum(e) if e.payload().is_empty() => out.push_str(e.variant_name()),
         ValueView::Enum(e) if is_record(&e) => {
             let payload = e.payload();
