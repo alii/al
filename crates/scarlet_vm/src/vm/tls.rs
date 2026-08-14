@@ -33,19 +33,18 @@
 //! **re-run** protocol unchanged: park on the fd, re-run the instruction, and
 //! let rustls re-derive what it needs next from state it kept itself.
 //!
-//! Nearly every park here follows a genuine `WouldBlock` from the fd, which is
-//! what an edge-triggered poller requires: the edge that wakes us is the one
-//! that arrives after the buffer we just found full has drained.
+//! Every park here follows a genuine `WouldBlock` from the fd, which is what
+//! an edge-triggered poller requires: the edge that wakes us is the one that
+//! arrives after the buffer we just found full has drained.
 //!
-//! **One park does not, and this paragraph used to claim they all did.**
-//! [`TlsIo::write`] synthesizes a `WouldBlock` when the session refuses the
-//! plaintext because its own send buffer is at its limit. It calls `flush_out`
-//! first to make room — and if that flush SUCCEEDS, the last thing that touched
-//! the fd was a write that worked, so there may be no edge left to arrive and
-//! the park would be waiting on one. Nobody has constructed an input that
-//! reaches it: the buffer is at its limit only because an earlier flush could
-//! not empty it, which is the case where this one cannot either. That is an
-//! argument, not a proof, so it is written down rather than relied on.
+//! [`TlsIo::write`] is the site that has to work to keep that true, and for a
+//! while it did not. When the session refuses the plaintext its send buffer
+//! is at its limit, and that buffer drains only by reaching the socket — so
+//! the write flushes and then RETRIES, and never reports a `WouldBlock` of its
+//! own. The distinction is which `WouldBlock` the caller parks on: the flush's
+//! is owed an edge, because the fd refused it; a synthesized one issued after a
+//! flush that SUCCEEDED is owed nothing, because the last syscall on the fd was
+//! a write that worked, and a park on it can wait for ever.
 //!
 //! # Why reads and writes are not new opcodes
 //!
@@ -246,12 +245,32 @@ impl Read for TlsIo {
 /// finished by `flush`.
 impl Write for TlsIo {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let accepted = self.session.writer().write(buf)?;
+        let mut accepted = self.session.writer().write(buf)?;
         if accepted == 0 && !buf.is_empty() {
-            // The session's send buffer is full; it drains only by reaching
-            // the socket, so make room and let the caller retry.
+            // The session's send buffer is at its limit; it drains only by
+            // reaching the socket. Flush, then RETRY — rather than reporting a
+            // `WouldBlock` of our own, which is what used to make this the one
+            // park not owed an edge. `flush_out`'s own `WouldBlock` still
+            // propagates and still parks, and that one is owed one: the fd
+            // refused it. A flush that SUCCEEDS is not, because the last
+            // syscall on the fd was a write that worked.
+            //
+            // The retry cannot come back empty. Once the handshake is done the
+            // limit is measured against the queued ciphertext alone, and a
+            // flush returns `Ok` only by emptying that queue, so the retry is
+            // offered the whole buffer's worth of room.
             self.flush_out()?;
-            return Err(io::Error::from(ErrorKind::WouldBlock));
+            accepted = self.session.writer().write(buf)?;
+            if accepted == 0 {
+                // Unreachable by the paragraph above. Reported rather than
+                // parked: no edge would resolve it, and falling through would
+                // return `Ok(0)`, which the caller's drain loop reads as a
+                // peer close.
+                return Err(io::Error::new(
+                    ErrorKind::WriteZero,
+                    "TLS session refused plaintext with its ciphertext queue empty",
+                ));
+            }
         }
         match self.flush_out() {
             // Reporting the plaintext as accepted is correct even with
@@ -1061,6 +1080,109 @@ mod tests {
             "the connection must be gone whatever the alert did — the result \
              reports whether the peer was told, not whether the fd closed"
         );
+        drop(peer);
+    }
+
+    /// Fill the session's send buffer to its limit, so the next `TlsIo::write`
+    /// finds its plaintext refused.
+    ///
+    /// Goes through `Writer`, which only encrypts into the queue and never
+    /// touches the socket. Arming through `TlsIo::write` instead would flush,
+    /// and a flush that drained even partially reopens room — which disarms the
+    /// refusal and quietly retargets the test at a branch it is not about.
+    fn arm_refusal(tls: &mut TlsIo, chunk: &[u8]) {
+        for _ in 0..CHUNKS {
+            if tls
+                .session
+                .writer()
+                .write(chunk)
+                .expect("the session buffers plaintext without touching the socket")
+                == 0
+            {
+                return;
+            }
+        }
+        panic!(
+            "the session accepted {} bytes without reaching its send-buffer \
+             limit, so the refusal this test needs was never armed",
+            CHUNKS * CHUNK
+        )
+    }
+
+    /// Every `WouldBlock` the write path reports is owed an edge from the fd.
+    ///
+    /// This is the input nobody had constructed: the session's send buffer left
+    /// at its limit by a flush the full socket refused, and then the socket
+    /// draining underneath it. A write in that state finds the session refusing
+    /// the plaintext and the flush SUCCEEDING — which used to synthesize a
+    /// `WouldBlock` and park a Scarlet process on an edge-triggered poller that
+    /// had no edge left to deliver.
+    ///
+    /// The verdict is `wants_write()` at the moment of each `WouldBlock`, not
+    /// anything timed: queued ciphertext IS the edge that is owed, so its
+    /// absence is exactly the park that cannot be woken. That keeps the test
+    /// independent of when the peer gets round to draining — an attempt made
+    /// too early finds the socket still full and asserts the honest case.
+    ///
+    /// It does not witness the byte count or the flush guarantee — those are
+    /// `a_write_the_socket_cannot_take_reports_flushing_not_done`'s — and it
+    /// does not pin down which arm any given attempt takes. Whether the socket
+    /// still has room is the kernel's business, and asserting it was full at a
+    /// chosen instant is what made an earlier draft of this fail one run in ten
+    /// against correct code.
+    #[test]
+    fn every_would_block_from_the_write_path_has_ciphertext_owed() {
+        provider();
+        let (leaf, key) = mint();
+        let peer = start_peer(leaf.clone(), key);
+        let mut conn = connect(&peer, leaf);
+        fill_until_flushing(&mut conn);
+
+        let ConnIo::Tls(tls) = &mut conn else {
+            panic!("the connection under test is a TLS one");
+        };
+
+        let chunk = vec![0x5au8; CHUNK];
+
+        // Let the peer drain. The socket gains room while the session's buffer
+        // is held at its limit by `arm_refusal`, and that is the window in
+        // which a flush can SUCCEED on a write whose plaintext the session has
+        // just refused.
+        peer.go.send(()).expect("release the peer");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            // Re-arm before every attempt. A flush that drained even partially
+            // leaves the session willing again, and an attempt that finds it
+            // willing never reaches the branch under test — which is how this
+            // test read green against the very bug it exists to catch, once in
+            // ten, before the arming moved off the write path.
+            arm_refusal(tls, &chunk);
+            match tls.write(&chunk) {
+                // The session took plaintext again, so the retry after the
+                // flush did its job and nothing parked.
+                Ok(n) => {
+                    assert!(n > 0, "an accepted write moves at least one byte");
+                    break;
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    assert!(
+                        tls.session.wants_write(),
+                        "`write` parked the caller with the session's ciphertext \
+                         queue empty: the last syscall on the fd was a write that \
+                         worked, so no edge is owed and this park waits for one \
+                         that never arrives"
+                    );
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the peer never drained the socket, so the window this \
+                         test exists to cover never opened"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("unexpected write failure: {e}"),
+            }
+        }
         drop(peer);
     }
 }
