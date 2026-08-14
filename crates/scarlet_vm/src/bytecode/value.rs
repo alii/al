@@ -2473,7 +2473,7 @@ impl<'a> EnumRef<'a> {
     /// it from [`Self::type_id`] and [`Self::variant_idx`], so `Op::MatchEnum`
     /// tests the same bits the native ladder loads.
     #[inline]
-    pub fn variant_tag(&self) -> i64 {
+    pub(crate) fn variant_tag(&self) -> i64 {
         // SAFETY: constructed from a tag-checked Enum value.
         unsafe { payload_word(self.obj, 0) as i64 }
     }
@@ -2515,7 +2515,7 @@ impl<'a> EnumRef<'a> {
         unsafe { payload_value(self.obj, 2) }
     }
     #[inline]
-    pub(crate) fn variant_name_value(&self) -> Value {
+    fn variant_name_value(&self) -> Value {
         // SAFETY: as above.
         unsafe { payload_value(self.obj, 3) }
     }
