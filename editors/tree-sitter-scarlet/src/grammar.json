@@ -3335,7 +3335,7 @@
       "type": "TOKEN",
       "content": {
         "type": "PATTERN",
-        "value": "\\d+(_\\d+)*(\\.\\d+(_\\d+)*)?"
+        "value": "(0[xX][0-9A-Fa-f]+(_[0-9A-Fa-f]+)*|0[bB][01]+(_[01]+)*|\\d+(_\\d+)*(\\.\\d+(_\\d+)*)?)"
       }
     },
     "line_comment": {
