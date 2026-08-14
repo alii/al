@@ -4932,7 +4932,7 @@ impl Compiler {
         let f = &mut self.program.functions[func_idx.index()];
         f.locals = param_slots.max(out.locals);
         f.code_start = base;
-        f.code_len = end - base - 1;
+        f.code_len = end - base;
     }
 
     /// Open the elaboration phase boundary: every function body walked until
@@ -5153,16 +5153,16 @@ impl Compiler {
     }
 
     /// Give a parked body that never elaborated the same shape the inline path
-    /// gives an ill-typed one: a bare `Ret` and a zero-length `Function`. The
-    /// jump-over is patched with the rest of the region's, in
-    /// [`Self::end_deferred_elaboration`].
+    /// gives an ill-typed one: a bare `Ret`, and a `Function` one instruction
+    /// long that spans it. The jump-over is patched with the rest of the
+    /// region's, in [`Self::end_deferred_elaboration`].
     fn close_empty_deferred(&mut self, func_idx: crate::core_ir::FuncIdx, param_slots: i32) {
         let base = self.current_addr();
         self.program.code.push(op(Op::Ret));
         let f = &mut self.program.functions[func_idx.index()];
         f.locals = param_slots;
         f.code_start = base;
-        f.code_len = 0;
+        f.code_len = 1;
     }
 
     /// Compile a `fn(...) { ... }` expression. `param_hints` is `Some` when

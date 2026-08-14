@@ -1070,6 +1070,14 @@ pub struct Function {
     pub locals: i32,
     pub capture_count: i32,
     pub code_start: i32,
+    /// The body's whole extent, terminator included:
+    /// `[code_start, code_start + code_len)` ends with the `Ret` that closes
+    /// the frame, or the `Halt` that closes the entry frame. A `Function`
+    /// nothing has been emitted for is the only one with a zero here.
+    ///
+    /// Jump operands are frame-relative, so a legal target is `0..code_len`,
+    /// and `code_len - 1` — the terminator — is where `emit` aims the merge of
+    /// an `if` whose arms both return.
     pub code_len: i32,
 }
 

@@ -180,13 +180,14 @@ fn line(program: &Program, ip: i32, instr: &Instruction, code_len: i32) -> Strin
             instr.operand,
             instr.operand - ip
         );
-        // Jumps are intra-function, so an out-of-range target is a bug. The one
-        // legal edge case is exactly `code_len`: `emit` leaves that when both
-        // arms of an `if` return and the merge point is unreachable.
-        if instr.operand < 0 || instr.operand > code_len {
+        // Jumps are intra-function, so an out-of-range target is a bug.
+        // `code_len` spans the terminator, so the last legal target is
+        // `code_len - 1`: that is where `emit` aims the merge of an `if` whose
+        // arms both return, and it lands on the terminator itself.
+        if instr.operand < 0 || instr.operand >= code_len {
             let _ = write!(comment, "  !! outside 0..{code_len}");
-        } else if instr.operand == code_len {
-            let _ = write!(comment, "  (merge, unreachable)");
+        } else if instr.operand == code_len - 1 {
+            let _ = write!(comment, "  (merge, lands on the terminator)");
         }
     } else if instr.op == Op::PushConst
         && let Some(c) = program.constants.get(instr.operand as usize)

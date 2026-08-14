@@ -63,8 +63,8 @@ fn a_zero_operand_is_printed_not_hidden() {
     );
 }
 
-/// `code_len` itself is the merge point of an `if` whose arms both return, so
-/// it is a legal target and never executed.
+/// `code_len - 1` is the merge point of an `if` whose arms both return: a
+/// legal target, landing on the body's own terminator.
 #[test]
 fn every_jump_target_is_inside_its_own_function() {
     for src in [
@@ -89,7 +89,7 @@ fn every_jump_target_is_inside_its_own_function() {
                     continue;
                 }
                 assert!(
-                    instr.operand >= 0 && instr.operand <= f.code_len,
+                    instr.operand >= 0 && instr.operand < f.code_len,
                     "fn {} @{ip}: {:?} jumps to {} outside 0..{}",
                     f.name,
                     instr.op,
@@ -288,6 +288,9 @@ fn an_infallible_match_keeps_the_flat_lowering() {
             (PushLocal, 3),
             (MulInt, 0),
             (Ret, 0),
+            // The body's own closing `Ret`, which `code_len` spans; the one
+            // above is the last arm's.
+            (Ret, 0),
         ]
     );
 
@@ -306,7 +309,10 @@ fn an_infallible_match_keeps_the_flat_lowering() {
             (PushLocal, 2),
             (AddInt, 0),
             (Ret, 0),
+            // `emit`'s unreachable fall-through trap, then the body's closing
+            // `Ret`.
             (Halt, 0),
+            (Ret, 0),
         ]
     );
 
@@ -330,6 +336,7 @@ fn an_infallible_match_keeps_the_flat_lowering() {
             (PushConst, -1),
             (Ret, 0),
             (Halt, 0),
+            (Ret, 0),
         ]
     );
 }

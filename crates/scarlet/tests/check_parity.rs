@@ -144,26 +144,12 @@ pub fn main() {
 /// A function's code region as `[start, end)`, its trailing `Ret` inside it —
 /// `None` for a `Function` nothing was emitted for.
 ///
-/// `Function.code_len` means two different things. `elaborate_body` stores
-/// `end - base - 1`, which stops one instruction short of the body's `Ret`;
-/// `materialize_eta_wrappers` stores `end - body_start`, which covers it. Both
-/// close a region with exactly one `Ret`, so a `Ret` sitting at the stored end
-/// is this function's own and the region runs one further. That reading is
-/// right under either convention, so it also holds once T-167 unifies them,
-/// whichever of the two it picks.
-fn code_region(
-    p: &scarlet::bytecode::Program,
-    f: &scarlet::bytecode::Function,
-) -> Option<(i32, i32)> {
-    if f.code_start < 0 || f.code_len < 0 {
-        return None;
-    }
-    let stored_end = f.code_start + f.code_len;
-    let end = match p.code.get(stored_end as usize) {
-        Some(ins) if matches!(ins.op, scarlet::bytecode::Op::Ret) => stored_end + 1,
-        _ => stored_end,
-    };
-    (end > f.code_start).then_some((f.code_start, end))
+/// `code_len` spans the trailing `Ret`, so the stored range is the region.
+/// This used to widen it by reading a `Ret` at the stored end as this
+/// function's own, which was how it straddled the two conventions; that
+/// reading would now annex the first instruction of whatever follows.
+fn code_region(f: &scarlet::bytecode::Function) -> Option<(i32, i32)> {
+    (f.code_start >= 0 && f.code_len > 0).then_some((f.code_start, f.code_start + f.code_len))
 }
 
 /// `base_of[pc]` is the `code_start` the operand at `code[pc]` resolves
@@ -178,7 +164,7 @@ fn frame_bases(p: &scarlet::bytecode::Program) -> Vec<i32> {
         if i == entry {
             continue;
         }
-        let Some((start, end)) = code_region(p, f) else {
+        let Some((start, end)) = code_region(f) else {
             continue;
         };
         let lo = (start as usize).min(len);
@@ -188,10 +174,9 @@ fn frame_bases(p: &scarlet::bytecode::Program) -> Vec<i32> {
     base_of
 }
 
-/// Regions do not overlap. `code_region` reads a `Ret` at a function's stored
-/// end as that function's own, which is wrong if the next region is a lone
-/// `Ret` — the shape `close_empty_deferred` emits — and `frame_bases` would
-/// stamp one body's base over another's. Either way this is what says so.
+/// Regions do not overlap. `frame_bases` fills each body's base over its own
+/// range, so two regions that overlapped would resolve one body's jumps
+/// against the other's frame. This is what says so.
 fn assert_bodies_are_disjoint(p: &scarlet::bytecode::Program, bodies: &[(usize, i32, i32)]) {
     let mut by_start = bodies.to_vec();
     by_start.sort_by_key(|&(_, start, _)| start);
@@ -221,7 +206,7 @@ fn assert_no_jump_into_a_foreign_body(p: &scarlet::bytecode::Program) {
         // The entry's own body *is* the code the toplevel `Jump base` targets,
         // and its region is the whole stream every other one sits inside.
         .filter(|(i, _)| *i != entry)
-        .filter_map(|(i, f)| code_region(p, f).map(|(start, end)| (i, start, end)))
+        .filter_map(|(i, f)| code_region(f).map(|(start, end)| (i, start, end)))
         .collect();
     assert!(!bodies.is_empty(), "no bodies to guard");
     assert_bodies_are_disjoint(p, &bodies);
@@ -375,15 +360,15 @@ pub fn main() {
     ));
 }
 
-/// The blind spot the three tests above cannot reach: a declared body's
-/// `code_len` stops one instruction short of its `Ret`, so a `Jump` landing
-/// exactly on that `Ret` read as outside every body and was waved through —
+/// The blind spot the three tests above cannot reach: a `Jump` landing exactly
+/// on a body's final `Ret` is a jump into that body, and is caught only
+/// because `code_len` spans the `Ret`. While a declared body's stopped one
+/// instruction short, this read as outside every body and was waved through —
 /// one instruction per body. Nothing the compiler emits aims there, so the
 /// witness is planted rather than compiled.
 ///
-/// The victim must be a *declared* body. An eta wrapper's `code_len` already
-/// spans its `Ret`, so a jump onto one was caught before this was fixed, and
-/// aiming at one would witness nothing.
+/// The victim is a *declared* body because that is the half that was blind;
+/// an eta wrapper's `code_len` spanned its `Ret` throughout.
 #[test]
 #[should_panic(expected = "inside function")]
 fn a_jump_onto_a_foreign_bodys_final_ret_is_caught() {
@@ -401,24 +386,31 @@ pub fn main() {
 "#,
     );
     let entry = p.entry as usize;
-    let (start, ret) = p
+    // Name the victim's closing `Ret` without going through `code_len`, which
+    // is the thing under test: a `code_len`-derived target tracks whatever
+    // `code_len` currently means and lands inside the region either way, so
+    // the plant would witness nothing. Bodies in a drain region are laid out
+    // back to back, so the instruction before the next body's `code_start` is
+    // the previous one's `Ret` — and the `Ret` check below is what says the
+    // two really are adjacent rather than separated by a jump-over.
+    let mut starts: Vec<i32> = p
         .functions
         .iter()
         .enumerate()
-        .filter(|(i, _)| *i != entry)
-        .filter_map(|(_, f)| {
-            // Read off `code_len` directly, not through `code_region`: this has
-            // to pick the same body whether or not the widening is in place, or
-            // the plant stops witnessing anything the moment it is reverted.
-            let ret = f.code_start + f.code_len;
-            let declared = p
-                .code
+        .filter(|(i, f)| *i != entry && f.code_start >= 0 && f.code_len > 0)
+        .map(|(_, f)| f.code_start)
+        .collect();
+    starts.sort_unstable();
+    starts.dedup();
+    let (start, ret) = starts
+        .windows(2)
+        .map(|w| (w[0], w[1] - 1))
+        .find(|&(_, ret)| {
+            p.code
                 .get(ret as usize)
-                .is_some_and(|ins| matches!(ins.op, scarlet::bytecode::Op::Ret));
-            (f.code_start >= 0 && declared).then_some((f.code_start, ret))
+                .is_some_and(|ins| matches!(ins.op, scarlet::bytecode::Op::Ret))
         })
-        .max_by_key(|&(start, _)| start)
-        .expect("a declared body to aim at");
+        .expect("two back-to-back declared bodies, the first closing with a Ret");
     let base_of = frame_bases(&p);
     let jump = (0..p.code.len())
         .find(|&pc| {
