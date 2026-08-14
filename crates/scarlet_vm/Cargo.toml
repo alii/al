@@ -35,7 +35,13 @@ mio = { version = "1", features = ["os-poll", "os-ext"] }
 smallvec = "1.15"
 socket2 = { version = "0.5", features = ["all"] }
 libmimalloc-sys = { version = "0.1.49", features = ["v2"] }
-simd-json = { version = "0.17.3", default-features = false, features = ["runtime-detection"] }
+# `default-features = false` is for `serde_impl`: it would pull serde, serde_json
+# and halfbrown/serde in for an API this crate never reaches — the tape is read
+# through `to_tape`, never `Deserialize`. Turning defaults off also drops
+# `swar-number-parsing`, which is unrelated to serde and does sit on this crate's
+# path (the exact number parser, not the `approx` one), so it is named back here.
+# The second `syn` major in the lock is simd-json's, via `ref-cast`, on x86_64 only.
+simd-json = { version = "0.17.3", default-features = false, features = ["runtime-detection", "swar-number-parsing"] }
 # TLS. rustls is sans-IO: it never owns the socket and never blocks, so it
 # drops into this crate's existing non-blocking poller without a thread of its
 # own and without a second event loop. See `vm/tls.rs` for the full argument.
