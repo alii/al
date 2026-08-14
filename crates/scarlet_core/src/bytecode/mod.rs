@@ -121,6 +121,7 @@ fn builtin_op(name: &str) -> Option<Op> {
         "process__receive" => Op::SubjectReceive,
         "process__receive_until" => Op::SubjectReceiveUntil,
         "time__monotonic" => Op::Monotonic,
+        "time__epoch_ms" => Op::WallClock,
         "crypto__random_bytes" => Op::RandomBytes,
         "os__argv" => Op::Argv,
         "os__env" => Op::EnvMap,

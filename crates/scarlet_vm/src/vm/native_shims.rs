@@ -577,6 +577,7 @@ mod opc {
     pub const MAP_VALUES: u8 = Op::MapValues as u8;
     pub const MOD: u8 = Op::Mod as u8;
     pub const MONOTONIC: u8 = Op::Monotonic as u8;
+    pub const WALL_CLOCK: u8 = Op::WallClock as u8;
     pub const RANDOM_BYTES: u8 = Op::RandomBytes as u8;
     pub const MUL: u8 = Op::Mul as u8;
     pub const MUL_FLOAT: u8 = Op::MulFloat as u8;
@@ -849,6 +850,7 @@ impl VM {
             opc::FLOAT_FROM_INT => self.float_from_int(),
             opc::FLOAT_TO_STRING => self.float_to_string(),
             opc::MONOTONIC => self.monotonic(),
+            opc::WALL_CLOCK => self.wall_clock(),
             opc::RANDOM_BYTES => self.random_bytes(),
             opc::IP_PARSE => self.ip_parse(),
             opc::HTTP_CHUNK_DECODE => self.http_chunk_decode(),

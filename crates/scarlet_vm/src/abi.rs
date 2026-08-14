@@ -900,6 +900,7 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
         | Op::SubjectNew
         | Op::SubjectReceive
         | Op::Monotonic
+        | Op::WallClock
         | Op::Argv
         | Op::EnvMap
         | Op::MapHas

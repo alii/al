@@ -24,6 +24,7 @@ use crate::bytecode::{
 use crate::heap::ProcHeap;
 use crate::tivec::Idx;
 use smallvec::SmallVec;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::mailbox::Delivery;
 use super::poll::{Resume, monotonic_now_ms};
@@ -748,6 +749,7 @@ impl VM {
                 Op::LiveSubjects => self.live_subjects()?,
                 Op::BlockingThreads => self.blocking_threads()?,
                 Op::Monotonic => self.monotonic()?,
+                Op::WallClock => self.wall_clock()?,
                 Op::RandomBytes => self.random_bytes()?,
                 Op::Argv => self.argv()?,
                 Op::EnvMap => self.env_map()?,
@@ -1329,6 +1331,28 @@ impl VM {
     /// the other pure ops.
     pub(super) fn monotonic(&mut self) -> VmResult<()> {
         self.stack.push(Value::small_int(monotonic_now_ms()));
+        Ok(())
+    }
+
+    /// `Op::WallClock` — the wall clock in milliseconds since the Unix epoch.
+    /// A plain read like [`VM::monotonic`], through the same bridge.
+    ///
+    /// `boxed_int` and not `Value::small_int`: this reading is whatever the
+    /// host clock says rather than a length or a count, so nothing here knows
+    /// it fits the 48-bit immediate. A clock set past the year 6429 boxes
+    /// instead of tripping `small_int`'s debug assert.
+    pub(super) fn wall_clock(&mut self) -> VmResult<()> {
+        // `duration_since` reports a pre-1970 clock as an `Err` carrying the
+        // magnitude, so the sign is put back rather than clamped: a clock set
+        // to 1969 must read as negative and not as the epoch.
+        let ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(d) => i64::try_from(d.as_millis()).unwrap_or(i64::MAX),
+            Err(before) => i64::try_from(before.duration().as_millis())
+                .map(|ms| -ms)
+                .unwrap_or(i64::MIN),
+        };
+        let v = self.boxed_int(ms);
+        self.stack.push(v);
         Ok(())
     }
 

@@ -485,6 +485,12 @@ pub enum Op {
     SubjectReceiveUntil,
     /// Push milliseconds elapsed since a process-global monotonic epoch (Int).
     Monotonic,
+    /// Push milliseconds since the Unix epoch on the system's wall clock
+    /// (Int), negative before 1970. A separate opcode from `Monotonic`
+    /// because it is a different clock and not a rebased one: it is settable,
+    /// so it can step in either direction, and no deadline is computed from
+    /// it. (scarlet/time.epoch_ms)
+    WallClock,
     /// `[n Int] -> Result(Binary, Nil)` — `n` bytes from the OS CSPRNG.
     /// `Err(Nil)` if `n` is negative or the OS source fails. Never a
     /// userspace PRNG, and never silent stand-in bytes.
@@ -797,6 +803,7 @@ impl Op {
             | Op::SubjectReceive
             | Op::SubjectReceiveUntil
             | Op::Monotonic
+            | Op::WallClock
             | Op::RandomBytes
             | Op::Argv
             | Op::EnvMap
@@ -1022,6 +1029,7 @@ impl Op {
             | Op::SubjectReceive
             | Op::SubjectReceiveUntil
             | Op::Monotonic
+            | Op::WallClock
             | Op::RandomBytes
             | Op::Argv
             | Op::EnvMap

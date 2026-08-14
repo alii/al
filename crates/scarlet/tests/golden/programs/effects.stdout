@@ -13,7 +13,11 @@ add_ms then since_ms: 250
 since_ms is signed: -250
 monotonic never rewinds: True
 deadline in raw ms: 250
+epoch is after 2024: True
+epoch is before 2100: True
+epoch is not the monotonic clock: True
 slept at least 50ms: True
+epoch advanced over the sleep: True
 argv is non-empty: True
 PATH is set: True
 unset var: None

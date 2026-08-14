@@ -1,5 +1,5 @@
 /**
- * Monotonic time.
+ * Time. Two clocks, and they are not interchangeable.
  *
  * monotonic() returns an Instant representing "now" on a clock that only ever
  * moves forward - it is unaffected by wall-clock adjustments (NTP steps, leap
@@ -10,6 +10,15 @@
  * form, deadline_in_ms) and only moved with add_ms / compared with since_ms, so
  * a wall-clock ms count or a bare duration cannot be passed where an absolute
  * monotonic deadline is expected.
+ *
+ * epoch_ms() reads the other clock: the system's wall clock, which is the one
+ * that says what date it is and therefore the only one that can be compared
+ * with a timestamp someone else produced. It is settable, so it can step in
+ * either direction, and the difference between two readings is not an elapsed
+ * time. It is a plain Int and not an Instant for exactly that reason: every
+ * deadline the stdlib takes from a caller is an Instant, so a wall-clock reading
+ * cannot be passed as one. What the type does not stop is handing it to a
+ * _within function, which takes a relative timeout and would read it as one.
  */
 
 pub opaque type Instant {
@@ -51,3 +60,12 @@ pub fn to_deadline_ms(t Instant) Int {
 		Instant(n) -> n
 	}
 }
+
+// Milliseconds since the Unix epoch, 1970-01-01T00:00:00Z; negative before it.
+// This is the clock to read when the number leaves the program or arrives from
+// outside it - a timestamp in a header, a log line, an id that encodes when it
+// was minted. It is not the clock to measure with: it can be stepped by the
+// operator or by NTP, so subtracting two readings can give a negative or a
+// wildly wrong duration. monotonic() is what durations and deadlines are for.
+@vm(time__epoch_ms)
+pub fn epoch_ms() Int

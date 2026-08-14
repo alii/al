@@ -220,6 +220,7 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::SubjectSend
         | Op::SubjectSendUrgent
         | Op::Monotonic
+        | Op::WallClock
         | Op::RandomBytes
         | Op::Argv
         | Op::EnvMap

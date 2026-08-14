@@ -1,5 +1,5 @@
 // The effectful stdlib, pinned to the parts of it that are deterministic:
-// scarlet/io (files), scarlet/time (a monotonic clock) and scarlet/process (argv/env).
+// scarlet/io (files), scarlet/time (both clocks) and scarlet/process (argv/env).
 //
 // Nothing here may print a value the environment chooses — a raw Instant, an
 // elapsed millisecond count, argv[0], an env var's value — so every assertion
@@ -89,8 +89,26 @@ pub fn main() {
 	// between two of them is ours to print.
 	println('deadline in raw ms: ${time.to_deadline_ms(deadline) - time.to_deadline_ms(start)}')
 
+	// The wall clock is a second clock and not a rebased first one, and these
+	// bounds are what say so. Both are fixed dates, so nothing printed here is a
+	// value the machine chose: a reading taken in seconds falls under the first
+	// bound and one taken in microseconds over the second, and a reading off the
+	// monotonic clock — milliseconds into this process — fails the first and the
+	// third. 1704067200000 is 2024-01-01T00:00:00Z, 4102444800000 is 2100-01-01.
+	epoch_start = time.epoch_ms()
+	println('epoch is after 2024: ${epoch_start > 1704067200000}')
+	println('epoch is before 2100: ${epoch_start < 4102444800000}')
+	println('epoch is not the monotonic clock: ${epoch_start - time.to_deadline_ms(start) > 1704067200000}')
+
 	process.sleep(50)
 	println('slept at least 50ms: ${time.since_ms(time.monotonic(), start) >= 50}')
+
+	// A clock frozen at any plausible constant passes all three bounds above, so
+	// only an advance refutes one. The floor is 10 rather than 50, and there is
+	// no ceiling, because this is the settable clock: it may be slewed or stepped
+	// while the sleep runs, which is the whole reason it is not the clock the
+	// line above measures with.
+	println('epoch advanced over the sleep: ${time.epoch_ms() - epoch_start >= 10}')
 
 	// --- scarlet/process ------------------------------------------------------------
 	// argv[0] is the script's path and env values are the machine's, so what gets
