@@ -645,12 +645,16 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::NetEnotconn,
             S::NetErrnoOther,
         ],
+        // `NetEnotconn` is this crate's own, not `getsockname`'s: a retired
+        // listener is in neither table and `listener_addr` reports the miss as
+        // `ENOTCONN`. The syscall's own errnos stay on the residual.
         Op::TcpLocalAddr => &[
             S::ResultOk,
             S::ResultErr,
             S::SocketAddr,
             S::IpV4,
             S::IpV6,
+            S::NetEnotconn,
             S::NetErrnoOther,
         ],
         Op::DnsResolve | Op::DnsResolveUntil => &[

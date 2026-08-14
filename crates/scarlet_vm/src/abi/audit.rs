@@ -47,7 +47,9 @@
 //!   or a rustls error onto a slot and are total over their input; that
 //!   `read(2)` never returns `EADDRINUSE` is POSIX, not Rust, and is not in
 //!   these sources. Slots named inside a classifier are therefore permitted,
-//!   not required — an arm may list any subset of them.
+//!   not required — an arm may list any subset of them. An errno this crate
+//!   mints *itself* is the exception: [`ERRNO_MINTS`] carries it, and the slot
+//!   it classifies to is required of every op that reaches the mint.
 //! - **Values the runtime builds after the op has returned.** Exit and crash
 //!   reasons are built when a monitored process ends, on a path the sweep cuts
 //!   at [`REENTRY`]. `Op::ProcessMonitor`'s arm declares them and this sweep
@@ -68,6 +70,24 @@ use crate::bytecode::Op;
 /// Functions that map a foreign error onto a slot. Total over their input, so
 /// which of their outputs a given op can reach is not stated in this crate.
 const CLASSIFIERS: &[&str] = &["classify_fs", "classify_net", "session_error_slot"];
+
+/// Errors this crate mints itself, with the slot [`CLASSIFIERS`] map them to.
+/// The errno is a literal in these sources rather than a syscall's to choose,
+/// so an op reaching one of these *can* build that slot: [`reach`] takes it
+/// back out of the permitted set, making it required like any other.
+///
+/// Keyed by the function that mints, and matched as a whole word rather than
+/// as a call, because `listener_addr` passes `stale_socket` to `ok_or_else`
+/// without calling it and [`call_edges`] needs a `(`.
+///
+/// Two further in-crate mints are deliberately absent: the sweep reaches
+/// neither site, so requiring their slots would assert a coverage this model
+/// does not have. `drain_write`'s `EPIPE` is called from the scrutinee of the
+/// `match` whose arms its caller is selected by, and a selected callee is
+/// never walked; `timed_out_offload`'s `ETIMEDOUT` is poller-side, past
+/// [`REENTRY`]. Both were checked by hand: every op that reaches either
+/// already declares the slot, so neither is a live gap.
+const ERRNO_MINTS: &[(&str, AbiSlot)] = &[("stale_socket", AbiSlot::NetEnotconn)];
 
 /// Where the sweep stops. Each of these hands control to the scheduler, the
 /// blocking pool or the poller, which then runs *other* ops and other
@@ -338,6 +358,22 @@ fn find(h: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
         .windows(needle.len())
         .position(|w| w == needle)
         .map(|k| from + k)
+}
+
+/// Whether `body` names `word` as a whole identifier, called or not.
+fn names_word(body: &[u8], word: &str) -> bool {
+    let w = word.as_bytes();
+    let mut i = 0;
+    while let Some(p) = find(body, i, w) {
+        i = p + 1;
+        let after = p + w.len();
+        if (p == 0 || !is_ident_byte(body[p - 1]))
+            && (after >= body.len() || !is_ident_byte(body[after]))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// `open` indexes a `{`; the index just past its `}`.
@@ -916,6 +952,26 @@ fn build() -> Graph {
             entry.1.extend(call_edges(arm, &per_file[d.file], &all));
         }
     }
+
+    // The mint builds its slot, and a body that merely names one gets the edge
+    // `call_edges` cannot see. Missing means renamed, which would silently
+    // return the slot to the permitted set.
+    for (mint, slot) in ERRNO_MINTS {
+        let n = nodes.get_mut(*mint).unwrap_or_else(|| {
+            panic!("{mint} mints an errno and is gone from this crate; ERRNO_MINTS is stale")
+        });
+        n.slots.insert(*slot);
+    }
+    for d in &defs {
+        for (mint, _) in ERRNO_MINTS {
+            if d.name != *mint
+                && names_word(&d.body, mint)
+                && let Some(n) = nodes.get_mut(&d.name)
+            {
+                n.calls.insert((*mint).to_string());
+            }
+        }
+    }
     // An enum with one arm in a body is a `let ... = E::V` destructure, not a
     // dispatch; selecting on it would drop the other paths.
     for n in nodes.values_mut() {
@@ -1017,6 +1073,7 @@ fn build() -> Graph {
 fn reach(g: &Graph, op: Op) -> (BTreeSet<AbiSlot>, BTreeSet<AbiSlot>, BTreeSet<String>) {
     let mut strict: BTreeSet<AbiSlot> = g.inline.get(&(op as u8)).cloned().unwrap_or_default();
     let mut loose = BTreeSet::new();
+    let mut minted: BTreeSet<AbiSlot> = BTreeSet::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut stack: Vec<String> = g
         .entries
@@ -1043,6 +1100,9 @@ fn reach(g: &Graph, op: Op) -> (BTreeSet<AbiSlot>, BTreeSet<AbiSlot>, BTreeSet<S
             continue;
         }
         strict.extend(node.slots.iter().copied());
+        if let Some((_, slot)) = ERRNO_MINTS.iter().find(|(m, _)| *m == name) {
+            minted.insert(*slot);
+        }
 
         for (e, v) in &node.mints {
             if e == BLOCKING_MINT
@@ -1080,6 +1140,11 @@ fn reach(g: &Graph, op: Op) -> (BTreeSet<AbiSlot>, BTreeSet<AbiSlot>, BTreeSet<S
                 }
             }
         }
+    }
+    // This op reached the mint, so the errno is this crate's and the slot is
+    // required of it — whatever the syscall on the same path could return.
+    for s in &minted {
+        loose.remove(s);
     }
     (strict, loose, seen)
 }
