@@ -1018,6 +1018,33 @@ mod tests {
         )
     }
 
+    /// Keep writing until the stream refuses a chunk outright: rustls's send
+    /// buffer full on top of a socket that is already full.
+    ///
+    /// [`fill_until_flushing`] stops one step earlier, at the FIRST `Flushing`
+    /// — the moment of least margin — which is enough for the sibling test
+    /// because it flushes straight afterwards. The close test needs the state
+    /// to survive to its next statement, so it fills to the refusal instead.
+    ///
+    /// Neither is durable. See the close test for why this has to be run with
+    /// nothing between it and the close.
+    fn saturate_until_refusing(conn: &mut ConnIo) {
+        let chunk = vec![0x5au8; CHUNK];
+        for _ in 0..CHUNKS {
+            if let Drain::Park { .. } =
+                drain_and_flush(conn, std::slice::from_ref(&chunk)).expect("write")
+            {
+                return;
+            }
+        }
+        panic!(
+            "{} bytes went to a peer that is not reading without the stream \
+             ever refusing a chunk: this host's buffers are too large for this \
+             test to exercise a refused alert at all",
+            CHUNKS * CHUNK
+        )
+    }
+
     /// A write whose plaintext the session accepted whole, but whose ciphertext
     /// the socket would not take, reports `Flushing` and NOT `Done` — and
     /// `Flushing` is a park, so `tls.write` has not returned `Ok` yet.
@@ -1113,6 +1140,17 @@ mod tests {
     /// Both halves are asserted, because they are separate promises: the result
     /// is `Err`, AND the connection is gone from the table regardless. A close
     /// that reported a failure by not closing would be worse than the bug.
+    ///
+    /// The `Err` only means anything if the socket still refuses the alert by
+    /// the time `tls.close` runs, so that is probed immediately before rather
+    /// than inherited from the fill, which does not keep. Without the probe an
+    /// `Ok(Nil)` here is ambiguous between a premise that evaporated and an
+    /// error that was swallowed, and those want opposite fixes.
+    ///
+    /// The probe narrows that window but does not close it: the socket can
+    /// still reopen between it and the close, so a red here is the flake at
+    /// roughly 2 runs in 10 and a real swallow at 10 in 10. The rate is the
+    /// only thing that separates them — the message is identical. T-617.
     #[test]
     fn a_close_notify_the_socket_refuses_is_reported_and_still_closes() {
         use super::super::halt_test_vm;
@@ -1121,9 +1159,16 @@ mod tests {
         provider();
         let (leaf, key) = mint();
         let peer = start_peer(leaf.clone(), key);
-        let mut conn = connect(&peer, leaf);
-        fill_until_flushing(&mut conn);
+        let conn = connect(&peer, leaf);
 
+        // The VM is built and the connection handed over BEFORE the socket is
+        // filled, because filling it is not a state that keeps. A peer that is
+        // not reading still absorbs: its receive queue drains the wire and
+        // macOS grows the receive buffer under load, so capacity reopens on its
+        // own within milliseconds. Establishing the premise first and then
+        // doing this setup drained the whole backlog before the close in 5 runs
+        // of 10 (and 7 of 10 filling harder) on aarch64-apple-darwin. Nothing
+        // below this point may block or allocate at leisure.
         let mut vm = halt_test_vm();
         let id = vm.alloc_socket_id();
         assert!(
@@ -1134,6 +1179,38 @@ mod tests {
             id,
             kind: SocketKind::Tls,
         }));
+
+        // The precondition is not that the session still owes ciphertext — it
+        // does either way — but that the socket still REFUSES it, and only the
+        // second separates a swallowed error from a premise that evaporated.
+        // `flush_out` is the very call `send_close_notify` makes, so it cannot
+        // answer a question adjacent to the one under test, and it leaves the
+        // state it found: the remainder stays in rustls and the socket stays
+        // full, which is what `tls_close` then needs.
+        let conn = vm
+            .connections
+            .get_mut(&id)
+            .expect("the entry stays until tls.close removes it");
+        saturate_until_refusing(&mut conn.io);
+        let ConnIo::Tls(tls) = &mut conn.io else {
+            panic!("the connection under test is a TLS one");
+        };
+        assert!(
+            tls.session.wants_write(),
+            "the fill must leave ciphertext owed; a session with nothing left \
+             to write means the fill never established the premise at all"
+        );
+        let refused = tls.flush_out().expect_err(
+            "the socket regained capacity between the fill and here, so the \
+             backlog drained and there is no refused alert left to report: the \
+             premise evaporated, and this is NOT tls.close swallowing an error",
+        );
+        assert_eq!(
+            refused.kind(),
+            ErrorKind::WouldBlock,
+            "the flush must fail by filling the socket, not by breaking the \
+             connection: any other error is a different test"
+        );
 
         let mut reds = 0;
         vm.tls_close(&mut reds)
