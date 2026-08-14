@@ -121,6 +121,28 @@ fn install_provider() {
     });
 }
 
+/// Whether the stalled server looks for bytes arriving BEYOND `expect`.
+///
+/// The read loop below stops at `expect`, so a writer that sent more can never
+/// show up as a larger count on its own — which is what made a duplicated
+/// re-send unobservable from the client side. `Probe` takes the second look.
+enum Excess {
+    /// Reply as soon as `expect` bytes are in. For tests whose subject is the
+    /// stall, not the byte count.
+    Ignore,
+    /// Wait [`EXCESS_WINDOW`] for anything after `expect` and fold it into the
+    /// reported count, so a writer that duplicated reports MORE than it wrote.
+    Probe,
+}
+
+/// How long [`Excess::Probe`] waits for a byte that should never come.
+///
+/// It is not a race in either direction: a correct writer sends exactly
+/// `expect`, so this window only ever expires, and a duplicating one has the
+/// extra bytes queued behind the ones just read, so they are already there.
+/// The value therefore sets how slow a passing run is, not whether it passes.
+const EXCESS_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Serve one TLS connection that does NOT read for `stall`, then drains exactly
 /// `expect` bytes of plaintext and answers `got:<n>:<ok|mismatch>`.
 ///
@@ -128,7 +150,12 @@ fn install_provider() {
 /// so the writer's window stays small and its socket fills while the peer is
 /// stalled. That is the state the VM's write path is only ever in here — a few
 /// hundred bytes over loopback never fills anything.
-fn spawn_stalled_tls_server(leaf: Leaf, expect: usize, stall: std::time::Duration) -> u16 {
+fn spawn_stalled_tls_server(
+    leaf: Leaf,
+    expect: usize,
+    stall: std::time::Duration,
+    excess: Excess,
+) -> u16 {
     install_provider();
     let config = Arc::new(
         ServerConfig::builder()
@@ -167,17 +194,39 @@ fn spawn_stalled_tls_server(leaf: Leaf, expect: usize, stall: std::time::Duratio
         }
         thread::sleep(stall);
         let mut all = Vec::with_capacity(expect);
-        let mut stream = rustls::Stream::new(&mut conn, &mut sock);
         let mut buf = vec![0u8; 16 * 1024];
-        while all.len() < expect {
-            match stream.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => all.extend_from_slice(&buf[..n]),
+        {
+            let mut stream = rustls::Stream::new(&mut conn, &mut sock);
+            while all.len() < expect {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => all.extend_from_slice(&buf[..n]),
+                }
             }
         }
-        let ok = all.len() == expect && all.chunks(16).all(|c| c == &PATTERN.as_bytes()[..c.len()]);
+
+        // Every byte past `expect` is one the writer sent twice. Read on a
+        // timeout rather than to EOF: the client is blocked waiting for the
+        // reply below and will not close until it has it, so EOF never comes.
+        let mut extra = 0usize;
+        if let Excess::Probe = excess {
+            let _ = sock.set_read_timeout(Some(EXCESS_WINDOW));
+            let mut stream = rustls::Stream::new(&mut conn, &mut sock);
+            while let Ok(n) = stream.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                extra += n;
+            }
+            let _ = sock.set_read_timeout(None);
+        }
+
+        let ok = all.len() == expect
+            && extra == 0
+            && all.chunks(16).all(|c| c == &PATTERN.as_bytes()[..c.len()]);
         let verdict = if ok { "ok" } else { "mismatch" };
-        let _ = stream.write_all(format!("got:{}:{verdict}", all.len()).as_bytes());
+        let mut stream = rustls::Stream::new(&mut conn, &mut sock);
+        let _ = stream.write_all(format!("got:{}:{verdict}", all.len() + extra).as_bytes());
         let _ = stream.flush();
     });
 
@@ -596,7 +645,8 @@ fn tls_read_within_times_out_as_transport_timed_out() {
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
     // Handshake, then sit unread. The client never writes, so the peer never
     // replies, and the 100 ms deadline is the only wake.
-    let port = spawn_stalled_tls_server(leaf, 1, std::time::Duration::from_secs(30));
+    let port =
+        spawn_stalled_tls_server(leaf, 1, std::time::Duration::from_secs(30), Excess::Ignore);
 
     let src = format!(
         r#"import scarlet/net
@@ -928,7 +978,8 @@ pub fn main() {{
 fn https_send_until_times_out_against_a_silent_peer() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
-    let port = spawn_stalled_tls_server(leaf, 1, std::time::Duration::from_secs(30));
+    let port =
+        spawn_stalled_tls_server(leaf, 1, std::time::Duration::from_secs(30), Excess::Ignore);
 
     let src = format!(
         r#"import scarlet/http/client.{{Request, Tls}}
@@ -1155,7 +1206,7 @@ fn a_tls_op_survives_the_function_around_it_being_compiled() {
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
     // Twelve 16-byte writes; the peer drains them all and reports.
     let expect = PATTERN.len() * REPS;
-    let port = spawn_stalled_tls_server(leaf, expect, std::time::Duration::ZERO);
+    let port = spawn_stalled_tls_server(leaf, expect, std::time::Duration::ZERO, Excess::Ignore);
     let dead = spawn_hangup_server(REPS);
 
     let src = format!(
@@ -1292,9 +1343,16 @@ pub fn main() {{
 /// still owes ciphertext — is asserted in `vm::tls::tests`, where the returned
 /// value can be read directly. What this covers is what the VM does with it:
 /// `tls_write`'s `Flushing` arm parks at `bytes.len()`, so the re-run carries an
-/// EMPTY tail and only finishes the flush. Re-sending the plaintext instead
-/// would show up here as a byte count larger than what was written, and a
-/// wedged re-run as no exit code at all.
+/// EMPTY tail and only finishes the flush. A wedged re-run shows up here as no
+/// exit code at all.
+///
+/// The duplication half rests entirely on [`Excess::Probe`]. Every write sends
+/// the same repeating 16-byte [`PATTERN`], so a duplicated re-send is
+/// byte-identical to a correct stream and no content assertion can separate the
+/// two — the only surviving observable is the COUNT, and a server that stops
+/// reading at `expect` cannot report one that is too large. Without the probe
+/// this test passes against a VM that re-sends the whole payload on every
+/// `Flushing` park.
 ///
 /// The write is a LOOP of chunks rather than one big binary, and that is
 /// load-bearing in two directions at once. Each chunk is under rustls's 64 KiB
@@ -1315,7 +1373,12 @@ fn a_large_tls_write_parks_and_resumes_without_duplicating_a_byte() {
 
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
-    let port = spawn_stalled_tls_server(leaf, total, std::time::Duration::from_secs(1));
+    let port = spawn_stalled_tls_server(
+        leaf,
+        total,
+        std::time::Duration::from_secs(1),
+        Excess::Probe,
+    );
 
     let src = format!(
         r#"import scarlet/net
