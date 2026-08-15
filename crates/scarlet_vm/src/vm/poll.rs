@@ -496,11 +496,19 @@ impl VM {
             return Ok(());
         }
 
-        // A retire wake counts as a wake: it queued a runnable process, and
-        // blocking below would strand it behind an idle poller.
-        let mut woke = retired_woke | self.drain_completions()?;
+        // wake_due_timers before drain_completions, the same order the tail
+        // of this function already uses and the same order Wait::Io gets
+        // from wake_due_timers running ahead of drain_io_events below: an
+        // expired deadline claims the park first, so a completion that only
+        // finished late is dropped by drain_completions' own park_remove
+        // finding nothing there (T-644). Reversed, this raced: a completion
+        // sitting in the queue when the scheduler got back to it could win
+        // over a deadline that had already passed, and which side won
+        // depended on nothing more principled than which of poll_parked's
+        // two call sites happened to run.
+        let mut woke = retired_woke | self.wake_due_timers()?;
+        woke |= self.drain_completions()?;
         woke |= self.drain_wakes();
-        woke |= self.wake_due_timers()?;
 
         let waiting_on_io = !self.io_waiters.is_empty();
 

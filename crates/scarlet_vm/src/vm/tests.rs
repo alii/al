@@ -642,6 +642,98 @@ fn fd_wake_leaves_stale_timer_entry_that_wake_due_timers_discards() {
     );
 }
 
+// A completion that is already sitting in the queue by the time its offload's
+// deadline has passed must not silently outrun the timeout (T-644). Built by
+// hand rather than raced: `park` is never called, so no job reaches the real
+// blocking pool — the parked entry, its timer-heap slot and the "finished"
+// completion are inserted exactly as `park`/the pool would leave them, the
+// same approach `vm::io::tests::resolve_step` uses to keep this off the
+// network and deterministic.
+#[test]
+fn a_completion_that_arrives_after_its_offload_deadline_loses_to_the_timeout() {
+    let mut vm = halt_test_vm();
+    let id = vm.next_wait_id;
+    vm.next_wait_id += 1;
+    let deadline = Instant::now() - Duration::from_millis(50);
+    vm.timer_heap.push(Reverse((deadline, id)));
+    vm.parked.insert(
+        id,
+        (
+            Wait::Offload {
+                op: None,
+                deadline: Some((deadline, poll::OffloadTimeout::Resolve)),
+            },
+            parked_process(),
+        ),
+    );
+    // The pool thread finished before this poll ever ran: the real answer is
+    // already in the queue when the deadline is checked.
+    lock(&vm.runtime.slots[vm.scheduler_index].completions).push_back(sched::Completion {
+        job_id: id,
+        result: sched::BlockingResult::ResolveDns {
+            result: Ok(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+        },
+    });
+
+    vm.poll_parked(false).expect("poll");
+
+    assert_eq!(vm.run_queue.len(), 1, "the parked process must wake");
+    let mut woken = vm.run_queue.pop_front().expect("woken process");
+    let result = woken.stack.pop().expect("a Result was pushed");
+    let e = result.as_enum().expect("a Result value");
+    assert_eq!(
+        e.variant_name(),
+        "Err",
+        "an expired deadline must win over a completion that arrives after it, not deliver the late answer"
+    );
+    let inner = e
+        .payload()
+        .first()
+        .and_then(|p| p.as_enum())
+        .expect("a NetError payload");
+    assert_eq!(inner.variant_name(), "TimedOut");
+}
+
+// The control on the guard's condition: a completion racing a deadline that
+// has NOT yet passed must still be delivered as the real answer. Without
+// this, synthesising TimedOut unconditionally would satisfy the test above.
+#[test]
+fn a_completion_that_arrives_before_its_offload_deadline_still_wins() {
+    let mut vm = halt_test_vm();
+    let id = vm.next_wait_id;
+    vm.next_wait_id += 1;
+    let deadline = Instant::now() + Duration::from_secs(3600);
+    vm.timer_heap.push(Reverse((deadline, id)));
+    vm.parked.insert(
+        id,
+        (
+            Wait::Offload {
+                op: None,
+                deadline: Some((deadline, poll::OffloadTimeout::Resolve)),
+            },
+            parked_process(),
+        ),
+    );
+    lock(&vm.runtime.slots[vm.scheduler_index].completions).push_back(sched::Completion {
+        job_id: id,
+        result: sched::BlockingResult::ResolveDns {
+            result: Ok(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+        },
+    });
+
+    vm.poll_parked(false).expect("poll");
+
+    assert_eq!(vm.run_queue.len(), 1, "the parked process must wake");
+    let mut woken = vm.run_queue.pop_front().expect("woken process");
+    let result = woken.stack.pop().expect("a Result was pushed");
+    let e = result.as_enum().expect("a Result value");
+    assert_eq!(
+        e.variant_name(),
+        "Ok",
+        "a deadline that has not passed must not steal a completion that already arrived"
+    );
+}
+
 // A victim referencing a connection id that is mid-connect or armed by a
 // parked sibling must not be donated. Quiescent connections and listeners
 // always can be.

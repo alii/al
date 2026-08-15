@@ -190,11 +190,13 @@ pub fn resolve(host String) Result(IpAddress, NetError)
 // for a hostname. An IP literal needs no lookup and is still `Ok` on any
 // budget: the bound is on the wait, not on work that never waits.
 //
-// What is NOT guaranteed is the other half: once a lookup has been dispatched
-// the deadline only competes with it, so a resolve that finishes late is still
-// delivered as `Ok` if the scheduler was busy elsewhere when the deadline
-// passed. Treat `timeout_ms` as a bound on how long this is willing to wait,
-// not as a ceiling on how long it can take.
+// The other half is guaranteed too, as of T-644: once a lookup has been
+// dispatched, the deadline still wins if it has already passed by the time
+// the answer comes back — the scheduler checks its expired timers before it
+// drains finished pool jobs, so a resolve that finishes late errs `TimedOut`
+// rather than being delivered as `Ok`. `timeout_ms` is a ceiling on how long
+// the caller waits, not merely a bound on how long this is willing to start
+// waiting.
 //
 // Unlike `connect_addr_within`, this is the only bound a resolve has: whether
 // `getaddrinfo` ever gives up is the platform resolver's business, not the
@@ -203,10 +205,13 @@ pub fn resolve(host String) Result(IpAddress, NetError)
 // nameserver that answers nothing at all was not reproducible without root, so
 // no upper bound on the unicast path is claimed.
 //
-// Giving up is giving up on the wait only: a dispatched lookup is not
-// cancellable and runs to completion on its pool thread, holding it for the
-// remainder. A budget spent before the call is the one case that costs no
-// pool thread, because nothing is dispatched.
+// Giving up is giving up on the wait only, not the work: a dispatched lookup
+// is not cancellable and runs to completion on its pool thread regardless,
+// holding it for the remainder — its answer just arrives too late to be
+// delivered and is discarded, the same way a connect whose deadline already
+// fired discards the connect that finishes after it. A budget spent before
+// the call is the one case that costs no pool thread, because nothing is
+// dispatched.
 pub fn resolve_within(host String, timeout_ms Int) Result(IpAddress, NetError) {
 	resolve_until(host, time.add_ms(time.monotonic(), timeout_ms))
 }
@@ -219,8 +224,9 @@ pub fn resolve_within(host String, timeout_ms Int) Result(IpAddress, NetError) {
 // A `deadline` the earlier steps already used up is the ordinary case here,
 // not an edge one: it errs `TimedOut` for a hostname without starting a
 // lookup, and still answers an IP literal, exactly as `resolve_within` does
-// on a `timeout_ms` of 0. The same limit applies too — a lookup that has been
-// dispatched can still be delivered late.
+// on a `timeout_ms` of 0. The same bound applies too — a lookup that has
+// been dispatched still errs `TimedOut` if `deadline` passes before the
+// answer does, even though the lookup itself keeps running to completion.
 pub fn resolve_until(host String, deadline Instant) Result(IpAddress, NetError) {
 	resolve_until_ms(host, time.to_deadline_ms(deadline))
 }
