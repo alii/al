@@ -415,12 +415,21 @@ impl Compiler {
                     } = self.hydrate_fn_signature(fd);
                     let m = self.current_module_slice();
                     let dl = DefinitionLocation::new(fd.identifier.span, m, EntityKind::Function);
+                    // Labelled on the preliminary scheme too, not just the
+                    // final one below: this is the scheme a recursive call
+                    // inside the body resolves against.
+                    let names: Vec<String> = fd
+                        .params
+                        .iter()
+                        .map(|p| p.identifier.name.clone())
+                        .collect();
+                    let param_labels = self.engine.intern_slice(&names);
                     self.env.define_at(
                         &fd.identifier.name,
                         Scheme {
                             quantified: ArenaSlice::EMPTY,
                             ty: fn_ty,
-                            kind: ValueKind::ModuleFn,
+                            kind: ValueKind::ModuleFn { param_labels },
                             def: Some(dl),
                         },
                         dl,
@@ -579,6 +588,16 @@ impl Compiler {
                 scheme.def = Some(p.dl());
                 if p.is_const() {
                     scheme.kind = ValueKind::Local;
+                } else {
+                    // `generalize_top` mints `ModuleFn` from a type alone and
+                    // so leaves the labels empty; this is the first point the
+                    // declaration is back in reach. Without this the final
+                    // scheme — the one exported and the one every call site
+                    // outside the body resolves against — carries none.
+                    let names = p.param_names();
+                    scheme.kind = ValueKind::ModuleFn {
+                        param_labels: self.engine.intern_slice(&names),
+                    };
                 }
                 self.env.define(p.name(), scheme);
                 final_schemes[idx] = Some(scheme);

@@ -159,7 +159,7 @@ impl Denotation {
                 Arity(arity),
             )),
             ValueKind::Builtin { op } => Some(Denotation::builtin(op)),
-            ValueKind::Local | ValueKind::ModuleFn => None,
+            ValueKind::Local | ValueKind::ModuleFn { .. } => None,
         }
     }
 
@@ -210,7 +210,7 @@ impl Denotation {
 mod tests {
     use super::*;
     use crate::type_def::TypeId;
-    use crate::types::StrId;
+    use crate::types::{ArenaSlice, StrId};
 
     const TY: RTy = RTy(7);
 
@@ -239,7 +239,12 @@ mod tests {
     /// the frame that bound it knows where it lives.
     #[test]
     fn the_kind_bridge_defers_places_to_the_frame() {
-        assert_eq!(Denotation::from_kind(ValueKind::ModuleFn), None);
+        assert_eq!(
+            Denotation::from_kind(ValueKind::ModuleFn {
+                param_labels: ArenaSlice::EMPTY
+            }),
+            None
+        );
         assert_eq!(Denotation::from_kind(ValueKind::Local), None);
     }
 

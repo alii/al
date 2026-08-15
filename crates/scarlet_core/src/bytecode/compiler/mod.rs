@@ -3685,7 +3685,7 @@ impl Compiler {
     /// effects), while constructors and builtins have no plain runtime binding.
     fn has_binding(&mut self, name: &str, kind: &ValueKind) -> bool {
         match kind {
-            ValueKind::Local | ValueKind::ModuleFn => {
+            ValueKind::Local | ValueKind::ModuleFn { .. } => {
                 let id = self.engine.intern(name);
                 self.resolve_variable(id).is_some()
             }
@@ -3782,7 +3782,7 @@ impl Compiler {
     ) {
         match kind {
             ValueKind::Constructor { .. } | ValueKind::Builtin { .. } => {}
-            ValueKind::Local | ValueKind::ModuleFn => {
+            ValueKind::Local | ValueKind::ModuleFn { .. } => {
                 if !has_binding {
                     self.no_runtime_binding(name, qualifier, sp);
                 }
@@ -3932,7 +3932,7 @@ impl Compiler {
                 ValueKind::Builtin { .. } => {
                     self.compile_positional_args(inst_ty, &expr.arguments, expr.span)
                 }
-                ValueKind::Local | ValueKind::ModuleFn => {
+                ValueKind::Local | ValueKind::ModuleFn { .. } => {
                     let ret = self.compile_positional_args(inst_ty, &expr.arguments, expr.span);
                     if !has_binding {
                         let module = qualifier.as_ref().map(|k| self.module_name(k));

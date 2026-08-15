@@ -430,7 +430,10 @@ fn quantvar(qv: &QuantVar) -> String {
 fn valuekind(k: ValueKind) -> String {
     match k {
         ValueKind::Local => "ValueKind::Local".into(),
-        ValueKind::ModuleFn => "ValueKind::ModuleFn".into(),
+        ValueKind::ModuleFn { param_labels } => format!(
+            "ValueKind::ModuleFn {{ param_labels: {} }}",
+            aslice(param_labels)
+        ),
         ValueKind::Builtin { op } => format!("ValueKind::Builtin {{ op: Op::{op:?} }}"),
         ValueKind::Constructor {
             type_name,

@@ -257,7 +257,18 @@ pub enum ValueKind {
     #[default]
     Local,
     /// Top-level `fn` in a module. Generic; instantiated on use.
-    ModuleFn,
+    ///
+    /// `param_labels` is the declaration's parameter names in declared order —
+    /// the same role `Constructor::field_labels` plays, and the only place they
+    /// exist, since `TypeNode::Fun` carries parameter types and no names.
+    ///
+    /// An empty slice means "not recorded", never "takes no parameters":
+    /// generalization mints this variant from a type alone, before the
+    /// declaration is in reach, and `analysis` fills the labels in afterwards.
+    ModuleFn {
+        /// → `InferEngine.str_slices`
+        param_labels: ArenaSlice<pool::StrSlices>,
+    },
     /// VM intrinsic registered from Rust. The `@vm(name)` string is resolved
     /// to an opcode at analysis time, so an unknown name is a compile error at
     /// the annotation rather than a codegen fallthrough.
@@ -1272,7 +1283,14 @@ impl InferEngine {
     /// Generic regardless of level. Run once a top-level body is fully
     /// inferred, so its scheme is closed.
     pub fn generalize_top(&mut self, ty: Ty) -> Scheme {
-        self.generalize_impl(ty, true, ValueKind::ModuleFn, None)
+        self.generalize_impl(
+            ty,
+            true,
+            ValueKind::ModuleFn {
+                param_labels: ArenaSlice::EMPTY,
+            },
+            None,
+        )
     }
 
     /// [`generalize`](Self::generalize) under the relaxed value restriction:
@@ -1289,7 +1307,14 @@ impl InferEngine {
     /// [`generalize_top`](Self::generalize_top) under the relaxed value
     /// restriction; see [`generalize_restricted`](Self::generalize_restricted).
     pub fn generalize_top_restricted(&mut self, ty: Ty, restricted: &HashSet<TypeId>) -> Scheme {
-        self.generalize_impl(ty, true, ValueKind::ModuleFn, Some(restricted))
+        self.generalize_impl(
+            ty,
+            true,
+            ValueKind::ModuleFn {
+                param_labels: ArenaSlice::EMPTY,
+            },
+            Some(restricted),
+        )
     }
 
     fn generalize_impl(
@@ -2162,7 +2187,7 @@ mod tests {
         let x = e.fresh_var();
         let scheme = e.generalize_top(x);
         assert_eq!(scheme.quantified.len, 1);
-        assert!(matches!(scheme.kind, ValueKind::ModuleFn));
+        assert!(matches!(scheme.kind, ValueKind::ModuleFn { .. }));
     }
 
     fn assert_no_live_vars(e: &InferEngine, ty: Ty) {
