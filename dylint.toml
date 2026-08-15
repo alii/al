@@ -1,7 +1,7 @@
 [mordant]
-nonidentity-key-types = ["scarlet_syntax::span::Span"]
-nonidentity-key-forms = ["ptr-cast"]
-nonidentity-key-methods = ["scarlet_vm::bytecode::value::Value::to_bits"]
+key-not-identity-types = ["scarlet_syntax::span::Span"]
+key-not-identity-forms = ["ptr-cast"]
+key-not-identity-methods = ["scarlet_vm::bytecode::value::Value::to_bits"]
 baseline = "mordant-baseline.toml"
 
 # The language server must never kill its own process from a handler: a
