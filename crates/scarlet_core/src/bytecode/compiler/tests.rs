@@ -936,3 +936,109 @@ mod abi_prefix {
         );
     }
 }
+
+/// `mint_wire_templates` extends `program.templates` past `bind_abi`'s ABI
+/// prefix and records where each `WireVariant` landed in
+/// `program.wire_templates`, keyed by the constructor identity it carries —
+/// never by name (T-461).
+mod wire_templates {
+    use super::super::*;
+    use crate::core_ir::VariantRef;
+    use crate::type_def::TypeId;
+    use crate::typed_ir::wire::{Desc, Node, WireVariant};
+
+    /// A one-node `Data` descriptor over one nullary constructor, so a test
+    /// names only what it varies: the type id, the variant index and the
+    /// constructor name.
+    fn one_variant_desc(c: &mut Compiler, ty: TypeId, variant_idx: u16, ctor: &str) -> Desc {
+        let type_name = c.engine.intern("Colour");
+        let ctor_name = c.engine.intern(ctor);
+        Desc::from_parts(vec![Node::Data(vec![WireVariant {
+            variant: VariantRef {
+                type_id: ty,
+                variant_idx,
+                type_name,
+            },
+            name: ctor_name,
+            fields: Vec::new(),
+        }])])
+    }
+
+    #[test]
+    fn a_variant_mints_one_template_past_the_abi_prefix() {
+        let mut c = new_compiler(None, false);
+        c.register_prelude();
+        c.bind_abi();
+        let n = c.abi_template_count;
+
+        let desc = one_variant_desc(&mut c, TypeId(500), 0, "Red");
+        c.mint_wire_templates(&[desc]);
+
+        assert_eq!(c.program.templates.len(), n + 1, "one template minted");
+        let idx = *c
+            .program
+            .wire_templates
+            .get(&(TypeId(500), 0))
+            .expect("recorded under its (type_id, variant_idx) identity");
+        assert_eq!(idx.index(), n, "lands right past the ABI prefix");
+    }
+
+    /// The same constructor reachable through two descriptors — one type two
+    /// `wire.encode`/`wire.decode` call sites both mention, in the eventual
+    /// caller — must mint one template, not two.
+    #[test]
+    fn the_same_identity_across_two_descriptors_mints_once() {
+        let mut c = new_compiler(None, false);
+        c.register_prelude();
+        c.bind_abi();
+        let n = c.abi_template_count;
+
+        let d1 = one_variant_desc(&mut c, TypeId(500), 0, "Red");
+        let d2 = one_variant_desc(&mut c, TypeId(500), 0, "Red");
+        c.mint_wire_templates(&[d1, d2]);
+
+        assert_eq!(
+            c.program.templates.len(),
+            n + 1,
+            "one identity across two descriptors is one template"
+        );
+    }
+
+    /// A later `bind_abi` — a second emit in one session — must drop
+    /// `wire_templates` along with the table it names, exactly as it already
+    /// drops a bare suffix template (`abi_prefix`'s test above): a stale
+    /// index surviving into a rebuilt table would name whatever constructor
+    /// now happens to sit there, not the one that was minted for it. The
+    /// mechanism, not any one `TemplateIdx`, is what a re-emit must preserve
+    /// — this compiler's own design forbids storing the index itself
+    /// anywhere longer-lived than one compile.
+    #[test]
+    fn a_second_bind_abi_drops_wire_templates_and_minting_again_still_works() {
+        let mut c = new_compiler(None, false);
+        c.register_prelude();
+        c.bind_abi();
+
+        let desc = one_variant_desc(&mut c, TypeId(500), 0, "Red");
+        c.mint_wire_templates(&[desc]);
+        assert!(c.program.wire_templates.contains_key(&(TypeId(500), 0)));
+
+        c.bind_abi();
+        assert!(
+            c.program.wire_templates.is_empty(),
+            "bind_abi must clear the wire index along with the templates it named"
+        );
+
+        let desc_again = one_variant_desc(&mut c, TypeId(500), 0, "Red");
+        c.mint_wire_templates(&[desc_again]);
+        let idx = *c
+            .program
+            .wire_templates
+            .get(&(TypeId(500), 0))
+            .expect("re-minting after a rebuild works the same way it did the first time");
+        assert_eq!(
+            idx.index(),
+            c.abi_template_count,
+            "lands past the (possibly relocated) new ABI prefix"
+        );
+    }
+}

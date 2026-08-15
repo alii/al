@@ -1126,6 +1126,7 @@ mod tests {
             native: Default::default(),
             templates,
             abi,
+            wire_templates: Default::default(),
         }
     }
 

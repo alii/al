@@ -213,8 +213,12 @@ impl Compiler {
         self.program.functions.truncate(functions);
         self.program.constants.truncate(constants);
         // ABI templates are a prefix whose length `bind_abi` recorded.
-        // Descriptor templates live only in the suffix and must not survive.
+        // Descriptor templates live only in the suffix and must not survive,
+        // and neither must the index naming where they were: every
+        // `TemplateIdx` in `wire_templates` names a slot this truncate is
+        // about to drop or reuse for a different constructor.
         self.program.templates.truncate(self.abi_template_count);
+        self.program.wire_templates.clear();
         self.local_count = local_count;
         self.global_to_func.retain(|_, fi| fi.index() < functions);
         // Survivors are watermark-preserved entry-frame slots. Depth normalises

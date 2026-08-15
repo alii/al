@@ -1331,6 +1331,7 @@ fn halt_test_vm() -> VM {
         native: Default::default(),
         templates,
         abi,
+        wire_templates: Default::default(),
     };
     new_vm(program).expect("test VM construction must succeed")
 }

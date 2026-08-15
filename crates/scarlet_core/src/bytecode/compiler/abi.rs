@@ -190,6 +190,10 @@ impl Compiler {
     pub(super) fn bind_abi(&mut self) {
         self.program.templates = TiVec::new();
         self.program.abi = Default::default();
+        // wire_templates names slots in the table just reset — stale the
+        // moment templates is, whether or not a full IncrementalSession
+        // rewind runs first.
+        self.program.wire_templates.clear();
 
         for &(slot, module, type_name, ctor) in BINDINGS {
             let key = ModuleKey::of(&module.iter().map(|s| s.to_string()).collect());
@@ -256,6 +260,56 @@ impl Compiler {
                 ),
                 ZERO_SPAN,
             );
+        }
+    }
+
+    /// Mint one `EnumTemplate` per `WireVariant` across `descs`, extending
+    /// `program.templates` past the ABI prefix `bind_abi` just fixed, and
+    /// record where each one landed in `program.wire_templates` — keyed by
+    /// the constructor identity a descriptor carries (`type_id`,
+    /// `variant_idx`), the same identity `VariantRef` names and never a
+    /// declared name: a renamed type, or two programs that declared the same
+    /// shape independently, must still resolve to one template.
+    ///
+    /// Call after `bind_abi`, whose prefix length is what a rewind truncates
+    /// `program.templates` back to (`IncrementalSession::reset_to`) — so a
+    /// template minted here is exactly as session-scoped as an ABI one, and
+    /// disappears the same way rather than surviving under a stale index.
+    ///
+    /// Idempotent across `descs`: two `WireVariant`s naming the same
+    /// constructor — one type reachable through two different `wire.encode`/
+    /// `wire.decode` call sites, say — mint one template, not two.
+    ///
+    /// No production caller until `build_desc` is wired into elaboration
+    /// (ticket 336, `wire 7/15`) and hands this the descriptors a compile
+    /// actually produced; suppressed for the same reason `build_desc` itself
+    /// is. Delete the `allow` with that caller.
+    #[allow(dead_code)]
+    pub(super) fn mint_wire_templates(&mut self, descs: &[crate::typed_ir::wire::Desc]) {
+        for desc in descs {
+            for variant in desc.variants() {
+                let key = (variant.variant.type_id, variant.variant.variant_idx);
+                if self.program.wire_templates.contains_key(&key) {
+                    continue;
+                }
+                let type_name = self.engine.str(variant.variant.type_name);
+                let ctor_name = self.engine.str(variant.name);
+                let labels: Vec<&str> = variant
+                    .fields
+                    .iter()
+                    .map(|f| self.engine.str(f.label))
+                    .collect();
+                let tpl = EnumTemplate::build(
+                    &mut self.frozen,
+                    variant.variant.type_id,
+                    variant.variant.variant_idx,
+                    type_name,
+                    ctor_name,
+                    &labels,
+                );
+                let idx = self.program.templates.push(tpl);
+                self.program.wire_templates.insert(key, idx);
+            }
         }
     }
 

@@ -744,6 +744,7 @@ mod tests {
             native: NativeTable::new(fn_count),
             templates,
             abi,
+            wire_templates: Default::default(),
         }
     }
 

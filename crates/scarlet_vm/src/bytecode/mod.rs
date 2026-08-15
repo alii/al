@@ -1143,11 +1143,22 @@ pub struct Program {
     /// everything. See [`native`].
     pub native: NativeTable,
     /// Constructors the VM may instantiate, interned into `frozen` by the
-    /// front end. Indexed by the `abi` table below.
+    /// front end. Indexed by the `abi` table below, and past that fixed
+    /// prefix by `wire_templates`.
     pub templates: crate::tivec::TiVec<crate::abi::TemplateIdx, crate::template::EnumTemplate>,
     /// Which template answers each [`AbiSlot`](crate::abi::AbiSlot) — the
     /// runtime's only knowledge of a front end's stdlib.
     pub abi: crate::template::AbiTable,
+    /// Which template answers a `wire` constructor, keyed by the identity a
+    /// descriptor's `WireVariant` carries — `(type_id, variant_idx)`, never a
+    /// name: renaming a type, or two programs declaring the same shape under
+    /// different names, must still resolve to the same template. Unlike
+    /// `abi`, this is not a fixed slot enum — an unbounded set of user types
+    /// can cross the wire — so it is a map rather than an array. Minted past
+    /// `templates`'s ABI prefix, and exactly as session-scoped: a rewind
+    /// clears this the same call that truncates `templates`
+    /// (`IncrementalSession::reset_to`).
+    pub wire_templates: std::collections::HashMap<(crate::TypeId, u16), crate::abi::TemplateIdx>,
 }
 
 impl Program {

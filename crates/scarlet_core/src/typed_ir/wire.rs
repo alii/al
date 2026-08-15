@@ -60,7 +60,7 @@ impl std::fmt::Display for NodeIdx {
 /// descriptor of its type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WireField {
-    label: StrId,
+    pub(crate) label: StrId,
     node: NodeIdx,
 }
 
@@ -74,11 +74,11 @@ pub struct WireField {
 /// different template, or none, by the time anything read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireVariant {
-    variant: VariantRef,
+    pub(crate) variant: VariantRef,
     /// Declaration name. Fingerprint and refusal paths mix this as text.
-    name: StrId,
+    pub(crate) name: StrId,
     /// Declared order, which is the order a decoder fills the payload in.
-    fields: Vec<WireField>,
+    pub(crate) fields: Vec<WireField>,
 }
 
 /// One node of a [`Desc`]. Children are [`NodeIdx`] rather than nested nodes,
@@ -148,6 +148,34 @@ impl Desc {
     #[allow(dead_code)]
     fn len(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// A `Desc` over an already-built node table, for a caller that has one
+    /// without a `WireCtx` — `mint_wire_templates`'s own tests, which need a
+    /// `Data` node's `WireVariant`s and nothing else a `Desc` carries. The
+    /// fingerprint is never read by anything reachable from those tests, so
+    /// it is left at a placeholder rather than folded here a second time.
+    #[cfg(test)]
+    pub(crate) fn from_parts(nodes: Vec<Node>) -> Desc {
+        Desc {
+            nodes,
+            root: NodeIdx(0),
+            fingerprint: 0,
+        }
+    }
+
+    /// Every `WireVariant` this descriptor's table mentions, for the emit
+    /// seam that mints their `EnumTemplate`s
+    /// (`Compiler::mint_wire_templates`, ticket 461). A `Data` node's
+    /// variants only, in table order — a scalar or container node has none.
+    pub(crate) fn variants(&self) -> impl Iterator<Item = &WireVariant> {
+        self.nodes
+            .iter()
+            .filter_map(|n| match n {
+                Node::Data(vs) => Some(vs.iter()),
+                _ => None,
+            })
+            .flatten()
     }
 }
 
