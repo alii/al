@@ -494,9 +494,10 @@ fn typeinfo(ti: &TypeInfo) -> String {
         TypeBody::Custom {
             variants,
             ctors_public,
+            must_name_variants,
         } => {
             format!(
-                "TypeBody::Custom {{ variants: {}, ctors_public: {ctors_public} }}",
+                "TypeBody::Custom {{ variants: {}, ctors_public: {ctors_public}, must_name_variants: {must_name_variants} }}",
                 aslice(variants)
             )
         }

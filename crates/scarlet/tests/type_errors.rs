@@ -489,3 +489,39 @@ reject_case! {
         "Expected 2 argument(s), got 1",
     ),
 }
+
+// T-148: `@exhaustive` forbids a wildcard/bare-binder arm from standing in
+// for variants a match on that type does not name.
+reject_case! {
+    exhaustive_type_wildcard_arm_is_rejected: (
+        "@exhaustive\ntype Color {\n\tRed\n\tGreen\n\tBlue\n}\npub fn main() {\n\tprintln(match Red {\n\t\tRed -> 1\n\t\t_ -> 2\n\t})\n}\n",
+        "'Color' is @exhaustive; a wildcard arm may not stand in for its remaining variant(s): Green, Blue",
+    ),
+    /// A bare binder (`c -> ..`) is the same hole as `_`, not a different one.
+    exhaustive_type_bare_binder_arm_is_rejected: (
+        "@exhaustive\ntype Color {\n\tRed\n\tGreen\n\tBlue\n}\npub fn main() {\n\tprintln(match Red {\n\t\tRed -> 1\n\t\t_c -> 2\n\t})\n}\n",
+        "'Color' is @exhaustive; a wildcard arm may not stand in for its remaining variant(s): Green, Blue",
+    ),
+    /// An alias or an external type has no variants to collapse, so the
+    /// attribute would silently do nothing rather than guard anything.
+    exhaustive_attribute_on_alias_is_rejected: (
+        "@exhaustive\ntype Meters = Int\n",
+        "'@exhaustive' requires a type with variants, not an alias or external type",
+    ),
+    exhaustive_attribute_on_function_is_rejected: (
+        "@exhaustive\nfn f() Int { 1 }\n",
+        "'@exhaustive' may only be used on types",
+    ),
+    exhaustive_attribute_takes_no_arguments: (
+        "@exhaustive(oops)\ntype Color {\n\tRed\n\tGreen\n}\npub fn main() {\n\tprintln(match Red {\n\t\tRed -> 1\n\t\tGreen -> 2\n\t})\n}\n",
+        "'@exhaustive' takes no arguments",
+    ),
+    /// A wildcard that covers nothing left (every variant already named
+    /// before it) is not a T-148 violation — the ordinary "unreachable
+    /// pattern" check still catches it as dead code, same as on any other
+    /// type, and T-148's own check must not also fire and mask it.
+    exhaustive_type_wildcard_covering_nothing_is_unreachable_not_a_t148_error: (
+        "@exhaustive\ntype Color {\n\tRed\n\tGreen\n}\npub fn main() {\n\tprintln(match Red {\n\t\tRed -> 0\n\t\tGreen -> 1\n\t\t_ -> 2\n\t})\n}\n",
+        "unreachable",
+    ),
+}

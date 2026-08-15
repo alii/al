@@ -20,6 +20,7 @@
 // takes the current value, so the "leave it as it is" branch has something to
 // leave.
 
+@exhaustive
 pub opaque type Field(a) {
 	Absent
 	Null
