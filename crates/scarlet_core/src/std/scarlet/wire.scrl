@@ -55,9 +55,47 @@
  * agree without ever having shared a declaration.
  *
  * CHANGING THIS ALGORITHM MEANS BUMPING THE FORMAT VERSION BYTE, and bumping
- * VERSION above with it. The fingerprint travels in every message: an
- * algorithm change that left the version alone would surface at a peer as a
- * SchemaMismatch on a type nobody had touched.
+ * VERSION above with it - the same byte "The byte format" below reads. The
+ * fingerprint travels in every message: an algorithm change that left the
+ * version alone would surface at a peer as a SchemaMismatch on a type nobody
+ * had touched.
+ *
+ * # The byte format
+ *
+ * Little-endian throughout, and no per-value type tags: the descriptor drives
+ * structure on both sides, so the bytes hold only what the descriptor cannot
+ * already supply. A second implementation that follows this section produces
+ * the same bytes, same bar as the fingerprint above.
+ *
+ *   value := magic "SW" . version u8 . fingerprint u64 . body
+ *
+ * `version` is VERSION from the fingerprint algorithm above - one byte, one
+ * definition, read by both sections. `fingerprint` is the 64-bit hash of the
+ * root type, computed as specified there. A magic other than "SW", or a
+ * version this runtime does not read, is NotWire; a fingerprint that parses
+ * but disagrees with the reader's own is SchemaMismatch(expected, found) -
+ * both sides carried, so a log line can say which end changed.
+ *
+ * `body` holds the value, laid out by the root node's kind and then, for a
+ * container or Data node, recursively by each child's:
+ *
+ *   Int     zigzag LEB128                  (Int is 64-bit; nothing outside i64 exists)
+ *   Float   8 bytes, f64 bits
+ *   String  len LEB128, then that many UTF-8 bytes
+ *   Binary  bit_len LEB128, then ceil(bit_len / 8) bytes (bit-level binaries round-trip)
+ *   Array   count LEB128, then that many elements
+ *   Map     count LEB128, then that many key/value pairs
+ *   Tuple   its elements, in order (arity comes from the descriptor, not the bytes)
+ *   Data    variant LEB128, then that constructor's fields - the variant is
+ *           omitted entirely when the type has exactly one, so a record costs
+ *           only its fields and Nil is zero bytes
+ *
+ * A count is checked against the bytes actually remaining before anything is
+ * allocated - a short input claiming a huge count is Malformed(offset, what),
+ * never an allocation. A complete value followed by more bytes is
+ * TrailingBytes(count), reported rather than ignored, because a caller that
+ * framed its own messages has lost sync. Input shorter than the value it
+ * claims to hold is Truncated.
  */
 
 // A value of any encodable type as bytes. Total: a type this cannot encode
