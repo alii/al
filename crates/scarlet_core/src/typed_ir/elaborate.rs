@@ -118,6 +118,19 @@ pub trait ElabCtx: PreludeTys {
     /// `mod.Ctor(..)` is not in scope under its bare name, so a name lookup
     /// would miss a constructor the check walk accepted.
     fn ctor_labels(&mut self, v: VariantRef) -> Option<Vec<StrId>>;
+    /// Declared parameter-label order of the module `fn` a callee names, or
+    /// `None` when the callee is not one — a local binding holding a function,
+    /// a `@vm` builtin, an arbitrary expression — none of which has parameter
+    /// names at the call site, and all of which the check walk refuses a label
+    /// on.
+    ///
+    /// Keyed on the same `qual`/`name` pair the callee's own
+    /// [`Self::resolve_name`] / [`Self::resolve_qualified`] resolved, so the
+    /// labels cannot come from a different declaration than the callee did.
+    ///
+    /// An unrecorded label list reads as `None`: `ValueKind::ModuleFn` mints an
+    /// empty slice for "not recorded", never for "takes no parameters".
+    fn fn_param_labels(&mut self, qual: Option<&str>, name: &str) -> Option<Vec<StrId>>;
     /// The `(func_idx, captures)` the check walk assigned to the
     /// `FunctionExpression` at `span`, which must be written directly inside
     /// the body being elaborated.
@@ -826,21 +839,97 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         // `ctor_call` before their arguments are reordered.
         match self.callee(&fc.callee) {
             Callee::Ctor { scheme, den } => self.ctor_call(scheme, den, &fc.arguments, ty, fc.span),
-            Callee::Value(callee) => {
-                let args = fc
-                    .arguments
-                    .iter()
-                    .map(|a| match a {
-                        ast::CallArg::Positional(e) => self.expr(e),
-                        ast::CallArg::Labeled { .. } | ast::CallArg::Spread(_) => elaborator_bug(
-                            "labeled or spread argument on a non-constructor callee",
-                            fc.span,
-                        ),
-                    })
-                    .collect();
-                TypedExpr::Call { ty, callee, args }
+            Callee::Value {
+                callee,
+                param_labels,
+            } => self.value_call(callee, param_labels, &fc.arguments, ty, fc.span),
+        }
+    }
+
+    /// A call through a callee value. Labelled arguments are reordered into the
+    /// callee's declared parameter order — the order the check walk typed them
+    /// against — by the same [`slot_labeled`] over the same labels the check
+    /// walk used, so the two cannot permute differently.
+    ///
+    /// As in [`Self::ctor_call`], a call that reorders binds every supplied
+    /// argument to a `Let` in *source* order first, or reordering them would
+    /// reorder their side effects.
+    fn value_call(
+        &mut self,
+        callee: TypedCallee,
+        param_labels: Option<Vec<StrId>>,
+        args: &[ast::CallArg],
+        ty: RTy,
+        at: Span,
+    ) -> TypedExpr {
+        if args
+            .iter()
+            .all(|a| matches!(a, ast::CallArg::Positional(_)))
+        {
+            let args = args
+                .iter()
+                .map(|a| match a {
+                    ast::CallArg::Positional(e) => self.expr(e),
+                    ast::CallArg::Labeled { .. } | ast::CallArg::Spread(_) => {
+                        elaborator_bug("non-positional argument on a positional call", at)
+                    }
+                })
+                .collect();
+            return TypedExpr::Call { ty, callee, args };
+        }
+        let Some(labels) = param_labels else {
+            elaborator_bug(
+                "labeled or spread argument on a callee with no parameter names",
+                at,
+            )
+        };
+
+        let mut lets: Vec<(TypedBind, TypedExpr)> = Vec::new();
+        let mut supplied: SmallVec<[(Option<StrId>, TypedExpr); 4]> =
+            SmallVec::with_capacity(args.len());
+        for a in args {
+            match a {
+                ast::CallArg::Positional(e) => {
+                    let v = self.expr(e);
+                    let v = self.spill(v, &mut lets);
+                    supplied.push((None, v));
+                }
+                ast::CallArg::Labeled { label, value } => {
+                    let sid = self.ctx.intern(&label.name);
+                    let v = self.expr(value);
+                    let v = self.spill(v, &mut lets);
+                    supplied.push((Some(sid), v));
+                }
+                // Only a constructor call takes a spread; the check walk has
+                // refused this one.
+                ast::CallArg::Spread(_) => {
+                    elaborator_bug("spread argument on a non-constructor callee", at)
+                }
             }
         }
+
+        let slots: SmallVec<[Option<StrId>; 4]> = labels.iter().map(|&l| Some(l)).collect();
+        let (by_pos, errors) = slot_labeled(&slots, supplied);
+        if !errors.is_empty() {
+            elaborator_bug("call arguments the check walk mis-slotted", at)
+        }
+        let mut out: Vec<TypedExpr> = Vec::with_capacity(by_pos.len());
+        for slot in by_pos {
+            match slot {
+                Some(v) => out.push(v),
+                // A call takes no spread, so an unfilled parameter is an arity
+                // error the check walk has already reported.
+                None => elaborator_bug("call parameter with no argument", at),
+            }
+        }
+        wrap_lets(
+            lets,
+            TypedExpr::Call {
+                ty,
+                callee,
+                args: out,
+            },
+        )
     }
 
     fn callee(&mut self, e: &ast::Expression) -> Callee {
@@ -849,29 +938,58 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             E::Identifier(id) => {
                 let sid = self.ctx.intern(&id.name);
                 if let Some(bid) = self.lookup_name(sid) {
-                    return Callee::Value(TypedCallee::Dynamic(Box::new(self.var(bid))));
+                    // A binding in scope shadows any module `fn` of that name,
+                    // exactly as it does for the check walk's `env` lookup, and
+                    // carries no parameter names.
+                    let callee = TypedCallee::Dynamic(Box::new(self.var(bid)));
+                    return Callee::Value {
+                        callee,
+                        param_labels: None,
+                    };
                 }
                 let res = self.ctx.resolve_name(&id.name);
-                self.resolved_callee(res, id.span)
+                let labels = self.ctx.fn_param_labels(None, &id.name);
+                self.resolved_callee(res, labels, id.span)
             }
             E::PropertyAccessExpression(pa) => {
                 if let Some((mty, den, _)) = self.qualified(&pa.left, &pa.right, pa.span) {
-                    return self.resolved_callee(Some((mty, den)), pa.span);
+                    // `qualified` accepted the shape, so both halves are names.
+                    let labels = match (&*pa.left, &pa.right) {
+                        (E::Identifier(q), ast::PropertyKey::Field(m)) => {
+                            self.ctx.fn_param_labels(Some(&q.name), &m.name)
+                        }
+                        _ => None,
+                    };
+                    return self.resolved_callee(Some((mty, den)), labels, pa.span);
                 }
-                Callee::Value(TypedCallee::Dynamic(Box::new(self.expr(e))))
+                Callee::Value {
+                    callee: TypedCallee::Dynamic(Box::new(self.expr(e))),
+                    param_labels: None,
+                }
             }
-            _ => Callee::Value(TypedCallee::Dynamic(Box::new(self.expr(e)))),
+            _ => Callee::Value {
+                callee: TypedCallee::Dynamic(Box::new(self.expr(e))),
+                param_labels: None,
+            },
         }
     }
 
-    fn resolved_callee(&mut self, res: Option<(Ty, Denotation)>, at: Span) -> Callee {
+    fn resolved_callee(
+        &mut self,
+        res: Option<(Ty, Denotation)>,
+        param_labels: Option<Vec<StrId>>,
+        at: Span,
+    ) -> Callee {
         let Some((fn_ty, den)) = res else {
             elaborator_bug("unbound callee", at)
         };
         let sig = self.resolve(fn_ty);
         match den.as_callee(sig) {
             CallForm::Ctor => Callee::Ctor { scheme: fn_ty, den },
-            CallForm::Callee(c) => Callee::Value(c),
+            CallForm::Callee(c) => Callee::Value {
+                callee: c,
+                param_labels,
+            },
         }
     }
 
@@ -1411,11 +1529,14 @@ impl<C: ElabCtx> PatCtx for Elab<'_, C> {
 enum Callee {
     /// A saturated constructor call. It carries the scheme and denotation so a
     /// qualified `mod.Ctor(..)`, whose bare name is not in scope, still works.
-    Ctor {
-        scheme: Ty,
-        den: Denotation,
+    Ctor { scheme: Ty, den: Denotation },
+    /// A call through a callee value. `param_labels` is `Some` only for a
+    /// statically resolved module `fn`, which is the only callee whose
+    /// arguments may be labelled.
+    Value {
+        callee: TypedCallee,
+        param_labels: Option<Vec<StrId>>,
     },
-    Value(TypedCallee),
 }
 
 /// One node of a block's spine, before it is folded into the right-nested

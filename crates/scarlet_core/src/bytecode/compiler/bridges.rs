@@ -220,6 +220,32 @@ impl ElabCtx for Compiler {
                 .collect(),
         )
     }
+    /// Labels come off the callee's own scheme, found by the same lookup
+    /// [`ElabCtx::resolve_name`] / [`ElabCtx::resolve_qualified`] used for its
+    /// denotation, so the two cannot answer for different declarations.
+    fn fn_param_labels(&mut self, qual: Option<&str>, name: &str) -> Option<Vec<StrId>> {
+        let kind = match qual {
+            None => self.env.lookup(name)?.kind,
+            // Same lookup `resolve_qualified` uses for the callee's own
+            // denotation: qualifier -> module key -> exported scheme. Reading
+            // the labels off that scheme, not a second table, is what keeps
+            // this answer for the same declaration `resolve_qualified` named.
+            Some(q) => {
+                let key = self.imported_qualifiers.get(q)?.clone();
+                let iface = self.module_table.get(&key)?;
+                iface.values.get(name)?.scheme.kind
+            }
+        };
+        let ValueKind::ModuleFn { param_labels } = kind else {
+            return None;
+        };
+        // Empty is "not recorded", never "takes no parameters", so it refuses
+        // the label rather than slotting it against nothing.
+        if param_labels.len == 0 {
+            return None;
+        }
+        Some(self.engine.str_ids_of(param_labels).to_vec())
+    }
     fn closure(&mut self, span: Span) -> Option<(crate::core_ir::FuncIdx, Vec<StrId>)> {
         // A scan over the frame's own lambdas, a handful at most. A table
         // keyed by span would collide across modules.

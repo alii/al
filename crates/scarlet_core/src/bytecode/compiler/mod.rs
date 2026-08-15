@@ -3930,10 +3930,22 @@ impl Compiler {
                     expr.span,
                 ),
                 ValueKind::Builtin { .. } => {
-                    self.compile_positional_args(inst_ty, &expr.arguments, expr.span)
+                    self.compile_call_args(inst_ty, None, &expr.arguments, expr.span)
                 }
                 ValueKind::Local | ValueKind::ModuleFn { .. } => {
-                    let ret = self.compile_positional_args(inst_ty, &expr.arguments, expr.span);
+                    // A module `fn` reached by name is the only callee here
+                    // whose parameter names are known, so it is the only one
+                    // that admits labelled arguments. An empty label slice
+                    // means "not recorded", never "takes no parameters" (see
+                    // `ValueKind::ModuleFn`), so it falls back to the
+                    // positional-only refusal rather than to a zero-arity one.
+                    let labels = match scheme.kind {
+                        ValueKind::ModuleFn { param_labels } if param_labels.len > 0 => {
+                            Some(param_labels)
+                        }
+                        _ => None,
+                    };
+                    let ret = self.compile_call_args(inst_ty, labels, &expr.arguments, expr.span);
                     if !has_binding {
                         let module = qualifier.as_ref().map(|k| self.module_name(k));
                         self.no_runtime_binding(name, module.as_deref(), name_span);
@@ -3946,15 +3958,29 @@ impl Compiler {
         // Arbitrary callee expression: compile it first so we have its type
         // for argument hints.
         let callee_ty = self.compile_expr(&expr.callee);
-        self.compile_positional_args(callee_ty, &expr.arguments, expr.span)
+        self.compile_call_args(callee_ty, None, &expr.arguments, expr.span)
     }
 
-    /// Type-check and emit a positional argument list against a callee type
-    /// using `match_fun_type`. Labeled and spread arguments are rejected here
-    /// since only constructor calls support them.
-    fn compile_positional_args(
+    /// Type-check and emit an argument list against a callee type using
+    /// `match_fun_type`.
+    ///
+    /// `param_labels` is the callee's declared parameter names when it is a
+    /// module `fn` reached by name, and `None` for every other callee — a local
+    /// binding holding a function, a `@vm` builtin, an arbitrary expression —
+    /// none of which has parameter names at the call site. Only the first
+    /// admits labelled arguments; the rest still refuse them. Spread stays
+    /// constructor-only either way.
+    ///
+    /// Both walks visit the arguments in *source* order, so the permutation a
+    /// labelled call needs is applied to the parameter *types* here and to the
+    /// emitted argument vector in `Elab::value_call` — never to this traversal,
+    /// which is what `walk_tys` is recorded in. Both sides take it from
+    /// [`slot_labeled`] over this one slice, so the order the arguments are
+    /// checked in and the order they are passed in cannot disagree.
+    fn compile_call_args(
         &mut self,
         callee_ty: Ty,
+        param_labels: Option<ArenaSlice<pool::StrSlices>>,
         args: &[ast::CallArg],
         call_span: Span,
     ) -> Ty {
@@ -3988,15 +4014,29 @@ impl Compiler {
             }
         };
 
+        // Which parameter each source argument fills. A call with no label is
+        // the identity, so only a labelled one pays for the slotting.
+        let labelled = args
+            .iter()
+            .any(|a| matches!(a, ast::CallArg::Labeled { .. }));
+        let param_of_arg: Vec<Option<usize>> = match param_labels {
+            Some(sl) if labelled => self.slot_call_args(sl, args),
+            _ => (0..args.len()).map(Some).collect(),
+        };
+
         for (i, arg) in args.iter().enumerate() {
-            let hint = params.get(i).cloned();
+            let hint = param_of_arg[i].and_then(|p| params.get(p).cloned());
             let (arg_ty, arg_span) = match arg {
                 ast::CallArg::Positional(e) => (self.compile_expr_with_hint(e, hint), e.span()),
                 ast::CallArg::Labeled { label, value } => {
-                    self.error(
-                        "Labelled arguments are only allowed in constructor calls".to_string(),
-                        label.span,
-                    );
+                    if param_labels.is_none() {
+                        self.error(
+                            "Labelled arguments need a callee whose parameter names are known: \
+                             a constructor, or a function named directly"
+                                .to_string(),
+                            label.span,
+                        );
+                    }
                     (self.compile_expr_with_hint(value, hint), value.span())
                 }
                 ast::CallArg::Spread(e) => {
@@ -4014,6 +4054,76 @@ impl Compiler {
         }
 
         ret
+    }
+
+    /// Map each source argument to the parameter it fills, reporting a label
+    /// naming no parameter and a parameter supplied twice. `None` for an
+    /// argument that filled no slot: a positional past the last parameter,
+    /// whose arity `match_fun_type` has already reported, or a bad label
+    /// reported here.
+    fn slot_call_args(
+        &mut self,
+        param_labels: ArenaSlice<pool::StrSlices>,
+        args: &[ast::CallArg],
+    ) -> Vec<Option<usize>> {
+        // Interning up front releases the `&mut engine` borrow before the
+        // `str_ids_of` slice is taken.
+        let items: Vec<(Option<StrId>, (usize, Span))> = args
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| match a {
+                ast::CallArg::Positional(e) => Some((None, (i, e.span()))),
+                ast::CallArg::Labeled { label, .. } => {
+                    Some((Some(self.engine.intern(&label.name)), (i, label.span)))
+                }
+                // Spread is refused by the caller and fills no parameter.
+                ast::CallArg::Spread(_) => None,
+            })
+            .collect();
+        // One slot per declared parameter, both sized and named from this one
+        // slice, so there is no second width for a label table to drift from.
+        let names: Vec<Option<StrId>> = self
+            .engine
+            .str_ids_of(param_labels)
+            .iter()
+            .map(|&n| Some(n))
+            .collect();
+        let (by_pos, errors) = slot_labeled(&names, items);
+        for e in errors {
+            match e {
+                // An arity error `match_fun_type` has already reported.
+                SlotError::ExtraPositional(_) => {}
+                SlotError::UnknownLabel(label, (_, span)) => {
+                    let available = self.engine.strs_of(param_labels).join(", ");
+                    let label = self.engine.str(label).to_string();
+                    self.error(
+                        format!(
+                            "This function has no parameter '{}'. Available: {}",
+                            label, available
+                        ),
+                        span,
+                    );
+                }
+                SlotError::Duplicate((_, span), param) => {
+                    let dup = self
+                        .engine
+                        .str_ids_of(param_labels)
+                        .get(param)
+                        .map_or("_".to_string(), |&id| self.engine.str(id).to_string());
+                    self.error(
+                        format!("Parameter '{}' is specified more than once", dup),
+                        span,
+                    );
+                }
+            }
+        }
+        let mut out = vec![None; args.len()];
+        for (p, slot) in by_pos.into_iter().enumerate() {
+            if let Some((i, _)) = slot {
+                out[i] = Some(p);
+            }
+        }
+        out
     }
 
     fn compile_call_arg_value(&mut self, arg: &ast::CallArg) -> Ty {

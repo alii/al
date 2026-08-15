@@ -20,6 +20,25 @@ fn relative_qualified() {
 }
 
 #[test]
+fn labelled_args_on_a_qualified_call_take_declared_order() {
+    // A qualified callee resolves through `resolve_qualified`, so its parameter
+    // labels come off the imported module's scheme rather than the local env —
+    // a separate path from the bare-name one covered in `type_semantics`. Two
+    // same-typed parameters and an order-revealing body, so source order and
+    // declared order give different answers while both type-check.
+    let proj = Project::new("qual_labels");
+    proj.write("math.scrl", "pub fn diff(a Int, b Int) Int { a - b }\n");
+    proj.write(
+        "main.scrl",
+        "import ./math\nimport ./math as m\n\npub fn main() {\n\
+         \tprintln(math.diff(b: 2, a: 1))\n\
+         \tprintln(m.diff(b: 10, a: 4))\n\
+         }\n",
+    );
+    run_project_outputs(&proj, "run", "main.scrl", "-1\n-6\n");
+}
+
+#[test]
 fn relative_selective_and_alias() {
     let proj = Project::new("rel_sel");
     proj.write("util.scrl", UTIL_SRC);

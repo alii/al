@@ -489,13 +489,85 @@ reject_case! {
          }\n",
         "Spread arguments are only allowed in constructor record-update calls",
     ),
-    /// Labelled arguments are constructor-only.
-    labelled_arg_in_plain_call_rejected: (
+    /// A callee that is only a value has no parameter names to label, however
+    /// it was bound: `g` is a local binding, so the declaration `f`'s names are
+    /// not in reach at this call site. The refusal is the feature here, not a
+    /// gap — see T-126.
+    labelled_arg_on_value_callee_rejected: (
         "fn f(a Int) Int { a }\n\
          pub fn main() {\n\
-         \tprintln(f(a: 1))\n\
+         \tg = f\n\
+         \tprintln(g(a: 1))\n\
          }\n",
-        "Labelled arguments are only allowed in constructor calls",
+        "Labelled arguments need a callee whose parameter names are known",
+    ),
+    /// A label naming no parameter lists the ones there are.
+    unknown_label_on_fn_call_rejected: (
+        "fn diff(a Int, b Int) Int { a - b }\n\
+         pub fn main() {\n\
+         \tprintln(diff(a: 1, c: 2))\n\
+         }\n",
+        "This function has no parameter 'c'. Available: a, b",
+    ),
+    /// Two arguments claiming one parameter is reported, not silently dropped.
+    duplicate_label_on_fn_call_rejected: (
+        "fn diff(a Int, b Int) Int { a - b }\n\
+         pub fn main() {\n\
+         \tprintln(diff(a: 1, a: 2))\n\
+         }\n",
+        "Parameter 'a' is specified more than once",
+    ),
+}
+
+run_case! {
+    /// Labels reversed against the declaration, on two parameters of the SAME
+    /// type and returning an order-revealing result. Both orders type-check —
+    /// which is exactly why the type checker cannot witness this — so `-1` vs
+    /// `1` is the only thing that distinguishes arguments passed in declared
+    /// order from arguments passed in source order.
+    ///
+    /// This does not witness the *checking* order, only the order the call is
+    /// emitted in; `labelled_args_evaluate_in_source_order` covers the other
+    /// half.
+    labelled_args_reversed_on_same_typed_params: (
+        "fn diff(a Int, b Int) Int { a - b }\n\
+         pub fn main() {\n\
+         \tprintln(diff(b: 2, a: 1))\n\
+         }\n",
+        "-1\n",
+    ),
+
+    /// A full permutation of three same-typed parameters: `123` holds only if
+    /// each label reached its declared position.
+    labelled_args_full_permutation: (
+        "fn pick(a Int, b Int, c Int) Int { a * 100 + b * 10 + c }\n\
+         pub fn main() {\n\
+         \tprintln(pick(c: 3, a: 1, b: 2))\n\
+         }\n",
+        "123\n",
+    ),
+
+    /// Arguments are evaluated in SOURCE order and passed in DECLARED order:
+    /// `2` prints before `1`, and the call still computes `1 - 2`.
+    labelled_args_evaluate_in_source_order: (
+        "fn note(n Int) Int {\n\
+         \tprintln(n)\n\
+         \tn\n\
+         }\n\
+         fn diff(a Int, b Int) Int { a - b }\n\
+         pub fn main() {\n\
+         \tprintln(diff(b: note(2), a: note(1)))\n\
+         }\n",
+        "2\n1\n-1\n",
+    ),
+
+    /// Leading positionals still fill left-to-right with a label after them.
+    labelled_args_mixed_with_positional: (
+        "fn diff(a Int, b Int) Int { a - b }\n\
+         pub fn main() {\n\
+         \tprintln(diff(10, b: 4))\n\
+         }\n",
+        "6\n",
     ),
 }
 
