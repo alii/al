@@ -1147,10 +1147,38 @@ mod tests {
     /// `Ok(Nil)` here is ambiguous between a premise that evaporated and an
     /// error that was swallowed, and those want opposite fixes.
     ///
-    /// The probe narrows that window but does not close it: the socket can
-    /// still reopen between it and the close, so a red here is the flake at
-    /// roughly 2 runs in 10 and a real swallow at 10 in 10. The rate is the
-    /// only thing that separates them — the message is identical. T-617.
+    /// T-617: the probe alone narrows the window between the fill and the close
+    /// but does not close it — on aarch64-apple-darwin, host not quiet (the
+    /// rest of the fleet building concurrently), 80 runs of this test WITHOUT
+    /// the fix below hit the swallow assertion 5 times (6.25%); the message a
+    /// real swallow leaves is identical.
+    ///
+    /// The ticket weighed three fixes. Replacing the whole fill with
+    /// `shutdown(Write)` is deterministic but never exercises the "genuinely
+    /// full, under backpressure" state at all — not measured, rejected on
+    /// what it would stop proving rather than on a run. Shrinking
+    /// [`start_peer`]'s `SO_RCVBUF` below its current 4 KiB was reasoned
+    /// through rather than tried: `close_notify` itself is only a few bytes,
+    /// so any nonzero drain of an already-small buffer admits it, which reads
+    /// as the same race at a smaller scale rather than a fix. `#[ignore]` on
+    /// Darwin gives up the coverage on the host most contributors build on,
+    /// which is what T-239's parent bug existed to end.
+    ///
+    /// The fix kept is narrower than any of those: shut down OUR OWN write
+    /// half — not the peer's — in the gap right after the probe, so what the
+    /// peer's kernel does next cannot matter. The probe still establishes the
+    /// realistic premise (a session that genuinely filled the socket, proven
+    /// by observing `WouldBlock`); the shutdown only pins that state for the
+    /// few statements until `tls.close` runs. It changes nothing the test
+    /// proves: `tls_close`'s `Err` arm is reached through the same `?` in
+    /// `flush_out` whichever `io::Error` kind trips it, and the assertion on
+    /// its result already checked the `Transport` shape, never the specific
+    /// kind — a swallow of a self-inflicted `EPIPE` is exactly as much a
+    /// swallow as one of a `WouldBlock`. MEASURED, same host and load: 90 runs
+    /// with the fix (30 + 40 + 20) hit the swallow assertion 0 times; 2 hit
+    /// the unrelated, pre-existing fill-to-probe flake this ticket does not
+    /// cover (the `expect_err` a few lines up, which T-277 already reduced
+    /// but did not eliminate).
     #[test]
     fn a_close_notify_the_socket_refuses_is_reported_and_still_closes() {
         use super::super::halt_test_vm;
@@ -1211,6 +1239,11 @@ mod tests {
             "the flush must fail by filling the socket, not by breaking the \
              connection: any other error is a different test"
         );
+        // T-617: pins the refusal for the rest of this test — see the doc
+        // comment above for why a local shutdown rather than a tighter fill.
+        tls.tcp
+            .shutdown(std::net::Shutdown::Write)
+            .expect("shutdown");
 
         let mut reds = 0;
         vm.tls_close(&mut reds)
