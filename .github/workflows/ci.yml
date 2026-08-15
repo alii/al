@@ -27,13 +27,6 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      # The GC stress gate: SCARLET_GC_STRESS=1 makes every allocation safepoint
-      # collect, so a value held in a Rust local across an allocation — a
-      # rooting-rule violation — fails deterministically instead of
-      # corrupting memory intermittently.
-      - name: Test (GC stress)
-        run: SCARLET_GC_STRESS=1 cargo test --workspace
-
   grammar:
     runs-on: ubuntu-latest
     defaults:

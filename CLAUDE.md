@@ -1,8 +1,8 @@
 Build with `cargo build`. Run tests with `cargo test`. Production build with `cargo build --release`.
 
-Before committing, run what CI runs. `.github/workflows/ci.yml` is the authority on that and nothing else is: it is four jobs and eight failable steps, on every pull request and every push to master. Judge each by its exit code, and run it in this spelling:
+Before committing, run what CI runs. `.github/workflows/ci.yml` is the authority on that and nothing else is: it is four jobs and seven failable steps, on every pull request and every push to master. Judge each by its exit code, and run it in this spelling:
 
-- `test` — `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `SCARLET_GC_STRESS=1 cargo test --workspace`.
+- `test` — `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`.
 - `grammar`, with `editors/tree-sitter-scarlet` as the working directory — `bun install`; `bun run generate && git diff --exit-code src grammar.js`; `bun run corpus`.
 - `hawk` — `cargo hawk check -D warnings`.
 - `mordant` — `cargo dylint --all`, with `DYLINT_RUSTFLAGS=-D warnings` in the environment.
@@ -10,8 +10,6 @@ Before committing, run what CI runs. `.github/workflows/ci.yml` is the authority
 Three of those need a tool this repo does not install for you: `grammar` needs `bun`, `hawk` needs `cargo-hawk` (below), and `mordant` needs `cargo-dylint` and `dylint-link` (`cargo install cargo-dylint dylint-link --locked`). All three run on an Apple host — none is Linux-only — so a missing one is worth installing rather than skipping. A host that still cannot run a gate reports it unrun, with the reason; a green you inferred from "my change does not touch that" is not a measurement.
 
 Only these spellings report what CI reports. `cargo clippy --all-targets` without `-D warnings` exits 0 while printing the warnings, so it reports success on a tree CI will reject, and bare `cargo fmt` rewrites the files instead of reporting on them, so it cannot fail on formatting at all. `--workspace` is the one part that is not load-bearing today: the root manifest is virtual and sets no `default-members`, so every crate is already in scope, and `cargo test` and `cargo test --workspace` build the same 43 test executables. Keep writing it, so the scope cannot narrow in silence if a `default-members` ever appears.
-
-The fourth `test` step is inert as it stands: nothing in the tree reads `SCARLET_GC_STRESS` — the only two occurrences of that name are in ci.yml itself — so it repeats the step above it byte for byte and cannot fail unless that one already did. Do not read its green as evidence about rooting rules (T-647).
 
 `bun run corpus` parses every `.scrl` in the repo with the committed grammar. On a host with no tree-sitter configuration it prints `Warning: You have not configured any parser directories!` and then resolves this directory's grammar and runs anyway — the warning is noise, not a skipped gate, and a malformed `.scrl` still takes the step to rc=1.
 
