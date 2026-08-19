@@ -579,12 +579,6 @@ mod opc {
     pub const MONOTONIC: u8 = Op::Monotonic as u8;
     pub const WALL_CLOCK: u8 = Op::WallClock as u8;
     pub const RANDOM_BYTES: u8 = Op::RandomBytes as u8;
-    pub const SHA256: u8 = Op::Sha256 as u8;
-    pub const SHA512: u8 = Op::Sha512 as u8;
-    pub const HMAC_SHA256: u8 = Op::HmacSha256 as u8;
-    pub const CONST_EQ: u8 = Op::ConstEq as u8;
-    pub const P256_VERIFY: u8 = Op::P256Verify as u8;
-    pub const ED25519_VERIFY: u8 = Op::Ed25519Verify as u8;
     pub const MUL: u8 = Op::Mul as u8;
     pub const MUL_FLOAT: u8 = Op::MulFloat as u8;
     pub const NEG: u8 = Op::Neg as u8;

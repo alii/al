@@ -1388,7 +1388,7 @@ impl VM {
 
     /// `Op::Sha256` — the digest of the popped binary. Total: 32 bytes out
     /// for any input, via aws-lc (the crypto rustls already links).
-    pub(super) fn sha256(&mut self) -> VmResult<()> {
+    fn sha256(&mut self) -> VmResult<()> {
         let v = self.pop_binary("crypto.sha256")?;
         let digest =
             aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &super::bin_ref(&v).full_bytes());
@@ -1398,7 +1398,7 @@ impl VM {
     }
 
     /// `Op::Sha512` — as `sha256`, 64 bytes out.
-    pub(super) fn sha512(&mut self) -> VmResult<()> {
+    fn sha512(&mut self) -> VmResult<()> {
         let v = self.pop_binary("crypto.sha512")?;
         let digest =
             aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA512, &super::bin_ref(&v).full_bytes());
@@ -1409,12 +1409,14 @@ impl VM {
 
     /// `Op::HmacSha256` — the tag over `msg` under `key`. Argument order on
     /// the stack is push order, so `msg` pops first.
-    pub(super) fn hmac_sha256(&mut self) -> VmResult<()> {
+    fn hmac_sha256(&mut self) -> VmResult<()> {
         let msg_v = self.pop_binary("crypto.hmac_sha256")?;
         let key_v = self.pop_binary("crypto.hmac_sha256")?;
         let tag = {
-            let key =
-                aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &super::bin_ref(&key_v).full_bytes());
+            let key = aws_lc_rs::hmac::Key::new(
+                aws_lc_rs::hmac::HMAC_SHA256,
+                &super::bin_ref(&key_v).full_bytes(),
+            );
             aws_lc_rs::hmac::sign(&key, &super::bin_ref(&msg_v).full_bytes())
         };
         let out = Value::binary_in(&mut self.heap, tag.as_ref().to_vec());
@@ -1425,7 +1427,7 @@ impl VM {
     /// `Op::ConstEq` — equality whose running time is a function of the
     /// lengths alone. Unequal lengths answer `false` immediately; a length
     /// is not the secret, its bytes are.
-    pub(super) fn const_eq(&mut self) -> VmResult<()> {
+    fn const_eq(&mut self) -> VmResult<()> {
         let b_v = self.pop_binary("crypto.const_eq")?;
         let a_v = self.pop_binary("crypto.const_eq")?;
         let equal = aws_lc_rs::constant_time::verify_slices_are_equal(
@@ -1442,7 +1444,7 @@ impl VM {
     /// (bad key length, non-DER sig) is a `False`, so the op is total: a
     /// caller distinguishes "invalid" from "malformed" only if it needs to,
     /// by validating shape first.
-    pub(super) fn sig_verify(&mut self, p256: bool) -> VmResult<()> {
+    fn sig_verify(&mut self, p256: bool) -> VmResult<()> {
         let sig_v = self.pop_binary("crypto.verify")?;
         let msg_v = self.pop_binary("crypto.verify")?;
         let key_v = self.pop_binary("crypto.verify")?;
@@ -1452,8 +1454,15 @@ impl VM {
             } else {
                 &aws_lc_rs::signature::ED25519
             };
-            let key = aws_lc_rs::signature::UnparsedPublicKey::new(alg, super::bin_ref(&key_v).full_bytes().into_owned());
-            key.verify(&super::bin_ref(&msg_v).full_bytes(), &super::bin_ref(&sig_v).full_bytes()).is_ok()
+            let key = aws_lc_rs::signature::UnparsedPublicKey::new(
+                alg,
+                super::bin_ref(&key_v).full_bytes().into_owned(),
+            );
+            key.verify(
+                &super::bin_ref(&msg_v).full_bytes(),
+                &super::bin_ref(&sig_v).full_bytes(),
+            )
+            .is_ok()
         };
         self.stack.push(Value::bool(ok));
         Ok(())
