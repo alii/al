@@ -497,6 +497,24 @@ pub enum Op {
     /// (scarlet/crypto.random_bytes)
     RandomBytes,
 
+    /// Pop a `Binary`, push its 32-byte SHA-256 digest. Total: every input
+    /// has a digest. Backed by aws-lc, the same crypto rustls already links.
+    /// (scarlet/crypto.sha256)
+    Sha256,
+
+    /// Pop a `Binary`, push its 64-byte SHA-512 digest. Same contract and
+    /// backing as `Sha256`. (scarlet/crypto.sha512)
+    Sha512,
+
+    /// Pop message then key (pushed key-first), push the 32-byte
+    /// HMAC-SHA-256 tag. Total. (scarlet/crypto.hmac_sha256)
+    HmacSha256,
+
+    /// Pop two binaries, push whether they are equal, in time that depends
+    /// only on their lengths — the comparison for secrets, where a byte-wise
+    /// early exit is a timing oracle. (scarlet/crypto.const_eq)
+    ConstEq,
+
     /// Push an `Array(String)` of the entrypoint path followed by every
     /// argument after it on the command line. (scarlet/os.argv)
     Argv,
@@ -805,6 +823,10 @@ impl Op {
             | Op::Monotonic
             | Op::WallClock
             | Op::RandomBytes
+            | Op::Sha256
+            | Op::Sha512
+            | Op::HmacSha256
+            | Op::ConstEq
             | Op::Argv
             | Op::EnvMap
             | Op::MapGet
@@ -1031,6 +1053,10 @@ impl Op {
             | Op::Monotonic
             | Op::WallClock
             | Op::RandomBytes
+            | Op::Sha256
+            | Op::Sha512
+            | Op::HmacSha256
+            | Op::ConstEq
             | Op::Argv
             | Op::EnvMap
             | Op::MapGet

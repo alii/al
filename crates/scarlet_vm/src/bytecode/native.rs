@@ -222,6 +222,10 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::Monotonic
         | Op::WallClock
         | Op::RandomBytes
+        | Op::Sha256
+        | Op::Sha512
+        | Op::HmacSha256
+        | Op::ConstEq
         | Op::Argv
         | Op::EnvMap
         | Op::MapGet

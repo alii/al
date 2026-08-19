@@ -46,6 +46,8 @@ simd-json = { version = "0.17.3", default-features = false, features = ["runtime
 # drops into this crate's existing non-blocking poller without a thread of its
 # own and without a second event loop. See `vm/tls.rs` for the full argument.
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
+# SHA-256 for scarlet/crypto: the same aws-lc rustls already links, used directly.
+aws-lc-rs = "1"
 rustls-pki-types = "1"
 # Trust roots: the machine's own store first, this bundle as the fallback.
 rustls-native-certs = "0.8"

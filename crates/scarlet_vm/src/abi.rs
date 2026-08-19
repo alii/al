@@ -920,7 +920,13 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
         | Op::JsonKind
         | Op::JsonLen
         | Op::JsonEncode
-        | Op::WireEncode => &[],
+        | Op::WireEncode
+        // The crypto digests, the tag, and the constant-time compare are all
+        // total single-value ops: nothing to wrap, nothing to refuse.
+        | Op::Sha256
+        | Op::Sha512
+        | Op::HmacSha256
+        | Op::ConstEq => &[],
     }
 }
 
