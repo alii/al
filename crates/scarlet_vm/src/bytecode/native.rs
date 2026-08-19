@@ -226,6 +226,8 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::Sha512
         | Op::HmacSha256
         | Op::ConstEq
+        | Op::P256Verify
+        | Op::Ed25519Verify
         | Op::Argv
         | Op::EnvMap
         | Op::MapGet

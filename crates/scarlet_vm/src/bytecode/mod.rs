@@ -515,6 +515,17 @@ pub enum Op {
     /// early exit is a timing oracle. (scarlet/crypto.const_eq)
     ConstEq,
 
+    /// Pop sig, message, then a SEC1 uncompressed P-256 key (0x04||x||y,
+    /// pushed key-first); push whether the ECDSA-P256-SHA256 signature
+    /// (ASN.1 DER) is valid. Total; a malformed key or sig is `False`.
+    /// (scarlet/crypto.p256_verify)
+    P256Verify,
+
+    /// Pop sig, message, then a 32-byte Ed25519 key (pushed key-first);
+    /// push whether the signature is valid. Total.
+    /// (scarlet/crypto.ed25519_verify)
+    Ed25519Verify,
+
     /// Push an `Array(String)` of the entrypoint path followed by every
     /// argument after it on the command line. (scarlet/os.argv)
     Argv,
@@ -827,6 +838,8 @@ impl Op {
             | Op::Sha512
             | Op::HmacSha256
             | Op::ConstEq
+            | Op::P256Verify
+            | Op::Ed25519Verify
             | Op::Argv
             | Op::EnvMap
             | Op::MapGet
@@ -1057,6 +1070,8 @@ impl Op {
             | Op::Sha512
             | Op::HmacSha256
             | Op::ConstEq
+            | Op::P256Verify
+            | Op::Ed25519Verify
             | Op::Argv
             | Op::EnvMap
             | Op::MapGet

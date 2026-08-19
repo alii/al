@@ -926,7 +926,9 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
         | Op::Sha256
         | Op::Sha512
         | Op::HmacSha256
-        | Op::ConstEq => &[],
+        | Op::ConstEq
+        | Op::P256Verify
+        | Op::Ed25519Verify => &[],
     }
 }
 

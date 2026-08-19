@@ -755,6 +755,8 @@ impl VM {
                 Op::Sha512 => self.sha512()?,
                 Op::HmacSha256 => self.hmac_sha256()?,
                 Op::ConstEq => self.const_eq()?,
+                Op::P256Verify => self.sig_verify(true)?,
+                Op::Ed25519Verify => self.sig_verify(false)?,
                 Op::Argv => self.argv()?,
                 Op::EnvMap => self.env_map()?,
                 Op::MapGet => self.map_get()?,
@@ -1432,6 +1434,28 @@ impl VM {
         )
         .is_ok();
         self.stack.push(Value::bool(equal));
+        Ok(())
+    }
+
+    /// `Op::P256Verify` / `Op::Ed25519Verify` — pop sig, message, key and
+    /// push whether the signature is valid under aws-lc. Every parse failure
+    /// (bad key length, non-DER sig) is a `False`, so the op is total: a
+    /// caller distinguishes "invalid" from "malformed" only if it needs to,
+    /// by validating shape first.
+    pub(super) fn sig_verify(&mut self, p256: bool) -> VmResult<()> {
+        let sig_v = self.pop_binary("crypto.verify")?;
+        let msg_v = self.pop_binary("crypto.verify")?;
+        let key_v = self.pop_binary("crypto.verify")?;
+        let ok = {
+            let alg: &dyn aws_lc_rs::signature::VerificationAlgorithm = if p256 {
+                &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1
+            } else {
+                &aws_lc_rs::signature::ED25519
+            };
+            let key = aws_lc_rs::signature::UnparsedPublicKey::new(alg, super::bin_ref(&key_v).full_bytes().into_owned());
+            key.verify(&super::bin_ref(&msg_v).full_bytes(), &super::bin_ref(&sig_v).full_bytes()).is_ok()
+        };
+        self.stack.push(Value::bool(ok));
         Ok(())
     }
 

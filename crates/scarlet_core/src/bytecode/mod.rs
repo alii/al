@@ -127,6 +127,8 @@ fn builtin_op(name: &str) -> Option<Op> {
         "crypto__sha512" => Op::Sha512,
         "crypto__hmac_sha256" => Op::HmacSha256,
         "crypto__const_eq" => Op::ConstEq,
+        "crypto__p256_verify" => Op::P256Verify,
+        "crypto__ed25519_verify" => Op::Ed25519Verify,
         "os__argv" => Op::Argv,
         "os__env" => Op::EnvMap,
         "map__get" => Op::MapGet,

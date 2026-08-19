@@ -238,3 +238,17 @@ pub fn hmac_sha256(key Binary, msg Binary) Binary
 // answer `False` immediately — a length is not the secret, its bytes are.
 @vm(crypto__const_eq)
 pub fn const_eq(a Binary, b Binary) Bool
+
+
+// Whether `sig` is a valid ECDSA-P256-SHA256 signature of `message` under
+// `public_key`. The key is SEC1 uncompressed — `0x04` then the 32-byte x and
+// y — and `sig` is ASN.1 DER, which is the form WebAuthn's ES256 and most TLS
+// stacks produce. Total: a key or signature of the wrong shape is `False`,
+// never a crash, so a caller may pass bytes straight off the wire.
+@vm(crypto__p256_verify)
+pub fn p256_verify(public_key Binary, message Binary, sig Binary) Bool
+
+// Whether `sig` is a valid Ed25519 signature of `message` under the 32-byte
+// `public_key`. Total, on the same terms as `p256_verify`.
+@vm(crypto__ed25519_verify)
+pub fn ed25519_verify(public_key Binary, message Binary, sig Binary) Bool
