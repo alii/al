@@ -23,7 +23,6 @@ import scarlet/array
 import scarlet/base64
 import scarlet/binary
 import scarlet/crypto
-import scarlet/http.{Request}
 import scarlet/http/form
 import scarlet/json.{Json, List, Object, Str}
 import scarlet/option
@@ -156,12 +155,12 @@ pub type AuthorizeReq {
 }
 
 /**
- * Read and validate the query of `GET /authorize`. The redirect uri must
+ * Read and validate the query bytes of a `GET /authorize` request. The redirect uri must
  * be one the client registered: a code delivered anywhere else is a
  * stolen code.
  */
-pub fn parse_authorize(store Store, req Request) Result(AuthorizeReq, String) {
-	q = form.decode(http.query(req))
+pub fn parse_authorize(store Store, query_bytes Binary) Result(AuthorizeReq, String) {
+	q = form.decode(query_bytes)
 	client_id = form.get(q, 'client_id') or ''
 	redirect_uri = form.get(q, 'redirect_uri') or ''
 	pkce_challenge = form.get(q, 'code_challenge') or ''
