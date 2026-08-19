@@ -1,10 +1,10 @@
 fn s0(%0:t0) -> :t1
   match %0 :t1
-    | 9217.0(%1, %2) ->
+    | 10241.0(%1, %2) ->
       drop %0 [Enum:2]
       drop %2
       ret %1
-    | 9217.1() ->
+    | 10241.1() ->
       drop %0 [Enum:0]
       ret c0
 
@@ -19,9 +19,9 @@ fn s1(%0:t0) -> :t1
   ret AddInt(%3, %4)
 
 fn s2() -> :t1
-  let %0:t4 = ctor 9217.1()
-  let %1:t4 = ctor 9217.1()
-  let %2:t5 = ctor 9218.0(%0, %1)
+  let %0:t4 = ctor 10241.1()
+  let %1:t4 = ctor 10241.1()
+  let %2:t5 = ctor 10242.0(%0, %1)
   drop %0 [Enum:0]
   drop %1 [Enum:0]
   ret call fn#1(%2)
