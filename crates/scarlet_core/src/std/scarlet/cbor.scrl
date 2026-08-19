@@ -1,0 +1,222 @@
+/**
+ * CBOR (RFC 8949) decoding, the subset the byte-oriented protocols the
+ * stdlib speaks actually carry: unsigned and negative integers, byte and
+ * text strings, arrays, and maps. This is enough for a COSE key and a
+ * WebAuthn attestation object; it is not a general CBOR library.
+ *
+ * What is deliberately absent: floats, tags, indefinite-length items, and
+ * the simple values beyond none of which appear in COSE or WebAuthn. An
+ * input using them is a `Malformed`, not a silent partial parse — the same
+ * strictness `base64.decode` keeps, and for the same reason: a decoder that
+ * guesses is a decoder an attacker steers.
+ *
+ * Map keys are kept as `Value`s, not coerced to strings, because COSE keys
+ * are negative and positive integers (`kty` is 1, `alg` is 3, the EC
+ * coordinates are -2 and -3). `map_get` looks one up by an integer label.
+ */
+
+import scarlet/array
+import scarlet/binary
+import scarlet/int
+import scarlet/result
+import scarlet/option
+
+pub type Value {
+	Uint(value Int)
+	/** A CBOR negative integer, as its actual (negative) value. */
+	Nint(value Int)
+	Bytes(value Binary)
+	Text(value String)
+	List(items Array(Value))
+	Map(entries Array((Value, Value)))
+}
+
+pub type Error {
+	/** The input ended inside an item. */
+	Truncated
+	/** A major type or additional-info this subset does not decode. */
+	Unsupported(at Int)
+	/** A text string that was not valid UTF-8. */
+	NotUtf8(at Int)
+}
+
+/** Decode exactly one CBOR item from the front of `b`, and reject trailing
+ * bytes. Use `decode_prefix` when more may follow. */
+pub fn decode(b Binary) Result(Value, Error) {
+	v <- result.then(decode_prefix(b, 0))
+	(value, at) = v
+	if at == binary.byte_size(b) {
+		Ok(value)
+	} else {
+		Err(Unsupported(at))
+	}
+}
+
+/** Decode one item starting at `at`; return it and the offset just past it. */
+pub fn decode_prefix(b Binary, at Int) Result((Value, Int), Error) {
+	if at >= binary.byte_size(b) {
+		Err(Truncated)
+	} else {
+		ib = binary.byte_at(b, at)
+		major = int.bitwise_shift_right(ib, 5)
+		info = int.bitwise_and(ib, 31)
+		head <- result.then(argument(b, at + 1, info))
+		(arg, body) = head
+		read_item(b, major, arg, body, at)
+	}
+}
+
+// The integer argument an item carries: `info` itself for 0-23, or the next
+// 1/2/4/8 bytes for 24-27. Returns the value and the offset past it.
+fn argument(b Binary, at Int, info Int) Result((Int, Int), Error) {
+	if info < 24 {
+		Ok((info, at))
+	} else if info == 24 {
+		be(b, at, 1)
+	} else if info == 25 {
+		be(b, at, 2)
+	} else if info == 26 {
+		be(b, at, 4)
+	} else if info == 27 {
+		be(b, at, 8)
+	} else {
+		// 28-30 are reserved; 31 is indefinite length, unsupported here.
+		Err(Unsupported(at))
+	}
+}
+
+fn be(b Binary, at Int, n Int) Result((Int, Int), Error) {
+	if at + n > binary.byte_size(b) {
+		Err(Truncated)
+	} else {
+		Ok((be_from(b, at, n, 0), at + n))
+	}
+}
+
+fn be_from(b Binary, at Int, left Int, acc Int) Int {
+	if left <= 0 {
+		acc
+	} else {
+		be_from(b, at + 1, left - 1, acc * 256 + binary.byte_at(b, at))
+	}
+}
+
+fn read_item(b Binary, major Int, arg Int, body Int, start Int) Result((Value, Int), Error) {
+	if major == 0 {
+		Ok((Uint(arg), body))
+	} else if major == 1 {
+		Ok((Nint(0 - 1 - arg), body))
+	} else if major == 2 {
+		bytes(b, body, arg, fn(slice) Bytes(slice))
+	} else if major == 3 {
+		if body + arg > binary.byte_size(b) {
+			Err(Truncated)
+		} else {
+			slice = binary.slice_bytes(b, body, arg) or <<>>
+			match binary.to_string(slice) {
+				Ok(s) -> Ok((Text(s), body + arg))
+				Err(Nil) -> Err(NotUtf8(start))
+			}
+		}
+	} else if major == 4 {
+		read_list(b, body, arg, [])
+	} else if major == 5 {
+		read_map(b, body, arg, [])
+	} else {
+		// 6 (tags) and 7 (floats/simple) are not part of this subset.
+		Err(Unsupported(start))
+	}
+}
+
+fn bytes(b Binary, at Int, n Int, wrap fn(Binary) Value) Result((Value, Int), Error) {
+	if at + n > binary.byte_size(b) {
+		Err(Truncated)
+	} else {
+		Ok((wrap(binary.slice_bytes(b, at, n) or <<>>), at + n))
+	}
+}
+
+fn read_list(b Binary, at Int, left Int, acc Array(Value)) Result((Value, Int), Error) {
+	if left <= 0 {
+		Ok((List(acc), at))
+	} else {
+		item <- result.then(decode_prefix(b, at))
+		(value, next) = item
+		read_list(b, next, left - 1, [..acc, value])
+	}
+}
+
+fn read_map(b Binary, at Int, left Int, acc Array((Value, Value))) Result((Value, Int), Error) {
+	if left <= 0 {
+		Ok((Map(acc), at))
+	} else {
+		key <- result.then(decode_prefix(b, at))
+		(k, after_key) = key
+		val <- result.then(decode_prefix(b, after_key))
+		(v, after_val) = val
+		read_map(b, after_val, left - 1, [..acc, (k, v)])
+	}
+}
+
+/** The value for integer label `label` in a `Map`, matching both `Uint` and
+ * `Nint` keys so a COSE lookup for -2 finds it. */
+pub fn map_get(v Value, label Int) Option(Value) {
+	match v {
+		Map(entries) -> option.map(
+			array.find(entries, fn(e) {
+				(k, _) = e
+				key_int(k) == Some(label)
+			}),
+			fn(e) {
+				(_, val) = e
+				val
+			},
+		)
+		_ -> None
+	}
+}
+
+fn key_int(v Value) Option(Int) {
+	match v {
+		Uint(n) -> Some(n)
+		Nint(n) -> Some(n)
+		_ -> None
+	}
+}
+
+/** The value for text label `label` in a `Map` — for the text-keyed maps
+ * (the WebAuthn attestation object), as opposed to COSE's integer keys. */
+pub fn text_map_get(v Value, label String) Option(Value) {
+	match v {
+		Map(entries) -> option.map(
+			array.find(entries, fn(e) {
+				(k, _) = e
+				match k {
+					Text(t) -> t == label
+					_ -> False
+				}
+			}),
+			fn(e) {
+				(_, val) = e
+				val
+			},
+		)
+		_ -> None
+	}
+}
+
+/** The bytes of a `Bytes`, else `None`. */
+pub fn as_bytes(v Value) Option(Binary) {
+	match v {
+		Bytes(b) -> Some(b)
+		_ -> None
+	}
+}
+
+/** The text of a `Text`, else `None`. */
+pub fn as_text(v Value) Option(String) {
+	match v {
+		Text(s) -> Some(s)
+		_ -> None
+	}
+}

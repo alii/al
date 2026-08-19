@@ -1,0 +1,272 @@
+/**
+ * WebAuthn (W3C Level 3) server-side verification: the two checks a relying
+ * party runs, and nothing it does not. `verify_registration` reads a
+ * `navigator.credentials.create` response and returns the credential to
+ * store; `verify_authentication` reads a `navigator.credentials.get`
+ * response and confirms it against a stored credential.
+ *
+ * The heavy lifting is `scarlet/cbor` (the attestation object and COSE key)
+ * and `scarlet/crypto` (the signature). What is left here is the protocol:
+ * the clientDataJSON checks, the authenticator-data layout, and the one
+ * message construction — `authenticatorData || sha256(clientDataJSON)` —
+ * that the signature is over.
+ *
+ * Scope, deliberately: only the `none` and `packed`-self attestation paths
+ * matter to a relying party that trusts the platform to hold the key, so
+ * the attestation *statement* is not verified — the credential public key
+ * is taken from the authenticator data and every later assertion is checked
+ * against it, which is the property that actually secures the account.
+ * Only ES256 (-7) and EdDSA (-8) algorithms are accepted. `signCount` is
+ * returned, not enforced: cloning detection is the caller's policy.
+ */
+
+import scarlet/base64
+import scarlet/binary
+import scarlet/cbor
+import scarlet/crypto
+import scarlet/int
+import scarlet/json
+import scarlet/option
+import scarlet/result
+
+/** A stored credential: what registration yields and authentication needs. */
+pub type Credential {
+	Credential(id Binary, public_key Binary, algorithm Algorithm, sign_count Int)
+}
+
+pub type Algorithm {
+	/** ECDSA P-256 with SHA-256 (COSE -7). `public_key` is SEC1 uncompressed. */
+	Es256
+	/** Ed25519 (COSE -8). `public_key` is the 32-byte point. */
+	EdDsa
+}
+
+pub type Error {
+	BadClientData
+	WrongType
+	ChallengeMismatch
+	OriginMismatch
+	UserNotPresent
+	RpIdMismatch
+	BadAttestation
+	UnsupportedAlgorithm
+	BadCredential
+	BadSignature
+}
+
+// ---------- clientDataJSON ----------
+
+// The three fields a relying party checks, read from the client data. Origin
+// and challenge are compared by the caller-facing functions below.
+type ClientData {
+	ClientData(kind String, challenge String, origin String)
+}
+
+fn parse_client_data(client_data_json Binary) Result(ClientData, Error) {
+	doc <- result.then(result.map_err(json.parse_binary(client_data_json), fn(_) BadClientData))
+	kind <- result.then(field(doc, 'type'))
+	challenge <- result.then(field(doc, 'challenge'))
+	origin <- result.then(field(doc, 'origin'))
+	Ok(ClientData(kind: kind, challenge: challenge, origin: origin))
+}
+
+fn field(doc json.Doc, name String) Result(String, Error) {
+	match option.then(json.field(doc, name), json.string) {
+		Some(s) -> Ok(s)
+		None -> Err(BadClientData)
+	}
+}
+
+// The challenge in clientDataJSON is base64url without padding; compare it to
+// the raw bytes the server issued by decoding it, in constant time.
+fn challenge_ok(client_challenge String, expected Binary) Bool {
+	match base64.url_decode(binary.from_string(client_challenge)) {
+		Ok(got) -> crypto.const_eq(got, expected)
+		Err(Nil) -> False
+	}
+}
+
+// ---------- authenticatorData ----------
+
+/** The fixed head of authenticator data (RFC-fixed offsets), plus, when the
+ * AT flag is set, the attested credential. */
+type AuthData {
+	AuthData(rp_id_hash Binary, user_present Bool, sign_count Int, attested Option((Binary, cbor.Value)))
+}
+
+fn parse_auth_data(auth Binary) Result(AuthData, Error) {
+	if binary.byte_size(auth) < 37 {
+		Err(BadCredential)
+	} else {
+		rp_id_hash = binary.slice_bytes(auth, 0, 32) or <<>>
+		flags = binary.byte_at(auth, 32)
+		user_present = int.bitwise_and(flags, 1) == 1
+		attested_flag = int.bitwise_and(flags, 64) == 64
+		sign_count = { binary.byte_at(auth, 33) * 16777216 } + { binary.byte_at(auth, 34) * 65536 } +
+			{ binary.byte_at(auth, 35) * 256 } + binary.byte_at(auth, 36)
+		if !attested_flag {
+			Ok(AuthData(rp_id_hash: rp_id_hash, user_present: user_present, sign_count: sign_count, attested: None))
+		} else if binary.byte_size(auth) < 55 {
+			Err(BadCredential)
+		} else {
+			// aaguid[16] at 37, then credentialIdLength[2], then the id, then
+			// the COSE key as the remaining bytes.
+			id_len = { binary.byte_at(auth, 53) * 256 } + binary.byte_at(auth, 54)
+			if binary.byte_size(auth) < 55 + id_len {
+				Err(BadCredential)
+			} else {
+				cred_id = binary.slice_bytes(auth, 55, id_len) or <<>>
+				key_bytes = binary.slice_bytes(auth, 55 + id_len, binary.byte_size(auth) - { 55 + id_len }) or <<>>
+				match cbor.decode(key_bytes) {
+					Ok(key) -> Ok(AuthData(
+						rp_id_hash: rp_id_hash,
+						user_present: user_present,
+						sign_count: sign_count,
+						attested: Some((cred_id, key)),
+					))
+					Err(_) -> Err(BadCredential)
+				}
+			}
+		}
+	}
+}
+
+// A COSE key -> (algorithm, verify-ready public key). ES256's key becomes
+// SEC1 uncompressed (0x04 || x || y); EdDSA's is the 32-byte point as given.
+fn cose_key(key cbor.Value) Result((Algorithm, Binary), Error) {
+	alg <- result.then(match option.then(cbor.map_get(key, 3), cbor_int) {
+		Some(a) -> Ok(a)
+		None -> Err(UnsupportedAlgorithm)
+	})
+	if alg == 0 - 7 {
+		x <- result.then(cose_bytes(key, 0 - 2))
+		y <- result.then(cose_bytes(key, 0 - 3))
+		if binary.byte_size(x) == 32 && binary.byte_size(y) == 32 {
+			Ok((Es256, binary.append(binary.append(<<4:8>>, x), y)))
+		} else {
+			Err(BadCredential)
+		}
+	} else if alg == 0 - 8 {
+		x <- result.then(cose_bytes(key, 0 - 2))
+		if binary.byte_size(x) == 32 {
+			Ok((EdDsa, x))
+		} else {
+			Err(BadCredential)
+		}
+	} else {
+		Err(UnsupportedAlgorithm)
+	}
+}
+
+fn cose_bytes(key cbor.Value, label Int) Result(Binary, Error) {
+	match option.then(cbor.map_get(key, label), cbor.as_bytes) {
+		Some(b) -> Ok(b)
+		None -> Err(BadCredential)
+	}
+}
+
+fn cbor_int(v cbor.Value) Option(Int) {
+	match v {
+		cbor.Uint(n) -> Some(n)
+		cbor.Nint(n) -> Some(n)
+		_ -> None
+	}
+}
+
+// ---------- registration ----------
+
+/**
+ * Verify a `navigator.credentials.create` response and return the credential
+ * to store. `attestation_object` and `client_data_json` are the raw bytes
+ * from the browser; `challenge` is what the server issued; `rp_id` and
+ * `origin` are the relying party's own values.
+ */
+pub fn verify_registration(
+	attestation_object Binary,
+	client_data_json Binary,
+	challenge Binary,
+	rp_id String,
+	origin String,
+) Result(Credential, Error) {
+	cd <- result.then(parse_client_data(client_data_json))
+	ClientData(kind, chal, org) = cd
+	if kind != 'webauthn.create' {
+		Err(WrongType)
+	} else if !challenge_ok(chal, challenge) {
+		Err(ChallengeMismatch)
+	} else if org != origin {
+		Err(OriginMismatch)
+	} else {
+		att <- result.then(result.map_err(cbor.decode(attestation_object), fn(_) BadAttestation))
+		auth_bytes <- result.then(match option.then(cbor.text_map_get(att, 'authData'), cbor.as_bytes) {
+			Some(b) -> Ok(b)
+			None -> Err(BadAttestation)
+		})
+		ad <- result.then(parse_auth_data(auth_bytes))
+		AuthData(rp_id_hash, user_present, sign_count, attested) = ad
+		if !crypto.const_eq(rp_id_hash, crypto.sha256(binary.from_string(rp_id))) {
+			Err(RpIdMismatch)
+		} else if !user_present {
+			Err(UserNotPresent)
+		} else {
+			match attested {
+				None -> Err(BadCredential)
+				Some((cred_id, key)) -> {
+					parsed <- result.then(cose_key(key))
+					(alg, pk) = parsed
+					Ok(Credential(id: cred_id, public_key: pk, algorithm: alg, sign_count: sign_count))
+				}
+			}
+		}
+	}
+}
+
+// ---------- authentication ----------
+
+/**
+ * Verify a `navigator.credentials.get` response against a stored credential.
+ * `authenticator_data`, `client_data_json`, and `signature` are the raw
+ * bytes from the browser; `challenge` is what the server issued; `cred` is
+ * what `verify_registration` stored. On success returns the new `signCount`,
+ * for the caller to compare against the stored one if it enforces cloning
+ * detection.
+ */
+pub fn verify_authentication(
+	authenticator_data Binary,
+	client_data_json Binary,
+	signature Binary,
+	challenge Binary,
+	rp_id String,
+	origin String,
+	cred Credential,
+) Result(Int, Error) {
+	cd <- result.then(parse_client_data(client_data_json))
+	ClientData(kind, chal, org) = cd
+	Credential(_, public_key, algorithm, _) = cred
+	if kind != 'webauthn.get' {
+		Err(WrongType)
+	} else if !challenge_ok(chal, challenge) {
+		Err(ChallengeMismatch)
+	} else if org != origin {
+		Err(OriginMismatch)
+	} else {
+		ad <- result.then(parse_auth_data(authenticator_data))
+		AuthData(rp_id_hash, user_present, sign_count, _) = ad
+		if !crypto.const_eq(rp_id_hash, crypto.sha256(binary.from_string(rp_id))) {
+			Err(RpIdMismatch)
+		} else if !user_present {
+			Err(UserNotPresent)
+		} else {
+			// The one message construction the whole protocol turns on.
+			message = binary.append(authenticator_data, crypto.sha256(client_data_json))
+			ok = match algorithm {
+				Es256 -> crypto.p256_verify(public_key, message, signature)
+				EdDsa -> crypto.ed25519_verify(public_key, message, signature)
+			}
+			match ok {
+				True -> Ok(sign_count)
+				False -> Err(BadSignature)
+			}
+		}
+	}
+}
