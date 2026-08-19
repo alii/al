@@ -16,6 +16,12 @@
  * decoding two ways is how a signature check is bypassed, so there is
  * deliberately no lenient mode and no whitespace skipping. Callers holding
  * MIME text with line breaks must strip them first.
+ *
+ * `url_encode`/`url_decode` are RFC 4648 §5: `-` and `_` in place of `+` and
+ * `/`, and no padding at all — the form URLs, JWTs, and OAuth's PKCE
+ * challenge (RFC 7636 §4.2) carry. The same strictness applies: `url_decode`
+ * rejects standard-alphabet characters, any `=`, an impossible length
+ * (4n+1), and non-zero fill bits in a partial tail.
  */
 
 import scarlet/binary
@@ -170,6 +176,142 @@ fn decode_from(b Binary, at Int, size Int, acc Binary) Result(Binary, Nil) {
 				o2 = int.bitwise_or(int.bitwise_shift_left(int.bitwise_and(v2, 3), 6), v3)
 				decode_from(b, at + 4, size, binary.append(acc, <<o0:8, o1:8, o2:8>>))
 			}
+		}
+	}
+}
+
+
+// §5's alphabet differs from §4's only in the last two digits.
+fn url_digit(v Int) Int {
+	if v == 62 {
+		// '-'
+		45
+	} else if v == 63 {
+		// '_'
+		95
+	} else {
+		digit(v)
+	}
+}
+
+fn url_undigit(c Int) Int {
+	if c == 45 {
+		62
+	} else if c == 95 {
+		63
+	} else if c == 43 || c == 47 {
+		// The §4 digits for 62 and 63 are NOT part of this alphabet; mapping
+		// them would make one value decodable two ways across the two forms.
+		0 - 1
+	} else {
+		undigit(c)
+	}
+}
+
+// `b` in unpadded url-safe base64 (RFC 4648 §5). Total, and the empty binary
+// encodes to the empty binary.
+pub fn url_encode(b Binary) Binary {
+	url_encode_from(b, 0, binary.byte_size(b), <<>>)
+}
+
+fn url_encode_from(b Binary, at Int, size Int, acc Binary) Binary {
+	left = size - at
+	if left <= 0 {
+		acc
+	} else if left == 1 {
+		b0 = binary.byte_at(b, at)
+		d0 = int.bitwise_shift_right(b0, 2)
+		d1 = int.bitwise_shift_left(int.bitwise_and(b0, 3), 4)
+		binary.append(acc, <<url_digit(d0):8, url_digit(d1):8>>)
+	} else if left == 2 {
+		b0 = binary.byte_at(b, at)
+		b1 = binary.byte_at(b, at + 1)
+		d0 = int.bitwise_shift_right(b0, 2)
+		d1 = int.bitwise_or(
+			int.bitwise_shift_left(int.bitwise_and(b0, 3), 4),
+			int.bitwise_shift_right(b1, 4),
+		)
+		d2 = int.bitwise_shift_left(int.bitwise_and(b1, 15), 2)
+		binary.append(acc, <<url_digit(d0):8, url_digit(d1):8, url_digit(d2):8>>)
+	} else {
+		b0 = binary.byte_at(b, at)
+		b1 = binary.byte_at(b, at + 1)
+		b2 = binary.byte_at(b, at + 2)
+		d0 = int.bitwise_shift_right(b0, 2)
+		d1 = int.bitwise_or(
+			int.bitwise_shift_left(int.bitwise_and(b0, 3), 4),
+			int.bitwise_shift_right(b1, 4),
+		)
+		d2 = int.bitwise_or(
+			int.bitwise_shift_left(int.bitwise_and(b1, 15), 2),
+			int.bitwise_shift_right(b2, 6),
+		)
+		d3 = int.bitwise_and(b2, 63)
+		next = binary.append(
+			acc,
+			<<url_digit(d0):8, url_digit(d1):8, url_digit(d2):8, url_digit(d3):8>>,
+		)
+		url_encode_from(b, at + 3, size, next)
+	}
+}
+
+// The bytes `b` url-encodes, or `Err(Nil)` if `b` is not exactly what
+// `url_encode` produces.
+pub fn url_decode(b Binary) Result(Binary, Nil) {
+	size = binary.byte_size(b)
+	if size % 4 == 1 {
+		// One digit holds six bits: not enough for a byte, so no input of
+		// this length is the encoding of anything.
+		Err(Nil)
+	} else {
+		url_decode_from(b, 0, size, <<>>)
+	}
+}
+
+fn url_decode_from(b Binary, at Int, size Int, acc Binary) Result(Binary, Nil) {
+	left = size - at
+	if left <= 0 {
+		Ok(acc)
+	} else if left == 2 {
+		// One byte; the low four bits of the second digit are the fill.
+		v0 = url_undigit(binary.byte_at(b, at))
+		v1 = url_undigit(binary.byte_at(b, at + 1))
+		if v0 < 0 || v1 < 0 || int.bitwise_and(v1, 15) != 0 {
+			Err(Nil)
+		} else {
+			out = int.bitwise_or(int.bitwise_shift_left(v0, 2), int.bitwise_shift_right(v1, 4))
+			Ok(binary.append(acc, <<out:8>>))
+		}
+	} else if left == 3 {
+		// Two bytes; the low two bits of the third digit are the fill.
+		v0 = url_undigit(binary.byte_at(b, at))
+		v1 = url_undigit(binary.byte_at(b, at + 1))
+		v2 = url_undigit(binary.byte_at(b, at + 2))
+		if v0 < 0 || v1 < 0 || v2 < 0 || int.bitwise_and(v2, 3) != 0 {
+			Err(Nil)
+		} else {
+			o0 = int.bitwise_or(int.bitwise_shift_left(v0, 2), int.bitwise_shift_right(v1, 4))
+			o1 = int.bitwise_or(
+				int.bitwise_shift_left(int.bitwise_and(v1, 15), 4),
+				int.bitwise_shift_right(v2, 2),
+			)
+			Ok(binary.append(acc, <<o0:8, o1:8>>))
+		}
+	} else {
+		v0 = url_undigit(binary.byte_at(b, at))
+		v1 = url_undigit(binary.byte_at(b, at + 1))
+		v2 = url_undigit(binary.byte_at(b, at + 2))
+		v3 = url_undigit(binary.byte_at(b, at + 3))
+		if v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0 {
+			Err(Nil)
+		} else {
+			o0 = int.bitwise_or(int.bitwise_shift_left(v0, 2), int.bitwise_shift_right(v1, 4))
+			o1 = int.bitwise_or(
+				int.bitwise_shift_left(int.bitwise_and(v1, 15), 4),
+				int.bitwise_shift_right(v2, 2),
+			)
+			o2 = int.bitwise_or(int.bitwise_shift_left(int.bitwise_and(v2, 3), 6), v3)
+			url_decode_from(b, at + 4, size, binary.append(acc, <<o0:8, o1:8, o2:8>>))
 		}
 	}
 }
