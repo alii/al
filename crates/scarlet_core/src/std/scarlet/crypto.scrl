@@ -15,8 +15,11 @@
  * `Sec-WebSocket-Key` have to be unpredictable; a userspace PRNG, even a
  * good one seeded once at boot, is not this function.
  *
- * For anything where the choice of hash is actually yours, this module is
- * the wrong import.
+ * SHA-256 is the one general-purpose hash here: fine wherever a
+ * collision-resistant digest is called for (PKCE's S256 challenge, content
+ * addressing), though on its own it is still neither a password hash nor a
+ * MAC. Everything said about SHA-1 above stays true: protocol handshakes
+ * only.
  */
 
 import scarlet/base64
@@ -204,3 +207,151 @@ pub fn websocket_accept(key Binary) Binary {
 // and never silent zeros (or any other stand-in) on failure.
 @vm(crypto__random_bytes)
 pub fn random_bytes(n Int) Result(Binary, Nil)
+
+
+// SHA-256's eight-word chaining state, and the working variables a-h inside
+// its compression function.
+type State256 {
+	a Int
+	b Int
+	c Int
+	d Int
+	e Int
+	f Int
+	g Int
+	h Int
+}
+
+// Rotate right within 32 bits. Same masking argument as `rotl32`: `x` is
+// already 32-bit clean, so the arithmetic right shift cannot smear a sign.
+fn rotr32(x Int, n Int) Int {
+	int.bitwise_and(
+		int.bitwise_or(int.bitwise_shift_right(x, n), int.bitwise_shift_left(x, 32 - n)),
+		MASK32,
+	)
+}
+
+// FIPS 180-4's 64 round constants, packed as big-endian words so `word_at`
+// can index them the way it indexes a message block — the stdlib has no
+// constant integer arrays, but it does have constant binaries.
+const K256 = <<
+	1116352408:32, 1899447441:32, 3049323471:32, 3921009573:32,
+	961987163:32, 1508970993:32, 2453635748:32, 2870763221:32,
+	3624381080:32, 310598401:32, 607225278:32, 1426881987:32,
+	1925078388:32, 2162078206:32, 2614888103:32, 3248222580:32,
+	3835390401:32, 4022224774:32, 264347078:32, 604807628:32,
+	770255983:32, 1249150122:32, 1555081692:32, 1996064986:32,
+	2554220882:32, 2821834349:32, 2952996808:32, 3210313671:32,
+	3336571891:32, 3584528711:32, 113926993:32, 338241895:32,
+	666307205:32, 773529912:32, 1294757372:32, 1396182291:32,
+	1695183700:32, 1986661051:32, 2177026350:32, 2456956037:32,
+	2730485921:32, 2820302411:32, 3259730800:32, 3345764771:32,
+	3516065817:32, 3600352804:32, 4094571909:32, 275423344:32,
+	430227734:32, 506948616:32, 659060556:32, 883997877:32,
+	958139571:32, 1322822218:32, 1537002063:32, 1747873779:32,
+	1955562222:32, 2024104815:32, 2227730452:32, 2361852424:32,
+	2428436474:32, 2756734187:32, 3204031479:32, 3329325298:32
+>>
+
+// One 64-round SHA-256 compression over `win`, the 16-word rolling schedule
+// window: the round's own word is word 0, and the appended word is w[i+16] =
+// w[i] + s0(w[i+1]) + w[i+9] + s1(w[i+14]). As with SHA-1, the final rounds
+// extend the schedule past anything a round reads; computing them is cheaper
+// than branching to avoid it.
+fn compress256(win Binary, i Int, w State256) State256 {
+	if i >= 64 {
+		w
+	} else {
+		e_sigma = int.bitwise_xor(int.bitwise_xor(rotr32(w.e, 6), rotr32(w.e, 11)), rotr32(w.e, 25))
+		ch = int.bitwise_xor(int.bitwise_and(w.e, w.f), int.bitwise_and(int.bitwise_not(w.e), w.g))
+		// Five 32-bit addends again: bounded by 2^35, masked back to 32.
+		t1 = int.bitwise_and(w.h + e_sigma + ch + word_at(K256, i) + word_at(win, 0), MASK32)
+		a_sigma = int.bitwise_xor(int.bitwise_xor(rotr32(w.a, 2), rotr32(w.a, 13)), rotr32(w.a, 22))
+		maj = int.bitwise_xor(
+			int.bitwise_xor(int.bitwise_and(w.a, w.b), int.bitwise_and(w.a, w.c)),
+			int.bitwise_and(w.b, w.c),
+		)
+		t2 = int.bitwise_and(a_sigma + maj, MASK32)
+		s0 = int.bitwise_xor(
+			int.bitwise_xor(rotr32(word_at(win, 1), 7), rotr32(word_at(win, 1), 18)),
+			int.bitwise_shift_right(word_at(win, 1), 3),
+		)
+		s1 = int.bitwise_xor(
+			int.bitwise_xor(rotr32(word_at(win, 14), 17), rotr32(word_at(win, 14), 19)),
+			int.bitwise_shift_right(word_at(win, 14), 10),
+		)
+		next = int.bitwise_and(word_at(win, 0) + s0 + word_at(win, 9) + s1, MASK32)
+		compress256(
+			binary.append(binary.drop_bytes(win, 4), <<next:32>>),
+			i + 1,
+			State256(
+				int.bitwise_and(t1 + t2, MASK32),
+				w.a,
+				w.b,
+				w.c,
+				int.bitwise_and(w.d + t1, MASK32),
+				w.e,
+				w.f,
+				w.g,
+			),
+		)
+	}
+}
+
+fn blocks256(p Binary, at Int, size Int, h State256) State256 {
+	if at >= size {
+		h
+	} else {
+		match binary.slice_bytes(p, at, 64) {
+			Ok(block) -> {
+				w = compress256(block, 0, State256(h.a, h.b, h.c, h.d, h.e, h.f, h.g, h.h))
+				blocks256(
+					p,
+					at + 64,
+					size,
+					State256(
+						int.bitwise_and(h.a + w.a, MASK32),
+						int.bitwise_and(h.b + w.b, MASK32),
+						int.bitwise_and(h.c + w.c, MASK32),
+						int.bitwise_and(h.d + w.d, MASK32),
+						int.bitwise_and(h.e + w.e, MASK32),
+						int.bitwise_and(h.f + w.f, MASK32),
+						int.bitwise_and(h.g + w.g, MASK32),
+						int.bitwise_and(h.h + w.h, MASK32),
+					),
+				)
+			}
+			// Unreachable for the same reason as SHA-1's: `pad` emits whole
+			// 64-byte blocks and `at` steps by 64 from 0.
+			Err(Nil) -> h
+		}
+	}
+}
+
+// The SHA-256 digest of `m`: 32 bytes, big-endian. Total — every input has a
+// digest, including the empty binary.
+//
+// Unlike SHA-1 above, this one is fine to reach for on its own merits:
+// collision-resistant as far as anyone knows, and the hash OAuth's PKCE
+// (S256), TLS 1.3, and most content addressing specify. SHA-256 alone is
+// still not a password hash and not a MAC — it needs a KDF or HMAC on top
+// for those jobs.
+pub fn sha256(m Binary) Binary {
+	p = pad(m)
+	h = blocks256(
+		p,
+		0,
+		binary.byte_size(p),
+		State256(
+			1779033703,
+			3144134277,
+			1013904242,
+			2773480762,
+			1359893119,
+			2600822924,
+			528734635,
+			1541459225,
+		),
+	)
+	<<h.a:32, h.b:32, h.c:32, h.d:32, h.e:32, h.f:32, h.g:32, h.h:32>>
+}
