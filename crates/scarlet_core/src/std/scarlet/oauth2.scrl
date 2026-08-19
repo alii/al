@@ -1,0 +1,263 @@
+/**
+ * OAuth 2.1, both halves, as the MCP authorization spec (rev 2026-07-28)
+ * profiles it: a resource server that publishes RFC 9728 metadata and
+ * challenges tokenless requests, and an authorization server speaking the
+ * authorization-code flow with PKCE S256 only — public clients, opaque
+ * bearer tokens, resource indicators carried through the grant, and
+ * dynamic client registration (RFC 7591).
+ *
+ * The module owns the protocol; the caller owns everything with a
+ * lifetime. Storage arrives as a `Store` of closures over whatever the
+ * caller persists with, and the consent page is the caller's: this module
+ * parses an /authorize request and mints the redirect for an approved
+ * one, but never renders a form. What a "user" is — an invite code, a
+ * password, a hardware key — is deliberately not its business.
+ *
+ * The compromises are the spec's, not convenience's: `plain` PKCE does
+ * not exist here, client secrets do not exist here (PKCE is the client
+ * authentication), and codes are one-shot — `take_code` consuming the
+ * code is what makes a replayed authorization code fail.
+ */
+
+import scarlet/array
+import scarlet/base64
+import scarlet/binary
+import scarlet/crypto
+import scarlet/http.{Request}
+import scarlet/http/form
+import scarlet/json.{Json, List, Object, Str}
+import scarlet/option
+import scarlet/result
+import scarlet/string
+
+/** Everything a grant carries from consent to token to bearer check. */
+pub type Grant {
+	Grant(
+		user String,
+		scope String,
+		client_id String,
+		redirect_uri String,
+		challenge String,
+		resource String,
+	)
+}
+
+/** Caller-provided persistence. Codes are one-shot: `take_code` must
+ * consume what it returns. */
+pub type Store {
+	Store(
+		put_client fn(String, String) Nil,
+		get_client fn(String) Option(String),
+		put_code fn(String, Grant) Nil,
+		take_code fn(String) Option(Grant),
+		put_token fn(String, Grant) Nil,
+		get_token fn(String) Option(Grant),
+	)
+}
+
+fn texts(values Array(String)) Json {
+	List(array.map(values, Str))
+}
+
+// ---------- discovery ----------
+
+/** RFC 9728 Protected Resource Metadata: this resource, its authorization
+ * server, its scopes. Mount at /.well-known/oauth-protected-resource. */
+pub fn resource_metadata(resource_uri String, auth_server String, scopes Array(String)) Json {
+	Object([
+		('resource', Str(resource_uri)),
+		('authorization_servers', List([Str(auth_server)])),
+		('scopes_supported', texts(scopes)),
+		('bearer_methods_supported', List([Str('header')])),
+	])
+}
+
+/** The WWW-Authenticate value for a 401: where the resource metadata
+ * lives and, when not empty, the scope the request needed (RFC 6750 §3). */
+pub fn challenge(metadata_url String, scope String) String {
+	base = 'Bearer resource_metadata="${metadata_url}"'
+	match scope {
+		'' -> base
+		_ -> '${base}, scope="${scope}"'
+	}
+}
+
+/** RFC 8414 metadata for an AS under `issuer` (no trailing slash), with
+ * its endpoints at `issuer`/oauth/{authorize,token,register}. Mount at
+ * /.well-known/oauth-authorization-server. */
+pub fn metadata(issuer String, scopes Array(String)) Json {
+	Object([
+		('issuer', Str(issuer)),
+		('authorization_endpoint', Str('${issuer}/oauth/authorize')),
+		('token_endpoint', Str('${issuer}/oauth/token')),
+		('registration_endpoint', Str('${issuer}/oauth/register')),
+		('response_types_supported', List([Str('code')])),
+		('grant_types_supported', List([Str('authorization_code')])),
+		('code_challenge_methods_supported', List([Str('S256')])),
+		('token_endpoint_auth_methods_supported', List([Str('none')])),
+		('scopes_supported', texts(scopes)),
+	])
+}
+
+// ---------- registration (RFC 7591, public clients) ----------
+
+/** Register a public client: remember its redirect uris, hand back the
+ * metadata. No secret is issued — these are PKCE public clients. */
+pub fn register(store Store, req_body Binary) Result(Json, String) {
+	doc <- result.then(result.map_err(json.parse_binary(req_body), fn(_) 'body is not json'))
+	uris = match json.field(doc, 'redirect_uris') {
+		Some(list) -> array.fold(json.elements(list), [], fn(acc, u) {
+			match json.string(u) {
+				Some(t) -> [..acc, t]
+				None -> acc
+			}
+		})
+		None -> []
+	}
+	match uris {
+		[] -> Err('redirect_uris is required')
+		_ -> {
+			id = new_token()
+			Store(put_client, _, _, _, _, _) = store
+			put_client(id, join_spaced(uris))
+			Ok(Object([
+				('client_id', Str(id)),
+				('redirect_uris', texts(uris)),
+				('token_endpoint_auth_method', Str('none')),
+				('grant_types', List([Str('authorization_code')])),
+				('response_types', List([Str('code')])),
+			]))
+		}
+	}
+}
+
+fn join_spaced(xs Array(String)) String {
+	array.fold(xs, '', fn(acc, x) {
+		match acc {
+			'' -> x
+			_ -> '${acc} ${x}'
+		}
+	})
+}
+
+// ---------- authorize ----------
+
+/** A parsed, validated /authorize request, ready for the caller's consent
+ * UI. */
+pub type AuthorizeReq {
+	AuthorizeReq(
+		client_id String,
+		redirect_uri String,
+		state String,
+		challenge String,
+		scope String,
+		resource String,
+	)
+}
+
+/**
+ * Read and validate the query of `GET /authorize`. The redirect uri must
+ * be one the client registered: a code delivered anywhere else is a
+ * stolen code.
+ */
+pub fn parse_authorize(store Store, req Request) Result(AuthorizeReq, String) {
+	q = form.decode(http.query(req))
+	client_id = form.get(q, 'client_id') or ''
+	redirect_uri = form.get(q, 'redirect_uri') or ''
+	pkce_challenge = form.get(q, 'code_challenge') or ''
+	method = form.get(q, 'code_challenge_method') or ''
+	Store(_, get_client, _, _, _, _) = store
+	registered = get_client(client_id) or ''
+	if client_id == '' || redirect_uri == '' {
+		Err('client_id and redirect_uri are required')
+	} else if !array.contains(string.split(registered, ' '), redirect_uri) {
+		Err('redirect_uri is not registered for this client')
+	} else if { form.get(q, 'response_type') or '' } != 'code' {
+		Err('only response_type=code is supported')
+	} else if method != 'S256' || pkce_challenge == '' {
+		Err('PKCE S256 is required')
+	} else {
+		Ok(AuthorizeReq(
+			client_id: client_id,
+			redirect_uri: redirect_uri,
+			state: form.get(q, 'state') or '',
+			challenge: pkce_challenge,
+			scope: form.get(q, 'scope') or '',
+			resource: form.get(q, 'resource') or '',
+		))
+	}
+}
+
+/** The caller approved: mint a one-shot code bound to `user` and hand
+ * back the redirect target. */
+pub fn approve(store Store, areq AuthorizeReq, user String) String {
+	AuthorizeReq(client_id, redirect_uri, state, pkce_challenge, scope, resource) = areq
+	code = new_token()
+	Store(_, _, put_code, _, _, _) = store
+	put_code(code, Grant(
+		user: user,
+		scope: scope,
+		client_id: client_id,
+		redirect_uri: redirect_uri,
+		challenge: pkce_challenge,
+		resource: resource,
+	))
+	sep = match string.contains(redirect_uri, '?') {
+		True -> '&'
+		False -> '?'
+	}
+	'${redirect_uri}${sep}code=${form.pct_encode(code)}&state=${form.pct_encode(state)}'
+}
+
+// ---------- token ----------
+
+/**
+ * `POST /token`: exchange a code for a bearer token. PKCE is the client
+ * authentication — the verifier must hash to the challenge the code was
+ * minted under, compared in constant time.
+ */
+pub fn token(store Store, req_body Binary) Result(Json, String) {
+	f = form.decode(req_body)
+	code = form.get(f, 'code') or ''
+	verifier = form.get(f, 'code_verifier') or ''
+	if { form.get(f, 'grant_type') or '' } != 'authorization_code' {
+		Err('only grant_type=authorization_code is supported')
+	} else if code == '' || verifier == '' {
+		Err('code and code_verifier are required')
+	} else {
+		Store(_, _, _, take_code, put_token, _) = store
+		match take_code(code) {
+			None -> Err('code is unknown, used, or expired')
+			Some(g) -> {
+				Grant(_, scope, client_id, redirect_uri, pkce_challenge, _) = g
+				hashed = base64.url_encode(crypto.sha256(binary.from_string(verifier)))
+				ok_client = { form.get(f, 'client_id') or client_id } == client_id
+				ok_redirect = { form.get(f, 'redirect_uri') or redirect_uri } == redirect_uri
+				if !crypto.const_eq(hashed, binary.from_string(pkce_challenge)) {
+					Err('PKCE verification failed')
+				} else if !ok_client || !ok_redirect {
+					Err('client_id or redirect_uri does not match the grant')
+				} else {
+					tok = new_token()
+					put_token(tok, g)
+					Ok(Object([
+						('access_token', Str(tok)),
+						('token_type', Str('Bearer')),
+						('scope', Str(scope)),
+					]))
+				}
+			}
+		}
+	}
+}
+
+/** The bearer check for the resource side: token text to its grant. */
+pub fn bearer(store Store, token_text String) Option(Grant) {
+	Store(_, _, _, _, _, get_token) = store
+	get_token(token_text)
+}
+
+// 32 random bytes, url-safe: token, code, and client-id material alike.
+fn new_token() String {
+	binary.to_string(base64.url_encode(crypto.random_bytes(32) or <<>>)) or ''
+}
