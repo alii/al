@@ -343,6 +343,26 @@ impl VM {
         Ok(())
     }
 
+    // The read side of `int_to_string`. Returns `Option`, matching how the
+    // VM already builds `Option` values (mirrors `bin_parse_int` just
+    // above) — the `.scrl` wrapper turns `None` into `Err(Nil)` per the
+    // stdlib's Result convention.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn int_from_string(&mut self) -> VmResult<()> {
+        let s_v = self.pop_str("int.from_string")?;
+        let parsed = parse_int_ascii(str_ref(&s_v).as_bytes());
+        let v = match parsed {
+            Some(n) => {
+                let n = self.boxed_int(n);
+                self.make_some(n)?
+            }
+            None => self.make_none()?,
+        };
+        self.stack.push(v);
+        Ok(())
+    }
+
     #[cold]
     #[inline(never)]
     pub(super) fn bin_eq_ignore_ascii_case(&mut self) -> VmResult<()> {
@@ -518,6 +538,42 @@ pub(super) fn parse_uint_ascii(bytes: &[u8], radix: Radix) -> Option<i64> {
         acc = acc.checked_mul(base)?.checked_add(digit)?;
     }
     Some(acc)
+}
+
+/// Parse ASCII bytes as a base-10 `Int`: an optional leading `+`/`-`, then
+/// one or more digits, and nothing else. `None` on empty input (with or
+/// without a bare sign), a non-digit anywhere, or a magnitude past `Int`'s
+/// range.
+///
+/// Accumulates negatively rather than building a positive magnitude and
+/// negating at the end: `Int`'s negative range holds one more value than its
+/// positive range (`i64::MIN`), and only the negative accumulator can reach
+/// that value's magnitude without overflowing. A positive result negates the
+/// accumulator as the very last step, which is exactly where `i64::MIN`'s
+/// magnitude — unsigned, no leading `-` — is correctly refused: negating it
+/// is what would overflow.
+fn parse_int_ascii(bytes: &[u8]) -> Option<i64> {
+    let (negative, digits) = match bytes.first() {
+        Some(b'-') => (true, &bytes[1..]),
+        Some(b'+') => (false, &bytes[1..]),
+        _ => (false, bytes),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut acc: i64 = 0;
+    for &c in digits {
+        let digit = match c {
+            b'0'..=b'9' => (c - b'0') as i64,
+            _ => return None,
+        };
+        acc = acc.checked_mul(10)?.checked_sub(digit)?;
+    }
+    if negative {
+        Some(acc)
+    } else {
+        acc.checked_neg()
+    }
 }
 
 /// Stack-rendered ASCII digits of an `Int`. 20 bytes is the ceiling

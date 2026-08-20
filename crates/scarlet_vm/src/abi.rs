@@ -761,10 +761,12 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::WireMalformed,
             S::WireTrailingBytes,
         ],
-        // `arr[i]`, `binary.index_of` and `binary.parse_int` answer with an
-        // `Option`; `binary.to_string` and `binary.slice_bits` with a `Result`
-        // whose error carries no payload.
-        Op::Index | Op::BinIndexOf | Op::BinParseInt => &[S::OptionSome, S::OptionNone],
+        // `arr[i]`, `binary.index_of`, `binary.parse_int` and
+        // `int.from_string` answer with an `Option`; `binary.to_string` and
+        // `binary.slice_bits` with a `Result` whose error carries no payload.
+        Op::Index | Op::BinIndexOf | Op::BinParseInt | Op::IntFromString => {
+            &[S::OptionSome, S::OptionNone]
+        }
         Op::BinToString | Op::BinSlice => &[S::ResultOk, S::ResultErr, S::Unit],
         // The rest construct no stdlib value: they push a prim, move the
         // stack, branch, or build a plain aggregate. `Count` is not an opcode

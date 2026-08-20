@@ -159,6 +159,7 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::StrTrim
         | Op::StrToGraphemes
         | Op::IntToString
+        | Op::IntFromString
         | Op::BinFromString
         | Op::BinToString
         | Op::BinBitSize

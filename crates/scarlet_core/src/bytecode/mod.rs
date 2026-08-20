@@ -62,6 +62,7 @@ fn builtin_op(name: &str) -> Option<Op> {
         "string__trim" => Op::StrTrim,
         "string__to_graphemes" => Op::StrToGraphemes,
         "int__to_string" => Op::IntToString,
+        "int__from_string" => Op::IntFromString,
         "int__bitwise_and" => Op::BitAnd,
         "int__bitwise_or" => Op::BitOr,
         "int__bitwise_xor" => Op::BitXor,

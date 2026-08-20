@@ -245,6 +245,29 @@ run_case! {
         "Ok(255)\nOk(255)\nOk(255)\nErr(Nil)\nErr(Nil)\nErr(Nil)\n",
     ),
 
+    // Op::IntFromString is the total inverse of `to_string`: unlike a
+    // hand-rolled "strip a sign, delegate to the unsigned digit walk" parse
+    // (which cannot represent `min_value`'s magnitude in a positive Int), it
+    // round-trips every value `to_string` produces, `min_value` included.
+    int_from_string: (
+        "import scarlet/int\n\
+         pub fn main() {\n\
+         \tprintln(int.from_string('42'))\n\
+         \tprintln(int.from_string('0'))\n\
+         \tprintln(int.from_string('-42'))\n\
+         \tprintln(int.from_string('+42'))\n\
+         \tprintln(int.from_string('007'))\n\
+         \tprintln(int.from_string(''))\n\
+         \tprintln(int.from_string('-'))\n\
+         \tprintln(int.from_string('12x'))\n\
+         \tprintln(int.from_string(' 42'))\n\
+         \tprintln(int.from_string('9223372036854775808'))\n\
+         \tprintln(int.from_string(int.to_string(int.min_value)))\n\
+         \tprintln(int.from_string(int.to_string(int.max_value)))\n\
+         }\n",
+        "Ok(42)\nOk(0)\nOk(-42)\nOk(42)\nOk(7)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(-9223372036854775808)\nOk(9223372036854775807)\n",
+    ),
+
     // Op::BinEqIgnoreAsciiCase: ASCII-case-insensitive header-name matching.
     binary_eq_ignore_ascii_case: (
         "import scarlet/binary\n\

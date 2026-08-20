@@ -546,6 +546,7 @@ mod opc {
     pub const HTTP_SERIALIZE_HEAD: u8 = Op::HttpSerializeHead as u8;
     pub const INDEX: u8 = Op::Index as u8;
     pub const INDEX_OR: u8 = Op::IndexOr as u8;
+    pub const INT_FROM_STRING: u8 = Op::IntFromString as u8;
     pub const INT_TO_STRING: u8 = Op::IntToString as u8;
     pub const IP_PARSE: u8 = Op::IpParse as u8;
     pub const LT: u8 = Op::Lt as u8;
@@ -821,6 +822,7 @@ impl VM {
             opc::STR_TRIM => self.str_trim(),
             opc::STR_TO_GRAPHEMES => self.str_to_graphemes(),
             opc::INT_TO_STRING => self.int_to_string(),
+            opc::INT_FROM_STRING => self.int_from_string(),
             opc::TO_STRING => self.op_to_string(),
             opc::STR_CONCAT_N => self.str_concat_n(operand as usize),
             opc::BIN_FROM_STRING => self.bin_from_string(),

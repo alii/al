@@ -1,6 +1,30 @@
 @vm(int__to_string)
 pub fn to_string(n Int) String
 
+// The raw form answers with `Option`, matching how the VM already builds
+// `Option` values (the same split `binary.parse_int` uses below); `from_string`
+// turns that into `Result` per the stdlib convention.
+@vm(int__from_string)
+fn from_string_raw(s String) Option(Int)
+
+// The read side of `to_string`: an optional leading `+`/`-`, then one or more
+// ASCII digits, and nothing else. `Err(Nil)` on empty input (with or without
+// a bare sign), leading/trailing whitespace, a non-digit anywhere — including
+// a truncated tail such as `'20O'` — or a magnitude past Int's range.
+// Leading zeros are accepted: `'007'` is `7`.
+//
+// Total over everything `to_string` produces, `min_value` included: unlike
+// composing this from `binary.parse_int` plus a sign check, which parses the
+// magnitude unsigned and negates it afterwards, `min_value`'s magnitude
+// (9223372036854775808) does not fit a positive Int, so that approach cannot
+// round-trip it. This parses by accumulating negatively instead.
+pub fn from_string(s String) Result(Int, Nil) {
+	match from_string_raw(s) {
+		Some(n) -> Ok(n)
+		None -> Err(Nil)
+	}
+}
+
 pub fn max(a Int, b Int) Int {
 	if a > b { a } else { b }
 }

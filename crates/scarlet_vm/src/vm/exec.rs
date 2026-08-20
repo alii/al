@@ -896,6 +896,7 @@ impl VM {
                 Op::StrTrim => self.str_trim()?,
                 Op::StrToGraphemes => self.str_to_graphemes()?,
                 Op::IntToString => self.int_to_string()?,
+                Op::IntFromString => self.int_from_string()?,
                 // Integer bitwise builtins (scarlet/int).
                 Op::BitAnd => self.bit_and()?,
                 Op::BitOr => self.bit_or()?,

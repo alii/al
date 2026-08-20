@@ -110,6 +110,14 @@ pub fn main() {
 	println('parse overflow: ${string.inspect(parse_int('9223372036854775808'))}')
 	println('signed round trip: ${string.inspect(parse_signed(int.to_string(-42)))}')
 	println('max round trip: ${string.inspect(parse_signed(int.to_string(int.max_value)))}')
+
+	// `int.from_string` is the stdlib version of `parse_signed` above, and
+	// unlike it, round-trips `min_value`: its magnitude has no positive Int
+	// to delegate the unsigned parse to, which `parse_signed`'s
+	// strip-the-sign-then-negate scheme cannot represent.
+	println('from_string: ${string.inspect(int.from_string('42'))} ${string.inspect(int.from_string('-42'))} ${string.inspect(int.from_string('+7'))}')
+	println('from_string rejects: ${string.inspect(int.from_string(''))} ${string.inspect(int.from_string('12abc'))} ${string.inspect(int.from_string(' 1'))}')
+	println('from_string min round trip: ${string.inspect(int.from_string(int.to_string(int.min_value)))}')
 	println('hex: ${string.inspect(binary.to_string(binary.from_int_ascii(255, Hex)))}')
 	println('hex parse: ${string.inspect(binary.parse_int(<<'ff'>>, Hex))}')
 

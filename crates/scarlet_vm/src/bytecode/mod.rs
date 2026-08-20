@@ -215,6 +215,7 @@ pub enum Op {
     StrTrim,
     StrToGraphemes,
     IntToString,
+    IntFromString,
 
     // Binary operations
     BinFromString,
@@ -744,6 +745,7 @@ impl Op {
             | Op::StrTrim
             | Op::StrToGraphemes
             | Op::IntToString
+            | Op::IntFromString
             | Op::BinFromString
             | Op::BinToString
             | Op::BinBitSize
@@ -979,6 +981,7 @@ impl Op {
             | Op::StrTrim
             | Op::StrToGraphemes
             | Op::IntToString
+            | Op::IntFromString
             | Op::BinFromString
             | Op::BinToString
             | Op::BinBitSize
