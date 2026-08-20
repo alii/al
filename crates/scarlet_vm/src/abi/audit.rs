@@ -43,7 +43,8 @@
 //!   keyed on the two handlers rather than on the reason's type because every
 //!   other body naming an `Ended` is on the delivery side.
 //! - **Arm selection.** Where a caller names `E::V` and its callee dispatches on
-//!   `E`, only that arm counts. `tls_read` reaches `tls_error_value` only as
+//!   `E`, only that arm counts — plus the match's own scrutinee, which runs
+//!   whichever arm is picked. `tls_read` reaches `tls_error_value` only as
 //!   `TlsFail::Io`, so it cannot build `TlsInvalidServerName`.
 //!
 //! # What this does not witness
@@ -85,14 +86,22 @@ const CLASSIFIERS: &[&str] = &["classify_fs", "classify_net", "session_error_slo
 /// as a call, because `listener_addr` passes `stale_socket` to `ok_or_else`
 /// without calling it and [`call_edges`] needs a `(`.
 ///
-/// Two further in-crate mints are deliberately absent: the sweep reaches
-/// neither site, so requiring their slots would assert a coverage this model
-/// does not have. `drain_write`'s `EPIPE` is called from the scrutinee of the
-/// `match` whose arms its caller is selected by, and a selected callee is
-/// never walked; `timed_out_offload`'s `ETIMEDOUT` is poller-side, past
-/// [`REENTRY`]. Both were checked by hand: every op that reaches either
-/// already declares the slot, so neither is a live gap.
-const ERRNO_MINTS: &[(&str, AbiSlot)] = &[("stale_socket", AbiSlot::NetEnotconn)];
+/// `drain_write`'s `EPIPE` used to be a third entry left out on purpose: the
+/// sweep reached its caller, `drain_and_flush`, only by arm selection on
+/// `Drain`, and the mint sat in that match's own scrutinee — outside every
+/// arm — where a selected callee was never walked. [`match_scrutinees`] and
+/// [`enclosing_scrutinee`] fold the scrutinee into every arm now, which is
+/// what puts it back here (T-605).
+///
+/// `timed_out_offload`'s `ETIMEDOUT` remains absent: it is poller-side, past
+/// [`REENTRY`], so the sweep does not reach it at all and requiring its slot
+/// would assert a coverage this model does not have. Checked by hand: every
+/// op that reaches it already declares `NetEtimedout`, so it is not a live
+/// gap.
+const ERRNO_MINTS: &[(&str, AbiSlot)] = &[
+    ("stale_socket", AbiSlot::NetEnotconn),
+    ("drain_write", AbiSlot::NetEpipe),
+];
 
 /// Where the sweep stops. Each of these hands control to the scheduler, the
 /// blocking pool or the poller, which then runs *other* ops and other
@@ -587,6 +596,54 @@ fn enclosing_arm(s: &[u8], end: usize) -> Option<(usize, usize)> {
     None
 }
 
+/// Every `match`'s scrutinee in `body`, as (text_start, brace_open,
+/// brace_close). Found once per body and reused for every arm in it: the
+/// scrutinee runs before any arm is chosen, so it belongs to all of them.
+fn match_scrutinees(body: &[u8]) -> Vec<(usize, usize, usize)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(p) = find(body, i, b"match") {
+        let after = p + 5;
+        i = after;
+        if (p > 0 && is_ident_byte(body[p - 1]))
+            || (after < body.len() && is_ident_byte(body[after]))
+        {
+            continue;
+        }
+        // The scrutinee ends at the first `{` at paren/bracket depth zero:
+        // Rust refuses a bare struct-literal scrutinee, so nothing else
+        // opens an unparenthesized brace before the arms do.
+        let (mut d, mut k) = (0i32, after);
+        let open = loop {
+            if k >= body.len() {
+                break None;
+            }
+            match body[k] {
+                b'(' | b'[' => d += 1,
+                b')' | b']' => d -= 1,
+                b'{' if d == 0 => break Some(k),
+                _ => {}
+            }
+            k += 1;
+        };
+        let Some(open) = open else { continue };
+        out.push((after, open, match_brace(body, open)));
+    }
+    out
+}
+
+/// The innermost of `scrutinees` whose arms enclose `pos`: matches nest
+/// properly in valid source, so the smallest enclosing span is the innermost
+/// one. Returns (scrutinee_start, brace_open) — the text to scan for what it
+/// builds and calls.
+fn enclosing_scrutinee(scrutinees: &[(usize, usize, usize)], pos: usize) -> Option<(usize, usize)> {
+    scrutinees
+        .iter()
+        .filter(|&&(_, open, close)| open < pos && pos < close)
+        .min_by_key(|&&(_, open, close)| close - open)
+        .map(|&(start, open, _)| (start, open))
+}
+
 /// A named body: every `fn` and every `macro_rules!`. Trait signatures without
 /// a body are skipped.
 struct Def {
@@ -955,7 +1012,8 @@ fn build() -> Graph {
         });
         n.slots.extend(built_slots(&d.body, &variants, &h1));
         n.calls.extend(call_edges(&d.body, &per_file[d.file], &all));
-        for (a, b, _, end) in paths(&d.body) {
+        let scrutinees = match_scrutinees(&d.body);
+        for (a, b, start, end) in paths(&d.body) {
             n.mints.insert((a.clone(), b.clone()));
             let Some(past) = arm_head_at(&d.body, end) else {
                 continue;
@@ -970,6 +1028,17 @@ fn build() -> Graph {
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()));
             entry.0.extend(built_slots(arm, &variants, &h1));
             entry.1.extend(call_edges(arm, &per_file[d.file], &all));
+            // The scrutinee runs unconditionally, before any arm is picked —
+            // fold it into every arm here so a caller that enters this
+            // function by arm selection (`reach`, below) still pays for it,
+            // whichever variant it names.
+            if let Some((sc_s, sc_open)) = enclosing_scrutinee(&scrutinees, start) {
+                let scrutinee = &d.body[sc_s..sc_open];
+                entry.0.extend(built_slots(scrutinee, &variants, &h1));
+                entry
+                    .1
+                    .extend(call_edges(scrutinee, &per_file[d.file], &all));
+            }
         }
     }
 
@@ -1363,6 +1432,11 @@ fn the_sweep_witnesses_each_kind_of_construction_path() {
             Op::WatchNew,
             AbiSlot::ExitNormal,
             "the notice continuation, through a watch",
+        ),
+        (
+            Op::TcpWrite,
+            AbiSlot::NetEpipe,
+            "a match scrutinee behind arm selection (drain_write, T-605)",
         ),
     ];
     let missed: Vec<String> = cases
