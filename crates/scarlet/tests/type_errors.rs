@@ -525,3 +525,241 @@ reject_case! {
         "unreachable",
     ),
 }
+
+// ===========================================================================
+// scarlet/wire refusals (T-342). The refusals ARE the feature: `wire.encode`
+// is total precisely because a type it could not reconstruct is rejected when
+// the program is compiled, so each of these is a guarantee rather than an
+// edge case.
+//
+// Every case here goes through `al check`, which never emits — the refusal is
+// raised in elaboration for exactly that reason, and a refusal raised at
+// emission would leave every one of these green while `al run` rejected the
+// same file.
+// ===========================================================================
+
+/// `al check` rejects `src` with `needle`, and the wire refusal is the ONLY
+/// error. Returns the combined output so a caller can assert more.
+///
+/// The single-error assertion is not decoration, and it does not do what it
+/// looks like it does. Elaboration only runs on a module the check walk left
+/// clean, so an unrelated mistake in a fixture does not add a second
+/// diagnostic beside the wire one — it **deletes** the wire one. Measured
+/// while writing these: a fixture calling a `scarlet/process` member that does
+/// not exist reported that twice and the wire refusal not at all. Pinning the
+/// count is what separates "the fixture is wrong" from "the compiler is
+/// wrong" without reading the output by hand.
+fn wire_rejects(src: &str, needle: &str) -> String {
+    let out = check_rejects(src, needle);
+    let all = out.combined();
+    assert!(
+        all.contains("Found 1 error"),
+        "the wire refusal must be the only error; got:\n{all}"
+    );
+    all
+}
+
+const FN_FIELD: &str = "import scarlet/wire\n\
+                        pub type Handler {\n\
+                        \tHandler(name String, run fn(Int) Int)\n\
+                        }\n\
+                        pub fn main() {\n\
+                        \tprintln(wire.encode(Handler('h', fn(x) { x + 1 })))\n\
+                        }\n";
+
+/// A record with a `fn` field, and the reason is **reconstructibility**.
+///
+/// `Handler` is `pub` on purpose, so `ctors_public` is true and the visibility
+/// rule cannot be what refuses it. Found by planting: with a bare `type`, an
+/// implementation that refused every non-public type took this red for the
+/// wrong reason and looked like a working test.
+///
+/// The negative assertion is the load-bearing one. "`fn(Int) Int` has no wire
+/// representation" is false — Erlang's `NEW_FUN_EXT`/`EXPORT_EXT` serialise
+/// funs perfectly well, carrying no code, and they fail only when CALLED on a
+/// peer without the module. What Scarlet cannot do is rebuild one: a closure
+/// is a function index plus a flat untyped capture array, the descriptor is a
+/// function of the static type, and `fn(Int) Int` fixes neither. Asserting the
+/// false rationale here is what would make it permanent, which is the whole
+/// reason this ticket carries a correction block.
+#[test]
+fn wire_refuses_a_fn_field_for_reconstructibility_not_for_want_of_bytes() {
+    let all = wire_rejects(
+        FN_FIELD,
+        "a closure's captures are not fixed by its type, so a decoder cannot rebuild one",
+    );
+    assert!(
+        all.contains("Handler.run"),
+        "the refusal must name the field it was reached through:\n{all}"
+    );
+    assert!(
+        !all.contains("no wire representation"),
+        "the false rationale must not come back:\n{all}"
+    );
+}
+
+/// A host-backed type three levels down, and the assertion is the PATH.
+///
+/// This is the case the path machinery exists for: a refusal that says only
+/// "cannot encode `Outer`" leaves the reader to find which of nine fields it
+/// meant. The full chain is asserted, not merely that a refusal happened.
+///
+/// All three types are `pub` for the reason `FN_FIELD` is: the only rule that
+/// may refuse this program is the one about `Subject`, so the test witnesses
+/// that rule and not the visibility one standing in front of it.
+///
+/// The reason is pinned in full, and it is not the one this arm shipped with.
+/// It read "the type is host-backed and has no representation outside this
+/// program" — the same overstatement this ticket had to correct for `fn`, by
+/// the same refutation (Erlang writes a pid with `NEW_PID_EXT`), and the owner
+/// has said on #35 that pids and subjects should eventually cross the wire.
+/// Writing that into a golden is how it would have stopped being cheap to
+/// change, so it was corrected in `typed_ir/wire.rs` first and the corrected
+/// text is what is frozen here. T-745 carries what remains: whether "never"
+/// and "not yet" should refuse differently at all.
+#[test]
+fn wire_names_the_whole_field_path_down_to_the_refusing_type() {
+    let all = wire_rejects(
+        "import scarlet/process\n\
+         import scarlet/wire\n\
+         pub type Inner {\n\
+         \tInner(reply process.Subject(String))\n\
+         }\n\
+         pub type Middle {\n\
+         \tMiddle(inner Inner)\n\
+         }\n\
+         pub type Outer {\n\
+         \tOuter(mid Middle)\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(wire.encode(Outer(Middle(Inner(process.subject())))))\n\
+         }\n",
+        "Outer.mid -> Middle.inner -> Inner.reply",
+    );
+    assert!(
+        all.contains("`Subject(String)`"),
+        "the refusal names the offending sub-type, not the type the call named:\n{all}"
+    );
+    assert!(
+        all.contains("no constructor a decoder could call"),
+        "the reason must be given, and it must be the reconstructibility one:\n{all}"
+    );
+    assert!(
+        !all.contains("no representation"),
+        "the corrected rationale must not regress:\n{all}"
+    );
+}
+
+/// `decode` with nothing to fix its payload, and `decode` inside a generic
+/// function, are two different inputs — an unsolved variable and a rigid
+/// quantified one — that the descriptor builder deliberately does not
+/// distinguish. `zonk` says why: undetermined and rigidly polymorphic are the
+/// same operational fact, an unknown representation. So both are pinned to the
+/// same wording rather than to two, and the pair is what says the second case
+/// is not accidentally reaching the first's code path.
+mod unknown_payload {
+    use super::wire_rejects;
+
+    const WANTED: &str = "the type `wire.decode` produces here is not known; annotate the binding";
+
+    #[test]
+    fn an_unconstrained_decode_is_refused() {
+        wire_rejects(
+            "import scarlet/wire\n\
+             fn read(b Binary) {\n\
+             \tmatch wire.decode(b) {\n\
+             \t\tOk(v) -> Some(v)\n\
+             \t\tErr(_) -> None\n\
+             \t}\n\
+             }\n\
+             pub fn main() {\n\
+             \tprintln(match read(<<1>>) {\n\
+             \t\tSome(_) -> 'ok'\n\
+             \t\tNone -> 'no'\n\
+             \t})\n\
+             }\n",
+            WANTED,
+        );
+    }
+
+    /// The call site pins `a` to `Int`, and it is still refused: the body is
+    /// elaborated at the generalised signature, where `a` is rigid. That is
+    /// the distinction from the case above, and it is invisible in the text.
+    #[test]
+    fn a_decode_in_a_generic_fn_is_refused() {
+        wire_rejects(
+            "import scarlet/wire\n\
+             fn read(b Binary, fallback a) a {\n\
+             \tmatch wire.decode(b) {\n\
+             \t\tOk(v) -> v\n\
+             \t\tErr(_) -> fallback\n\
+             \t}\n\
+             }\n\
+             pub fn main() {\n\
+             \tprintln(read(<<1>>, 0))\n\
+             }\n",
+            WANTED,
+        );
+    }
+}
+
+/// An opaque type from another module, refused in BOTH directions.
+///
+/// The symmetry is the point and is why both halves are asserted rather than
+/// one: encoding refuses exactly what decoding refuses, so a program can never
+/// write bytes it is unable to read back. `Decimal`'s own fields are two
+/// `Int`s, so nothing but the visibility rule can be doing the refusing here.
+mod opaque_from_another_module {
+    use super::wire_rejects;
+
+    const WANTED: &str = "the type's constructors are not visible here, and decoding builds \
+                          values by constructor without running the declaring module's code";
+
+    #[test]
+    fn encode_is_refused() {
+        let all = wire_rejects(
+            "import scarlet/decimal\n\
+             import scarlet/wire\n\
+             pub fn main() {\n\
+             \tprintln(wire.encode(decimal.new(1, 2)))\n\
+             }\n",
+            WANTED,
+        );
+        assert!(
+            all.contains("`wire.encode` cannot encode `Decimal`"),
+            "{all}"
+        );
+    }
+
+    #[test]
+    fn decode_is_refused_the_same_way() {
+        let all = wire_rejects(
+            "import scarlet/decimal\n\
+             import scarlet/wire\n\
+             pub fn main() {\n\
+             \tprintln(match wire.decode(<<1>>) {\n\
+             \t\tOk(d) -> decimal.units(d)\n\
+             \t\tErr(_) -> 0\n\
+             \t})\n\
+             }\n",
+            WANTED,
+        );
+        assert!(
+            all.contains("`wire.decode` cannot decode `Decimal`"),
+            "{all}"
+        );
+    }
+}
+
+ok_case! {
+    /// THE CONTROL, and the reason the five refusals above mean anything: a
+    /// module may encode its OWN opaque type. Without this, an implementation
+    /// that refused every opaque type everywhere — or every user type, or
+    /// every `wire.encode` at all — passes all five and looks complete.
+    ///
+    /// `Token` is `opaque`, so `ctors_public` is false and only
+    /// `declared_here` can be admitting it.
+    a_module_may_encode_its_own_opaque_type: (
+        "import scarlet/binary\nimport scarlet/wire\npub opaque type Token {\n\tToken(id Int)\n}\npub fn main() {\n\tprintln(binary.byte_size(wire.encode(Token(1))))\n}\n"
+    ),
+}

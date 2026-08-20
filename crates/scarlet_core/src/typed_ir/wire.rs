@@ -230,8 +230,9 @@ pub enum Nominal {
         declared_here: bool,
         ctors: Vec<CtorDecl>,
     },
-    /// `pub type Name` with no body — host-backed. There is no representation
-    /// to write and nothing a decoder could rebuild.
+    /// `pub type Name` with no body — host-backed. It declares no fields for
+    /// the descriptor to walk and no constructor a decoder could call, so
+    /// nothing can be rebuilt from whatever bytes were written.
     Bodiless,
 }
 
@@ -273,11 +274,18 @@ pub enum Step {
 }
 
 /// Why a type cannot cross the wire.
+///
+/// Every arm names a way a peer cannot REBUILD the value. None of them claims
+/// the value has no byte representation — that criterion is wrong, and the
+/// `Function` arm below carries the refutation that establishes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     Function,
     TypeVariable,
-    NoRepresentation,
+    /// A `pub type Name` with no body. Named for the declaration rather than
+    /// for a verdict about representability: it was `NoRepresentation`, and
+    /// that name asserted the very thing `describe` had to stop saying.
+    Bodiless,
     ConstructorsNotVisible,
 }
 
@@ -297,8 +305,19 @@ impl Reason {
             Reason::TypeVariable => {
                 "the type is still polymorphic here, so its representation is not known"
             }
-            Reason::NoRepresentation => {
-                "the type is host-backed and has no representation outside this program"
+            // NOT "has no representation outside this program". Same
+            // overstatement as the `fn` arm and the same refutation: Erlang
+            // writes a pid with `NEW_PID_EXT`, so a representation can exist,
+            // and the owner has said on #35 that pids and subjects should
+            // eventually cross the wire. What is missing is anything to write
+            // it FROM and anything to rebuild it WITH — a bodiless type
+            // declares no fields for the descriptor to walk and no
+            // constructor for a decoder to call. T-745 carries the wider
+            // question of whether "never" and "not yet" should refuse
+            // differently; this only stops the text asserting the false half.
+            Reason::Bodiless => {
+                "the type is host-backed: it declares no fields to write and no constructor a \
+                 decoder could call, so a peer cannot rebuild one"
             }
             Reason::ConstructorsNotVisible => {
                 "the type's constructors are not visible here, and decoding builds values by \
@@ -649,7 +668,7 @@ impl<C: WireCtx + ?Sized> Build<'_, C> {
         path: &mut Vec<Step>,
     ) -> Result<NodeIdx, WireRefusal> {
         match self.cx.nominal(self.pool, id) {
-            Nominal::Bodiless => Err(self.refuse(t, Reason::NoRepresentation, path)),
+            Nominal::Bodiless => Err(self.refuse(t, Reason::Bodiless, path)),
 
             Nominal::Builtin(b) => self.builtin(b, args, path),
 
@@ -1061,7 +1080,7 @@ mod tests {
         f.types.insert(pid, Nominal::Bodiless);
         let t = f.con(pid, "Pid", &[]);
         let e = refusal(f.build(t));
-        assert_eq!(e.reason, Reason::NoRepresentation);
+        assert_eq!(e.reason, Reason::Bodiless);
     }
 
     #[test]
@@ -1111,7 +1130,7 @@ mod tests {
 
         let t = f.con(sock, "Socket", &[]);
         let e = refusal(f.build(t));
-        assert_eq!(e.reason, Reason::NoRepresentation);
+        assert_eq!(e.reason, Reason::Bodiless);
         assert_eq!(e.ty, conn);
         let cx = Decls {
             names: &f.names,
@@ -1544,5 +1563,52 @@ mod tests {
         f.data(ph, vec![c]);
         let t = f.con(ph, "Phantom", &[bad]);
         assert_eq!(refusal(f.build(t)).reason, Reason::Function);
+    }
+
+    /// THE CRITERION, asserted over every reason rather than one at a time.
+    ///
+    /// A golden pins the text a refusal has today; this pins the property all
+    /// of them must have, so a seventh refusal added next year is covered
+    /// without anyone remembering to widen a test. The property is the one
+    /// #35's `fn` rationale got wrong and T-342 exists to stop recurring:
+    /// **the criterion is reconstructibility, never the existence of a byte
+    /// encoding.** Erlang writes funs (`NEW_FUN_EXT`) and pids
+    /// (`NEW_PID_EXT`); they fail at the far end, not at the wire.
+    ///
+    /// WHAT THIS DOES NOT WITNESS, said plainly rather than implied: it cannot
+    /// prove `ALL` lists every variant. The `match` below is exhaustive, so a
+    /// new `Reason` stops this file compiling until someone edits here — but
+    /// they could satisfy the compiler without extending `ALL`. The match is a
+    /// tripwire that brings the author to this test, not a proof of coverage.
+    #[test]
+    fn no_refusal_claims_the_type_has_no_representation() {
+        const ALL: [Reason; 4] = [
+            Reason::Function,
+            Reason::TypeVariable,
+            Reason::Bodiless,
+            Reason::ConstructorsNotVisible,
+        ];
+        for r in ALL {
+            match r {
+                Reason::Function
+                | Reason::TypeVariable
+                | Reason::Bodiless
+                | Reason::ConstructorsNotVisible => {}
+            }
+            let text = r.describe();
+            assert!(
+                !text.contains("no representation"),
+                "{r:?} claims the type has no representation, which is the criterion \
+                 #35 got wrong: {text}"
+            );
+            assert!(
+                !text.contains("cannot be represented"),
+                "{r:?} claims the type cannot be represented: {text}"
+            );
+            assert!(
+                !text.is_empty(),
+                "{r:?} must carry prose a diagnostic can quote"
+            );
+        }
     }
 }
