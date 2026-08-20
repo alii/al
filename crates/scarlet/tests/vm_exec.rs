@@ -1261,3 +1261,18 @@ run_case! {
         "3\n15\n",
     ),
 }
+
+#[test]
+fn w32_3_probe_wire_backend_parity() {
+    let _g = ALLOC_LOCK.lock().unwrap();
+    const SRC: &str = "import scarlet/wire\n\
+                       type Event {\n\
+                       \tSaid(who String)\n\
+                       \tLeft(who String)\n\
+                       }\n\
+                       pub fn main() {\n\
+                       \twire.encode(Left('a'))\n\
+                       }\n";
+    let (allocs, out) = run_counting_allocs(SRC, &["main"]);
+    println!("W32_3_WIRE_PARITY out={out} allocs={allocs}");
+}
