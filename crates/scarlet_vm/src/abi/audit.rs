@@ -145,6 +145,13 @@ const WAKE_FILE: &str = "poll.rs";
 /// Every other wake re-runs the op's own handler, which the call walk already
 /// covers. Asserted so a third action fails here.
 const WAKE_RERUN: &str = "Rerun";
+/// Every function [`wake_complete_consumers`] must find on a `CompleteConnect`
+/// arm, named rather than merely counted: a non-empty check passes just as
+/// well when one consumer replaces another, so
+/// [`the_continuation_model_still_matches_the_runtime`] asserts equality
+/// against this list, and losing or gaining a consumer without updating it
+/// here fails that test.
+const WAKE_COMPLETE_CONSUMERS: &[&str] = &["finish_connect", "timeout_connect", "wake_with"];
 
 /// The notice link's minting end. Both handlers store a closure to be started
 /// when their target ends; the value it is applied to is built there and then,
@@ -1219,16 +1226,19 @@ fn the_continuation_model_still_matches_the_runtime() {
         "{WAKE_ENUM} gained an action; a wake that neither re-runs the op nor \
          finishes a connect is a continuation this sweep does not follow"
     );
-    // Derived, so it cannot go stale — but it can go empty, and an empty set
-    // silently unhooks every connect outcome. Require that it still reaches a
-    // function that builds one.
-    assert!(
-        g.wake_complete
-            .iter()
-            .any(|f| g.nodes.get(f).is_some_and(|n| !n.slots.is_empty())),
-        "no arm matching {WAKE_ENUM}::{WAKE_COMPLETE} in {WAKE_FILE} reaches a \
-         function that builds a slot; found {:?}. The poller finishes a connect \
-         somewhere this sweep can no longer see.",
+    // Derived, so it cannot go stale — but equality, not membership, is what
+    // catches it going stale: an `any(..)` over this set stays green when one
+    // consumer silently replaces another (or vanishes) as long as some other
+    // member still builds a slot.
+    let expect_complete: BTreeSet<String> = WAKE_COMPLETE_CONSUMERS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        g.wake_complete, expect_complete,
+        "{WAKE_ENUM}::{WAKE_COMPLETE} in {WAKE_FILE} no longer reaches exactly \
+         {WAKE_COMPLETE_CONSUMERS:?}; found {:?}. If this is an intended change \
+         to who finishes a connect, update WAKE_COMPLETE_CONSUMERS to match.",
         g.wake_complete
     );
 
