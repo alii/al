@@ -132,6 +132,15 @@ pub(crate) fn relocate(code: &mut [Instruction], base: i32) {
 
 /// Lower one Core function to bytecode. Jump operands index the returned
 /// `code` vector; see [`relocate`].
+///
+/// The whole body runs at `tail = true` (via [`Emitter::emit_expr`]), and
+/// every `CoreExpr` leaf already emits its own terminator when reached in
+/// tail position: `emit_atom` follows a `Tail` leaf's non-`Call` atom with
+/// `Ret` and lowers a tail `Call` straight to a `Tail*` op, and
+/// `emit_ladder`'s fall-through trap is an unconditional `Halt`. So the
+/// returned code always ends in one of those — the caller must not append
+/// its own trailing `Ret` (T-576; the `debug_assert` below is what would
+/// have caught the two unreachable ones it used to add).
 pub(crate) fn emit<C: EmitCtx>(f: &CoreFn, ctx: &mut C) -> EmitOut {
     let mut e = Emitter::new(ctx);
     e.scan = Scan::of(&f.body);
@@ -141,7 +150,15 @@ pub(crate) fn emit<C: EmitCtx>(f: &CoreFn, ctx: &mut C) -> EmitOut {
         e.bind(p);
     }
     e.emit_expr(&f.body);
-    e.finish()
+    let out = e.finish();
+    debug_assert!(
+        matches!(
+            out.code.last().map(|i| i.op),
+            Some(Op::Ret | Op::TailCall | Op::TailCallSelf | Op::TailCallKnown | Op::Halt)
+        ),
+        "a tail-position body must end in its own terminator"
+    );
+    out
 }
 
 /// Lower a bare expression (module toplevel). `slot_base` is the first

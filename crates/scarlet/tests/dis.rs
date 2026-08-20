@@ -298,9 +298,8 @@ fn an_infallible_match_keeps_the_flat_lowering() {
             (PushLocal, 2),
             (PushLocal, 3),
             (MulInt, 0),
-            (Ret, 0),
-            // The body's own closing `Ret`, which `code_len` spans; the one
-            // above is the last arm's.
+            // The last arm's own `Ret` closes the body; the compiler no
+            // longer appends a second one after it (T-576).
             (Ret, 0),
         ]
     );
@@ -319,11 +318,12 @@ fn an_infallible_match_keeps_the_flat_lowering() {
             (PushLocal, 1),
             (PushLocal, 2),
             (AddInt, 0),
+            // The arm's own `Ret` closes the body.
             (Ret, 0),
-            // `emit`'s unreachable fall-through trap, then the body's closing
-            // `Ret`.
+            // `emit`'s unreachable fall-through trap, for a match the checker
+            // proved exhaustive. The compiler no longer appends its own
+            // `Ret` after it (T-576).
             (Halt, 0),
-            (Ret, 0),
         ]
     );
 
@@ -346,8 +346,9 @@ fn an_infallible_match_keeps_the_flat_lowering() {
             (Ret, 0),
             (PushConst, -1),
             (Ret, 0),
+            // Same fall-through trap as `single`, and no appended `Ret`
+            // after it either.
             (Halt, 0),
-            (Ret, 0),
         ]
     );
 }

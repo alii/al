@@ -5055,10 +5055,11 @@ impl Compiler {
         let out = emit::emit(&core, self);
         self.frame_layouts.insert(func_idx, out.layout);
         self.program.code.extend(out.code);
-        // The frame is long closed, so this body owns its whole tail: the
-        // `Ret`, and every field of the `Function` entry the walk reserved but
-        // could not fill.
-        self.program.code.push(op(Op::Ret));
+        // No `Ret` appended here: `emit` runs the whole body at `tail = true`,
+        // so its own code already ends in a terminator (its doc comment and
+        // `debug_assert` are the proof). Appending another used to leave a
+        // second, unreachable one after it (T-576) — this body owns only the
+        // `Function` entry's remaining fields, not any more code.
         let end = self.current_addr();
         let f = &mut self.program.functions[func_idx.index()];
         f.locals = param_slots.max(out.locals);
