@@ -249,6 +249,14 @@ pub opaque type Timer {
 // message is dropped. A program ends only once every process has finished, so
 // a pending timer also keeps the program running until it fires — cancel one
 // whose answer has already arrived.
+//
+// Settled, not overlooked (T-538): staying process-backed over a VM timer
+// wheel is the decision, not a gap. A wheel would trade the two costs above
+// for a scheduler-level timer registry, its own poll-loop integration and a
+// `Timer` that no longer wraps a `Pid` — real work nothing here needs yet.
+// madder's rate limiter arms one timer per exhausted bucket and cancels
+// none, which this already serves. Revisit if a caller arms many timers per
+// request, or needs a clean exit with one still outstanding.
 pub fn send_after(s Subject(msg), delay_ms Int, m msg) Timer {
 	Timer(waiting: spawn_unlinked(fn() {
 		sleep(delay_ms)
