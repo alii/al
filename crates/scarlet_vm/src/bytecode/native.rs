@@ -157,6 +157,7 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::StrLen
         | Op::StrContains
         | Op::StrTrim
+        | Op::StrToGraphemes
         | Op::IntToString
         | Op::BinFromString
         | Op::BinToString

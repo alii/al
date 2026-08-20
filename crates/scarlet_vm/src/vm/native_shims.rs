@@ -622,6 +622,7 @@ mod opc {
     pub const STR_CONTAINS: u8 = Op::StrContains as u8;
     pub const STR_LEN: u8 = Op::StrLen as u8;
     pub const STR_SPLIT: u8 = Op::StrSplit as u8;
+    pub const STR_TO_GRAPHEMES: u8 = Op::StrToGraphemes as u8;
     pub const STR_TRIM: u8 = Op::StrTrim as u8;
     pub const SUB: u8 = Op::Sub as u8;
     pub const SUB_FLOAT: u8 = Op::SubFloat as u8;
@@ -818,6 +819,7 @@ impl VM {
             opc::STR_LEN => self.str_len(),
             opc::STR_CONTAINS => self.str_contains(),
             opc::STR_TRIM => self.str_trim(),
+            opc::STR_TO_GRAPHEMES => self.str_to_graphemes(),
             opc::INT_TO_STRING => self.int_to_string(),
             opc::TO_STRING => self.op_to_string(),
             opc::STR_CONCAT_N => self.str_concat_n(operand as usize),

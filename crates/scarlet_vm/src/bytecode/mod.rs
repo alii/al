@@ -213,6 +213,7 @@ pub enum Op {
     StrLen,
     StrContains,
     StrTrim,
+    StrToGraphemes,
     IntToString,
 
     // Binary operations
@@ -741,6 +742,7 @@ impl Op {
             | Op::StrLen
             | Op::StrContains
             | Op::StrTrim
+            | Op::StrToGraphemes
             | Op::IntToString
             | Op::BinFromString
             | Op::BinToString
@@ -975,6 +977,7 @@ impl Op {
             | Op::StrLen
             | Op::StrContains
             | Op::StrTrim
+            | Op::StrToGraphemes
             | Op::IntToString
             | Op::BinFromString
             | Op::BinToString

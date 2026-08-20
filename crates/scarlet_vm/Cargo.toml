@@ -32,6 +32,12 @@ libc = "0.2"
 getrandom = "0.4"
 memchr = "2"
 mio = { version = "1", features = ["os-poll", "os-ext"] }
+# Extended grapheme cluster breaking (UAX #29) for `strings.to_graphemes`.
+# Unicode-version-dependent break tables, the same shape as scarlet_syntax's
+# `unicode-width` dependency — already resolved in the lockfile transitively
+# via `idna`/`url`, so this names a direct dependency on a crate already
+# vetted by the tree rather than adding new supply-chain surface.
+unicode-segmentation = "1"
 smallvec = "1.15"
 socket2 = { version = "0.5", features = ["all"] }
 libmimalloc-sys = { version = "0.1.49", features = ["v2"] }

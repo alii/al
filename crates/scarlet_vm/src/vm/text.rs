@@ -15,6 +15,7 @@
 use crate::bytecode::Value;
 use crate::bytecode::bits::copy_bits;
 use smallvec::SmallVec;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::{VM, VmError, VmResult, bin_ref, binary, http, str_ref};
 
@@ -60,6 +61,22 @@ impl VM {
         let s_v = self.pop_str("strings.trim")?;
         let trimmed = str_ref(&s_v).trim();
         let v = Value::str_in(&mut self.heap, trimmed);
+        self.stack.push(v);
+        Ok(())
+    }
+
+    /// `s` split on extended grapheme cluster boundaries (UAX #29). Mirrors
+    /// `str_split`'s empty-delimiter branch, one cluster per piece instead
+    /// of one scalar value.
+    pub(super) fn str_to_graphemes(&mut self) -> VmResult<()> {
+        let s_v = self.pop_str("strings.to_graphemes")?;
+        let s = str_ref(&s_v);
+        let mut parts: Vec<Value> = Vec::new();
+        for g in s.graphemes(true) {
+            let part = Value::str_in(&mut self.heap, g);
+            parts.push(part);
+        }
+        let v = Value::array_in(&mut self.heap, &parts);
         self.stack.push(v);
         Ok(())
     }

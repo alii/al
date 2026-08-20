@@ -4,7 +4,17 @@
  * Strings are UTF-8 text values. Indexing is not offered; `length` and
  * `split` work in Unicode scalar values, so multi-byte characters are never
  * cut in half.
+ *
+ * `to_graphemes` and `replace` work at different granularities on purpose.
+ * `replace` is a plain scalar-value substring replace — the same unit as
+ * `split`/`contains`/`length` — so a CRLF pair stays two scalar values and
+ * `replace(s, "\r", "")` always finds a bare `\r`, cluster or no cluster.
+ * `to_graphemes` is the one function in this module that reasons about
+ * grapheme clusters, for callers who need user-perceived characters (e.g.
+ * counting or reversing what a person would call "one character").
  */
+
+import scarlet/array
 
 // The debug rendering of any value — what `println` prints: composites
 // (arrays, maps, constructors) show their structure, strings are inserted
@@ -30,3 +40,22 @@ pub fn contains(s String, needle String) Bool
 // `s` with Unicode whitespace removed from both ends.
 @vm(string__trim)
 pub fn trim(s String) String
+
+// `s` with every non-overlapping occurrence of `pattern` swapped for
+// `replacement`, left to right — split on `pattern`, then glue the pieces
+// back together with `replacement` between them. An empty `pattern` behaves
+// like `split`'s: `replacement` lands between every scalar value, never
+// before the first or after the last.
+pub fn replace(s String, pattern String, replacement String) String {
+	match split(s, pattern) {
+		[] -> s
+		[first, ..rest] -> array.fold(rest, first, fn(acc, piece) acc + replacement + piece)
+	}
+}
+
+// `s` split into its extended grapheme clusters (UAX #29) — what a person
+// would call "one character": a base scalar value plus any combining marks,
+// or one member of a ZWJ sequence, joined into a single piece. Unlike
+// `split`, this never divides a multi-scalar cluster.
+@vm(string__to_graphemes)
+pub fn to_graphemes(s String) Array(String)

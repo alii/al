@@ -876,4 +876,31 @@ fn stdlib_string() {
          }\n",
         "5\n[a, b, c]\nFalse\nhi\nhi\n42\n",
     );
+    // replace is a plain scalar-value substring replace: no grapheme barrier
+    // blocks a bare \r inside a CRLF pair, unlike Gleam's grapheme-aware
+    // replace (the hazard T-287 found does not exist in this module's model).
+    run_outputs(
+        "import scarlet/string\n\
+         pub fn main() {\n\
+         \tprintln(string.replace('a-b-c', '-', '_'))\n\
+         \tprintln(string.replace('abc', 'z', 'Q'))\n\
+         \tprintln(string.replace('a\\r\\nb', '\\r', ''))\n\
+         }\n",
+        "a_b_c\nabc\na\nb\n",
+    );
+    // to_graphemes groups an extended grapheme cluster into one piece where
+    // split('') would cut it at every scalar value: 'e' + combining acute
+    // (U+0301) is 2 scalar values, 1 cluster; the ZWJ family emoji from
+    // T-287 is 7 scalar values, 1 cluster.
+    run_outputs(
+        "import scarlet/array\n\
+         import scarlet/string\n\
+         pub fn main() {\n\
+         \tprintln(string.length('e\u{0301}b'))\n\
+         \tprintln(array.length(string.to_graphemes('e\u{0301}b')))\n\
+         \tprintln(string.length('\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}'))\n\
+         \tprintln(array.length(string.to_graphemes('\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}')))\n\
+         }\n",
+        "3\n2\n7\n1\n",
+    );
 }
