@@ -32,6 +32,7 @@ pub mod native_rc;
 pub mod template;
 pub mod tivec;
 pub mod vm;
+pub mod wire;
 
 pub use abi::{AbiSlot, TemplateIdx};
 pub use ids::{FuncIdx, TypeId};

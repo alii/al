@@ -37,6 +37,7 @@ fn single_fn_program(
         templates,
         abi,
         wire_templates: Default::default(),
+        wire_descs: Default::default(),
     }
 }
 

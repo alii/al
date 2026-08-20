@@ -162,8 +162,8 @@ pub trait ElabCtx: PreludeTys {
 
     fn ty_nil(&mut self) -> Ty;
 
-    /// The descriptor constant a `wire.encode`/`wire.decode` call carries, for
-    /// the type that call crosses the wire at.
+    /// The descriptor a `wire.encode`/`wire.decode` call carries, as its index
+    /// in `Program.wire_descs`, for the type that call crosses the wire at.
     ///
     /// `None` means `ty` cannot cross, and the refusal has been reported as an
     /// error at `at`. This is the one question the elaborator asks that can be
@@ -178,7 +178,7 @@ pub trait ElabCtx: PreludeTys {
         ty: RTy,
         op: WireOp,
         at: Span,
-    ) -> Option<ConstId>;
+    ) -> Option<u32>;
 }
 
 /// One step of the check walk, recorded in entry order and replayed
@@ -995,7 +995,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             _ => return TypedCallee::Builtin { op, imm },
         };
         let imm = match self.ctx.wire_descriptor(&mut *self.pool, crossed, wop, at) {
-            Some(c) => Imm::Const(c),
+            Some(i) => Imm::WireDesc(i),
             None => imm,
         };
         TypedCallee::Builtin { op, imm }

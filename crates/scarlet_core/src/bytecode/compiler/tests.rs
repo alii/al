@@ -1105,21 +1105,29 @@ mod wire_descriptors {
     /// its constructors are minted, under the `(type_id, variant_idx)`
     /// identity a decoder rebuilds them by. The template count is the part
     /// that witnesses the node table's contents rather than just that some
-    /// number was pooled.
+    /// number was attached.
+    ///
+    /// **The operand indexes `Program.wire_descs`, not the constant pool.**
+    /// Until T-732 it named a pooled `Int` holding the shape fingerprint,
+    /// because the node table had no runtime form; it now names the table
+    /// directly and the fingerprint rides inside the descriptor. Asserting
+    /// against `constants` here would still find *a* value and would say
+    /// nothing about wire.
     #[test]
     fn an_encode_carries_a_descriptor_and_mints_that_type_s_constructors() {
         let p = emitted(&format!("{EVENT}b = wire.encode(Left('a'))\nb\n"));
 
         let ops = operands(&p, Op::WireEncode);
         assert_eq!(ops.len(), 1, "one call, one op");
-        let c = p
-            .constants
-            .get(ops[0] as usize)
-            .expect("the operand names a pooled constant");
         assert!(
-            c.as_int().is_some(),
-            "the descriptor constant is the shape fingerprint, an Int; got {c:?}"
+            usize::try_from(ops[0])
+                .ok()
+                .is_some_and(|i| i < p.wire_descs.len()),
+            "the operand must index wire_descs; got {} against a table of {}",
+            ops[0],
+            p.wire_descs.len()
         );
+        assert_eq!(p.wire_descs.len(), 1, "one type crossed, one descriptor");
 
         assert_eq!(
             p.wire_templates.len(),

@@ -165,6 +165,13 @@ pub enum Imm {
     Const(ConstId),
     /// `Op::IndexOr` with the default pushed on the stack (encoded as -1).
     PushedDefault,
+    /// A wire op's descriptor, as an index into `Program.wire_descs`.
+    ///
+    /// **Not `Const`**, though it was until T-732: a descriptor is not a
+    /// constant-pool `Value` and reusing `Const` would mean two index spaces
+    /// silently made to coincide. Its own variant is what makes
+    /// `imm_operand`'s abort able to tell them apart.
+    WireDesc(u32),
 }
 
 impl fmt::Display for Imm {
@@ -175,6 +182,7 @@ impl fmt::Display for Imm {
             Imm::Argc(n) => write!(f, "#{n}"),
             Imm::Const(c) => write!(f, "#{c}"),
             Imm::PushedDefault => f.write_str("#pushed"),
+            Imm::WireDesc(i) => write!(f, "#w{i}"),
         }
     }
 }

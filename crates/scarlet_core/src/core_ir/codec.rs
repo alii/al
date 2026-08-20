@@ -270,6 +270,10 @@ fn enc_imm(e: &mut Enc, imm: &Imm) {
             e.u32(c.0);
         }
         Imm::PushedDefault => e.u8(4),
+        Imm::WireDesc(i) => {
+            e.u8(5);
+            e.u32(*i);
+        }
     }
 }
 
@@ -280,6 +284,7 @@ fn dec_imm(d: &mut Dec) -> Result<Imm> {
         2 => Imm::Argc(d.u32()?),
         3 => Imm::Const(ConstId(d.u32()?)),
         4 => Imm::PushedDefault,
+        5 => Imm::WireDesc(d.u32()?),
         b => return Err(DecodeError::BadTag("Imm", b)),
     })
 }
@@ -744,12 +749,13 @@ mod tests {
         assert_eq!(format!("{f}"), format!("{back}"));
     }
 
-    /// A wire op's descriptor rides in `Imm::Const`, and the codec is the one
-    /// place a `.core` blob can lose it. Asserted structurally rather than
+    /// A wire op's descriptor rides in `Imm::WireDesc`, and the codec is the
+    /// one place a `.core` blob can lose it. Asserted structurally rather than
     /// through the golden renderer, which is the equality the test above uses:
     /// a decode that produced `Imm::Index(5)` instead would render `#5` where
-    /// `Imm::Const(ConstId(5))` renders `#c5`, but only the tag proves which
-    /// pool the operand indexes.
+    /// `Imm::WireDesc(5)` renders `#w5`, but only the tag proves which table
+    /// the operand indexes — and `Imm::Const(ConstId(5))` would name the
+    /// constant pool, which is a different table with a different meaning.
     #[test]
     fn a_wire_op_descriptor_round_trips() {
         let f = CoreFn {
@@ -758,7 +764,7 @@ mod tests {
             body: CoreExpr::Tail(Atom::PrimOp {
                 op: Op::WireEncode,
                 args: vec![LocalId::from_usize(0)],
-                imm: Imm::Const(ConstId(5)),
+                imm: Imm::WireDesc(5),
             }),
             ret_ty: RTy(7),
         };
@@ -767,7 +773,7 @@ mod tests {
             panic!("expected a Tail PrimOp");
         };
         assert_eq!(op, Op::WireEncode);
-        assert_eq!(imm, Imm::Const(ConstId(5)));
+        assert_eq!(imm, Imm::WireDesc(5));
     }
 
     #[test]

@@ -129,20 +129,11 @@ const REENTRY: &[&str] = &[
 /// Construction sites no op reaches, each with the reason it does not. A site
 /// that is not here and not reachable fails
 /// [`every_construction_site_is_attributed_to_an_op`].
-const UNATTRIBUTED: &[(&str, &str)] = &[
-    (
-        "resolve",
-        "Templates::resolve binds the H1 bundle once at VM start; it is the \
+const UNATTRIBUTED: &[(&str, &str)] = &[(
+    "resolve",
+    "Templates::resolve binds the H1 bundle once at VM start; it is the \
          binding step, not an op's outcome",
-    ),
-    (
-        "wire_refusal",
-        "builds every DecodeError for Op::WireDecode, which cannot reach it \
-         yet: the op has no descriptor operand to read against and traps \
-         first, so the call edge does not exist (T-732). Delete this row with \
-         the operand, and the sweep finds it",
-    ),
-];
+)];
 
 /// The blocking pool's mint/consume pair. A handler returns
 /// `BlockingOp::V`; the poller builds the value in `completion_result`'s

@@ -23,6 +23,10 @@ use std::collections::HashMap;
 
 use smallvec::SmallVec;
 
+use scarlet_vm::wire::{
+    WireCtor as RtCtor, WireDesc as RtDesc, WireNode as RtNode, WireNodeIdx as RtIdx,
+};
+
 use super::elaborate::subst_rty;
 use super::rty::{RTy, ResolvedNode, ResolvedPool};
 use crate::core_ir::VariantRef;
@@ -126,7 +130,7 @@ impl Desc {
     /// The 64-bit hash of this type's shape. Two peers agree they are talking
     /// about the same shape by comparing these; `wire.scrl`'s module doc
     /// specifies how it is computed and what moves it.
-    pub(crate) fn fingerprint(&self) -> u64 {
+    fn fingerprint(&self) -> u64 {
         self.fingerprint
     }
 
@@ -139,6 +143,52 @@ impl Desc {
     #[allow(dead_code)]
     fn len(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// This descriptor as the runtime's own, for `Program.wire_descs`.
+    ///
+    /// **Every name is dropped**, and that is the point rather than an
+    /// economy: the VM reads structure, and rebuilds a constructor through
+    /// `Program::wire_templates`, which is keyed on the identity
+    /// [`VariantRef`] already carries. `Compiler::mint_wire_templates` turns
+    /// the names into templates and runs from this same list, so the two
+    /// halves cannot drift — one walk, one order, one source.
+    ///
+    /// The fingerprint travels because it cannot be recomputed on the other
+    /// side: it folds constructor and field names as text, and the runtime
+    /// descriptor holds none.
+    ///
+    /// Index-preserving. `NodeIdx` and the runtime's `WireNodeIdx` are the
+    /// same numbers over the same table, which is what lets a recursive type
+    /// stay finite across the conversion — `Cons.tail` still points at the
+    /// node it sits in.
+    pub(crate) fn to_runtime(&self) -> RtDesc {
+        let at = |n: NodeIdx| RtIdx(n.0);
+        let nodes = self
+            .nodes
+            .iter()
+            .map(|n| match n {
+                Node::Int => RtNode::Int,
+                Node::Float => RtNode::Float,
+                Node::String => RtNode::String,
+                Node::Binary => RtNode::Binary,
+                Node::Array(e) => RtNode::Array(at(*e)),
+                Node::Map(k, v) => RtNode::Map(at(*k), at(*v)),
+                Node::Tuple(es) => RtNode::Tuple(es.iter().map(|e| at(*e)).collect()),
+                // Declared order is preserved, because a variant's position in
+                // this list is the tag the peer receives.
+                Node::Data(vs) => RtNode::Data(
+                    vs.iter()
+                        .map(|v| RtCtor {
+                            type_id: v.variant.type_id,
+                            variant_idx: v.variant.variant_idx,
+                            fields: v.fields.iter().map(|f| at(f.node)).collect(),
+                        })
+                        .collect(),
+                ),
+            })
+            .collect();
+        RtDesc::new(nodes, at(self.root), self.fingerprint())
     }
 
     /// A `Desc` over an already-built node table, for a caller that has one
@@ -1610,5 +1660,38 @@ mod tests {
                 "{r:?} must carry prose a diagnostic can quote"
             );
         }
+    }
+
+    /// [`Desc::to_runtime`] carries the fingerprint and preserves every index.
+    ///
+    /// Asserted here, directly, because **a round trip cannot see either of
+    /// them**. Dropping the fingerprint in the conversion was planted and
+    /// `wire.encode`/`wire.decode` still agreed end to end: the encoder writes
+    /// whatever it is handed into the header and the decoder compares against
+    /// that same value, so the fault is symmetric across the two halves and
+    /// cancels exactly. That is the checksum-through-the-mechanism-it-checks
+    /// shape, and it is the concrete reason T-341 pins a *printed* encoding
+    /// rather than only a round trip.
+    ///
+    /// The index half does show up in a round trip — shifting it by one takes
+    /// the `wire.encode` walk red — but it is asserted here too, because that
+    /// failure depends on the descriptor having nodes of different kinds and a
+    /// table that happened to be uniform would hide it.
+    #[test]
+    fn to_runtime_carries_the_fingerprint_and_preserves_indices() {
+        let d = Desc {
+            nodes: vec![Node::Array(NodeIdx(1)), Node::Int],
+            root: NodeIdx(0),
+            fingerprint: 0xdead_beef_0bad_f00d,
+        };
+        // Structural equality rather than accessor-by-accessor: the runtime
+        // descriptor's readers are crate-private to `scarlet_vm`, and widening
+        // them so a test could call them would add public surface for nothing.
+        let want = RtDesc::new(
+            vec![RtNode::Array(RtIdx(1)), RtNode::Int],
+            RtIdx(0),
+            0xdead_beef_0bad_f00d,
+        );
+        assert_eq!(d.to_runtime(), want);
     }
 }

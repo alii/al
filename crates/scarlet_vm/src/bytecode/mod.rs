@@ -1206,6 +1206,17 @@ pub struct Program {
     /// clears this the same call that truncates `templates`
     /// (`IncrementalSession::reset_to`).
     pub wire_templates: std::collections::HashMap<(crate::TypeId, u16), crate::abi::TemplateIdx>,
+    /// The descriptors `Op::WireEncode` and `Op::WireDecode` walk, one per
+    /// distinct type shape a `wire` call in this program crosses. **The
+    /// instruction's operand is an index into this table**, which is why the
+    /// wire ops carry `Imm::WireDesc` rather than the `Imm::Const` every other
+    /// immediate-bearing op uses: a descriptor is not a constant-pool `Value`
+    /// and pretending it was would mean two index spaces made to coincide.
+    ///
+    /// Session-scoped exactly as `wire_templates` is — the front end rebuilds
+    /// both from the same `Desc` list on every emit, so a rewind that truncates
+    /// one must clear the other.
+    pub wire_descs: Vec<std::sync::Arc<crate::wire::WireDesc>>,
 }
 
 impl Program {

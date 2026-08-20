@@ -685,11 +685,11 @@ pub(crate) unsafe extern "C" fn al_shim_try_op(
 impl VM {
     /// Dispatch an [`is_native_try_op`](crate::bytecode::is_native_try_op)
     /// opcode to its interpreter method.
-    fn run_try_op(&mut self, op_code: u8, _operand: i32) -> VmResult<()> {
+    fn run_try_op(&mut self, op_code: u8, operand: i32) -> VmResult<()> {
         match op_code {
             opc::ARRAY_SLICE => self.seq_slice(),
-            opc::WIRE_ENCODE => self.wire_encode(),
-            opc::WIRE_DECODE => self.wire_decode(),
+            opc::WIRE_ENCODE => self.wire_encode(operand),
+            opc::WIRE_DECODE => self.wire_decode(operand),
             _ => proof_violation("run_try_op on an op is_native_try_op excludes"),
         }
     }

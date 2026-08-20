@@ -781,8 +781,8 @@ impl VM {
                 Op::JsonFloat => self.json_float()?,
                 Op::JsonBool => self.json_bool()?,
                 Op::JsonEncode => self.json_encode()?,
-                Op::WireEncode => self.wire_encode()?,
-                Op::WireDecode => self.wire_decode()?,
+                Op::WireEncode => self.wire_encode(instr.operand)?,
+                Op::WireDecode => self.wire_decode(instr.operand)?,
                 Op::MakeEnumPayload => {
                     self.make_enum_payload(instr.operand, instr.b as usize, instr.a != 0)?
                 }

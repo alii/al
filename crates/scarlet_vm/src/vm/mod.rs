@@ -1332,6 +1332,7 @@ fn halt_test_vm() -> VM {
         templates,
         abi,
         wire_templates: Default::default(),
+        wire_descs: Default::default(),
     };
     new_vm(program).expect("test VM construction must succeed")
 }

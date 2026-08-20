@@ -319,7 +319,7 @@ impl ElabCtx for Compiler {
         ty: RTy,
         op: wire::WireOp,
         at: Span,
-    ) -> Option<crate::core_ir::ConstId> {
+    ) -> Option<u32> {
         let desc = match wire::build_desc(pool, &mut *self, ty) {
             Ok(desc) => desc,
             Err(refusal) => {
@@ -328,23 +328,28 @@ impl ElabCtx for Compiler {
                 return None;
             }
         };
-        // The immediate is the fingerprint, which is the half of the
-        // descriptor whose runtime meaning `wire.scrl` already fixes: it
-        // travels in every encoded value's header and `SchemaMismatch` carries
-        // it as an `Int`. The node table reaches the VM only as the templates
-        // `mint_wire_templates` derives from `wire_descs`; the rest of it has
-        // no runtime form yet (T-732).
-        let c = self.const_int(desc.fingerprint() as i64);
-        // Two call sites at one type describe it twice. Pooling the constant
-        // already dedups; this keeps the descriptor list to one entry per
-        // distinct shape, and `Desc` equality is the right key because the
-        // fingerprint deliberately is not — it excludes the type's identity,
-        // so two different types of one shape share it while needing
-        // different templates.
-        if !self.wire_descs.contains(&desc) {
-            self.wire_descs.push(desc);
-        }
-        Some(crate::core_ir::ConstId(c as u32))
+        // The immediate is this descriptor's position in `wire_descs`, which
+        // emit copies to `Program.wire_descs` in the same order — so the
+        // number the instruction carries is the number the VM indexes with.
+        //
+        // Two call sites at one type describe it twice, and both must reach
+        // the same entry. `Desc` equality is the right key and the fingerprint
+        // is NOT: the fingerprint deliberately excludes the type's identity,
+        // so two different types of one shape share it while needing different
+        // templates, and deduping on it would hand one type's call site the
+        // other's constructors.
+        let at = self.wire_descs.iter().position(|d| *d == desc);
+        let idx = match at {
+            Some(i) => i,
+            None => {
+                self.wire_descs.push(desc);
+                self.wire_descs.len() - 1
+            }
+        };
+        // The table is indexed by an i32 operand, so an index past i32::MAX
+        // could not be named. A program with two billion distinct wire shapes
+        // is not reachable, and saying so is cheaper than a silent truncation.
+        u32::try_from(idx).ok().filter(|i| *i <= i32::MAX as u32)
     }
 }
 

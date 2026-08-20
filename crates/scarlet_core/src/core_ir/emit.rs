@@ -266,20 +266,31 @@ fn redeclared_join(id: JoinId) -> ! {
     )
 }
 
-/// Flatten a typed [`Imm`] to the raw `i32` operand. Three ops read a
-/// [`ConstId`] out of it: `Op::IndexOr`'s default, and the two wire ops'
-/// descriptor. `-1` ("default was pushed") stays `Op::IndexOr`'s alone. Any
-/// other pairing aborts rather than emit an operand the VM would misread —
-/// keep the op/immediate arms spelled out, because a catch-all would hand a
-/// `ConstId` to an op that reads its operand as an index or an argc.
+/// Flatten a typed [`Imm`] to the raw `i32` operand. `Op::IndexOr` reads a
+/// [`ConstId`] out of it; the two wire ops read an index into
+/// `Program.wire_descs`. Any other pairing aborts rather than emit an operand
+/// the VM would misread — keep the op/immediate arms spelled out, because a
+/// catch-all would hand a `ConstId` to an op that reads its operand as an
+/// index or an argc.
+///
+/// **A wire op with no descriptor flattens to `-1`, and that is load-bearing
+/// rather than tidy.** It used to be `0`, which was harmless while the VM had
+/// no descriptor table and trapped on every wire op. Now `0` is a *valid*
+/// index, so a call whose descriptor never got attached — an eta-wrapped
+/// builtin still does exactly that, `typed_ir::eta` mints `Imm::None` and
+/// T-337 is the ticket for it — would encode a value against whatever shape
+/// happens to sit first in the table. `-1` cannot be an index, so the VM
+/// refuses it the way it refused every wire op before this landed.
 #[allow(clippy::panic)]
 pub(super) fn imm_operand(op: Op, imm: Imm) -> i32 {
     match (op, imm) {
         (Op::IndexOr, Imm::Const(c)) => c.0 as i32,
         (Op::IndexOr, Imm::PushedDefault) => -1,
-        (Op::WireEncode | Op::WireDecode, Imm::Const(c)) => c.0 as i32,
+        (Op::WireEncode | Op::WireDecode, Imm::WireDesc(i)) => i as i32,
+        // No descriptor attached: not an index, so the VM refuses it.
+        (Op::WireEncode | Op::WireDecode, Imm::None) => -1,
         (Op::IndexOr, Imm::None | Imm::Index(_) | Imm::Argc(_))
-        | (_, Imm::Const(_) | Imm::PushedDefault) => panic!(
+        | (_, Imm::Const(_) | Imm::PushedDefault | Imm::WireDesc(_)) => panic!(
             "internal compiler error: {op:?} cannot carry immediate {imm:?}. \
              Report this as a compiler bug."
         ),
@@ -1386,12 +1397,28 @@ mod tests {
         super::super::testkit::bind(id, RTy(0))
     }
 
-    /// The wire ops' descriptor is a constant-pool entry, so it flattens the
-    /// same way `Op::IndexOr`'s default does.
+    /// The wire ops' descriptor is an index into `Program.wire_descs`.
     #[test]
-    fn a_wire_op_flattens_its_descriptor_to_the_const_id() {
-        assert_eq!(imm_operand(Op::WireEncode, Imm::Const(ConstId(3))), 3);
-        assert_eq!(imm_operand(Op::WireDecode, Imm::Const(ConstId(9))), 9);
+    fn a_wire_op_flattens_its_descriptor_to_the_table_index() {
+        assert_eq!(imm_operand(Op::WireEncode, Imm::WireDesc(3)), 3);
+        assert_eq!(imm_operand(Op::WireDecode, Imm::WireDesc(9)), 9);
+    }
+
+    /// The two index spaces are kept apart by the abort, not by convention.
+    /// A `ConstId` on a wire op used to be the permitted form; now it names
+    /// the wrong table and must not reach the VM.
+    #[test]
+    #[should_panic(expected = "cannot carry immediate")]
+    fn a_wire_op_carrying_a_const_id_aborts() {
+        imm_operand(Op::WireEncode, Imm::Const(ConstId(3)));
+    }
+
+    /// And the reverse: a descriptor index on an op that reads its operand as
+    /// something else.
+    #[test]
+    #[should_panic(expected = "cannot carry immediate")]
+    fn a_non_wire_op_carrying_a_descriptor_index_aborts() {
+        imm_operand(Op::IndexOr, Imm::WireDesc(3));
     }
 
     /// The permitted set is exactly three ops, and the value of the abort is
@@ -1412,12 +1439,18 @@ mod tests {
         imm_operand(Op::WireEncode, Imm::PushedDefault);
     }
 
-    /// A wire op with no descriptor attached yet stays legal and emits 0, so
-    /// this change is inert until something sets the immediate.
+    /// A wire op with no descriptor emits `-1`, NOT `0`.
+    ///
+    /// This assertion is the whole of what stops a silent misencode. `0` is a
+    /// real index into `Program.wire_descs`, so a call that never got a
+    /// descriptor — `typed_ir::eta` still mints `Imm::None` for an
+    /// eta-wrapped builtin, which is T-337 — would otherwise be encoded
+    /// against whatever shape sits first in the table, and nothing anywhere
+    /// would report it. `-1` is not an index and the VM refuses it.
     #[test]
-    fn a_wire_op_without_a_descriptor_is_operand_zero() {
-        assert_eq!(imm_operand(Op::WireEncode, Imm::None), 0);
-        assert_eq!(imm_operand(Op::WireDecode, Imm::None), 0);
+    fn a_wire_op_without_a_descriptor_is_minus_one_not_zero() {
+        assert_eq!(imm_operand(Op::WireEncode, Imm::None), -1);
+        assert_eq!(imm_operand(Op::WireDecode, Imm::None), -1);
     }
 
     /// `emit` is the only place the typed immediate becomes the `i32` the VM
@@ -1430,7 +1463,7 @@ mod tests {
             rhs: Atom::PrimOp {
                 op: Op::WireEncode,
                 args: vec![LocalId(0)],
-                imm: Imm::Const(ConstId(5)),
+                imm: Imm::WireDesc(5),
             },
             body: Box::new(CoreExpr::Tail(Atom::Local(LocalId(1)))),
         };

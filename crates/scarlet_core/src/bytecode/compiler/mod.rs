@@ -51,6 +51,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use super::peephole::fuse;
 use super::session::{RawRef, Watermark};
@@ -1542,6 +1543,11 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         // produced cannot be minted again by the next one.
         let descs = std::mem::take(&mut c.wire_descs);
         c.mint_wire_templates(&descs);
+        // The same list the instruction operands index, in the same order,
+        // converted to the runtime's own descriptor. Assigned rather than
+        // appended: emit is the only writer, so a table an earlier compile
+        // built cannot survive into this one and no index can go stale.
+        c.program.wire_descs = descs.iter().map(|d| Arc::new(d.to_runtime())).collect();
         // Jump operands are frame-relative, so fusion has to know which frame
         // owns each instruction: `functions` is that map, and the entry frame
         // owns everything the bodies do not.

@@ -219,6 +219,7 @@ impl Compiler {
         // about to drop or reuse for a different constructor.
         self.program.templates.truncate(self.abi_template_count);
         self.program.wire_templates.clear();
+        self.program.wire_descs.clear();
         // Descriptors elaboration built for the compile being rewound. A
         // check-only compile never drains them, so without this a later emit
         // in the same session would mint templates for a call site that no

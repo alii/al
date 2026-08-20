@@ -1,17 +1,16 @@
 //! `scarlet/wire`: values as bytes, under a descriptor of the type the call
 //! site was inferred at.
 //!
-//! Both halves live here. [`WireDesc`] is the runtime shape of a type;
-//! [`encode_value`] walks a value under one and writes the bytes
+//! Both halves live here. [`encode_value`] walks a value under a
+//! [`WireDesc`](crate::wire::WireDesc) and writes the bytes
 //! `scarlet/wire.scrl`'s module doc specifies, and [`VM::decode_wire`] reads
 //! them back, treating every byte as hostile.
 //!
-//! Neither op body runs yet, because nothing puts a [`WireDesc`] in front of
-//! them. The descriptor is built in the compiler
-//! (`scarlet_core::typed_ir::wire`, which this crate may not depend on) and has
-//! to arrive as a program constant; elaboration attaching it, and the
-//! constant's runtime form, are still being cut (T-732). So the ops trap and
-//! both walks are reachable only from the tests below.
+//! The descriptor itself is program data and lives in [`crate::wire`]; each
+//! instruction names one by index into
+//! [`Program::wire_descs`](crate::bytecode::Program::wire_descs). The front end
+//! builds it (`scarlet_core::typed_ir::wire`, which this crate may not depend
+//! on) and converts on the way out.
 //!
 //! # Decoding refuses; encoding cannot
 //!
@@ -47,12 +46,15 @@
 //! [`values_equal`](crate::bytecode::values_equal) and the JSON encoder already
 //! follow. `wire_encode_deep_chain_is_iterative` below is what holds it.
 
+use std::sync::Arc;
+
 use crate::TypeId;
 use crate::abi::AbiSlot;
 use crate::bytecode::{MapBacking, Value, ValueView, hamt, hash_value};
+use crate::wire::{WireDesc, WireNode, WireNodeIdx};
 
 use super::map::env_entries;
-use super::{VM, VmError, VmResult, range_len};
+use super::{VM, VmError, VmResult, bin_ref, range_len};
 
 /// Format version, written as the third header byte and folded into every
 /// fingerprint. `scarlet/wire.scrl`'s module doc is normative on why the two
@@ -68,81 +70,9 @@ const MAGIC: [u8; 2] = *b"SW";
 /// `MAGIC` · `VERSION` · fingerprint u64.
 const HEADER_LEN: usize = MAGIC.len() + 1 + 8;
 
-/// Index into [`WireDesc::nodes`]. Only meaningful for the `WireDesc` that
-/// minted it, which is what lets a recursive type be a finite table: a
-/// `List(Int)` is two nodes, and `Cons.tail` is the index of the node it sits
-/// in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// No production caller yet, here and on every item below: the descriptor
-// reaches the VM as an op operand, and nothing mints that operand. Retire these
-// with the code that does. Not `expect`, which would be unfulfilled in the lib
-// target and fulfilled in lib test, and `cargo clippy --all-targets` fails on
-// the difference.
-#[allow(dead_code)]
-struct WireNodeIdx(u32);
-
-/// One constructor a value may be, as the runtime needs it.
-///
-/// The position of a `WireCtor` in its [`WireNode::Data`] list **is** the tag
-/// the peer receives, so reordering a type's constructors is a wire break.
-/// `variant_idx` is the same number seen from the other side — a constructor's
-/// declaration order within its type — and they coincide because the descriptor
-/// builder lists constructors in declared order. Both are kept: the tag is what
-/// goes on the wire, and `(type_id, variant_idx)` is what a decoder hands
-/// `Program::wire_templates` to get the constructor back.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-struct WireCtor {
-    type_id: TypeId,
-    variant_idx: u16,
-    /// Field types in declared order, which is the order the payload is
-    /// written in.
-    fields: Vec<WireNodeIdx>,
-}
-
-/// One node of a [`WireDesc`]. Children are [`WireNodeIdx`] rather than nested
-/// nodes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-enum WireNode {
-    Int,
-    Float,
-    String,
-    Binary,
-    Array(WireNodeIdx),
-    Map(WireNodeIdx, WireNodeIdx),
-    Tuple(Vec<WireNodeIdx>),
-    Data(Vec<WireCtor>),
-}
-
-/// The runtime descriptor of one type: a node table, the node the type itself
-/// is, and the 64-bit hash of that shape.
-///
-/// The fingerprint is carried, never recomputed here. It folds constructor and
-/// field names as text, and this table holds no names — by design, see the
-/// module doc. The compiler computes it in `scarlet_core::typed_ir::wire` and
-/// it travels with the descriptor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-struct WireDesc {
-    nodes: Vec<WireNode>,
-    root: WireNodeIdx,
-    fingerprint: u64,
-}
-
-impl WireDesc {
-    /// The node at `i`. `None` only for an index from another `WireDesc`,
-    /// which the builder cannot produce.
-    #[allow(dead_code)]
-    fn node(&self, i: WireNodeIdx) -> Option<&WireNode> {
-        self.nodes.get(i.0 as usize)
-    }
-}
-
 // --- primitives -----------------------------------------------------------
 
 /// LEB128.
-#[allow(dead_code)]
 fn put_u64(out: &mut Vec<u8>, mut v: u64) {
     loop {
         let b = (v & 0x7f) as u8;
@@ -156,13 +86,11 @@ fn put_u64(out: &mut Vec<u8>, mut v: u64) {
 }
 
 /// Zigzag + LEB128. `Int` is 64-bit, so every Scarlet integer fits.
-#[allow(dead_code)]
 fn put_i64(out: &mut Vec<u8>, v: i64) {
     put_u64(out, ((v << 1) ^ (v >> 63)) as u64);
 }
 
 /// `len LEB128 · UTF-8 bytes`.
-#[allow(dead_code)]
 fn put_str(out: &mut Vec<u8>, s: &str) {
     put_u64(out, s.len() as u64);
     out.extend_from_slice(s.as_bytes());
@@ -182,12 +110,11 @@ fn put_str(out: &mut Vec<u8>, s: &str) {
 ///
 /// Iterative: children go onto an explicit work stack, so nesting depth costs
 /// heap rather than native frames.
-#[allow(dead_code)]
 fn encode_value(desc: &WireDesc, root: &Value) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN);
     out.extend_from_slice(&MAGIC);
     out.push(VERSION);
-    out.extend_from_slice(&desc.fingerprint.to_le_bytes());
+    out.extend_from_slice(&desc.fingerprint().to_le_bytes());
     write_body(&mut out, desc, root);
     out
 }
@@ -195,13 +122,12 @@ fn encode_value(desc: &WireDesc, root: &Value) -> Vec<u8> {
 /// The body half of [`encode_value`]: the value under `desc.root`, with no
 /// header. Split out because the header is written once and the walk is the
 /// part with an invariant worth naming.
-#[allow(dead_code)]
 fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value) {
     // A container pushes its children and they are popped before anything
     // queued beside it, so a 100k-deep chain costs O(1) entries here rather
     // than one per level. A 100k-wide container does cost one entry per
     // element — that is heap, which is the trade this exists to make.
-    let mut pending: Vec<(WireNodeIdx, Value)> = vec![(desc.root, root.clone())];
+    let mut pending: Vec<(WireNodeIdx, Value)> = vec![(desc.root(), root.clone())];
 
     while let Some((at, v)) = pending.pop() {
         let Some(node) = desc.node(at) else {
@@ -371,7 +297,6 @@ fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value) {
 /// BYTES, and every arm of it is something a hostile or stale peer can
 /// legitimately provoke.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 enum Refusal {
     Truncated,
     NotWire,
@@ -397,7 +322,6 @@ enum Refusal {
 /// into the first would report a compiler bug as hostile input, and the peer
 /// that sent perfectly good bytes would get the blame.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 enum Stop {
     Refused(Refusal),
     Internal(&'static str),
@@ -412,13 +336,11 @@ impl From<Refusal> for Stop {
 /// A cursor over untrusted bytes. Every read is bounds-checked and every
 /// failure names an offset; nothing here can panic on a short or hostile
 /// input.
-#[allow(dead_code)]
 struct Reader<'a> {
     buf: &'a [u8],
     at: usize,
 }
 
-#[allow(dead_code)]
 impl<'a> Reader<'a> {
     fn new(buf: &'a [u8]) -> Reader<'a> {
         Reader { buf, at: 0 }
@@ -511,17 +433,19 @@ const MAX_ZERO_COST_ELEMS: u64 = 1 << 24;
 /// refers to itself: `List(Int)`'s `Cons.tail` is the `List(Int)` node, so a
 /// single pass would need its own answer. Successive rounds shrink each entry
 /// until nothing moves, which is at most one round per node.
-#[allow(dead_code)]
 fn min_bytes(desc: &WireDesc) -> Vec<u64> {
     // `u64::MAX` reads "not yet known", and every arm below saturates, so an
     // unknown never wraps into a small number and lets a count through.
-    let mut min = vec![u64::MAX; desc.nodes.len()];
+    let mut min = vec![u64::MAX; desc.len()];
     let at = |m: &Vec<u64>, i: WireNodeIdx| -> u64 { *m.get(i.0 as usize).unwrap_or(&u64::MAX) };
     loop {
         let mut moved = false;
-        for i in 0..desc.nodes.len() {
+        for i in 0..desc.len() {
             let was = min[i];
-            let now = match &desc.nodes[i] {
+            let Some(node) = desc.node(WireNodeIdx(i as u32)) else {
+                continue;
+            };
+            let now = match node {
                 // A zigzag LEB128 of 0, an empty string, an empty binary and
                 // an empty container are all one byte.
                 WireNode::Int | WireNode::String | WireNode::Binary => 1,
@@ -558,7 +482,6 @@ fn min_bytes(desc: &WireDesc) -> Vec<u64> {
 /// Refuse a count the remaining input cannot possibly satisfy, BEFORE anything
 /// is allocated. This is the check that stands between a four-byte message
 /// claiming a 2^40-element array and the allocator.
-#[allow(dead_code)]
 fn guard_count(
     count: u64,
     min_each: u64,
@@ -581,7 +504,6 @@ fn guard_count(
 }
 
 /// One pending piece of decoder work.
-#[allow(dead_code)]
 enum Step {
     /// Read a value of this node from the input.
     Read(WireNodeIdx),
@@ -592,7 +514,6 @@ enum Step {
 /// A container whose children are built and are waiting to be joined. The
 /// child count is fixed when the container's count is read and guarded, so a
 /// `Finish` can never ask for more values than the walk put there.
-#[allow(dead_code)]
 enum Finish {
     Array(usize),
     /// `n` key/value pairs, so `2 * n` values, plus the offset the count was
@@ -607,7 +528,6 @@ enum Finish {
 }
 
 /// Take the last `n` finished values, in the order they were built.
-#[allow(dead_code)]
 fn take_last(done: &mut Vec<Value>, n: usize) -> Result<Vec<Value>, Stop> {
     if done.len() < n {
         // The count that sized this `Finish` is the same one that pushed the
@@ -624,7 +544,6 @@ fn take_last(done: &mut Vec<Value>, n: usize) -> Result<Vec<Value>, Stop> {
 /// bytes from somewhere else are `NotWire` rather than a `SchemaMismatch`
 /// against whatever their bytes 3..11 happen to spell. An input too short to
 /// hold even the magic has nothing to judge and is `Truncated`.
-#[allow(dead_code)]
 fn read_header(r: &mut Reader<'_>, expected: u64) -> Result<(), Refusal> {
     if r.take(MAGIC.len())? != MAGIC {
         return Err(Refusal::NotWire);
@@ -645,7 +564,6 @@ impl VM {
     /// The Scarlet `DecodeError` a [`Refusal`] names. Built through the ABI,
     /// so a renamed constructor is a compile diagnostic rather than a
     /// mis-built value.
-    #[allow(dead_code)]
     fn wire_refusal(&mut self, r: Refusal) -> VmResult<Value> {
         match r {
             Refusal::Truncated => self.abi_nullary(AbiSlot::WireTruncated),
@@ -678,7 +596,6 @@ impl VM {
     /// map insert path — so it is indistinguishable from a constructed one,
     /// and that plus the descriptor being the type is the whole type-safety
     /// argument. Nothing writes a field directly.
-    #[allow(dead_code)]
     fn decode_wire(&mut self, desc: &WireDesc, bytes: &[u8]) -> VmResult<Value> {
         match self.decode_checked(desc, bytes) {
             Ok(v) => self.make_ok(v),
@@ -691,10 +608,9 @@ impl VM {
         }
     }
 
-    #[allow(dead_code)]
     fn decode_checked(&mut self, desc: &WireDesc, bytes: &[u8]) -> Result<Value, Stop> {
         let mut r = Reader::new(bytes);
-        read_header(&mut r, desc.fingerprint)?;
+        read_header(&mut r, desc.fingerprint())?;
         let v = self.decode_body(desc, &mut r)?;
         // Reported rather than ignored: a caller that framed its own messages
         // and has extra bytes left has lost sync, and silently returning the
@@ -716,7 +632,6 @@ impl VM {
     /// values built so far; a container pushes its `Finish` first and its
     /// children after, so the children are popped and built before the parent
     /// that joins them.
-    #[allow(dead_code)]
     fn decode_body(&mut self, desc: &WireDesc, r: &mut Reader<'_>) -> Result<Value, Stop> {
         let mins = min_bytes(desc);
         let min_at = |i: WireNodeIdx| -> Result<u64, Stop> {
@@ -725,7 +640,7 @@ impl VM {
                 .ok_or(Stop::Internal("wire descriptor node index out of range"))
         };
 
-        let mut work: Vec<Step> = vec![Step::Read(desc.root)];
+        let mut work: Vec<Step> = vec![Step::Read(desc.root())];
         let mut done: Vec<Value> = Vec::new();
 
         while let Some(step) = work.pop() {
@@ -904,20 +819,45 @@ impl VM {
 }
 
 impl VM {
+    /// The descriptor an instruction's operand names.
+    ///
+    /// `Arc`-held, so this is a refcount bump rather than a copy of the node
+    /// table — and, more to the point, it ends the borrow of `self.program`
+    /// before the walk needs `self.heap`.
+    ///
+    /// A missing index is this runtime's own fault, never a program's: emit
+    /// writes the operand from the same list it fills the table from.
+    fn wire_desc(&self, operand: i32, op: &'static str) -> VmResult<Arc<WireDesc>> {
+        usize::try_from(operand)
+            .ok()
+            .and_then(|i| self.program.wire_descs.get(i).cloned())
+            .ok_or_else(|| {
+                VmError::internal(format!(
+                    "{op} names wire descriptor {operand}, which is not in the program"
+                ))
+            })
+    }
+
     /// `Op::WireEncode` — `[value] -> Binary`.
-    pub(super) fn wire_encode(&mut self) -> VmResult<()> {
-        Err(VmError::internal(
-            "wire.encode has no descriptor to walk: the encoder is implemented, \
-             but the op's descriptor operand is not minted yet",
-        ))
+    pub(super) fn wire_encode(&mut self, operand: i32) -> VmResult<()> {
+        let desc = self.wire_desc(operand, "wire.encode")?;
+        let v = self.pop()?;
+        let bytes = encode_value(&desc, &v);
+        let out = Value::binary_in(&mut self.heap, bytes);
+        self.stack.push(out);
+        Ok(())
     }
 
     /// `Op::WireDecode` — `[bytes Binary] -> Result(a, DecodeError)`.
-    pub(super) fn wire_decode(&mut self) -> VmResult<()> {
-        Err(VmError::internal(
-            "wire.decode has no descriptor to read against: the decoder is \
-             implemented, but the op's descriptor operand is not minted yet",
-        ))
+    pub(super) fn wire_decode(&mut self, operand: i32) -> VmResult<()> {
+        let desc = self.wire_desc(operand, "wire.decode")?;
+        let src = self.pop_binary("wire.decode")?;
+        // Own the bytes: the walk allocates into the same heap the borrow
+        // would be pinned to.
+        let bytes = bin_ref(&src).full_bytes().into_owned();
+        let out = self.decode_wire(&desc, &bytes)?;
+        self.stack.push(out);
+        Ok(())
     }
 }
 
@@ -929,8 +869,10 @@ mod tests {
 
     use super::super::halt_test_vm;
     use super::*;
+    // Only the tests build a constructor by hand; the walks match on one.
     use crate::bytecode::values_equal;
     use crate::template::EnumTemplate;
+    use crate::wire::WireCtor;
 
     fn variant_of(v: &Value) -> String {
         v.as_enum()
@@ -949,11 +891,7 @@ mod tests {
     /// A descriptor over `nodes` rooted at node 0, with a fingerprint the
     /// tests can recognise in the header.
     fn desc(nodes: Vec<WireNode>) -> WireDesc {
-        WireDesc {
-            nodes,
-            root: WireNodeIdx(0),
-            fingerprint: 0x0807_0605_0403_0201,
-        }
+        WireDesc::new(nodes, WireNodeIdx(0), 0x0807_0605_0403_0201)
     }
 
     /// The eleven header bytes every value carries: `SW`, version, then the
@@ -1334,14 +1272,53 @@ mod tests {
         assert_eq!(payload(&trailing)[0].as_int().expect("Int payload"), 3);
     }
 
-    /// Both ops still have no reachable body: `wire_decode` has no decoder, and
-    /// `wire_encode` has an encoder but no descriptor operand to feed it.
-    /// Pinned so the day either is wired up, this test is what says so.
+    /// The whole path, through the ops rather than through the walks: a
+    /// descriptor in `Program.wire_descs`, an instruction operand naming it,
+    /// a value on the stack, bytes back, and the value again.
+    ///
+    /// This is what the unit tests above could not witness while the operand
+    /// did not exist — every one of them calls `encode_value`/`decode_wire`
+    /// directly, so all of them would still pass with both op bodies trapping.
     #[test]
-    fn both_ops_trap_until_a_descriptor_reaches_them() {
+    fn the_ops_round_trip_through_their_operand() {
+        let mut vm = list_vm();
+        let d = list_desc();
+        vm.program.wire_descs.push(Arc::new(d));
+        let operand = 0i32;
+
+        let nil = Value::enum_with_names_in(&mut vm.heap, TypeId(7), 0, "List", "Nil", &[], &[]);
+        let one = Value::enum_with_names_in(
+            &mut vm.heap,
+            TypeId(7),
+            1,
+            "List",
+            "Cons",
+            &["head", "tail"],
+            &[Value::small_int(5), nil],
+        );
+
+        vm.stack.push(one.clone());
+        vm.wire_encode(operand).expect("encode runs");
+        let bytes = vm.stack.pop().expect("encode left a Binary");
+        assert!(matches!(bytes.kind(), ValueView::Binary(_)));
+
+        vm.stack.push(bytes);
+        vm.wire_decode(operand).expect("decode runs");
+        let res = vm.stack.pop().expect("decode left a Result");
+        let e = res.as_enum().expect("Result");
+        assert_eq!(e.variant_name(), "Ok");
+        assert!(values_equal(&one, &e.payload()[0]));
+    }
+
+    /// An operand naming no descriptor is this runtime's fault, not a
+    /// program's, so it is a VM error rather than a decode refusal.
+    #[test]
+    fn an_operand_with_no_descriptor_is_a_vm_error() {
         let mut vm = halt_test_vm();
-        assert!(vm.wire_encode().is_err());
-        assert!(vm.wire_decode().is_err());
+        assert!(vm.program.wire_descs.is_empty());
+        vm.stack.push(Value::small_int(1));
+        assert!(vm.wire_encode(0).is_err());
+        assert!(vm.wire_encode(-1).is_err());
     }
 
     // --- decoding ---------------------------------------------------------
@@ -1660,7 +1637,7 @@ mod tests {
             .collect();
         assert_eq!(
             got,
-            vec![d.fingerprint as i64, (d.fingerprint ^ 0xff) as i64],
+            vec![d.fingerprint() as i64, (d.fingerprint() ^ 0xff) as i64],
             "expected is the reader's own, found is the one in the bytes"
         );
     }
