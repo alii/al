@@ -352,3 +352,105 @@ fn an_infallible_match_keeps_the_flat_lowering() {
         ]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Wire fingerprint stability across two compiles (T-478, T-334's unmet arm)
+
+/// A program with one `wire.encode` at `Event`, optionally preceded by an
+/// unrelated declaration that interns identifiers ahead of `Event`'s.
+///
+/// The padding is the whole point: two compiles of a byte-identical source is
+/// a determinism test, not a stability test, and passes even on a fingerprint
+/// that folds `StrId` numbers. The pair has to differ in something that moves
+/// `StrId` allocation, and a type declared before `Event` does exactly that —
+/// its name, constructor and field are interned first, shifting every id that
+/// follows.
+fn wire_src(padding: &str) -> String {
+    format!(
+        "import scarlet/wire\n\
+         {padding}\
+         type Event {{\n\
+         \x20 Said(who String, tags Array(String))\n\
+         \x20 Left(who String)\n\
+         }}\n\n\
+         pub fn main() {{\n\
+         \tb = wire.encode(Left('a'))\n\
+         \tprintln(b)\n\
+         }}\n"
+    )
+}
+
+const PADDING: &str = "type Zzz {\n\x20 Zzz(zzz String)\n}\n\n";
+
+/// The fingerprint constant of the single `wire.encode` in `p`, found by the
+/// instruction that owns it.
+///
+/// NOT by searching the dump for a number. `dis` has no wire-specific arm, so
+/// the fingerprint prints as an ordinary integer constant, indistinguishable
+/// from any other int of the same value — a text search can match an unrelated
+/// constant and agree with itself. `Op::WireEncode` carries the fingerprint's
+/// `ConstId` as its own operand, which is the only identification here that
+/// cannot pick up the wrong int.
+fn wire_fingerprint(p: &bytecode::Program) -> i64 {
+    let ops: Vec<i32> = p
+        .code
+        .iter()
+        .filter(|i| i.op == Op::WireEncode)
+        .map(|i| i.operand)
+        .collect();
+    assert_eq!(
+        ops.len(),
+        1,
+        "the fixture must hold exactly one wire.encode, or the operand below \
+         names an arbitrary one of them; got {}",
+        ops.len()
+    );
+    p.constants
+        .get(ops[0] as usize)
+        .expect("WireEncode's operand must name a pooled constant")
+        .as_int()
+        .expect("the descriptor constant is the shape fingerprint, an Int")
+}
+
+/// The fingerprint of a type is the same in two compiles that intern its names
+/// at different `StrId`s — the stability arm T-334 could not reach until
+/// elaboration emitted the constant.
+///
+/// **What proves the pair is actually distinct is the plant, not an assertion
+/// here.** Nothing reachable from a `Program` exposes `StrId`s, so this test
+/// cannot assert that allocation moved; it asserts only that the two compiles
+/// differ at all. Reverting `Desc::fingerprint` to fold `StrId.0` takes this
+/// test red, and that is the witness that the padding shifts the ids this
+/// fingerprint would otherwise depend on. A green here with that plant applied
+/// would mean the pair was not distinct after all.
+#[test]
+fn the_wire_fingerprint_is_stable_across_two_compiles() {
+    let plain = program_of(&wire_src(""));
+    let padded = program_of(&wire_src(PADDING));
+
+    let dump_plain = dis::disassemble(&plain);
+    let dump_padded = dis::disassemble(&padded);
+    assert_ne!(
+        dump_plain, dump_padded,
+        "the two compiles must not be the same program, or this witnesses nothing"
+    );
+
+    let fp_plain = wire_fingerprint(&plain);
+    let fp_padded = wire_fingerprint(&padded);
+    assert_eq!(
+        fp_plain, fp_padded,
+        "one shape is one fingerprint: an unrelated declaration ahead of the \
+         type must not move it"
+    );
+
+    // The DONE-WHEN asks for it through `dis`, so read it back out of both
+    // dumps too — identified above, then confirmed present here.
+    assert!(
+        dump_plain.contains(&fp_plain.to_string()),
+        "the fingerprint must appear in the disassembly:\n{dump_plain}"
+    );
+    assert!(
+        dump_padded.contains(&fp_padded.to_string()),
+        "the fingerprint must appear in the disassembly:\n{dump_padded}"
+    );
+}
