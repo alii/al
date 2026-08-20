@@ -1133,3 +1133,126 @@ fn dis_native_prints_clif_for_fib() {
         out.stdout
     );
 }
+
+/// How many `wire.encode`/`wire.decode` round trips the JIT test below runs.
+/// Only has to clear `NativeTable::WARM_CALLS` (8) by enough that most
+/// iterations execute natively; wire allocates on every round, so this is
+/// deliberately far smaller than `BITWISE_ROUNDS`.
+const WIRE_ROUNDS: i64 = 2_000;
+
+/// (f) Both wire ops across the interp→native switch. Nothing else holds the
+/// interpreter and the JIT together on them: every other wire test runs the
+/// interpreter only, so a wrong dispatch arm — `WIRE_ENCODE` wired to
+/// `wire_decode`, or an `op_coverage` class that disagrees with the arm the
+/// op is actually dispatched from — is invisible to all of them and shows up
+/// here as a wrong answer or an abort.
+///
+/// It is also the parity check their `OpCoverage` move rests on (T-466,
+/// T-340): they lower as `Bridge`, whose failure arm is a `proof_violation`
+/// abort, so a wrong arm here does not misbehave — it kills the process.
+///
+/// The accumulator folds the decoded `n` in on every round, so there is no
+/// fixed point to collapse onto: a decode returning a constant, a stale value,
+/// or the wrong field changes the sum. A decode that fails at all lands on
+/// `0 - 1` and diverges immediately rather than reading as a quiet zero. The
+/// expected total is recomputed in Rust from the same recurrence, so a
+/// miscompile fails against ground truth rather than against a second run of
+/// the same code.
+///
+/// **What this does NOT witness**, deliberately: the byte format (that is
+/// T-341's golden, and a round trip shares its encoder and decoder so it
+/// cannot see a fault symmetric across both), and decode's behaviour on
+/// hostile bytes (T-343). This test is about the bridge, not the codec.
+#[test]
+fn wire_ops_survive_the_native_bridge() {
+    let src = "import scarlet/wire
+
+pub type Tag {
+\tTag(n Int, label String)
+}
+
+fn churn(n Int, acc Int) Int {
+\tbytes = wire.encode(Tag(n, 'x'))
+\tnext = match wire.decode(bytes) {
+\t\tOk(Tag(m, _)) -> acc + m
+\t\tErr(_) -> 0 - 1
+\t}
+\tif n == 0 { next } else { churn(n - 1, next) }
+}
+
+pub fn main() {
+\tprintln(churn(ROUNDS, 0))
+}
+";
+    let src = src.replace("ROUNDS", &WIRE_ROUNDS.to_string());
+
+    // Ground truth from the recurrence, not from the VM: the fold adds every
+    // `n` from WIRE_ROUNDS down to 0, and each `n` only arrives by surviving
+    // a full encode/decode round trip.
+    let expected = format!("{}\n", (0..=WIRE_ROUNDS).sum::<i64>());
+
+    let proj = Project::new("wire_bridge");
+    let path = proj.dir.join("prog.scrl");
+    std::fs::write(&path, src).unwrap();
+    let path = path.to_string_lossy().into_owned();
+    let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
+    assert!(out.success, "run failed:\n{}", out.stderr);
+    assert_eq!(out.stdout, expected, "stderr:\n{}", out.stderr);
+    assert_warmed(&out.stderr, "churn");
+}
+
+/// (g) **Bad bytes are a value, not a VM error** — checked rather than argued,
+/// on the native arm.
+///
+/// This is the fact that makes `OpCoverage::Try`'s own criterion — "can raise
+/// a runtime error *on user data*" — no longer describe `wire.decode`
+/// (T-466): a refusal is `Err(DecodeError)`, which the program matches on.
+/// It is also the precondition any future move to `Bridge` rests on, since
+/// `al_shim_op` answers a returned `Err` with `proof_violation`, a
+/// `std::process::abort`, so an op that raised on malformed input would abort
+/// the process on the JIT arm and nowhere else. Pinned here so the premise
+/// stays true rather than being re-derived from the code each time.
+///
+/// The bytes are deliberately not wire's at all — a fixed `<<1, 2, 3>>` fails
+/// the magic check. The assertion is on the printed refusal AND on exit
+/// status, because an abort and a clean `Err` differ in the status, not in
+/// stdout, and `out.success` is the only place that shows.
+///
+/// **What this does NOT witness**: which `DecodeError` is right for which
+/// corruption, or truncation and single-byte mutation coverage — that is
+/// T-343. Here the only question is abort versus value.
+#[test]
+fn a_wire_decode_refusal_is_a_value_on_the_native_bridge_not_an_abort() {
+    let src = "import scarlet/wire
+
+fn churn(n Int, acc Int) Int {
+\tnext = match wire.decode(<<1, 2, 3>>) {
+\t\tOk(v) -> acc + v
+\t\tErr(_) -> acc + 1
+\t}
+\tif n == 0 { next } else { churn(n - 1, next) }
+}
+
+pub fn main() {
+\tprintln(churn(ROUNDS, 0))
+}
+";
+    let src = src.replace("ROUNDS", &WIRE_ROUNDS.to_string());
+    // Every round must take the `Err` arm, so the count is the round count.
+    // `Ok(v) -> acc + v` also pins the payload to `Int`, which is what gives
+    // the call a descriptor to be refused against in the first place.
+    let expected = format!("{}\n", WIRE_ROUNDS + 1);
+
+    let proj = Project::new("wire_bridge_refusal");
+    let path = proj.dir.join("prog.scrl");
+    std::fs::write(&path, src).unwrap();
+    let path = path.to_string_lossy().into_owned();
+    let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
+    assert!(
+        out.success,
+        "a decode refusal aborted or unwound instead of returning a value:\n{}",
+        out.stderr
+    );
+    assert_eq!(out.stdout, expected, "stderr:\n{}", out.stderr);
+    assert_warmed(&out.stderr, "churn");
+}

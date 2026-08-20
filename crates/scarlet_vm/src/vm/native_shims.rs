@@ -685,11 +685,14 @@ pub(crate) unsafe extern "C" fn al_shim_try_op(
 impl VM {
     /// Dispatch an [`is_native_try_op`](crate::bytecode::is_native_try_op)
     /// opcode to its interpreter method.
-    fn run_try_op(&mut self, op_code: u8, operand: i32) -> VmResult<()> {
+    ///
+    /// `_operand` is kept because `al_shim_try_op` is handed one by the C ABI
+    /// and every sibling dispatcher takes the same pair; `ArraySlice` is the
+    /// only `Try` op left since the wire ops moved to `Bridge` (T-466), and it
+    /// takes none. Give it a name again when a `Try` op needs it.
+    fn run_try_op(&mut self, op_code: u8, _operand: i32) -> VmResult<()> {
         match op_code {
             opc::ARRAY_SLICE => self.seq_slice(),
-            opc::WIRE_ENCODE => self.wire_encode(operand),
-            opc::WIRE_DECODE => self.wire_decode(operand),
             _ => proof_violation("run_try_op on an op is_native_try_op excludes"),
         }
     }
@@ -789,6 +792,8 @@ impl VM {
         match op_code {
             opc::INDEX => self.seq_index(),
             opc::INDEX_OR => self.seq_index_or(operand),
+            opc::WIRE_ENCODE => self.wire_encode(operand),
+            opc::WIRE_DECODE => self.wire_decode(operand),
             opc::ELEM_AT => self.elem_at(operand),
             opc::SEQ_DROP => self.seq_drop(),
             opc::ARRAY_CONCAT => self.seq_concat(),

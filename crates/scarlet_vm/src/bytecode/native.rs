@@ -261,12 +261,35 @@ fn op_coverage(op: Op) -> OpCoverage {
         | Op::JsonIntText
         | Op::JsonFloat
         | Op::JsonBool
-        | Op::JsonEncode => OpCoverage::Bridge,
-        // `Bridge` is where both of these end up — pure, single-result, and
-        // (with a descriptor the compiler built) unable to fail. They are
-        // `Try` while they have no bodies, because `Bridge`'s failure arm is a
-        // `proof_violation` abort and these are reachable and always fail.
-        Op::ArraySlice | Op::WireEncode | Op::WireDecode => OpCoverage::Try,
+        | Op::JsonEncode
+        // The two wire ops, and **not** because their bodies arrived — that
+        // was T-331's stated reason and it is the wrong one. `Try` names ops
+        // that can fail *on user data*, and neither can: `encode` is total
+        // because encodability is decided at compile time, and `decode`
+        // reports bad bytes as `Err(DecodeError)`, a value the program matches
+        // on. `Try`'s own criterion stopped describing them the moment they
+        // had bodies.
+        //
+        // THESE ARE THE FIRST `Bridge` OPS CARRYING A `VmError::internal` PATH
+        // AT ALL — `map`, `json` and `crypto` have none — so do not read the
+        // list above as evidence that a `Bridge` op never has one. Two survive
+        // here: a descriptor operand that does not index `program.wire_descs`,
+        // and a decoder that finishes a container short. `Bridge` answers a
+        // returned `Err` with `proof_violation`, a `std::process::abort`,
+        // which is the *defined* response for that class: `al_shim_op` calls
+        // it "type-proof-excluded", and a descriptor index the compiler itself
+        // emitted being wrong is precisely a violated compiler proof.
+        //
+        // Both paths were searched for a user-data route and none was found
+        // (T-466): the operand is an `Imm::Const` elaboration emits against
+        // the same table it indexes, and no runtime program loader exists to
+        // supply another; the container-short site is sized and filled from
+        // one count. **Searched, not proved** — if either is ever made
+        // unreachable by construction, that is strictly better than this
+        // comment.
+        | Op::WireEncode
+        | Op::WireDecode => OpCoverage::Bridge,
+        Op::ArraySlice => OpCoverage::Try,
         Op::FileRead
         | Op::FileWrite
         | Op::TcpAccept
