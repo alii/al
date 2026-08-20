@@ -481,6 +481,14 @@ module.exports = grammar({
 
     // Strings ----------------------------------------------------------------
     // Single-line; both quotes; `${expr}` and `$name` interpolation.
+    //
+    // `\u{HEX*}` is hand-written here rather than generated: `lex.escape` is
+    // scanner::ESCAPES, one source byte to one denoted byte, and this one
+    // denotes up to 4. As permissive on digit count as the scanner itself —
+    // `scan_unicode_escape` recovers a bad count or an out-of-range value
+    // with a diagnostic, not a lex error, so the shape still parses. Aliased
+    // to `escape_sequence` inline, the same way `string_content` below is,
+    // so `@string.escape` highlighting covers it with no wrapper node.
 
     string: ($) =>
       choice(
@@ -489,6 +497,7 @@ module.exports = grammar({
           repeat(
             choice(
               $.escape_sequence,
+              alias(token.immediate(seq('\\u{', /[0-9A-Fa-f]*/, '}')), $.escape_sequence),
               $.interpolation,
               $.short_interpolation,
               alias(token.immediate(prec(1, /[^'\\$\n]+/)), $.string_content),
@@ -502,6 +511,7 @@ module.exports = grammar({
           repeat(
             choice(
               $.escape_sequence,
+              alias(token.immediate(seq('\\u{', /[0-9A-Fa-f]*/, '}')), $.escape_sequence),
               $.interpolation,
               $.short_interpolation,
               alias(token.immediate(prec(1, /[^"\\$\n]+/)), $.string_content),

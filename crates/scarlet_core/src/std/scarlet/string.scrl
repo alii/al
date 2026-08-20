@@ -15,6 +15,9 @@
  */
 
 import scarlet/array
+import scarlet/binary
+import scarlet/int
+import scarlet/result
 
 // The debug rendering of any value — what `println` prints: composites
 // (arrays, maps, constructors) show their structure, strings are inserted
@@ -59,3 +62,52 @@ pub fn replace(s String, pattern String, replacement String) String {
 // `split`, this never divides a multi-scalar cluster.
 @vm(string__to_graphemes)
 pub fn to_graphemes(s String) Array(String)
+
+// The UTF-8 encoding of `code_point`, or `Err(Nil)` if it does not name a
+// Unicode scalar value: negative, past U+10FFFF (1114111), or a UTF-16
+// surrogate half (U+D800..U+DFFF, 55296..57343) — none of which stands
+// alone in UTF-8. No opcode needed: every branch is a `<<..:8>>` binary
+// literal over bits `bitwise_and`/`bitwise_shift_right` already expose.
+fn encode_scalar_value(code_point Int) Result(Binary, Nil) {
+	if code_point < 0 || code_point > 1114111 {
+		Err(Nil)
+	} else if code_point >= 55296 && code_point <= 57343 {
+		Err(Nil)
+	} else if code_point <= 127 {
+		Ok(<<code_point:8>>)
+	} else if code_point <= 2047 {
+		Ok(<<
+			192 + int.bitwise_shift_right(code_point, 6):8,
+			128 + int.bitwise_and(code_point, 63):8,
+		>>)
+	} else if code_point <= 65535 {
+		Ok(<<
+			224 + int.bitwise_shift_right(code_point, 12):8,
+			128 + int.bitwise_and(int.bitwise_shift_right(code_point, 6), 63):8,
+			128 + int.bitwise_and(code_point, 63):8,
+		>>)
+	} else {
+		Ok(<<
+			240 + int.bitwise_shift_right(code_point, 18):8,
+			128 + int.bitwise_and(int.bitwise_shift_right(code_point, 12), 63):8,
+			128 + int.bitwise_and(int.bitwise_shift_right(code_point, 6), 63):8,
+			128 + int.bitwise_and(code_point, 63):8,
+		>>)
+	}
+}
+
+// `code_points` rendered as a `String`, one Unicode scalar value at a time,
+// in the order given — the inverse direction from decoding one code point
+// out of a `Binary`. `Err(Nil)` if any entry is not a Unicode scalar value
+// (see `encode_scalar_value`). Gleam calls its version
+// `string.from_utf_codepoints`.
+pub fn from_code_points(code_points Array(Int)) Result(String, Nil) {
+	result.then(
+		array.fold(code_points, Ok(<<>>), fn(acc, cp) {
+			result.then(acc, fn(bytes) {
+				result.map(encode_scalar_value(cp), fn(next) binary.append(bytes, next))
+			})
+		}),
+		fn(bytes) binary.to_string(bytes),
+	)
+}

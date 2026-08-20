@@ -903,4 +903,39 @@ fn stdlib_string() {
          }\n",
         "3\n2\n7\n1\n",
     );
+    // \u{...} spells a code point in Scarlet SOURCE, decoded by the
+    // scanner — every \\u{...} below is literal backslash-u-brace text
+    // handed to `al run`, not Rust's own escape (which only fires in the
+    // `expected` argument, to name the same character a second, independent
+    // way). Precomposed 'a\u{0301}' is 2 scalar values, matching
+    // `to_graphemes`'s own count above for the same pair.
+    run_outputs(
+        "import scarlet/string\n\
+         pub fn main() {\n\
+         \tprintln('\\u{E9}')\n\
+         \tprintln(string.length('\\u{E9}'))\n\
+         \tprintln('\\u{1F469}')\n\
+         \tprintln(string.length('\\u{1F469}'))\n\
+         \tprintln('a\\u{0301}')\n\
+         \tprintln(string.length('a\\u{0301}'))\n\
+         }\n",
+        "\u{E9}\n1\n\u{1F469}\n1\na\u{0301}\n2\n",
+    );
+    // from_code_points is the constructing inverse: an Array(Int) of scalar
+    // values rebuilds the String \u{...} above spells one at a time.
+    // Err(Nil) for a code point past U+10FFFF, a surrogate half, or
+    // negative — none of which UTF-8 can encode alone.
+    run_outputs(
+        "import scarlet/string\n\
+         pub fn main() {\n\
+         \tprintln(string.from_code_points([233]))\n\
+         \tprintln(string.from_code_points([128105]))\n\
+         \tprintln(string.from_code_points([104, 105]))\n\
+         \tprintln(string.from_code_points([]))\n\
+         \tprintln(string.from_code_points([1114112]))\n\
+         \tprintln(string.from_code_points([55296]))\n\
+         \tprintln(string.from_code_points([-1]))\n\
+         }\n",
+        "Ok(\u{E9})\nOk(\u{1F469})\nOk(hi)\nOk()\nErr(Nil)\nErr(Nil)\nErr(Nil)\n",
+    );
 }

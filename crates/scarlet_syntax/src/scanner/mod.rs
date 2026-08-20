@@ -319,11 +319,9 @@ impl Scanner {
                 }
 
                 if next == b'\\' {
-                    // `None` leaves the terminator unconsumed, so the loop top
-                    // reports the unterminated string.
-                    if let Some(b) = self.scan_escape_sequence() {
-                        result.push(b);
-                    }
+                    // Pushes nothing when the terminator is unconsumed, so the
+                    // loop top reports the unterminated string.
+                    self.scan_escape_sequence(&mut result);
                 } else {
                     result.push(next);
                 }
@@ -560,20 +558,27 @@ impl Scanner {
         self.pos += 1;
     }
 
-    // Every escape denotes one ASCII byte. An unknown escape reports a
-    // diagnostic and yields the escaped byte itself.
+    // Most escapes denote one ASCII byte; `\u{...}` denotes the UTF-8 encoding
+    // of a code point, which can be up to four. Pushes the denoted bytes onto
+    // `out`. An unknown escape reports a diagnostic and yields the escaped
+    // byte itself.
     //
-    // Returns `None` WITHOUT consuming when the backslash sits at EOF or a line
-    // ending, so the caller still sees the terminator.
-    fn scan_escape_sequence(&mut self) -> Option<u8> {
+    // Consumes nothing when the backslash sits at EOF or a line ending, so
+    // the caller still sees the terminator.
+    fn scan_escape_sequence(&mut self, out: &mut Vec<u8>) {
         let peeked = self.peek_char();
         if peeked == 0 || peeked == b'\n' || peeked == b'\r' {
-            return None;
+            return;
         }
         self.incr_pos();
 
-        Some(match ESCAPES.iter().find(|(source, _)| *source == peeked) {
-            Some(&(_, denoted)) => denoted,
+        if peeked == b'u' {
+            self.scan_unicode_escape(out);
+            return;
+        }
+
+        match ESCAPES.iter().find(|(source, _)| *source == peeked) {
+            Some(&(_, denoted)) => out.push(denoted),
             None => {
                 if peeked >= 0x80 {
                     // Decode the full UTF-8 sequence for the message. Only the
@@ -592,9 +597,69 @@ impl Scanner {
                 } else {
                     self.add_error(format!("Unknown escape sequence '\\{}'", peeked as char));
                 }
-                peeked
+                out.push(peeked);
             }
-        })
+        }
+    }
+
+    // `\u{HEX+}`: hex digits naming a Unicode scalar value, encoded as UTF-8.
+    // No digit-count cap: a scalar value never needs more than 6, so 7+ digits
+    // always lands in the same out-of-range diagnostic a too-large 6-digit
+    // value would, without a separate "too many digits" check. `\u` itself is
+    // already consumed by the caller. Every failure recovers by pushing
+    // U+FFFD (the replacement character) so the buffer stays valid UTF-8 and
+    // scanning continues, the same recovery style `scan_radix_number` uses
+    // for a malformed number.
+    fn scan_unicode_escape(&mut self, out: &mut Vec<u8>) {
+        const REPLACEMENT_CHARACTER: char = '\u{FFFD}';
+
+        if self.peek_char() != b'{' {
+            self.add_error("Expected '{' after '\\u'".to_string());
+            out.push(b'u');
+            return;
+        }
+        self.incr_pos();
+
+        let digits_start = self.pos;
+        while self.peek_char().is_ascii_hexdigit() {
+            self.incr_pos();
+        }
+        let digits = self.slice(digits_start, self.pos);
+
+        if self.peek_char() != b'}' {
+            self.add_error(format!(
+                "Unterminated '\\u{{{digits}' escape: expected a closing '}}'",
+            ));
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(REPLACEMENT_CHARACTER.encode_utf8(&mut buf).as_bytes());
+            return;
+        }
+        self.incr_pos();
+
+        if digits.is_empty() {
+            self.add_error("'\\u{}' names no code point".to_string());
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(REPLACEMENT_CHARACTER.encode_utf8(&mut buf).as_bytes());
+            return;
+        }
+
+        match u32::from_str_radix(&digits, 16)
+            .ok()
+            .and_then(char::from_u32)
+        {
+            Some(c) => {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+            None => {
+                self.add_error(format!(
+                    "'\\u{{{digits}}}' is not a Unicode scalar value — it is above U+10FFFF or \
+                     in the surrogate range U+D800..=U+DFFF",
+                ));
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(REPLACEMENT_CHARACTER.encode_utf8(&mut buf).as_bytes());
+            }
+        }
     }
 
     fn scan_interp_string_content(&mut self, quote: u8) -> Token {
@@ -658,11 +723,9 @@ impl Scanner {
             self.incr_pos();
 
             if ch == b'\\' {
-                // `None` leaves the terminator unconsumed, so the loop top
-                // reports the unterminated string.
-                if let Some(b) = self.scan_escape_sequence() {
-                    result.push(b);
-                }
+                // Pushes nothing when the terminator is unconsumed, so the
+                // loop top reports the unterminated string.
+                self.scan_escape_sequence(&mut result);
             } else {
                 result.push(ch);
             }
@@ -1339,6 +1402,75 @@ mod tests {
             diags
                 .iter()
                 .any(|d| d.message.contains("Unknown escape sequence '\\q'")),
+            "diagnostics: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn test_unicode_escape_spells_a_code_point() {
+        // A single scalar value, and one past the BMP (4-byte UTF-8) — both
+        // clean, no diagnostics.
+        assert_eq!(kinds_clean("'\\u{E9}'"), vec![lit("\u{E9}"), Eof]);
+        assert_eq!(kinds_clean("'\\u{1F469}'"), vec![lit("\u{1F469}"), Eof]);
+
+        // Lowercase hex, and content on both sides survive untouched.
+        let ks = kinds_clean("'a\\u{1f469}b'");
+        assert!(ks.contains(&lit("a\u{1F469}b")), "tokens: {ks:?}");
+    }
+
+    #[test]
+    fn test_unicode_escape_in_interpolated_string() {
+        // The interp-string scanner is a second call site with its own copy
+        // of the escape loop; cover it separately.
+        let ks = kinds_clean("'\\u{E9} $x'");
+        assert!(ks.contains(&part("\u{E9} ")), "tokens: {ks:?}");
+    }
+
+    #[test]
+    fn test_unicode_escape_malformed_recovers_with_diagnostic() {
+        // Missing '{': the 'u' is echoed back, matching the unknown-escape
+        // recovery style, and nothing after it is consumed.
+        let (toks, diags) = scan("'\\u41}'");
+        let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
+        assert!(ks.contains(&lit("u41}")), "tokens: {ks:?}");
+        assert!(
+            diags.iter().any(|d| d.message.contains("Expected '{'")),
+            "diagnostics: {diags:?}"
+        );
+
+        // No closing '}'.
+        let (_, diags) = scan("'\\u{41'");
+        assert!(
+            diags.iter().any(|d| d.message.contains("Unterminated")),
+            "diagnostics: {diags:?}"
+        );
+
+        // No digits at all.
+        let (toks, diags) = scan("'\\u{}'");
+        let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
+        assert!(ks.contains(&lit("\u{FFFD}")), "tokens: {ks:?}");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("names no code point")),
+            "diagnostics: {diags:?}"
+        );
+
+        // A UTF-16 surrogate half: not a Unicode scalar value on its own.
+        let (toks, diags) = scan("'\\u{D800}'");
+        let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
+        assert!(ks.contains(&lit("\u{FFFD}")), "tokens: {ks:?}");
+        assert!(
+            diags.iter().any(|d| d.message.contains("surrogate range")),
+            "diagnostics: {diags:?}"
+        );
+
+        // Past U+10FFFF.
+        let (toks, diags) = scan("'\\u{110000}'");
+        let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
+        assert!(ks.contains(&lit("\u{FFFD}")), "tokens: {ks:?}");
+        assert!(
+            diags.iter().any(|d| d.message.contains("U+10FFFF")),
             "diagnostics: {diags:?}"
         );
     }
