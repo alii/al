@@ -217,7 +217,7 @@ enum Proj {
 /// Snapshot the process environment as UTF-8 `(key, value)` pairs.
 /// `std::env::vars` panics on a non-UTF-8 entry, so walk `vars_os` and drop
 /// what an Scarlet `String` cannot hold.
-fn env_entries() -> Vec<(String, String)> {
+pub(super) fn env_entries() -> Vec<(String, String)> {
     std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
         .collect()
