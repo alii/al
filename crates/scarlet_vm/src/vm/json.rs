@@ -216,6 +216,41 @@ fn element_index(tape: &[u8], idx: usize, want: usize) -> Option<usize> {
     Some(cursor)
 }
 
+/// Tape index of every element of the array at `idx`, in document order —
+/// `json_elements`' walk, and the number of `node_at` reads it took.
+///
+/// `None` if `idx` is not an array or the walk runs off the tape.
+///
+/// The read count exists for the same reason `scan_for_lone_surrogate`'s
+/// does (T-173): no assertion about the *positions* can tell this walk,
+/// which advances `cursor` by `skip` and never revisits a node, from one
+/// that calls [`element_index`] once per element and restarts at `idx`
+/// every time — both produce the identical `Vec<usize>` for every input.
+/// The second shape is `element_index`'s own cost, `want`, summed over
+/// `want in 0..count`: `O(n^2)`. The read count is the smallest thing that
+/// tells them apart.
+fn collect_element_positions(tape: &[u8], idx: usize) -> Option<(Vec<usize>, usize)> {
+    let arr = node_at(tape, idx)?;
+    if arr.kind != K_ARRAY {
+        return None;
+    }
+    let count = usize::try_from(arr.payload).ok()?;
+    let mut out = Vec::with_capacity(count);
+    let mut cursor = idx.checked_add(1)?;
+    let mut reads = 0usize;
+    for _ in 0..count {
+        // Every element is bounds-checked as it is reached, so a walk that
+        // runs off the tape yields the empty array rather than a truncated
+        // one.
+        reads += 1;
+        node_at(tape, cursor)?;
+        out.push(cursor);
+        reads += 1;
+        cursor = cursor.checked_add(node_at(tape, cursor)?.skip)?;
+    }
+    Some((out, reads))
+}
+
 /// Build the compact tape and the string arena from a parsed `simd-json` tape.
 ///
 /// One linear pass: `simd-json` already emits nodes in document order with a
@@ -767,12 +802,14 @@ impl VM {
     /// `[d Doc] -> Array(Doc)` — an array's elements in document order. Empty
     /// for anything that is not an array.
     ///
-    /// One linear walk, the same shape as `json_entries`. The obvious spelling
-    /// — `json.index` once per element, from Scarlet — is O(n²): every `index`
-    /// restarts the cursor at the container and adds `skip` `i` times. The
-    /// element count is whatever the sender wrote, so that is an algorithmic
-    /// denial of service on any caller that decodes an array it did not
-    /// author, which is every caller that reads a payload off a socket.
+    /// One linear walk, the same shape as `json_entries` — [`collect_element_positions`]
+    /// does the walk and carries the read count that gates it staying linear
+    /// (T-173). The obvious spelling — `json.index` once per element, from
+    /// Scarlet — is O(n²): every `index` restarts the cursor at the
+    /// container and adds `skip` `i` times. The element count is whatever
+    /// the sender wrote, so that is an algorithmic denial of service on any
+    /// caller that decodes an array it did not author, which is every
+    /// caller that reads a payload off a socket.
     pub(super) fn json_elements(&mut self) -> VmResult<()> {
         let doc = self.pop()?;
 
@@ -781,22 +818,7 @@ impl VM {
         let ats: Vec<usize> = (|| {
             let (_, tape_v, idx) = Self::doc_parts(&doc)?;
             let tape = bin_ref(&tape_v).full_bytes();
-            let arr = node_at(&tape, idx)?;
-            if arr.kind != K_ARRAY {
-                return None;
-            }
-            let count = usize::try_from(arr.payload).ok()?;
-            let mut out = Vec::with_capacity(count);
-            let mut cursor = idx.checked_add(1)?;
-            for _ in 0..count {
-                // Every element is bounds-checked as it is reached, so a walk
-                // that runs off the tape yields the empty array rather than a
-                // truncated one.
-                node_at(&tape, cursor)?;
-                out.push(cursor);
-                cursor = cursor.checked_add(node_at(&tape, cursor)?.skip)?;
-            }
-            Some(out)
+            Some(collect_element_positions(&tape, idx)?.0)
         })()
         .unwrap_or_default();
 
@@ -1172,6 +1194,51 @@ mod tests {
         assert_eq!(node_at(&tape, ats[3]).unwrap().payload as i64, 5);
         // One walk covers the whole subtree: the cursor ends past the last node.
         assert_eq!(cursor, arr.skip);
+    }
+
+    /// T-173: the test above proves the *positions* are right; it does not
+    /// prove the walk stayed linear, because a walk that restarts at the
+    /// container for every element finds the identical four positions. This
+    /// asserts the read count instead, on the same fixture: two `node_at`
+    /// calls per top-level element (the bounds check, then the one that
+    /// reads `skip`) is 8, not `element_index`'s cost summed over
+    /// `0..4` — `(0+1)+(1+1)+(2+1)+(3+1) = 10` — which is what the deleted
+    /// `collect_elements` shape (`json.index` once per element) paid, and
+    /// which the gap widens against as the array grows.
+    #[test]
+    fn elements_walk_reads_the_tape_a_fixed_number_of_times_per_element() {
+        let (tape, _) = tape_of(r#"[1,{"a":[2,3]},[4],5]"#);
+        let (ats, reads) = collect_element_positions(&tape, 0).unwrap();
+        assert_eq!(ats.len(), 4);
+        assert_eq!(reads, 8, "2 reads x 4 elements, not the O(n^2) shape");
+    }
+
+    /// The read count must grow linearly with the element count, not
+    /// quadratically — the property T-173 asks to be gated, demonstrated
+    /// rather than pinned to one array's magic number. Flat arrays of
+    /// integers only, so every element costs exactly the same 2 reads and
+    /// the count is exact rather than approximate: `reads(n) == 2n`.
+    /// Quadratic (`element_index` once per element, restarting at the
+    /// container) would instead cost `n(n+1)`, i.e. roughly `n^2/2` — for
+    /// `n = 512` that is 131,584 against this walk's 1,024.
+    #[test]
+    fn elements_walk_reads_scale_linearly_with_element_count() {
+        fn reads_for(n: usize) -> usize {
+            let src = format!(
+                "[{}]",
+                (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+            );
+            let (tape, _) = tape_of(&src);
+            collect_element_positions(&tape, 0).unwrap().1
+        }
+
+        assert_eq!(reads_for(8), 16);
+        assert_eq!(reads_for(64), 128);
+        assert_eq!(
+            reads_for(512),
+            1024,
+            "reads(n) == 2n, or the walk is no longer O(n)"
+        );
     }
 
     /// `json.int` is `None` for a `u64` above `i64::MAX`, so `to_json` has to
