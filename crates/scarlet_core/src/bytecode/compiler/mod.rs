@@ -81,8 +81,8 @@ use crate::type_def::TypeId;
 use crate::types::{
     AnnotationContext, ArenaSlice, Constraint, CtorResolver, DefinitionLocation, EntityKind,
     Hydrator, InferEngine, MatchFunTypeError, NullaryPrim, Pat, PatternBindings, PatternSink,
-    Scheme, StrId, Ty, TypeEnv, TypeInfo, TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine,
-    new_env, pool,
+    Scheme, StrId, Ty, TypeBody, TypeEnv, TypeInfo, TypeNode, UsefulnessMatrix, ValueKind, mono,
+    new_engine, new_env, pool,
 };
 
 mod abi;
@@ -574,6 +574,14 @@ pub struct Compiler {
     /// `reset_to` truncates the table to this rather than clearing it, so a
     /// descriptor template appended past the prefix cannot survive a rewind.
     pub(super) abi_template_count: usize,
+    /// One descriptor per distinct type this compile's `wire.encode`/
+    /// `wire.decode` calls cross the wire at, in the order elaboration built
+    /// them. Filled by [`ElabCtx::wire_descriptor`] and **drained** by
+    /// `mint_wire_templates` after `bind_abi`, so a descriptor is minted into
+    /// `program.templates` exactly once and never carries into a later
+    /// compile. A check-only compile never reaches the drain, which is why
+    /// `reset_to` clears this too.
+    pub(super) wire_descs: Vec<typed_ir::wire::Desc>,
     // --- Module state ---
     pub(super) module_table: ModuleTable,
     /// Append-only `ModulePath` ↔ `ModuleId` interner backing every `DefId`.
@@ -1268,6 +1276,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         module_scope: ModuleScope::default(),
         restricted_gen_cons: None,
         abi_template_count: 0,
+        wire_descs: Vec::new(),
         module_table: ModuleTable::new(),
         module_display: HashMap::new(),
         ref_interner,
@@ -1528,6 +1537,11 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         // Bind the runtime-constructed stdlib values (`Program.templates` /
         // `Program.abi`) and require coverage for every emitted op.
         c.bind_abi();
+        // Then the constructors a decoder may build, past the prefix `bind_abi`
+        // just fixed. Drained, so the descriptors this compile's elaboration
+        // produced cannot be minted again by the next one.
+        let descs = std::mem::take(&mut c.wire_descs);
+        c.mint_wire_templates(&descs);
         // Jump operands are frame-relative, so fusion has to know which frame
         // owns each instruction: `functions` is that map, and the entry frame
         // owns everything the bodies do not.

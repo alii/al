@@ -3,7 +3,7 @@
 //! here so `core_ir` never sees the compiler's fields.
 
 use super::*;
-use crate::typed_ir::PreludeTys;
+use crate::typed_ir::{PreludeTys, wire};
 
 impl crate::core_ir::emit::EmitCtx for Compiler {
     fn resolve_str(&self, id: StrId) -> &str {
@@ -312,5 +312,148 @@ impl ElabCtx for Compiler {
     }
     fn ty_nil(&mut self) -> Ty {
         Compiler::ty_nil(self)
+    }
+    fn wire_descriptor(
+        &mut self,
+        pool: &mut ResolvedPool,
+        ty: RTy,
+        op: wire::WireOp,
+        at: Span,
+    ) -> Option<crate::core_ir::ConstId> {
+        let desc = match wire::build_desc(pool, &mut *self, ty) {
+            Ok(desc) => desc,
+            Err(refusal) => {
+                let msg = refusal.message(&*self, pool, op);
+                self.error(msg, at);
+                return None;
+            }
+        };
+        // The immediate is the fingerprint, which is the half of the
+        // descriptor whose runtime meaning `wire.scrl` already fixes: it
+        // travels in every encoded value's header and `SchemaMismatch` carries
+        // it as an `Int`. The node table reaches the VM only as the templates
+        // `mint_wire_templates` derives from `wire_descs`; the rest of it has
+        // no runtime form yet (T-732).
+        let c = self.const_int(desc.fingerprint() as i64);
+        // Two call sites at one type describe it twice. Pooling the constant
+        // already dedups; this keeps the descriptor list to one entry per
+        // distinct shape, and `Desc` equality is the right key because the
+        // fingerprint deliberately is not — it excludes the type's identity,
+        // so two different types of one shape share it while needing
+        // different templates.
+        if !self.wire_descs.contains(&desc) {
+            self.wire_descs.push(desc);
+        }
+        Some(crate::core_ir::ConstId(c as u32))
+    }
+}
+
+/// The declaration half of the descriptor builder's seam. Everything it
+/// answers comes off `env`/`engine`; nothing here decides encodability, which
+/// is `wire`'s alone.
+impl wire::WireCtx for Compiler {
+    fn nominal(&mut self, pool: &mut ResolvedPool, id: TypeId) -> wire::Nominal {
+        // The structural primitives answer first. `Int`, `Array`, `Map` and
+        // the rest are declared with no body, so reading the body would report
+        // every one of them as host-backed and refuse `Int`.
+        if let Some(b) = self.wire_builtin(id) {
+            return wire::Nominal::Builtin(b);
+        }
+        let Some(info) = self.env.lookup_type_info_by_id(id) else {
+            // Every type the check walk admitted has a registered head.
+            // Answering `Bodiless` if one ever does not refuses the call
+            // rather than inventing a shape for it.
+            return wire::Nominal::Bodiless;
+        };
+        match info.body {
+            TypeBody::External | TypeBody::Unresolved => wire::Nominal::Bodiless,
+            TypeBody::Alias { target } => wire::Nominal::Alias(self.resolve_rty(pool, target)),
+            TypeBody::Custom {
+                variants,
+                ctors_public,
+                ..
+            } => {
+                let declared_here = self.type_declared_here(info);
+                // Copied out of the arena first: interning a field type
+                // reborrows the engine.
+                let vs = self.engine.variants_of(variants).to_vec();
+                let ctors = vs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let declared: Vec<(StrId, Ty)> = self
+                            .engine
+                            .variant_fields_of(v.fields)
+                            .iter()
+                            .map(|f| (f.label, f.ty))
+                            .collect();
+                        let fields = declared
+                            .into_iter()
+                            .map(|(label, t)| (label, self.resolve_rty(pool, t)))
+                            .collect();
+                        wire::CtorDecl::new(
+                            crate::core_ir::VariantRef {
+                                type_id: id,
+                                // The variant slice's own length is a `u16`,
+                                // so an index into it cannot overflow one.
+                                variant_idx: i as u16,
+                                type_name: info.name,
+                            },
+                            v.name,
+                            fields,
+                        )
+                    })
+                    .collect();
+                wire::Nominal::Data {
+                    ctors_public,
+                    declared_here,
+                    ctors,
+                }
+            }
+        }
+    }
+
+    fn name(&self, s: StrId) -> String {
+        self.engine.str(s).to_string()
+    }
+}
+
+impl Compiler {
+    /// The six types the wire format writes structurally rather than as a
+    /// tagged constructor.
+    ///
+    /// Identity is the prelude's own binding, never a name: a user's
+    /// `type Map(k, v)` is a different type from `scarlet/map`'s and must be
+    /// described by its constructors. `Map` is late-bound, so this answers
+    /// `None` for it until `scarlet/map` has loaded — which is also the first
+    /// moment a value of it can exist.
+    fn wire_builtin(&self, id: TypeId) -> Option<wire::Builtin> {
+        let p = &self.prelude;
+        if p.int().is(id) {
+            Some(wire::Builtin::Int)
+        } else if p.float().is(id) {
+            Some(wire::Builtin::Float)
+        } else if p.string().is(id) {
+            Some(wire::Builtin::String)
+        } else if p.binary().is(id) {
+            Some(wire::Builtin::Binary)
+        } else if p.array().is(id) {
+            Some(wire::Builtin::Array)
+        } else if p.map().is(id) {
+            Some(wire::Builtin::Map)
+        } else {
+            None
+        }
+    }
+
+    /// Whether the module being compiled is the one that declared `info`, which
+    /// is what lets a module put its own opaque type on the wire.
+    ///
+    /// Compared as the interned path rather than as the `ArenaSlice`:
+    /// `intern_slice` appends unconditionally, so two slices spelling one path
+    /// are two different slices and would compare unequal.
+    fn type_declared_here(&mut self, info: TypeInfo) -> bool {
+        let here = self.current_module_slice();
+        self.engine.str_ids_of(here) == self.engine.str_ids_of(info.module)
     }
 }

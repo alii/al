@@ -1042,3 +1042,226 @@ mod wire_templates {
         );
     }
 }
+
+/// Elaboration runs the descriptor builder at every `wire.encode`/
+/// `wire.decode` call: on success the op carries the descriptor's constant and
+/// the type's constructors reach `wire_templates`, and on a refusal the call
+/// site gets a diagnostic.
+///
+/// The reason these live here and not only as `al check` cases is the
+/// operand: a subprocess sees the diagnostics but not which constant an
+/// instruction names, and "a descriptor was attached" is exactly the half a
+/// clean compile is silent about.
+mod wire_descriptors {
+    use super::super::*;
+
+    const EVENT: &str = "import scarlet/wire\n\
+                         type Event {\n\
+                         \x20 Said(who String, tags Array(String))\n\
+                         \x20 Left(who String)\n\
+                         }\n";
+
+    /// The operand of every instruction with `op`, in code order.
+    fn operands(p: &crate::bytecode::Program, op: Op) -> Vec<i32> {
+        p.code
+            .iter()
+            .filter(|i| i.op == op)
+            .map(|i| i.operand)
+            .collect()
+    }
+
+    fn emitted(src: &str) -> crate::bytecode::Program {
+        let r = super::compile_script(src);
+        assert!(
+            !crate::diagnostic::has_errors(&r.diagnostics),
+            "snippet failed to compile: {:?}",
+            r.diagnostics,
+        );
+        r.into_runnable()
+            .expect("a non-check compile emits")
+            .program
+    }
+
+    /// Every error message a compile produced, joined — so an assertion can
+    /// say which text it wanted without depending on diagnostic order.
+    fn errors(src: &str, check_only: bool) -> String {
+        let block = super::parse_ok(src);
+        let r = compile_with(
+            &crate::ast::Expression::BlockExpression(block),
+            CompileOptions {
+                module_scope: ModuleScope::Script,
+                check_only,
+                ..CompileOptions::default()
+            },
+        );
+        r.diagnostics
+            .iter()
+            .map(|d| d.message.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A descriptor is attached, and it is a descriptor *of that type*: both
+    /// its constructors are minted, under the `(type_id, variant_idx)`
+    /// identity a decoder rebuilds them by. The template count is the part
+    /// that witnesses the node table's contents rather than just that some
+    /// number was pooled.
+    #[test]
+    fn an_encode_carries_a_descriptor_and_mints_that_type_s_constructors() {
+        let p = emitted(&format!("{EVENT}b = wire.encode(Left('a'))\nb\n"));
+
+        let ops = operands(&p, Op::WireEncode);
+        assert_eq!(ops.len(), 1, "one call, one op");
+        let c = p
+            .constants
+            .get(ops[0] as usize)
+            .expect("the operand names a pooled constant");
+        assert!(
+            c.as_int().is_some(),
+            "the descriptor constant is the shape fingerprint, an Int; got {c:?}"
+        );
+
+        assert_eq!(
+            p.wire_templates.len(),
+            2,
+            "Event has two constructors and both must be rebuildable: {:?}",
+            p.wire_templates
+        );
+    }
+
+    /// Two types are two descriptors; one type at two call sites is one. The
+    /// second half is what fails if the operand were not type-directed at
+    /// all — a hard-coded 0 passes every test that only looks at one call.
+    #[test]
+    fn the_operand_follows_the_type_and_nothing_else() {
+        let p = emitted(&format!(
+            "{EVENT}type Other {{\n\
+             \x20 Other(n Int)\n\
+             }}\n\
+             a = wire.encode(Left('a'))\n\
+             b = wire.encode(Said('b', []))\n\
+             c = wire.encode(Other(1))\n\
+             [a, b, c]\n"
+        ));
+
+        let ops = operands(&p, Op::WireEncode);
+        assert_eq!(ops.len(), 3);
+        assert_eq!(
+            ops[0], ops[1],
+            "two calls at one type describe one shape, so they share a constant"
+        );
+        assert_ne!(ops[0], ops[2], "a different type is a different descriptor");
+    }
+
+    /// The whole of constraint 2. `decode`'s payload is fixed only by the
+    /// `match` *after* the call, so a descriptor built from the type as the
+    /// call was entered would be built from an unresolved variable and refuse.
+    /// It compiles, and it describes the same shape the `encode` above it
+    /// does — which is the property a shared constant witnesses and a bare
+    /// "it compiled" does not.
+    #[test]
+    fn a_decode_typed_only_by_a_later_match_describes_that_type() {
+        let p = emitted(&format!(
+            "{EVENT}b = wire.encode(Left('a'))\n\
+             match wire.decode(b) {{\n\
+             \x20 Ok(Said(w, _)) -> w\n\
+             \x20 Ok(Left(w)) -> w\n\
+             \x20 Err(_) -> 'no'\n\
+             }}\n"
+        ));
+
+        let enc = operands(&p, Op::WireEncode);
+        let dec = operands(&p, Op::WireDecode);
+        assert_eq!((enc.len(), dec.len()), (1, 1));
+        assert_eq!(
+            enc[0], dec[0],
+            "decode's descriptor must be Event's, the same shape encode described"
+        );
+    }
+
+    #[test]
+    fn an_unconstrained_decode_is_refused_with_the_annotate_wording() {
+        let msgs = errors(
+            "import scarlet/wire\n\
+             fn read(b Binary) {\n\
+             \x20 match wire.decode(b) {\n\
+             \x20   Ok(v) -> Some(v)\n\
+             \x20   Err(_) -> None\n\
+             \x20 }\n\
+             }\n\
+             read\n",
+            false,
+        );
+        assert!(
+            msgs.contains("the type `wire.decode` produces here is not known"),
+            "got: {msgs}"
+        );
+    }
+
+    /// The same refusal, reached the other way: the payload is pinned to the
+    /// enclosing function's own quantified parameter rather than left unsolved.
+    #[test]
+    fn a_decode_in_a_generic_fn_is_refused() {
+        let msgs = errors(
+            "import scarlet/wire\n\
+             fn read(b Binary, fallback a) a {\n\
+             \x20 match wire.decode(b) {\n\
+             \x20   Ok(v) -> v\n\
+             \x20   Err(_) -> fallback\n\
+             \x20 }\n\
+             }\n\
+             read\n",
+            false,
+        );
+        assert!(
+            msgs.contains("the type `wire.decode` produces here is not known"),
+            "got: {msgs}"
+        );
+    }
+
+    /// `fn` is refused for RECONSTRUCTIBILITY, not for want of a
+    /// representation — Erlang serialises funs and this one could be written
+    /// too; what no peer can do is rebuild the captures, which the static type
+    /// does not fix. The negative half is the point: the false rationale is
+    /// the one a golden would otherwise freeze.
+    #[test]
+    fn a_fn_field_is_refused_on_reconstructibility_not_representation() {
+        let msgs = errors(
+            "import scarlet/wire\n\
+             type Handler {\n\
+             \x20 Handler(name String, run fn(Int) Int)\n\
+             }\n\
+             wire.encode(Handler('h', fn(x) { x + 1 }))\n",
+            false,
+        );
+        assert!(
+            msgs.contains("a closure's captures are not fixed by its type"),
+            "got: {msgs}"
+        );
+        assert!(
+            msgs.contains("Handler.run"),
+            "the refusal must name the field it was reached through: {msgs}"
+        );
+        assert!(
+            !msgs.contains("no wire representation"),
+            "the false rationale must not come back: {msgs}"
+        );
+    }
+
+    /// The arm that silently does not happen if the builder is run at
+    /// emission instead: `check` never emits, so a diagnostic raised there is
+    /// invisible in an editor.
+    #[test]
+    fn the_refusal_reaches_the_check_only_path() {
+        let src = "import scarlet/wire\n\
+                   type Handler {\n\
+                   \x20 Handler(run fn(Int) Int)\n\
+                   }\n\
+                   wire.encode(Handler(fn(x) { x + 1 }))\n";
+        let checked = errors(src, true);
+        assert!(
+            checked.contains("a closure's captures are not fixed by its type"),
+            "check-only must report the refusal too, got: {checked}"
+        );
+    }
+}

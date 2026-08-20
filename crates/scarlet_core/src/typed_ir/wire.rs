@@ -113,10 +113,11 @@ pub struct Desc {
 
 impl Desc {
     /// The node the described type itself is.
-    // Reading a descriptor is what a caller of `build_desc` does, so this has
-    // no reader until that caller exists; only the tests below walk one. The
-    // accessors are marked one at a time rather than on the `impl` block, so
-    // that a method added here later is not silently covered too.
+    // Elaboration builds a descriptor and pools its fingerprint; nothing in
+    // the library walks the node table yet, so these three accessors still
+    // have only the tests below as readers. They are marked one at a time
+    // rather than on the `impl` block, so that a method added here later is
+    // not silently covered too.
     #[allow(dead_code)]
     fn root(&self) -> NodeIdx {
         self.root
@@ -125,17 +126,7 @@ impl Desc {
     /// The 64-bit hash of this type's shape. Two peers agree they are talking
     /// about the same shape by comparing these; `wire.scrl`'s module doc
     /// specifies how it is computed and what moves it.
-    // Private and suppressed for the same reason as the accessors above, and on
-    // its own attribute for the same reason: elaboration is what will compare two
-    // of these, and it does not call `build_desc` yet. Widen with that caller.
-    //
-    // Not `#[expect(dead_code)]`, which would retire itself and is the obvious
-    // improvement: the tests below call this and the library does not, so the
-    // expectation is fulfilled in the lib target and *unfulfilled* in lib test —
-    // `cargo clippy --all-targets` then fails with "this lint expectation is
-    // unfulfilled". `expect` cannot express a test-only helper.
-    #[allow(dead_code)]
-    fn fingerprint(&self) -> u64 {
+    pub(crate) fn fingerprint(&self) -> u64 {
         self.fingerprint
     }
 
@@ -206,6 +197,22 @@ pub struct CtorDecl {
     fields: Vec<(StrId, RTy)>,
 }
 
+impl CtorDecl {
+    /// One declared constructor, for a [`WireCtx`] answering [`Nominal::Data`].
+    ///
+    /// `fields` must be closed over the owning type's parameters — `Bound(i)`
+    /// for the `i`th, which is the form `close_body` leaves a `VariantField`
+    /// in. A field carrying a live inference variable instead would be
+    /// described as a rigid parameter and refuse.
+    pub(crate) fn new(variant: VariantRef, name: StrId, fields: Vec<(StrId, RTy)>) -> CtorDecl {
+        CtorDecl {
+            variant,
+            name,
+            fields,
+        }
+    }
+}
+
 /// What a [`TypeId`] denotes to `wire`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Nominal {
@@ -235,10 +242,15 @@ pub enum Nominal {
 /// between the two. Same split, and for the same reason, as
 /// [`super::elaborate_pat::PatCtx`]: every type crossing it is an [`RTy`], so
 /// the builder is exercised against hand-built types without an engine.
-trait WireCtx {
+pub(crate) trait WireCtx {
     /// What `id` denotes. Field and alias-target types come back closed over
     /// the declaring type's own parameters.
-    fn nominal(&mut self, id: TypeId) -> Nominal;
+    ///
+    /// The pool is passed in because a real declaration table holds inference
+    /// types, not [`RTy`]s: answering at all means interning a variant's field
+    /// types into the pool the walk is building against. It must be that pool
+    /// and no other — an [`RTy`] is an index and means nothing anywhere else.
+    fn nominal(&mut self, pool: &mut ResolvedPool, id: TypeId) -> Nominal;
 
     /// Display text for an interned name, for a refusal's path.
     fn name(&self, s: StrId) -> String;
@@ -272,8 +284,6 @@ pub enum Reason {
 impl Reason {
     /// The prose a diagnostic carries. Present tense, naming the property that
     /// fails rather than the syntax that has it.
-    // No diagnostic quotes this until the elaborator reports a refusal.
-    #[allow(dead_code)]
     fn describe(self) -> &'static str {
         match self {
             // NOT "a function has no wire representation" — it has several, and
@@ -316,9 +326,6 @@ impl WireRefusal {
     /// This is the half of the diagnostic that makes it useful: a refusal three
     /// levels down a record that says only "cannot encode" leaves the reader to
     /// find which field it meant.
-    // Same as `Reason::describe`: no diagnostic renders a refusal path yet.
-    // This is also the only caller of `WireCtx::name`.
-    #[allow(dead_code)]
     fn path_text<C: WireCtx + ?Sized>(&self, cx: &C) -> String {
         self.path
             .iter()
@@ -333,6 +340,116 @@ impl WireRefusal {
             })
             .collect::<Vec<_>>()
             .join(" -> ")
+    }
+
+    /// The diagnostic this refusal reports at a `wire` call site.
+    ///
+    /// An unresolved type is worded as an instruction rather than as a
+    /// property: it is the one refusal a programmer clears by writing an
+    /// annotation instead of by not putting the type on the wire. Every other
+    /// reason names the property that fails, and the path says where — a
+    /// refusal three levels into a record that says only "cannot encode"
+    /// leaves the reader to find which field it meant.
+    pub(crate) fn message<C: WireCtx + ?Sized>(
+        &self,
+        cx: &C,
+        pool: &ResolvedPool,
+        op: WireOp,
+    ) -> String {
+        if self.reason == Reason::TypeVariable && self.path.is_empty() {
+            return match op {
+                WireOp::Encode => {
+                    "the type `wire.encode` is given here is not known; annotate the binding"
+                        .to_string()
+                }
+                WireOp::Decode => {
+                    "the type `wire.decode` produces here is not known; annotate the binding"
+                        .to_string()
+                }
+            };
+        }
+        let head = format!(
+            "`{}` cannot {} `{}`: {}",
+            op.call(),
+            op.verb(),
+            render_rty(cx, pool, self.ty),
+            self.reason.describe()
+        );
+        if self.path.is_empty() {
+            head
+        } else {
+            // Not "at": the driver appends the call's own source location to
+            // every diagnostic, and two "at"s in one line read as one place.
+            format!("{head} (through {})", self.path_text(cx))
+        }
+    }
+}
+
+/// Which of the two wire calls a refusal is being reported at. Both refuse
+/// exactly the same types — that symmetry is the module's whole point — so
+/// this only chooses the sentence, never the verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireOp {
+    Encode,
+    Decode,
+}
+
+impl WireOp {
+    fn call(self) -> &'static str {
+        match self {
+            WireOp::Encode => "wire.encode",
+            WireOp::Decode => "wire.decode",
+        }
+    }
+
+    fn verb(self) -> &'static str {
+        match self {
+            WireOp::Encode => "encode",
+            WireOp::Decode => "decode",
+        }
+    }
+}
+
+/// A resolved type as source-like text, for a diagnostic.
+///
+/// `Con.name` is display text and is exactly right here — this is the one
+/// place in the module that wants the name a reader wrote rather than the
+/// [`TypeId`] that decides identity.
+fn render_rty<C: WireCtx + ?Sized>(cx: &C, pool: &ResolvedPool, t: RTy) -> String {
+    let list = |xs: &[RTy]| {
+        xs.iter()
+            .map(|&x| render_rty(cx, pool, x))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match pool.node(t) {
+        ResolvedNode::Bound(i) => bound_name(i),
+        ResolvedNode::Con { name, args, .. } => {
+            let args = pool.children(args);
+            if args.is_empty() {
+                cx.name(name)
+            } else {
+                format!("{}({})", cx.name(name), list(args))
+            }
+        }
+        ResolvedNode::Fun { params, ret } => {
+            format!(
+                "fn({}) {}",
+                list(pool.children(params)),
+                render_rty(cx, pool, ret)
+            )
+        }
+        ResolvedNode::Tuple { elems } => format!("({})", list(pool.children(elems))),
+    }
+}
+
+/// A quantified parameter as the letter a signature would spell it with.
+/// Past `z` the index is written out, which no real signature reaches but
+/// which keeps the function total.
+fn bound_name(i: u32) -> String {
+    match u8::try_from(i) {
+        Ok(n) if i < 26 => char::from(b'a' + n).to_string(),
+        _ => format!("t{i}"),
     }
 }
 
@@ -446,11 +563,7 @@ fn fingerprint_of<C: WireCtx + ?Sized>(cx: &C, nodes: &[Node], root: NodeIdx) ->
 /// `pool` is taken mutably because instantiating a variant's field types at the
 /// type's arguments mints nodes — `Option(Int)`'s `Some.value` is an `Int` that
 /// the declared body, which says `Bound(0)`, does not contain.
-// The builder has no production caller until the descriptor is wired into
-// elaboration; suppressing it here keeps `Build`, `Key` and `wire_bug` live,
-// since this is the only root they hang from. Delete with the first caller.
-#[allow(dead_code)]
-fn build_desc<C: WireCtx + ?Sized>(
+pub(crate) fn build_desc<C: WireCtx + ?Sized>(
     pool: &mut ResolvedPool,
     cx: &mut C,
     root: RTy,
@@ -535,7 +648,7 @@ impl<C: WireCtx + ?Sized> Build<'_, C> {
         args: &[RTy],
         path: &mut Vec<Step>,
     ) -> Result<NodeIdx, WireRefusal> {
-        match self.cx.nominal(id) {
+        match self.cx.nominal(self.pool, id) {
             Nominal::Bodiless => Err(self.refuse(t, Reason::NoRepresentation, path)),
 
             Nominal::Builtin(b) => self.builtin(b, args, path),
@@ -788,7 +901,9 @@ mod tests {
     }
 
     impl WireCtx for Decls<'_> {
-        fn nominal(&mut self, id: TypeId) -> Nominal {
+        // The declarations are already `RTy`s the fixture minted, so this
+        // implementation has no use for the pool. A real one does.
+        fn nominal(&mut self, _pool: &mut ResolvedPool, id: TypeId) -> Nominal {
             match self.types.get(&id) {
                 Some(n) => n.clone(),
                 // An id the test never declared is host-backed, which is what

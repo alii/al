@@ -280,11 +280,10 @@ impl Compiler {
     /// constructor — one type reachable through two different `wire.encode`/
     /// `wire.decode` call sites, say — mint one template, not two.
     ///
-    /// No production caller until `build_desc` is wired into elaboration
-    /// (ticket 336, `wire 7/15`) and hands this the descriptors a compile
-    /// actually produced; suppressed for the same reason `build_desc` itself
-    /// is. Delete the `allow` with that caller.
-    #[allow(dead_code)]
+    /// `descs` is what elaboration built for the compile being emitted
+    /// (`Compiler::wire_descs`), including the ones an imported module's own
+    /// toplevel produced: they accumulate across module inits and are drained
+    /// once, here, after `bind_abi`.
     pub(super) fn mint_wire_templates(&mut self, descs: &[crate::typed_ir::wire::Desc]) {
         for desc in descs {
             for variant in desc.variants() {

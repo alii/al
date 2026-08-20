@@ -23,13 +23,14 @@ use super::eta::{FnRTy, FnTable, eta_wrapper};
 use super::resolve::{CallForm, Denotation, EtaTarget, ValueForm};
 use super::rty::{RTy, ResolvedNode, ResolvedPool};
 use super::slots::slot_labeled;
+use super::wire::WireOp;
 use super::{
     BindingId, GlobalSlot, TypedArm, TypedArrayElem, TypedBinSeg, TypedBind, TypedCallee,
     TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef,
 };
 use crate::ast;
 use crate::bytecode::{BinopKind, Op, ShortCircuitOp, Value, ValueBinop, specialize_binop};
-use crate::core_ir::{ConstId, FuncIdx, VariantRef};
+use crate::core_ir::{ConstId, FuncIdx, Imm, VariantRef};
 use crate::span::Span;
 use crate::types::{Prim, StrId, Ty};
 
@@ -160,6 +161,24 @@ pub trait ElabCtx: PreludeTys {
     fn or_shape(&mut self, lhs_ty: Ty) -> Option<OrShape>;
 
     fn ty_nil(&mut self) -> Ty;
+
+    /// The descriptor constant a `wire.encode`/`wire.decode` call carries, for
+    /// the type that call crosses the wire at.
+    ///
+    /// `None` means `ty` cannot cross, and the refusal has been reported as an
+    /// error at `at`. This is the one question the elaborator asks that can be
+    /// answered "no": everything else it asks the check walk has already
+    /// settled. It is asked *here* rather than at emission because the
+    /// check-only path — `scarlet check`, and the LSP through it — never
+    /// reaches emission, and a diagnostic raised there is invisible in an
+    /// editor.
+    fn wire_descriptor(
+        &mut self,
+        pool: &mut ResolvedPool,
+        ty: RTy,
+        op: WireOp,
+        at: Span,
+    ) -> Option<ConstId>;
 }
 
 /// One step of the check walk, recorded in entry order and replayed
@@ -874,7 +893,8 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                         elaborator_bug("non-positional argument on a positional call", at)
                     }
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            let callee = self.wire_imm(callee, &args, ty, at);
             return TypedExpr::Call { ty, callee, args };
         }
         let Some(labels) = param_labels else {
@@ -922,6 +942,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 None => elaborator_bug("call parameter with no argument", at),
             }
         }
+        let callee = self.wire_imm(callee, &out, ty, at);
         wrap_lets(
             lets,
             TypedExpr::Call {
@@ -930,6 +951,54 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 args: out,
             },
         )
+    }
+
+    /// Attach the descriptor constant to a `wire.encode`/`wire.decode` callee,
+    /// leaving every other callee alone.
+    ///
+    /// **The type is read here, and here is after the whole module's check
+    /// walk.** `analyse_module` finishes before any body is elaborated, so a
+    /// `decode` whose payload is fixed only by a later `match` — which is the
+    /// ordinary way one is written — is already solved by the time this runs.
+    /// Asking any earlier describes an unresolved variable and refuses, and
+    /// the refusal reads as "type is not known" on a program that is perfectly
+    /// well typed.
+    ///
+    /// A refusal leaves the immediate as it was and has already reported an
+    /// error at the call, which denies the module.
+    fn wire_imm(
+        &mut self,
+        callee: TypedCallee,
+        args: &[TypedExpr],
+        ty: RTy,
+        at: Span,
+    ) -> TypedCallee {
+        let TypedCallee::Builtin { op, imm } = callee else {
+            return callee;
+        };
+        let (wop, crossed) = match op {
+            Op::WireEncode => {
+                let Some(arg) = args.first() else {
+                    elaborator_bug("wire.encode with no argument", at)
+                };
+                (WireOp::Encode, arg.ty())
+            }
+            // `decode`'s declared result is `Result(a, DecodeError)`, so the
+            // call's own type is always that spine and the payload is its
+            // first argument — whatever inference did or did not solve `a` to.
+            Op::WireDecode => {
+                let Some(payload) = self.pool.con_arg(ty, 0) else {
+                    elaborator_bug("wire.decode whose result is not a Result", at)
+                };
+                (WireOp::Decode, payload)
+            }
+            _ => return TypedCallee::Builtin { op, imm },
+        };
+        let imm = match self.ctx.wire_descriptor(&mut *self.pool, crossed, wop, at) {
+            Some(c) => Imm::Const(c),
+            None => imm,
+        };
+        TypedCallee::Builtin { op, imm }
     }
 
     fn callee(&mut self, e: &ast::Expression) -> Callee {
