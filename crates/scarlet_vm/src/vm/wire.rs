@@ -1,17 +1,27 @@
 //! `scarlet/wire`: values as bytes, under a descriptor of the type the call
 //! site was inferred at.
 //!
-//! Two halves live here. The **encoder** is complete: [`WireDesc`] is the
-//! runtime shape of a type, and [`encode_value`] walks a value under one and
-//! writes the bytes `scarlet/wire.scrl`'s module doc specifies. The **decoder**
-//! is not, and [`VM::wire_decode`] still traps.
+//! Both halves live here. [`WireDesc`] is the runtime shape of a type;
+//! [`encode_value`] walks a value under one and writes the bytes
+//! `scarlet/wire.scrl`'s module doc specifies, and [`VM::decode_wire`] reads
+//! them back, treating every byte as hostile.
 //!
 //! Neither op body runs yet, because nothing puts a [`WireDesc`] in front of
 //! them. The descriptor is built in the compiler
 //! (`scarlet_core::typed_ir::wire`, which this crate may not depend on) and has
-//! to arrive as a program constant; elaboration attaching it, and the constant's
-//! runtime form, are still being cut. So the ops trap and the encoder is
-//! reachable only from the tests below.
+//! to arrive as a program constant; elaboration attaching it, and the
+//! constant's runtime form, are still being cut (T-732). So the ops trap and
+//! both walks are reachable only from the tests below.
+//!
+//! # Decoding refuses; encoding cannot
+//!
+//! Encode is total because the compiler proved the value matches the
+//! descriptor. Decode has proved nothing: the bytes may be truncated, forged,
+//! or written against a different version of the type. So every count is
+//! checked against the input that remains before anything is allocated, every
+//! string is UTF-8 validated, and every variant tag is range-checked — and the
+//! two ways a decode can stop are kept apart by [`Stop`], because a refusal is
+//! the peer's fault and an internal error is ours.
 //!
 //! What is already fixed here is the outcome vocabulary. `DecodeError`'s five
 //! constructors are bound as [`AbiSlot`](crate::abi::AbiSlot)s, so the decoder
@@ -38,7 +48,8 @@
 //! follow. `wire_encode_deep_chain_is_iterative` below is what holds it.
 
 use crate::TypeId;
-use crate::bytecode::{MapBacking, Value, ValueView, hamt};
+use crate::abi::AbiSlot;
+use crate::bytecode::{MapBacking, Value, ValueView, hamt, hash_value};
 
 use super::map::env_entries;
 use super::{VM, VmError, VmResult, range_len};
@@ -350,6 +361,548 @@ fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value) {
     }
 }
 
+// --- decoding -------------------------------------------------------------
+
+/// Why a decode refused, in the runtime's own vocabulary. Turned into a
+/// Scarlet `DecodeError` by [`VM::wire_refusal`], which is the only thing here
+/// that can reach the ABI.
+///
+/// Deliberately separate from [`Stop`]: a refusal is a statement about the
+/// BYTES, and every arm of it is something a hostile or stale peer can
+/// legitimately provoke.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+enum Refusal {
+    Truncated,
+    NotWire,
+    /// Both sides, so a log line can say which end changed. `expected` is the
+    /// reader's own fingerprint, `found` is the one in the bytes.
+    SchemaMismatch {
+        expected: u64,
+        found: u64,
+    },
+    Malformed {
+        offset: usize,
+        what: &'static str,
+    },
+    TrailingBytes {
+        count: usize,
+    },
+}
+
+/// What stopped a decode. The split is the point: a [`Refusal`] is the bytes'
+/// fault and becomes an `Err(DecodeError)` the program can match on, while
+/// `Internal` is this runtime's own — a descriptor naming a constructor the
+/// program minted no template for — and becomes a VM error. Folding the second
+/// into the first would report a compiler bug as hostile input, and the peer
+/// that sent perfectly good bytes would get the blame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+enum Stop {
+    Refused(Refusal),
+    Internal(&'static str),
+}
+
+impl From<Refusal> for Stop {
+    fn from(r: Refusal) -> Stop {
+        Stop::Refused(r)
+    }
+}
+
+/// A cursor over untrusted bytes. Every read is bounds-checked and every
+/// failure names an offset; nothing here can panic on a short or hostile
+/// input.
+#[allow(dead_code)]
+struct Reader<'a> {
+    buf: &'a [u8],
+    at: usize,
+}
+
+#[allow(dead_code)]
+impl<'a> Reader<'a> {
+    fn new(buf: &'a [u8]) -> Reader<'a> {
+        Reader { buf, at: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.buf.len() - self.at
+    }
+
+    fn take(&mut self, n: usize) -> Result<&'a [u8], Refusal> {
+        if n > self.remaining() {
+            return Err(Refusal::Truncated);
+        }
+        let s = &self.buf[self.at..self.at + n];
+        self.at += n;
+        Ok(s)
+    }
+
+    fn u8(&mut self) -> Result<u8, Refusal> {
+        Ok(self.take(1)?[0])
+    }
+
+    /// LEB128. Refuses a varint that runs past ten groups or whose top group
+    /// carries bits past 64 — an overlong encoding is a second spelling of a
+    /// number the encoder never writes, and accepting it would make the format
+    /// non-canonical.
+    fn uleb(&mut self) -> Result<u64, Refusal> {
+        let start = self.at;
+        let mut v: u64 = 0;
+        let mut shift = 0u32;
+        loop {
+            let b = self.u8()?;
+            let payload = u64::from(b & 0x7f);
+            if shift == 63 && payload > 1 {
+                return Err(Refusal::Malformed {
+                    offset: start,
+                    what: "varint does not fit in 64 bits",
+                });
+            }
+            v |= payload << shift;
+            if b & 0x80 == 0 {
+                // The encoder emits the shortest form, so a non-zero
+                // continuation that contributed nothing is a forgery.
+                if shift > 0 && b == 0 {
+                    return Err(Refusal::Malformed {
+                        offset: start,
+                        what: "overlong varint",
+                    });
+                }
+                return Ok(v);
+            }
+            shift += 7;
+            if shift > 63 {
+                return Err(Refusal::Malformed {
+                    offset: start,
+                    what: "varint does not fit in 64 bits",
+                });
+            }
+        }
+    }
+
+    /// Zigzag + LEB128, the inverse of [`put_i64`].
+    fn ileb(&mut self) -> Result<i64, Refusal> {
+        let u = self.uleb()?;
+        Ok(((u >> 1) as i64) ^ -((u & 1) as i64))
+    }
+}
+
+/// A node whose values occupy zero bytes has exactly one inhabitant — it is an
+/// empty tuple, or a one-constructor type all of whose fields are themselves
+/// zero-byte — so a container of them is bounded by nothing in the input at
+/// all: the count IS the whole encoding. `count * min <= remaining` is vacuous
+/// there, and this is the one number in the decoder that is chosen rather than
+/// derived from the input. 2^24 elements is 128 MiB of `Value` words, which no
+/// program reaches by accident and a forged count reaches immediately.
+///
+/// Recorded rather than hidden: every OTHER count is bounded exactly, with no
+/// policy number involved.
+const MAX_ZERO_COST_ELEMS: u64 = 1 << 24;
+
+/// The fewest bytes a value of each node can occupy, indexed as
+/// [`WireDesc::nodes`] is.
+///
+/// This is what makes the count guard exact rather than a guess: an `Array`
+/// claiming `n` elements needs at least `n * min_bytes(elem)` bytes after its
+/// count, and anything more than that is refused before a single element is
+/// allocated.
+///
+/// Computed as a fixed point from "unknown", because a recursive type's node
+/// refers to itself: `List(Int)`'s `Cons.tail` is the `List(Int)` node, so a
+/// single pass would need its own answer. Successive rounds shrink each entry
+/// until nothing moves, which is at most one round per node.
+#[allow(dead_code)]
+fn min_bytes(desc: &WireDesc) -> Vec<u64> {
+    // `u64::MAX` reads "not yet known", and every arm below saturates, so an
+    // unknown never wraps into a small number and lets a count through.
+    let mut min = vec![u64::MAX; desc.nodes.len()];
+    let at = |m: &Vec<u64>, i: WireNodeIdx| -> u64 { *m.get(i.0 as usize).unwrap_or(&u64::MAX) };
+    loop {
+        let mut moved = false;
+        for i in 0..desc.nodes.len() {
+            let was = min[i];
+            let now = match &desc.nodes[i] {
+                // A zigzag LEB128 of 0, an empty string, an empty binary and
+                // an empty container are all one byte.
+                WireNode::Int | WireNode::String | WireNode::Binary => 1,
+                WireNode::Array(_) | WireNode::Map(_, _) => 1,
+                WireNode::Float => 8,
+                WireNode::Tuple(elems) => elems
+                    .iter()
+                    .fold(0u64, |a, e| a.saturating_add(at(&min, *e))),
+                WireNode::Data(ctors) => {
+                    let tag = if ctors.len() > 1 { 1 } else { 0 };
+                    let body = ctors
+                        .iter()
+                        .map(|c| {
+                            c.fields
+                                .iter()
+                                .fold(0u64, |a, f| a.saturating_add(at(&min, *f)))
+                        })
+                        .min()
+                        .unwrap_or(0);
+                    body.saturating_add(tag)
+                }
+            };
+            if now < was {
+                min[i] = now;
+                moved = true;
+            }
+        }
+        if !moved {
+            return min;
+        }
+    }
+}
+
+/// Refuse a count the remaining input cannot possibly satisfy, BEFORE anything
+/// is allocated. This is the check that stands between a four-byte message
+/// claiming a 2^40-element array and the allocator.
+#[allow(dead_code)]
+fn guard_count(
+    count: u64,
+    min_each: u64,
+    remaining: usize,
+    offset: usize,
+) -> Result<usize, Refusal> {
+    let need = count.saturating_mul(min_each);
+    let fits = if min_each == 0 {
+        count <= MAX_ZERO_COST_ELEMS
+    } else {
+        need <= remaining as u64
+    };
+    if !fits {
+        return Err(Refusal::Malformed {
+            offset,
+            what: "count is larger than the remaining input can hold",
+        });
+    }
+    Ok(count as usize)
+}
+
+/// One pending piece of decoder work.
+#[allow(dead_code)]
+enum Step {
+    /// Read a value of this node from the input.
+    Read(WireNodeIdx),
+    /// Combine already-built values into one.
+    Finish(Finish),
+}
+
+/// A container whose children are built and are waiting to be joined. The
+/// child count is fixed when the container's count is read and guarded, so a
+/// `Finish` can never ask for more values than the walk put there.
+#[allow(dead_code)]
+enum Finish {
+    Array(usize),
+    /// `n` key/value pairs, so `2 * n` values, plus the offset the count was
+    /// read at so a duplicate-key refusal names a real byte.
+    Map(usize, usize),
+    Tuple(usize),
+    Ctor {
+        type_id: TypeId,
+        variant_idx: u16,
+        arity: usize,
+    },
+}
+
+/// Take the last `n` finished values, in the order they were built.
+#[allow(dead_code)]
+fn take_last(done: &mut Vec<Value>, n: usize) -> Result<Vec<Value>, Stop> {
+    if done.len() < n {
+        // The count that sized this `Finish` is the same one that pushed the
+        // reads, so this is unreachable by construction rather than by input.
+        return Err(Stop::Internal("wire decoder finished a container short"));
+    }
+    Ok(done.split_off(done.len() - n))
+}
+
+/// Magic, version, fingerprint — the first eleven bytes, and the whole schema
+/// check.
+///
+/// Order matters: magic and version are judged before the fingerprint, so
+/// bytes from somewhere else are `NotWire` rather than a `SchemaMismatch`
+/// against whatever their bytes 3..11 happen to spell. An input too short to
+/// hold even the magic has nothing to judge and is `Truncated`.
+#[allow(dead_code)]
+fn read_header(r: &mut Reader<'_>, expected: u64) -> Result<(), Refusal> {
+    if r.take(MAGIC.len())? != MAGIC {
+        return Err(Refusal::NotWire);
+    }
+    if r.u8()? != VERSION {
+        return Err(Refusal::NotWire);
+    }
+    let mut fp = [0u8; 8];
+    fp.copy_from_slice(r.take(8)?);
+    let found = u64::from_le_bytes(fp);
+    if found != expected {
+        return Err(Refusal::SchemaMismatch { expected, found });
+    }
+    Ok(())
+}
+
+impl VM {
+    /// The Scarlet `DecodeError` a [`Refusal`] names. Built through the ABI,
+    /// so a renamed constructor is a compile diagnostic rather than a
+    /// mis-built value.
+    #[allow(dead_code)]
+    fn wire_refusal(&mut self, r: Refusal) -> VmResult<Value> {
+        match r {
+            Refusal::Truncated => self.abi_nullary(AbiSlot::WireTruncated),
+            Refusal::NotWire => self.abi_nullary(AbiSlot::WireNotWire),
+            Refusal::SchemaMismatch { expected, found } => {
+                // `DecodeError` carries these as `Int`, which is signed, so a
+                // fingerprint above `i64::MAX` arrives negative. Both sides go
+                // through the same reinterpretation, so the pair in one
+                // message still tells a reader which end changed.
+                let e = Value::int_in(&mut self.heap, expected as i64);
+                let f = Value::int_in(&mut self.heap, found as i64);
+                self.abi_make(AbiSlot::WireSchemaMismatch, &[e, f])
+            }
+            Refusal::Malformed { offset, what } => {
+                let o = Value::int_in(&mut self.heap, offset as i64);
+                let w = Value::str_in(&mut self.heap, what);
+                self.abi_make(AbiSlot::WireMalformed, &[o, w])
+            }
+            Refusal::TrailingBytes { count } => {
+                let c = Value::int_in(&mut self.heap, count as i64);
+                self.abi_make(AbiSlot::WireTrailingBytes, &[c])
+            }
+        }
+    }
+
+    /// `bytes` at `desc`, as the `Result(a, DecodeError)` the op pushes.
+    ///
+    /// The only door: a decoded value is built here by the ordinary
+    /// constructors — `EnumTemplate::instantiate`, `tuple_in`, `array_in`, the
+    /// map insert path — so it is indistinguishable from a constructed one,
+    /// and that plus the descriptor being the type is the whole type-safety
+    /// argument. Nothing writes a field directly.
+    #[allow(dead_code)]
+    fn decode_wire(&mut self, desc: &WireDesc, bytes: &[u8]) -> VmResult<Value> {
+        match self.decode_checked(desc, bytes) {
+            Ok(v) => self.make_ok(v),
+            Err(Stop::Refused(r)) => {
+                let e = self.wire_refusal(r)?;
+                self.make_err(e)
+            }
+            // This runtime's own fault, not the peer's — see [`Stop`].
+            Err(Stop::Internal(why)) => Err(VmError::internal(why)),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn decode_checked(&mut self, desc: &WireDesc, bytes: &[u8]) -> Result<Value, Stop> {
+        let mut r = Reader::new(bytes);
+        read_header(&mut r, desc.fingerprint)?;
+        let v = self.decode_body(desc, &mut r)?;
+        // Reported rather than ignored: a caller that framed its own messages
+        // and has extra bytes left has lost sync, and silently returning the
+        // value would hide that until the next message parsed as garbage.
+        if r.remaining() > 0 {
+            return Err(Refusal::TrailingBytes {
+                count: r.remaining(),
+            }
+            .into());
+        }
+        Ok(v)
+    }
+
+    /// Build the value under `desc.root` from `r`.
+    ///
+    /// Iterative for the same reason the encoder is: the value is unbounded,
+    /// so a native frame per level is a stack overflow reachable from any peer
+    /// that sends a long list. `work` carries the walk and `done` carries the
+    /// values built so far; a container pushes its `Finish` first and its
+    /// children after, so the children are popped and built before the parent
+    /// that joins them.
+    #[allow(dead_code)]
+    fn decode_body(&mut self, desc: &WireDesc, r: &mut Reader<'_>) -> Result<Value, Stop> {
+        let mins = min_bytes(desc);
+        let min_at = |i: WireNodeIdx| -> Result<u64, Stop> {
+            mins.get(i.0 as usize)
+                .copied()
+                .ok_or(Stop::Internal("wire descriptor node index out of range"))
+        };
+
+        let mut work: Vec<Step> = vec![Step::Read(desc.root)];
+        let mut done: Vec<Value> = Vec::new();
+
+        while let Some(step) = work.pop() {
+            match step {
+                Step::Read(at) => {
+                    let Some(node) = desc.node(at) else {
+                        return Err(Stop::Internal("wire descriptor node index out of range"));
+                    };
+                    match node {
+                        WireNode::Int => {
+                            let n = r.ileb()?;
+                            let v = Value::int_in(&mut self.heap, n);
+                            done.push(v);
+                        }
+                        WireNode::Float => {
+                            let mut b = [0u8; 8];
+                            b.copy_from_slice(r.take(8)?);
+                            // `Value::float` is what maps a non-finite reading
+                            // to 0.0 — the VM never holds NaN/Inf and a real
+                            // NaN's bits collide with the tag space. Decode
+                            // inherits that rather than repeating it.
+                            done.push(Value::float(f64::from_le_bytes(b)));
+                        }
+                        WireNode::String => {
+                            let off = r.at;
+                            let n = r.uleb()?;
+                            let n = guard_count(n, 1, r.remaining(), off)?;
+                            let bytes = r.take(n)?;
+                            let Ok(s) = std::str::from_utf8(bytes) else {
+                                return Err(Refusal::Malformed {
+                                    offset: off,
+                                    what: "string is not UTF-8",
+                                }
+                                .into());
+                            };
+                            let v = Value::str_in(&mut self.heap, s);
+                            done.push(v);
+                        }
+                        WireNode::Binary => {
+                            let off = r.at;
+                            let bit_len = r.uleb()?;
+                            let n = guard_count(bit_len.div_ceil(8), 1, r.remaining(), off)?;
+                            let mut buf = r.take(n)?.to_vec();
+                            // The spare low bits of the trailing byte are not
+                            // part of the value. Encode writes them as zero;
+                            // masking here keeps one value to one encoding
+                            // rather than trusting a peer to have done it. A
+                            // whole-byte binary shifts by nothing, so the mask
+                            // is 0xff and this costs a no-op rather than a
+                            // branch.
+                            let spare = (n as u64 * 8) - bit_len;
+                            if let Some(last) = buf.last_mut() {
+                                *last &= !0u8 << spare;
+                            }
+                            let v = Value::binary_bits_in(&mut self.heap, buf, bit_len);
+                            done.push(v);
+                        }
+                        WireNode::Array(elem) => {
+                            let off = r.at;
+                            let n = r.uleb()?;
+                            let n = guard_count(n, min_at(*elem)?, r.remaining(), off)?;
+                            work.push(Step::Finish(Finish::Array(n)));
+                            for _ in 0..n {
+                                work.push(Step::Read(*elem));
+                            }
+                        }
+                        WireNode::Map(key, val) => {
+                            let off = r.at;
+                            let n = r.uleb()?;
+                            let each = min_at(*key)?.saturating_add(min_at(*val)?);
+                            let n = guard_count(n, each, r.remaining(), off)?;
+                            work.push(Step::Finish(Finish::Map(n, off)));
+                            // Pushed as (value, key) pairs, so each key pops
+                            // before its own value and `done` ends up
+                            // k0 v0 k1 v1 …
+                            for _ in 0..n {
+                                work.push(Step::Read(*val));
+                                work.push(Step::Read(*key));
+                            }
+                        }
+                        WireNode::Tuple(elems) => {
+                            work.push(Step::Finish(Finish::Tuple(elems.len())));
+                            for e in elems.iter().rev() {
+                                work.push(Step::Read(*e));
+                            }
+                        }
+                        WireNode::Data(ctors) => {
+                            let off = r.at;
+                            // Omitted entirely for a one-constructor type, so
+                            // there is nothing to read and nothing to check.
+                            let tag = if ctors.len() > 1 {
+                                usize::try_from(r.uleb()?).unwrap_or(usize::MAX)
+                            } else {
+                                0
+                            };
+                            let Some(c) = ctors.get(tag) else {
+                                return Err(Refusal::Malformed {
+                                    offset: off,
+                                    what: "variant tag out of range",
+                                }
+                                .into());
+                            };
+                            work.push(Step::Finish(Finish::Ctor {
+                                type_id: c.type_id,
+                                variant_idx: c.variant_idx,
+                                arity: c.fields.len(),
+                            }));
+                            for f in c.fields.iter().rev() {
+                                work.push(Step::Read(*f));
+                            }
+                        }
+                    }
+                }
+                Step::Finish(f) => match f {
+                    Finish::Array(n) => {
+                        let items = take_last(&mut done, n)?;
+                        let v = Value::array_in(&mut self.heap, &items);
+                        done.push(v);
+                    }
+                    Finish::Tuple(n) => {
+                        let items = take_last(&mut done, n)?;
+                        let v = Value::tuple_in(&mut self.heap, &items);
+                        done.push(v);
+                    }
+                    Finish::Map(n, off) => {
+                        let items = take_last(&mut done, 2 * n)?;
+                        let mut m = hamt::empty(&mut self.heap);
+                        for (i, pair) in items.chunks_exact(2).enumerate() {
+                            let (k, v) = (pair[0].clone(), pair[1].clone());
+                            let h = hash_value(&k);
+                            m = hamt::insert(&mut self.heap, m, k, v, h);
+                            // An insert that did not grow the map overwrote an
+                            // existing binding. Encode never writes a duplicate
+                            // key, so the input is claiming a map it did not
+                            // get from encode — and silently keeping the last
+                            // one would return a map shorter than its own count.
+                            if hamt::size(&m) != i + 1 {
+                                return Err(Refusal::Malformed {
+                                    offset: off,
+                                    what: "duplicate map key",
+                                }
+                                .into());
+                            }
+                        }
+                        done.push(m);
+                    }
+                    Finish::Ctor {
+                        type_id,
+                        variant_idx,
+                        arity,
+                    } => {
+                        let payload = take_last(&mut done, arity)?;
+                        let Some(&idx) = self.program.wire_templates.get(&(type_id, variant_idx))
+                        else {
+                            return Err(Stop::Internal(
+                                "the descriptor names a constructor this program minted no wire template for",
+                            ));
+                        };
+                        let Some(t) = self.program.templates.get(idx).cloned() else {
+                            return Err(Stop::Internal("a wire template index is out of range"));
+                        };
+                        let v = t.instantiate(&mut self.heap, &payload);
+                        done.push(v);
+                    }
+                },
+            }
+        }
+
+        match done.pop() {
+            Some(v) if done.is_empty() => Ok(v),
+            _ => Err(Stop::Internal(
+                "wire decoder ended with the wrong value count",
+            )),
+        }
+    }
+}
+
 impl VM {
     /// `Op::WireEncode` — `[value] -> Binary`.
     pub(super) fn wire_encode(&mut self) -> VmResult<()> {
@@ -362,7 +915,8 @@ impl VM {
     /// `Op::WireDecode` — `[bytes Binary] -> Result(a, DecodeError)`.
     pub(super) fn wire_decode(&mut self) -> VmResult<()> {
         Err(VmError::internal(
-            "wire.decode has no decoder yet: the op is declared, not implemented",
+            "wire.decode has no descriptor to read against: the decoder is \
+             implemented, but the op's descriptor operand is not minted yet",
         ))
     }
 }
@@ -375,8 +929,8 @@ mod tests {
 
     use super::super::halt_test_vm;
     use super::*;
-    use crate::abi::AbiSlot;
-    use crate::bytecode::hash_value;
+    use crate::bytecode::values_equal;
+    use crate::template::EnumTemplate;
 
     fn variant_of(v: &Value) -> String {
         v.as_enum()
@@ -788,5 +1342,587 @@ mod tests {
         let mut vm = halt_test_vm();
         assert!(vm.wire_encode().is_err());
         assert!(vm.wire_decode().is_err());
+    }
+
+    // --- decoding ---------------------------------------------------------
+
+    /// A VM that can build the constructors a descriptor names.
+    ///
+    /// This is by hand what `Compiler::mint_wire_templates` does for a real
+    /// program: one `EnumTemplate` per constructor identity, recorded under
+    /// `(TypeId, variant_idx)`. Building them the same way is what makes the
+    /// "indistinguishable from a constructed one" claim testable at all.
+    fn vm_with_ctors(specs: &[(TypeId, u16, &str, &str, &[&str])]) -> VM {
+        let mut vm = halt_test_vm();
+        for (tid, vi, tn, vn, labels) in specs {
+            let t = EnumTemplate::build(&mut vm.frozen, *tid, *vi, tn, vn, labels);
+            let idx = vm.program.templates.push(t);
+            vm.program.wire_templates.insert((*tid, *vi), idx);
+        }
+        vm
+    }
+
+    /// The payload of `Ok`, or a panic naming what came back instead.
+    fn ok_of(vm: &mut VM, d: &WireDesc, bytes: &[u8]) -> Value {
+        let v = vm.decode_wire(d, bytes).expect("decode reached the ABI");
+        let e = v.as_enum().expect("decode returns a Result");
+        assert_eq!(e.variant_name(), "Ok", "expected Ok, got {:?}", e.payload());
+        e.payload()[0].clone()
+    }
+
+    /// The `DecodeError` constructor name and its payload.
+    fn refusal_of(vm: &mut VM, d: &WireDesc, bytes: &[u8]) -> (String, Vec<Value>) {
+        let v = vm.decode_wire(d, bytes).expect("decode reached the ABI");
+        let e = v.as_enum().expect("decode returns a Result");
+        assert_eq!(e.variant_name(), "Err", "expected Err, got Ok");
+        let inner = e.payload()[0].clone();
+        let ie = inner.as_enum().expect("DecodeError is an enum");
+        (ie.variant_name().to_string(), ie.payload().to_vec())
+    }
+
+    /// Encode then decode, and assert the value survived. `values_equal` is
+    /// Scarlet's own `==`, so this asserts what a program would observe rather
+    /// than that two heap graphs happen to match.
+    fn round_trips(vm: &mut VM, d: &WireDesc, v: &Value) {
+        let bytes = encode_value(d, v);
+        let back = ok_of(vm, d, &bytes);
+        assert!(
+            values_equal(v, &back),
+            "round trip changed the value; bytes were {bytes:?}"
+        );
+    }
+
+    #[test]
+    fn scalars_round_trip() {
+        let mut vm = halt_test_vm();
+
+        let ints = desc(vec![WireNode::Int]);
+        for n in [0i64, 1, -1, 63, 64, -64, i64::MAX, i64::MIN] {
+            let v = Value::int_in(&mut vm.heap, n);
+            round_trips(&mut vm, &ints, &v);
+        }
+
+        let floats = desc(vec![WireNode::Float]);
+        for f in [0.0f64, 1.0, -0.5, f64::MAX, f64::MIN_POSITIVE] {
+            round_trips(&mut vm, &floats, &Value::float(f));
+        }
+
+        let strings = desc(vec![WireNode::String]);
+        for s in ["", "hi", "é€", "a longer string with spaces"] {
+            let v = Value::str_in(&mut vm.heap, s);
+            round_trips(&mut vm, &strings, &v);
+        }
+    }
+
+    /// Including the bit-level case, which is the whole reason `bit_len` is on
+    /// the wire rather than a byte count.
+    #[test]
+    fn binaries_round_trip_including_a_partial_trailing_byte() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Binary]);
+
+        let empty = Value::binary_in(&mut vm.heap, Vec::new());
+        round_trips(&mut vm, &d, &empty);
+        let whole = Value::binary_in(&mut vm.heap, vec![0xde, 0xad, 0xbe, 0xef]);
+        round_trips(&mut vm, &d, &whole);
+
+        let twelve = Value::binary_bits_in(&mut vm.heap, vec![0xab, 0xc0], 12);
+        let bytes = encode_value(&d, &twelve);
+        let back = ok_of(&mut vm, &d, &bytes);
+        let b = match back.kind() {
+            ValueView::Binary(b) => b,
+            _ => panic!("expected a Binary"),
+        };
+        assert_eq!(b.bit_len(), 12, "bit length survives, not just the bytes");
+        assert!(values_equal(&twelve, &back));
+    }
+
+    #[test]
+    fn containers_round_trip() {
+        let mut vm = halt_test_vm();
+
+        let arr = desc(vec![WireNode::Array(WireNodeIdx(1)), WireNode::Int]);
+        let empty = Value::array_in(&mut vm.heap, &[]);
+        round_trips(&mut vm, &arr, &empty);
+        let items = [
+            Value::small_int(1),
+            Value::small_int(-2),
+            Value::small_int(3),
+        ];
+        let three = Value::array_in(&mut vm.heap, &items);
+        round_trips(&mut vm, &arr, &three);
+
+        let tup = desc(vec![
+            WireNode::Tuple(vec![WireNodeIdx(1), WireNodeIdx(2)]),
+            WireNode::Int,
+            WireNode::String,
+        ]);
+        let s = Value::str_in(&mut vm.heap, "a");
+        let t = Value::tuple_in(&mut vm.heap, &[Value::small_int(7), s]);
+        round_trips(&mut vm, &tup, &t);
+
+        let map = desc(vec![
+            WireNode::Map(WireNodeIdx(1), WireNodeIdx(2)),
+            WireNode::String,
+            WireNode::Int,
+        ]);
+        let mut m = hamt::empty(&mut vm.heap);
+        round_trips(&mut vm, &map, &m);
+        for (k, n) in [("one", 1i64), ("two", 2), ("three", 3)] {
+            let kv = Value::str_in(&mut vm.heap, k);
+            let h = hash_value(&kv);
+            m = hamt::insert(&mut vm.heap, m, kv, Value::small_int(n), h);
+        }
+        round_trips(&mut vm, &map, &m);
+    }
+
+    /// A `Range` and the `Array` it equals encode alike, so both decode to the
+    /// same value — decode has no Range to rebuild and does not need one.
+    #[test]
+    fn a_range_decodes_as_the_array_it_equals() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Array(WireNodeIdx(1)), WireNode::Int]);
+        let range = Value::range_in(&mut vm.heap, 0, 3);
+        round_trips(&mut vm, &d, &range);
+    }
+
+    /// The `List(Int)` descriptor, whose `Cons.tail` is the index of the node
+    /// it sits in. Two constructors, so the tag is written.
+    fn list_desc() -> WireDesc {
+        desc(vec![
+            WireNode::Data(vec![
+                WireCtor {
+                    type_id: TypeId(7),
+                    variant_idx: 0,
+                    fields: Vec::new(),
+                },
+                WireCtor {
+                    type_id: TypeId(7),
+                    variant_idx: 1,
+                    fields: vec![WireNodeIdx(1), WireNodeIdx(0)],
+                },
+            ]),
+            WireNode::Int,
+        ])
+    }
+
+    fn list_vm() -> VM {
+        vm_with_ctors(&[
+            (TypeId(7), 0, "List", "Nil", &[]),
+            (TypeId(7), 1, "List", "Cons", &["head", "tail"]),
+        ])
+    }
+
+    #[test]
+    fn a_data_value_round_trips_through_both_constructors() {
+        let mut vm = list_vm();
+        let d = list_desc();
+        let nil = Value::enum_with_names_in(&mut vm.heap, TypeId(7), 0, "List", "Nil", &[], &[]);
+        round_trips(&mut vm, &d, &nil);
+        let one = Value::enum_with_names_in(
+            &mut vm.heap,
+            TypeId(7),
+            1,
+            "List",
+            "Cons",
+            &["head", "tail"],
+            &[Value::small_int(5), nil.clone()],
+        );
+        round_trips(&mut vm, &d, &one);
+    }
+
+    /// The claim that makes decode type-safe: a decoded variant is built by
+    /// `EnumTemplate::instantiate`, the same call a constructed one goes
+    /// through, so nothing downstream can tell them apart.
+    #[test]
+    fn a_decoded_variant_is_indistinguishable_from_a_constructed_one() {
+        let mut vm = list_vm();
+        let d = list_desc();
+        let nil = Value::enum_with_names_in(&mut vm.heap, TypeId(7), 0, "List", "Nil", &[], &[]);
+        let built = Value::enum_with_names_in(
+            &mut vm.heap,
+            TypeId(7),
+            1,
+            "List",
+            "Cons",
+            &["head", "tail"],
+            &[Value::small_int(5), nil],
+        );
+        let bytes = encode_value(&d, &built);
+        let decoded = ok_of(&mut vm, &d, &bytes);
+
+        let (b, dd) = (
+            built.as_enum().expect("enum"),
+            decoded.as_enum().expect("enum"),
+        );
+        assert_eq!(b.type_id(), dd.type_id());
+        assert_eq!(b.variant_idx(), dd.variant_idx());
+        assert_eq!(b.variant_name(), dd.variant_name());
+        assert_eq!(hash_value(&built), hash_value(&decoded));
+        assert!(values_equal(&built, &decoded));
+    }
+
+    /// The decode half of the rule that matters: native recursion here would
+    /// be a stack overflow any peer could reach by sending a long list.
+    #[test]
+    fn wire_decode_deep_chain_is_iterative() {
+        let mut vm = list_vm();
+        let d = list_desc();
+
+        const DEPTH: i64 = 100_000;
+        let mut v = Value::enum_with_names_in(&mut vm.heap, TypeId(7), 0, "List", "Nil", &[], &[]);
+        for _ in 0..DEPTH {
+            v = Value::enum_with_names_in(
+                &mut vm.heap,
+                TypeId(7),
+                1,
+                "List",
+                "Cons",
+                &["head", "tail"],
+                &[Value::small_int(1), v],
+            );
+        }
+        let bytes = encode_value(&d, &v);
+        let back = ok_of(&mut vm, &d, &bytes);
+        assert!(values_equal(&v, &back));
+    }
+
+    // --- every DecodeError arm -------------------------------------------
+
+    #[test]
+    fn a_short_input_is_truncated() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Int]);
+        // Header present, body missing.
+        let (name, payload) = refusal_of(&mut vm, &d, &header());
+        assert_eq!(name, "Truncated");
+        assert!(payload.is_empty());
+        // Not even the magic.
+        assert_eq!(refusal_of(&mut vm, &d, b"S").0, "Truncated");
+        assert_eq!(refusal_of(&mut vm, &d, &[]).0, "Truncated");
+    }
+
+    /// The FIRST case is the one that pins the order the header is judged in,
+    /// and it has to carry a foreign fingerprint as well as a foreign magic.
+    /// Bytes that corrupt only the magic cannot tell the two orderings apart:
+    /// a decoder that read the fingerprint first would find the right one,
+    /// fall through, and still answer `NotWire`. Real foreign bytes are wrong
+    /// in both places at once, and there the orderings differ — checking the
+    /// fingerprint first reports `SchemaMismatch` about a file that was never
+    /// wire at all.
+    ///
+    /// Written this way because the weaker version of this test was GREEN
+    /// under a plant that reordered the two checks.
+    #[test]
+    fn foreign_bytes_and_an_unknown_version_are_not_wire() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Int]);
+
+        // A PNG's opening bytes: foreign magic, and bytes 3..11 spell a
+        // number that is not this descriptor's fingerprint.
+        let png = [
+            0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13,
+        ];
+        assert_eq!(
+            refusal_of(&mut vm, &d, &png).0,
+            "NotWire",
+            "bytes that were never wire are not a schema disagreement"
+        );
+
+        // A version this runtime does not read, with everything else right.
+        let mut bad_version = header();
+        bad_version[2] = VERSION + 1;
+        bad_version.push(0);
+        assert_eq!(refusal_of(&mut vm, &d, &bad_version).0, "NotWire");
+
+        // Magic alone. Kept because it is a real case, not because it
+        // discriminates: see the note above.
+        let mut bad_magic = header();
+        bad_magic[0] = b'X';
+        bad_magic.push(0);
+        assert_eq!(refusal_of(&mut vm, &d, &bad_magic).0, "NotWire");
+    }
+
+    /// Both fingerprints travel, so a log line can say which end changed.
+    #[test]
+    fn a_different_shape_is_schema_mismatch_carrying_both_sides() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Int]);
+        let mut bytes = encode_value(&d, &Value::small_int(0));
+        // Flip the low fingerprint byte: same framing, different shape.
+        bytes[3] ^= 0xff;
+
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(name, "SchemaMismatch");
+        let got: Vec<i64> = payload
+            .iter()
+            .map(|v| v.as_int().expect("Int payload"))
+            .collect();
+        assert_eq!(
+            got,
+            vec![d.fingerprint as i64, (d.fingerprint ^ 0xff) as i64],
+            "expected is the reader's own, found is the one in the bytes"
+        );
+    }
+
+    /// The one that must not be got wrong: a four-byte message claiming a
+    /// 2^40-element array is refused BEFORE anything is allocated.
+    #[test]
+    fn a_forged_2_40_count_is_refused_before_anything_is_allocated() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Array(WireNodeIdx(1)), WireNode::Int]);
+        let mut bytes = header();
+        put_u64(&mut bytes, 1u64 << 40);
+
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "count is larger than the remaining input can hold"
+        );
+    }
+
+    /// The same guard at a size that is safe to run WITHOUT it, which is what
+    /// makes this the plantable arm of the pair above. With the guard removed
+    /// the decoder discovers the lie by running out of bytes — `Truncated`,
+    /// several allocations later — instead of refusing it up front.
+    #[test]
+    fn a_forged_small_count_is_malformed_rather_than_discovered_as_truncated() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Array(WireNodeIdx(1)), WireNode::Int]);
+        let mut bytes = header();
+        put_u64(&mut bytes, 5);
+
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(
+            name, "Malformed",
+            "a count the input cannot hold is refused, not discovered later"
+        );
+        assert_eq!(payload[0].as_int().expect("Int payload"), HEADER_LEN as i64);
+    }
+
+    /// The hole the guard cannot close, asserted rather than left implicit: a
+    /// zero-byte element type makes `count * min <= remaining` vacuous, so the
+    /// count is bounded by `MAX_ZERO_COST_ELEMS` and by nothing in the input.
+    #[test]
+    fn a_zero_byte_element_type_is_capped_rather_than_bounded_by_the_input() {
+        let mut vm = vm_with_ctors(&[(TypeId(3), 0, "Unit", "Unit", &[])]);
+        // `Array(Unit)`, and `Unit` is one constructor with no fields, so
+        // every element occupies zero bytes.
+        let d = desc(vec![
+            WireNode::Array(WireNodeIdx(1)),
+            WireNode::Data(vec![WireCtor {
+                type_id: TypeId(3),
+                variant_idx: 0,
+                fields: Vec::new(),
+            }]),
+        ]);
+        assert_eq!(min_bytes(&d)[1], 0, "the element really is zero-byte");
+
+        let mut over = header();
+        put_u64(&mut over, MAX_ZERO_COST_ELEMS + 1);
+        assert_eq!(refusal_of(&mut vm, &d, &over).0, "Malformed");
+
+        // And a small one still decodes from the same three bytes of body,
+        // which is what makes the cap necessary rather than incidental.
+        let mut small = header();
+        put_u64(&mut small, 3);
+        let v = ok_of(&mut vm, &d, &small);
+        match v.kind() {
+            ValueView::Array(a) => assert_eq!(a.len(), 3),
+            _ => panic!("expected an Array"),
+        }
+    }
+
+    #[test]
+    fn a_string_that_is_not_utf8_is_malformed() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::String]);
+        let mut bytes = header();
+        put_u64(&mut bytes, 2);
+        bytes.extend_from_slice(&[0xff, 0xfe]);
+
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "string is not UTF-8"
+        );
+    }
+
+    #[test]
+    fn a_variant_tag_out_of_range_is_malformed() {
+        let mut vm = list_vm();
+        let d = list_desc();
+        let mut bytes = header();
+        put_u64(&mut bytes, 9);
+
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "variant tag out of range"
+        );
+    }
+
+    /// Encode never writes a duplicate key, so bytes that claim one did not
+    /// come from encode — and keeping the last would return a map shorter than
+    /// its own count.
+    #[test]
+    fn a_duplicate_map_key_is_malformed() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![
+            WireNode::Map(WireNodeIdx(1), WireNodeIdx(2)),
+            WireNode::String,
+            WireNode::Int,
+        ]);
+        let mut bytes = header();
+        put_u64(&mut bytes, 2);
+        for n in [1i64, 2] {
+            put_str(&mut bytes, "k");
+            put_i64(&mut bytes, n);
+        }
+
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "duplicate map key"
+        );
+    }
+
+    /// A second spelling of a number the encoder never writes. Accepting it
+    /// would make the format non-canonical, so two peers could disagree on
+    /// whether two messages are the same bytes.
+    #[test]
+    fn an_overlong_varint_is_malformed() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Int]);
+        let mut bytes = header();
+        // zigzag(0) written in two groups instead of one.
+        bytes.extend_from_slice(&[0x80, 0x00]);
+        assert_eq!(refusal_of(&mut vm, &d, &bytes).0, "Malformed");
+
+        let mut wide = header();
+        wide.extend_from_slice(&[0xff; 11]);
+        assert_eq!(refusal_of(&mut vm, &d, &wide).0, "Malformed");
+    }
+
+    #[test]
+    fn extra_bytes_after_a_complete_value_are_trailing_bytes() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Int]);
+        let mut bytes = encode_value(&d, &Value::small_int(1));
+        bytes.extend_from_slice(&[0, 0, 0]);
+
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(name, "TrailingBytes");
+        assert_eq!(payload[0].as_int().expect("Int payload"), 3);
+    }
+
+    /// Not decode's own clamp: `Value::float` is what refuses to hold a
+    /// non-finite, and a real NaN's bits collide with the tag space. Pinned
+    /// here because the wire format lets a peer send one.
+    #[test]
+    fn a_non_finite_float_reading_becomes_zero() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Float]);
+        for bits in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut bytes = header();
+            bytes.extend_from_slice(&bits.to_bits().to_le_bytes());
+            let v = ok_of(&mut vm, &d, &bytes);
+            assert_eq!(v.as_float().expect("Float"), 0.0);
+        }
+    }
+
+    /// The `Stop` split, and it is not cosmetic: a descriptor naming a
+    /// constructor the program minted no template for is a compiler bug, and
+    /// reporting it as a `DecodeError` would blame a peer whose bytes were
+    /// perfectly good.
+    #[test]
+    fn a_missing_wire_template_is_a_vm_error_not_a_decode_error() {
+        // Same descriptor, but no templates minted.
+        let mut vm = halt_test_vm();
+        let d = list_desc();
+        let mut bytes = header();
+        put_u64(&mut bytes, 0);
+        assert!(
+            vm.decode_wire(&d, &bytes).is_err(),
+            "a missing template is a VM error, not an Err(DecodeError)"
+        );
+
+        // And with the template present the same bytes decode.
+        let mut ok_vm = list_vm();
+        assert_eq!(
+            ok_of(&mut ok_vm, &d, &bytes)
+                .as_enum()
+                .expect("enum")
+                .variant_name(),
+            "Nil"
+        );
+    }
+
+    /// Issue #35's worked example, all the way back.
+    #[test]
+    fn the_said_example_round_trips() {
+        let mut vm = vm_with_ctors(&[
+            (TypeId(9), 0, "Event", "Joined", &["user", "at"]),
+            (TypeId(9), 1, "Event", "Said", &["user", "text", "tags"]),
+        ]);
+        let d = desc(vec![
+            WireNode::Data(vec![
+                WireCtor {
+                    type_id: TypeId(9),
+                    variant_idx: 0,
+                    fields: vec![WireNodeIdx(1), WireNodeIdx(2)],
+                },
+                WireCtor {
+                    type_id: TypeId(9),
+                    variant_idx: 1,
+                    fields: vec![WireNodeIdx(1), WireNodeIdx(1), WireNodeIdx(3)],
+                },
+            ]),
+            WireNode::String,
+            WireNode::Int,
+            WireNode::Array(WireNodeIdx(1)),
+        ]);
+
+        let ali = Value::str_in(&mut vm.heap, "ali");
+        let hi = Value::str_in(&mut vm.heap, "hi");
+        let a = Value::str_in(&mut vm.heap, "a");
+        let tags = Value::array_in(&mut vm.heap, &[a]);
+        let said = Value::enum_with_names_in(
+            &mut vm.heap,
+            TypeId(9),
+            1,
+            "Event",
+            "Said",
+            &["user", "text", "tags"],
+            &[ali, hi, tags],
+        );
+        round_trips(&mut vm, &d, &said);
+
+        // The other constructor too, so the tag is not decoded by luck.
+        let bo = Value::str_in(&mut vm.heap, "bo");
+        let joined = Value::enum_with_names_in(
+            &mut vm.heap,
+            TypeId(9),
+            0,
+            "Event",
+            "Joined",
+            &["user", "at"],
+            &[bo, Value::small_int(3)],
+        );
+        round_trips(&mut vm, &d, &joined);
+    }
+
+    /// A recursive type's minimum is finite because at least one constructor
+    /// does not recurse — that is what the fixed point finds, and a single
+    /// pass could not.
+    #[test]
+    fn min_bytes_terminates_on_a_recursive_type() {
+        let m = min_bytes(&list_desc());
+        assert_eq!(m[0], 1, "tag byte, then Nil's zero fields");
+        assert_eq!(m[1], 1, "zigzag LEB128 of 0");
     }
 }
