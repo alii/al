@@ -1,6 +1,6 @@
 import scarlet/net
 import scarlet/net/address.{SocketAddress}
-import scarlet/net/error.{NetError, InvalidPort, UnexpectedEof}
+import scarlet/net/error.{NetError, UnexpectedEof}
 import scarlet/net/socket.{Socket, Read, Data, Closed}
 import scarlet/binary
 import scarlet/result
@@ -125,18 +125,8 @@ pub fn connect_within(host String, port Int, timeout_ms Int) Result(TlsSocket, T
 // step separately, and the call as a whole at three times the number the caller
 // wrote.
 pub fn connect_until(host String, port Int, deadline Instant) Result(TlsSocket, TlsError) {
-	sock <- result.then(result.map_err(connect_socket_until(host, port, deadline), Transport))
+	sock <- result.then(result.map_err(net.connect_until(host, port, deadline), Transport))
 	handshake_until(sock, host, deadline)
-}
-
-// The bounded twin of `net.connect`, written out here because `scarlet/net` has
-// no `connect_until` of its own yet: the resolve and the connect share
-// `deadline`, so the connect gets what the resolve left. It collapses to a call
-// to that function once it exists.
-fn connect_socket_until(host String, port Int, deadline Instant) Result(Socket, NetError) {
-	ip <- result.then(net.resolve_until(host, deadline))
-	addr <- result.then(result.replace_err(address.socket_address(ip, port), InvalidPort))
-	net.connect_addr_until(addr, deadline)
 }
 
 // Complete a TLS handshake over an already-connected socket, verifying the

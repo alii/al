@@ -1201,6 +1201,64 @@ pub fn main() {{
     );
 }
 
+/// `net.connect_within` against a listener that never accepts must hit its own
+/// deadline rather than the kernel's — the host-resolving twin of
+/// `connect_addr_within_times_out_against_a_full_accept_queue` above.
+///
+/// The elapsed time is the assertion, not the error variant, for the same
+/// reason as that test: both the bounded and the unbounded call end in
+/// `Err(TimedOut)` here, so only *when* it returns says whose deadline fired.
+///
+/// The address is an IP literal, so `resolve_until` inside `connect_until`
+/// answers for free and every millisecond measured here is spent in the
+/// connect step — this does not witness the deadline surviving a real
+/// hostname resolve, which is `resolve_within`'s own coverage above.
+#[test]
+fn connect_within_times_out_against_a_full_accept_queue() {
+    let (_listener, _fillers, port) = full_accept_queue();
+
+    let src = format!(
+        r#"import scarlet/net
+import scarlet/net/error.{{TimedOut}}
+import scarlet/time
+import scarlet/string
+
+pub fn main() {{
+	started = time.monotonic()
+	outcome = net.connect_within('127.0.0.1', {port}, {CONNECT_DEADLINE_MS})
+	ms = time.since_ms(time.monotonic(), started)
+	match outcome {{
+		Err(TimedOut) -> println('timed-out ${{ms}}')
+		Ok(_) -> println('connected ${{ms}}')
+		Err(e) -> println('other-error: ${{string.inspect(e)}}')
+	}}
+}}
+"#
+    );
+
+    let (code, out) = run_with_schedulers("connect_within_timeout", &src, 1, 30);
+    assert_eq!(
+        code,
+        Some(0),
+        "expected a clean exit; no exit code means it was killed\n--- output ---\n{out}"
+    );
+    // Parsed rather than substring-matched, and it panics on a missing line:
+    // an absent number and a slow one must not read the same.
+    let elapsed_ms: u64 = out
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("timed-out "))
+        .unwrap_or_else(|| panic!("expected the TimedOut arm\n--- output ---\n{out}"))
+        .trim()
+        .parse()
+        .expect("elapsed ms should be an integer");
+    assert!(
+        elapsed_ms < KERNEL_LOOPBACK_FLOOR_MS / 2,
+        "returned after {elapsed_ms} ms, which is the kernel's floor \
+         ({KERNEL_LOOPBACK_FLOOR_MS} ms) rather than the {CONNECT_DEADLINE_MS} ms \
+         deadline: the deadline did not fire\n--- output ---\n{out}"
+    );
+}
+
 /// `net.resolve_within` gives up on a lookup its deadline outlives.
 ///
 /// The two calls differ in *outcome*, not merely in timing, which is what lets

@@ -239,15 +239,35 @@ fn resolve_until_ms(host String, deadline_ms Int) Result(IpAddress, NetError)
 // connection is established with the calling process parked — neither step
 // blocks the scheduler.
 //
-// This has no bounded sibling yet. Both of its steps can now carry a deadline
-// — `resolve_until` and `connect_addr_until`, sharing one Instant so the
-// connect gets what the resolve left — but that call has not been written. An
-// IP literal skips resolution entirely, so a caller holding one reaches for
-// `connect_addr_within` and gets a deadline over the whole call today.
+// This carries no deadline of its own. `connect_within` and `connect_until`
+// are the bounded siblings, and an IP literal skips resolution entirely — a
+// caller holding one and wanting an address-only bound can also reach for
+// `connect_addr_within` instead.
 pub fn connect(host String, port Int) Result(Socket, NetError) {
 	ip <- result.then(resolve(host))
 	addr <- result.then(result.replace_err(address.socket_address(ip, port), InvalidPort))
 	connect_addr(addr)
+}
+
+// Open a connection to a remote host as `connect`, but wait no longer than
+// `timeout_ms` milliseconds for both steps together.
+pub fn connect_within(host String, port Int, timeout_ms Int) Result(Socket, NetError) {
+	connect_until(host, port, time.add_ms(time.monotonic(), timeout_ms))
+}
+
+// Connect as `connect_within`, giving up at the absolute Instant `deadline`
+// (from `time.monotonic()`). Use this rather than `connect_within` when one
+// deadline covers several steps, so the connect gets what is left of the
+// budget instead of a fresh copy of it.
+//
+// The resolve and the connect share `deadline` rather than each getting a
+// fresh copy of it, exactly as `connect_addr_until` shares one Instant across
+// its own steps: a hostname that eats most of the budget resolving leaves the
+// connect little of it, rather than a full `timeout_ms` of its own.
+pub fn connect_until(host String, port Int, deadline Instant) Result(Socket, NetError) {
+	ip <- result.then(resolve_until(host, deadline))
+	addr <- result.then(result.replace_err(address.socket_address(ip, port), InvalidPort))
+	connect_addr_until(addr, deadline)
 }
 
 // Connect to an already-resolved address. Useful to resolve once and connect
@@ -266,10 +286,9 @@ pub fn connect_addr(addr SocketAddress) Result(Socket, NetError)
 // `connect_addr` reports that as `Err(TimedOut)`. A `timeout_ms` above the
 // kernel's own is therefore inert. Short deadlines are what this adds.
 //
-// There is no `connect_within` taking a host: that would have to resolve the
-// name first, and until `resolve_until` existed the bound could cover only the
-// second of its two steps. `connect_addr_within` takes an address because that
-// is the call whose whole work it has always been able to bound.
+// `connect_within` bounds the host-resolving form the same way. Reach for
+// this one directly when an address is already in hand, so resolving it again
+// is not wasted work.
 pub fn connect_addr_within(addr SocketAddress, timeout_ms Int) Result(Socket, NetError) {
 	connect_addr_until(addr, time.add_ms(time.monotonic(), timeout_ms))
 }
