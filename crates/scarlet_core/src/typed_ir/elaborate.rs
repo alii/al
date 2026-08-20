@@ -665,7 +665,48 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         let Some(f) = f else {
             elaborator_bug("eta-expansion of a non-function", at)
         };
-        eta_wrapper(self.fns, name, self.eta_param, target, &f)
+        let imm = self.eta_wire_imm(target, &f, at);
+        eta_wrapper(self.fns, name, self.eta_param, target, &f, imm)
+    }
+
+    /// The descriptor immediate for a builtin being eta-expanded, and
+    /// [`Imm::None`] for every builtin that does not read one.
+    ///
+    /// `array.map(xs, wire.encode)` reaches the VM through a wrapper rather
+    /// than a direct call, so [`Self::wire_imm`] never sees it. The wrapper is
+    /// minted per use with the use site's instantiated type, which is what
+    /// makes the descriptor readable here at all — `f` is that type.
+    ///
+    /// **Leaving this as `Imm::None` is not inert.** `imm_operand` flattens a
+    /// wire op's `Imm::None` to the `-1` sentinel, so the program compiles
+    /// clean, `check` reports nothing, and the VM refuses it at run time as an
+    /// *internal compiler bug* — an accusation against the compiler for a
+    /// program the user wrote. Measured on `fc11616` before this existed.
+    fn eta_wire_imm(&mut self, target: EtaTarget, f: &FnRTy, at: Span) -> Imm {
+        let EtaTarget::Builtin { op } = target else {
+            return Imm::None;
+        };
+        let (wop, crossed) = match op {
+            Op::WireEncode => {
+                let Some(&arg) = f.params().first() else {
+                    elaborator_bug("wire.encode eta-expanded at no argument", at)
+                };
+                (WireOp::Encode, arg)
+            }
+            // Same spine as the direct call: `decode`'s declared result is
+            // `Result(a, DecodeError)`, so the payload is its first argument.
+            Op::WireDecode => {
+                let Some(payload) = self.pool.con_arg(f.ret(), 0) else {
+                    elaborator_bug("wire.decode eta-expanded at a non-Result", at)
+                };
+                (WireOp::Decode, payload)
+            }
+            _ => return Imm::None,
+        };
+        match self.ctx.wire_descriptor(&mut *self.pool, crossed, wop, at) {
+            Some(i) => Imm::WireDesc(i),
+            None => Imm::None,
+        }
     }
 
     /// An operator that denotes an opcode. `op` is a [`ValueBinop`], so `&&`/`||`

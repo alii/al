@@ -56,11 +56,11 @@ impl FnRTy {
         self.ty
     }
 
-    fn params(&self) -> &[RTy] {
+    pub(super) fn params(&self) -> &[RTy] {
         &self.params
     }
 
-    fn ret(&self) -> RTy {
+    pub(super) fn ret(&self) -> RTy {
         self.ret
     }
 
@@ -89,6 +89,11 @@ pub(crate) fn eta_wrapper(
     param_name: StrId,
     target: EtaTarget,
     fn_ty: &FnRTy,
+    // The immediate the wrapped builtin carries. `Imm::None` for every
+    // target that does not read one; a wire op MUST be given its
+    // descriptor here, because nothing downstream can recover it — see
+    // `Elaborator::eta_wire_imm`.
+    imm: Imm,
 ) -> TypedExpr {
     // A fresh function, so its `BindingId` space starts at zero.
     let params: Vec<TypedBind> = fn_ty
@@ -129,7 +134,7 @@ pub(crate) fn eta_wrapper(
         }
         EtaTarget::Builtin { op } => TypedExpr::Call {
             ty: ret,
-            callee: TypedCallee::Builtin { op, imm: Imm::None },
+            callee: TypedCallee::Builtin { op, imm },
             args,
         },
     };
@@ -211,6 +216,7 @@ mod tests {
                 arity: Arity(1),
             },
             &fn_ty,
+            Imm::None,
         );
 
         assert_eq!(
@@ -262,6 +268,7 @@ mod tests {
             PARAM,
             EtaTarget::Builtin { op: Op::Add },
             &fn_ty,
+            Imm::None,
         );
 
         assert_eq!(
@@ -315,6 +322,7 @@ mod tests {
                 arity: Arity(1),
             },
             &ctor_ty,
+            Imm::None,
         );
         let second = eta_wrapper(
             &mut fns,
@@ -322,6 +330,7 @@ mod tests {
             PARAM,
             EtaTarget::Builtin { op: Op::Add },
             &add_ty,
+            Imm::None,
         );
 
         let idx = |e: &TypedExpr| match e {
@@ -365,6 +374,7 @@ mod tests {
                 arity: Arity(1),
             },
             &fn_ty,
+            Imm::None,
         );
 
         let TypedExpr::Closure { func_idx, .. } = value else {
@@ -394,6 +404,7 @@ mod tests {
                 arity: Arity(2),
             },
             &fn_ty,
+            Imm::None,
         );
     }
 }

@@ -454,3 +454,39 @@ fn the_wire_fingerprint_is_stable_across_two_compiles() {
         "the fingerprint must appear in the disassembly:\n{dump_padded}"
     );
 }
+
+const ETA_WIRE: &str = "import scarlet/array\nimport scarlet/wire\n\n                        type S { S(s String) }\n\n                        pub fn main() {\n\t                        _first = wire.encode(S('x'))\n\t                        bs = array.map([1, 2], wire.encode)\n\t                        println(array.length(bs))\n}\n";
+
+/// `array.map(xs, wire.encode)` reaches the VM through an eta wrapper, and the
+/// wrapper is minted per use — so the descriptor has to be attached there and
+/// not at the direct call. **Nothing downstream can recover it.**
+/// `imm_operand` flattens a wire op's `Imm::None` to the `-1` sentinel, so a
+/// program that forgets compiles clean, passes `check` silently, and is
+/// refused by the VM at run time as an *internal compiler bug* — an accusation
+/// against the compiler for code the user wrote. Measured on `fc11616`.
+///
+/// The length assert is the precondition: with only the direct call compiled
+/// this would pass while witnessing nothing.
+///
+/// It does NOT witness that the descriptors are the *right* ones, only that
+/// every wire op carries one.
+#[test]
+fn an_eta_wrapped_wire_op_carries_a_descriptor() {
+    let p = program_of(ETA_WIRE);
+    let text = dis::disassemble(&p);
+    let wire: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("WireEncode") || l.contains("WireDecode"))
+        .collect();
+    assert!(
+        wire.len() >= 2,
+        "expected a direct wire call and an eta-wrapped one, got {}:\n{text}",
+        wire.len()
+    );
+    for l in &wire {
+        assert!(
+            !l.contains("op=-1"),
+            "a wire op reached the VM with no descriptor: {l}"
+        );
+    }
+}
