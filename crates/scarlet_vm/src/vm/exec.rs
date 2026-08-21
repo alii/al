@@ -38,6 +38,23 @@ use super::{
 /// only big cascading drops (thousands of objects) cost the process budget.
 const FREES_PER_REDUCTION: u64 = 256;
 
+/// The arithmetic half of [`VM::charge_reclamation`], split out so the wrap
+/// window is reachable in a unit test: `freed` there comes from a
+/// thread-local (`FREED_OBJECTS` in `bytecode::value`) incremented one object
+/// at a time with no bulk setter, so driving it past `i32::MAX` through the
+/// real path means actually freeing ~3 billion objects. This function takes
+/// `freed` as a plain argument instead, the same shape `wire::charge_wire`
+/// already uses for the same reason.
+///
+/// `freed / FREES_PER_REDUCTION` is `u64`; `try_from` (rather than `as`)
+/// keeps a value past `i32::MAX` from wrapping negative and having
+/// `saturating_sub` hand back reductions instead of spending them — same
+/// shape as `wire::charge_wire`.
+fn charge_for_frees(reds: &mut i32, freed: u64) {
+    let charge = i32::try_from(freed / FREES_PER_REDUCTION).unwrap_or(i32::MAX);
+    *reds = reds.saturating_sub(charge);
+}
+
 impl VM {
     /// One scheduling slice of the current process, dispatched on the top
     /// frame's resume point. `ip == 0` is the only resume point at which a
@@ -1196,17 +1213,11 @@ impl VM {
     /// checkpoint, one reduction per [`FREES_PER_REDUCTION`], so a giant
     /// cascading free preempts at the next call instead of stalling the
     /// scheduler.
-    ///
-    /// `freed / FREES_PER_REDUCTION` is `u64`; `try_from` (rather than `as`)
-    /// keeps a value past `i32::MAX` from wrapping negative and having
-    /// `saturating_sub` hand back reductions instead of spending them — same
-    /// shape as `wire::charge_wire`.
     #[inline]
     pub(super) fn charge_reclamation(&self, reds: &mut i32) {
         if freed_objects_pending() >= FREES_PER_REDUCTION {
             let freed = take_freed_objects();
-            let charge = i32::try_from(freed / FREES_PER_REDUCTION).unwrap_or(i32::MAX);
-            *reds = reds.saturating_sub(charge);
+            charge_for_frees(reds, freed);
         }
     }
 
@@ -1958,5 +1969,30 @@ mod bitwise_tests {
         // Delegates *left* by |MIN| saturated to i64::MAX — past the width,
         // so every bit shifts out and nothing of the sign survives.
         assert_eq!(shift_right_i64(-1, i64::MIN), 0);
+    }
+}
+
+#[cfg(test)]
+mod charge_tests {
+    use super::{FREES_PER_REDUCTION, charge_for_frees};
+
+    /// **T-780.** `charge_reclamation`'s own wrap window needs ~3 billion real
+    /// frees to reach through `FREED_OBJECTS`, which has no bulk setter — so
+    /// this drives the extracted arithmetic directly instead, the same way
+    /// `wire::charge_wire`'s
+    /// `a_charge_past_i32_max_does_not_add_reductions` does for the other
+    /// charge site T-779 fixed.
+    ///
+    /// `freed / FREES_PER_REDUCTION` is `u64`; casting it to `i32` with `as`
+    /// truncates rather than saturates. Past `i32::MAX` the low 32 bits
+    /// reinterpret as negative, and `saturating_sub` of a negative number is
+    /// `saturating_add` — the charge would hand reductions back instead of
+    /// spending them. `freed` here puts the divided work at 3_000_000_000,
+    /// strictly between `i32::MAX` and `u32::MAX`.
+    #[test]
+    fn a_charge_past_i32_max_does_not_add_reductions() {
+        let mut reds = 1_000_000i32;
+        charge_for_frees(&mut reds, 3_000_000_000u64 * FREES_PER_REDUCTION);
+        assert!(reds <= 1_000_000, "charging must never increase reds");
     }
 }
