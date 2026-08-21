@@ -61,7 +61,10 @@
 //!   neither when its target ends nor how. That a particular program's
 //!   monitored process can only ever return normally is not in these sources.
 //! - **An arm that overstates.** The check is one-directional: declaring a slot
-//!   the handler cannot build costs a binding, not a crash.
+//!   the handler cannot build costs a binding, not a crash. A per-op table
+//!   checked against a classifier's own slots would extend this same
+//!   direction into the foreign-errno set above, and was declined on the same
+//!   cost/benefit (T-606).
 //!
 //! A blind spot that is *not* declared is a test failure:
 //! [`every_construction_site_is_attributed_to_an_op`] fails when a slot is
