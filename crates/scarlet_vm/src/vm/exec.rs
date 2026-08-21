@@ -1196,11 +1196,17 @@ impl VM {
     /// checkpoint, one reduction per [`FREES_PER_REDUCTION`], so a giant
     /// cascading free preempts at the next call instead of stalling the
     /// scheduler.
+    ///
+    /// `freed / FREES_PER_REDUCTION` is `u64`; `try_from` (rather than `as`)
+    /// keeps a value past `i32::MAX` from wrapping negative and having
+    /// `saturating_sub` hand back reductions instead of spending them — same
+    /// shape as `wire::charge_wire`.
     #[inline]
     pub(super) fn charge_reclamation(&self, reds: &mut i32) {
         if freed_objects_pending() >= FREES_PER_REDUCTION {
             let freed = take_freed_objects();
-            *reds = reds.saturating_sub((freed / FREES_PER_REDUCTION) as i32);
+            let charge = i32::try_from(freed / FREES_PER_REDUCTION).unwrap_or(i32::MAX);
+            *reds = reds.saturating_sub(charge);
         }
     }
 

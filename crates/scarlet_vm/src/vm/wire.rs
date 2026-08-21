@@ -107,9 +107,13 @@ const WIRE_WORK_PER_REDUCTION: u64 = 256;
 /// Charge `reds` for a wire call that moved `bytes` and walked `nodes`.
 ///
 /// Saturating, and one call site for both ops so the two cannot drift apart.
+/// `work / WIRE_WORK_PER_REDUCTION` is `u64`; `try_from` (rather than `as`)
+/// keeps a value past `i32::MAX` from wrapping negative and having
+/// `saturating_sub` hand back reductions instead of spending them.
 fn charge_wire(reds: &mut i32, bytes: usize, nodes: u64) {
     let work = (bytes as u64).max(nodes);
-    *reds = reds.saturating_sub((work / WIRE_WORK_PER_REDUCTION) as i32);
+    let charge = i32::try_from(work / WIRE_WORK_PER_REDUCTION).unwrap_or(i32::MAX);
+    *reds = reds.saturating_sub(charge);
 }
 
 // --- primitives -----------------------------------------------------------
@@ -2076,6 +2080,20 @@ mod tests {
             (4110 / WIRE_WORK_PER_REDUCTION) as i32,
             "charged by bytes; a nodes-only rule would charge 0 here"
         );
+    }
+
+    /// **T-779.** `work / WIRE_WORK_PER_REDUCTION` is a `u64`; casting it to
+    /// `i32` with `as` truncates rather than saturates, despite this
+    /// function's own doc. Past `i32::MAX` the low 32 bits reinterpret as
+    /// negative, and `saturating_sub` of a negative number is
+    /// `saturating_add` — the charge would hand reductions back instead of
+    /// spending them. `nodes` here puts the divided work at 3_000_000_000,
+    /// strictly between `i32::MAX` and `u32::MAX`.
+    #[test]
+    fn a_charge_past_i32_max_does_not_add_reductions() {
+        let mut reds = 1_000_000i32;
+        charge_wire(&mut reds, 0, 3_000_000_000u64 * WIRE_WORK_PER_REDUCTION);
+        assert!(reds <= 1_000_000, "charging must never increase reds");
     }
 
     /// A decode that refuses **partway through the walk** still pays for what
