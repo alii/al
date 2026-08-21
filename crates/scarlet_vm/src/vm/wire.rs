@@ -70,6 +70,48 @@ const MAGIC: [u8; 2] = *b"SW";
 /// `MAGIC` · `VERSION` · fingerprint u64.
 const HEADER_LEN: usize = MAGIC.len() + 1 + 8;
 
+/// Units of wire work that cost one reduction, where a unit is **one byte
+/// moved or one node walked**.
+///
+/// Matched to [`FREES_PER_REDUCTION`](super::exec) at 256 rather than chosen
+/// afresh: freeing one object, copying one byte and visiting one descriptor
+/// node are the same order of cost, and the reclamation charge is already
+/// tuned so that only work in the thousands touches a 4000-reduction budget.
+///
+/// **The charge is `max(bytes, nodes)`, and each half is there because the
+/// other is blind to a real payload:**
+///
+/// - **Bytes alone under-charge a node-heavy value.** An `Array` whose element
+///   type occupies zero bytes — `Nil`, or any single-constructor record whose
+///   fields are all themselves zero-byte — is a count and nothing else, so
+///   millions of nodes arrive as about four bytes. `MAX_ZERO_COST_ELEMS` caps
+///   that at 2^24, which is 16.7 million nodes for a byte count near zero.
+/// - **Nodes alone under-charge a byte-heavy value.** One `Binary` field is a
+///   single node and an arbitrarily large `memcpy`.
+///
+/// `max` rather than the sum, because for an ordinary payload the two counts
+/// are within a small factor of each other and adding them would double the
+/// charge for no reason; the sum is only interesting where one term is
+/// negligible, and there `max` already gives the other.
+///
+/// **THIS DOES NOT CLOSE THE STARVATION ROUTE, and must not be read as if it
+/// did.** A wire op is one instruction, and the interpreter's preemption
+/// checkpoints sit only at a function application — three sites, none of them
+/// inside an op. Charging here cannot interrupt an encode in progress; it
+/// makes the process yield at its *next* application instead of running a
+/// further full slice, so a large payload stops being billed as though it were
+/// idle. Interrupting one long encode needs either a size cap or a resumable
+/// op that parks. That is T-766, and it is deliberately not this.
+const WIRE_WORK_PER_REDUCTION: u64 = 256;
+
+/// Charge `reds` for a wire call that moved `bytes` and walked `nodes`.
+///
+/// Saturating, and one call site for both ops so the two cannot drift apart.
+fn charge_wire(reds: &mut i32, bytes: usize, nodes: u64) {
+    let work = (bytes as u64).max(nodes);
+    *reds = reds.saturating_sub((work / WIRE_WORK_PER_REDUCTION) as i32);
+}
+
 // --- primitives -----------------------------------------------------------
 
 /// LEB128.
@@ -110,26 +152,30 @@ fn put_str(out: &mut Vec<u8>, s: &str) {
 ///
 /// Iterative: children go onto an explicit work stack, so nesting depth costs
 /// heap rather than native frames.
-fn encode_value(desc: &WireDesc, root: &Value) -> Vec<u8> {
+fn encode_value(desc: &WireDesc, root: &Value) -> (Vec<u8>, u64) {
     let mut out = Vec::with_capacity(HEADER_LEN);
     out.extend_from_slice(&MAGIC);
     out.push(VERSION);
     out.extend_from_slice(&desc.fingerprint().to_le_bytes());
-    write_body(&mut out, desc, root);
-    out
+    let nodes = write_body(&mut out, desc, root);
+    (out, nodes)
 }
 
 /// The body half of [`encode_value`]: the value under `desc.root`, with no
 /// header. Split out because the header is written once and the walk is the
 /// part with an invariant worth naming.
-fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value) {
+fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value) -> u64 {
     // A container pushes its children and they are popped before anything
     // queued beside it, so a 100k-deep chain costs O(1) entries here rather
     // than one per level. A 100k-wide container does cost one entry per
     // element — that is heap, which is the trade this exists to make.
     let mut pending: Vec<(WireNodeIdx, Value)> = vec![(desc.root(), root.clone())];
+    // One per value visited, which is what the node half of the reduction
+    // charge counts. Incremented before the arm so a `continue` still pays.
+    let mut nodes: u64 = 0;
 
     while let Some((at, v)) = pending.pop() {
+        nodes += 1;
         let Some(node) = desc.node(at) else {
             // Only an index from another descriptor reaches this, which the
             // builder cannot mint. Writing nothing keeps the walk total.
@@ -285,6 +331,7 @@ fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value) {
             }
         }
     }
+    nodes
 }
 
 // --- decoding -------------------------------------------------------------
@@ -596,8 +643,11 @@ impl VM {
     /// map insert path — so it is indistinguishable from a constructed one,
     /// and that plus the descriptor being the type is the whole type-safety
     /// argument. Nothing writes a field directly.
-    fn decode_wire(&mut self, desc: &WireDesc, bytes: &[u8]) -> VmResult<Value> {
-        match self.decode_checked(desc, bytes) {
+    fn decode_wire(&mut self, desc: &WireDesc, bytes: &[u8], reds: &mut i32) -> VmResult<Value> {
+        // Charged whatever the outcome: a refusal has already walked whatever
+        // the bytes claimed before finding them wanting, and a peer must not be
+        // able to buy scheduler time by sending input that fails late.
+        match self.decode_checked(desc, bytes, reds) {
             Ok(v) => self.make_ok(v),
             Err(Stop::Refused(r)) => {
                 let e = self.wire_refusal(r)?;
@@ -608,10 +658,27 @@ impl VM {
         }
     }
 
-    fn decode_checked(&mut self, desc: &WireDesc, bytes: &[u8]) -> Result<Value, Stop> {
+    fn decode_checked(
+        &mut self,
+        desc: &WireDesc,
+        bytes: &[u8],
+        reds: &mut i32,
+    ) -> Result<Value, Stop> {
         let mut r = Reader::new(bytes);
-        read_header(&mut r, desc.fingerprint())?;
-        let v = self.decode_body(desc, &mut r)?;
+        if let Err(e) = read_header(&mut r, desc.fingerprint()) {
+            charge_wire(reds, r.at, 0);
+            return Err(e.into());
+        }
+        let mut nodes: u64 = 0;
+        let out = self.decode_body(desc, &mut r, &mut nodes);
+        // Both arms, identically: a refusal has already built whatever it got
+        // through before finding the bytes wanting, and charging only the
+        // successful path lets a peer buy scheduler time with input that fails
+        // late. `nodes` is an out-parameter precisely so the error arm can see
+        // it — charging a refusal by bytes alone would be blind to a
+        // node-heavy payload in the same way the rejected bytes-only rule is.
+        charge_wire(reds, r.at, nodes);
+        let v = out?;
         // Reported rather than ignored: a caller that framed its own messages
         // and has extra bytes left has lost sync, and silently returning the
         // value would hide that until the next message parsed as garbage.
@@ -632,7 +699,12 @@ impl VM {
     /// values built so far; a container pushes its `Finish` first and its
     /// children after, so the children are popped and built before the parent
     /// that joins them.
-    fn decode_body(&mut self, desc: &WireDesc, r: &mut Reader<'_>) -> Result<Value, Stop> {
+    fn decode_body(
+        &mut self,
+        desc: &WireDesc,
+        r: &mut Reader<'_>,
+        nodes: &mut u64,
+    ) -> Result<Value, Stop> {
         let mins = min_bytes(desc);
         let min_at = |i: WireNodeIdx| -> Result<u64, Stop> {
             mins.get(i.0 as usize)
@@ -646,6 +718,9 @@ impl VM {
         while let Some(step) = work.pop() {
             match step {
                 Step::Read(at) => {
+                    // One per value built — the `Read` steps, not the `Finish`
+                    // joins: a join is bounded by children already paid for.
+                    *nodes += 1;
                     let Some(node) = desc.node(at) else {
                         return Err(Stop::Internal("wire descriptor node index out of range"));
                     };
@@ -839,23 +914,24 @@ impl VM {
     }
 
     /// `Op::WireEncode` — `[value] -> Binary`.
-    pub(super) fn wire_encode(&mut self, operand: i32) -> VmResult<()> {
+    pub(super) fn wire_encode(&mut self, operand: i32, reds: &mut i32) -> VmResult<()> {
         let desc = self.wire_desc(operand, "wire.encode")?;
         let v = self.pop()?;
-        let bytes = encode_value(&desc, &v);
+        let (bytes, nodes) = encode_value(&desc, &v);
+        charge_wire(reds, bytes.len(), nodes);
         let out = Value::binary_in(&mut self.heap, bytes);
         self.stack.push(out);
         Ok(())
     }
 
     /// `Op::WireDecode` — `[bytes Binary] -> Result(a, DecodeError)`.
-    pub(super) fn wire_decode(&mut self, operand: i32) -> VmResult<()> {
+    pub(super) fn wire_decode(&mut self, operand: i32, reds: &mut i32) -> VmResult<()> {
         let desc = self.wire_desc(operand, "wire.decode")?;
         let src = self.pop_binary("wire.decode")?;
         // Own the bytes: the walk allocates into the same heap the borrow
         // would be pinned to.
         let bytes = bin_ref(&src).full_bytes().into_owned();
-        let out = self.decode_wire(&desc, &bytes)?;
+        let out = self.decode_wire(&desc, &bytes, reds)?;
         self.stack.push(out);
         Ok(())
     }
@@ -869,6 +945,26 @@ mod tests {
 
     use super::super::halt_test_vm;
     use super::*;
+
+    /// The bytes only. Shadows [`super::encode_value`], which also reports the
+    /// nodes it walked for the reduction charge; every byte-format test below
+    /// wants the first half and none of them wants the second.
+    fn encode_value(desc: &WireDesc, root: &Value) -> Vec<u8> {
+        super::encode_value(desc, root).0
+    }
+
+    /// Reductions spent by one `wire.encode` through the op, budget-in minus
+    /// budget-out. Goes through `wire_encode` rather than `charge_wire` so a
+    /// charge that is computed and then not applied cannot pass.
+    fn encode_cost(vm: &mut VM, d: WireDesc, v: Value) -> i32 {
+        vm.program.wire_descs.push(Arc::new(d));
+        let operand = (vm.program.wire_descs.len() - 1) as i32;
+        vm.stack.push(v);
+        let mut reds = 1_000_000i32;
+        vm.wire_encode(operand, &mut reds).expect("encode runs");
+        vm.stack.pop();
+        1_000_000 - reds
+    }
     // Only the tests build a constructor by hand; the walks match on one.
     use crate::bytecode::values_equal;
     use crate::template::EnumTemplate;
@@ -1298,12 +1394,14 @@ mod tests {
         );
 
         vm.stack.push(one.clone());
-        vm.wire_encode(operand).expect("encode runs");
+        vm.wire_encode(operand, &mut 1_000_000)
+            .expect("encode runs");
         let bytes = vm.stack.pop().expect("encode left a Binary");
         assert!(matches!(bytes.kind(), ValueView::Binary(_)));
 
         vm.stack.push(bytes);
-        vm.wire_decode(operand).expect("decode runs");
+        vm.wire_decode(operand, &mut 1_000_000)
+            .expect("decode runs");
         let res = vm.stack.pop().expect("decode left a Result");
         let e = res.as_enum().expect("Result");
         assert_eq!(e.variant_name(), "Ok");
@@ -1317,8 +1415,8 @@ mod tests {
         let mut vm = halt_test_vm();
         assert!(vm.program.wire_descs.is_empty());
         vm.stack.push(Value::small_int(1));
-        assert!(vm.wire_encode(0).is_err());
-        assert!(vm.wire_encode(-1).is_err());
+        assert!(vm.wire_encode(0, &mut 1_000_000).is_err());
+        assert!(vm.wire_encode(-1, &mut 1_000_000).is_err());
     }
 
     // --- decoding ---------------------------------------------------------
@@ -1341,7 +1439,9 @@ mod tests {
 
     /// The payload of `Ok`, or a panic naming what came back instead.
     fn ok_of(vm: &mut VM, d: &WireDesc, bytes: &[u8]) -> Value {
-        let v = vm.decode_wire(d, bytes).expect("decode reached the ABI");
+        let v = vm
+            .decode_wire(d, bytes, &mut 1_000_000)
+            .expect("decode reached the ABI");
         let e = v.as_enum().expect("decode returns a Result");
         assert_eq!(e.variant_name(), "Ok", "expected Ok, got {:?}", e.payload());
         e.payload()[0].clone()
@@ -1349,7 +1449,9 @@ mod tests {
 
     /// The `DecodeError` constructor name and its payload.
     fn refusal_of(vm: &mut VM, d: &WireDesc, bytes: &[u8]) -> (String, Vec<Value>) {
-        let v = vm.decode_wire(d, bytes).expect("decode reached the ABI");
+        let v = vm
+            .decode_wire(d, bytes, &mut 1_000_000)
+            .expect("decode reached the ABI");
         let e = v.as_enum().expect("decode returns a Result");
         assert_eq!(e.variant_name(), "Err", "expected Err, got Ok");
         let inner = e.payload()[0].clone();
@@ -1824,7 +1926,7 @@ mod tests {
         let mut bytes = header();
         put_u64(&mut bytes, 0);
         assert!(
-            vm.decode_wire(&d, &bytes).is_err(),
+            vm.decode_wire(&d, &bytes, &mut 1_000_000).is_err(),
             "a missing template is a VM error, not an Err(DecodeError)"
         );
 
@@ -1901,5 +2003,116 @@ mod tests {
         let m = min_bytes(&list_desc());
         assert_eq!(m[0], 1, "tag byte, then Nil's zero fields");
         assert_eq!(m[1], 1, "zigzag LEB128 of 0");
+    }
+
+    // --- the reduction charge --------------------------------------------
+
+    /// An ordinary small value costs the scheduler nothing.
+    ///
+    /// The charge exists to stop a *large* payload being billed as idle; if it
+    /// taxed every call it would be a tax on using `wire` at all.
+    #[test]
+    fn a_small_value_charges_nothing() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Int]);
+        assert_eq!(encode_cost(&mut vm, d, Value::small_int(7)), 0);
+    }
+
+    /// **This test is what rules out charging by bytes alone.**
+    ///
+    /// `Array(Unit)` where `Unit` is one constructor with no fields: every
+    /// element occupies zero bytes, so a thousand of them is a two-byte count
+    /// and nothing else. Bytes say 13; nodes say 1001. A bytes-only rule would
+    /// charge 0 for a thousand-element walk.
+    #[test]
+    fn a_node_heavy_value_is_charged_by_its_nodes_not_its_bytes() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![
+            WireNode::Array(WireNodeIdx(1)),
+            WireNode::Data(vec![WireCtor {
+                type_id: TypeId(3),
+                variant_idx: 0,
+                fields: Vec::new(),
+            }]),
+        ]);
+        let unit = Value::enum_with_names_in(&mut vm.heap, TypeId(3), 0, "Unit", "Unit", &[], &[]);
+        let items: Vec<Value> = (0..1000).map(|_| unit.clone()).collect();
+        let arr = Value::array_in(&mut vm.heap, &items);
+
+        // 11 header + 2 count bytes = 13; 1 array node + 1000 elements = 1001.
+        assert_eq!(encode_value(&d, &arr).len(), 13, "the bytes really are few");
+        assert_eq!(
+            encode_cost(&mut vm, d, arr),
+            (1001 / WIRE_WORK_PER_REDUCTION) as i32,
+            "charged by nodes; a bytes-only rule would charge 0 here"
+        );
+    }
+
+    /// **This test is what rules out charging by nodes alone.**
+    ///
+    /// One `Binary` field is a single node and an arbitrarily large `memcpy`.
+    /// Nodes say 1; bytes say 4110. A nodes-only rule would charge 0 for four
+    /// kilobytes of copying.
+    #[test]
+    fn a_byte_heavy_value_is_charged_by_its_bytes_not_its_nodes() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Binary]);
+        let big = Value::binary_in(&mut vm.heap, vec![0xa5; 4096]);
+
+        // 11 header + 3 bit-length bytes + 4096 payload = 4110; nodes = 1.
+        assert_eq!(
+            encode_value(&d, &big).len(),
+            4110,
+            "the nodes really are few"
+        );
+        assert_eq!(
+            encode_cost(&mut vm, d, big),
+            (4110 / WIRE_WORK_PER_REDUCTION) as i32,
+            "charged by bytes; a nodes-only rule would charge 0 here"
+        );
+    }
+
+    /// A decode that refuses **partway through the walk** still pays for what
+    /// it built.
+    ///
+    /// The input is TRUNCATED mid-array, which is the shape that matters: the
+    /// walk gets several hundred elements in and then runs out, so the refusal
+    /// comes from inside `decode_body` and the error arm is what has to
+    /// charge. **An earlier version of this test appended a trailing byte to a
+    /// well-formed array instead — and that made `decode_body` SUCCEED, with
+    /// `TrailingBytes` raised afterwards, so the Ok arm paid and the error arm
+    /// was never entered.** It passed with the error-arm charge deleted. The
+    /// name was right and the input was not.
+    #[test]
+    fn a_refusal_partway_through_the_walk_is_still_charged() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Array(WireNodeIdx(1)), WireNode::Int]);
+        // Values above 63 zigzag to two bytes each, so the count clears the
+        // remaining-bytes guard while the data runs out long before the end.
+        let items: Vec<Value> = (0..1000).map(|_| Value::small_int(1000)).collect();
+        let arr = Value::array_in(&mut vm.heap, &items);
+        let full = encode_value(&d, &arr);
+        let cut = HEADER_LEN + 2 + 1200;
+        assert!(cut < full.len(), "the input must really be truncated");
+        let bytes = &full[..cut];
+
+        let mut reds = 1_000_000i32;
+        let out = vm
+            .decode_wire(&d, bytes, &mut reds)
+            .expect("decode reached the ABI");
+        let e = out.as_enum().expect("Result");
+        assert_eq!(e.variant_name(), "Err", "truncated input must refuse");
+        assert_eq!(
+            e.payload()[0]
+                .as_enum()
+                .expect("DecodeError")
+                .variant_name(),
+            "Truncated",
+            "and it must refuse from inside the walk, not after it"
+        );
+        assert!(
+            1_000_000 - reds > 0,
+            "a refusal that built ~600 elements must not be free"
+        );
     }
 }

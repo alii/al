@@ -792,8 +792,12 @@ impl VM {
         match op_code {
             opc::INDEX => self.seq_index(),
             opc::INDEX_OR => self.seq_index_or(operand),
-            opc::WIRE_ENCODE => self.wire_encode(operand),
-            opc::WIRE_DECODE => self.wire_decode(operand),
+            // The only bridge arms that charge reductions. `reds` is already
+            // threaded here for the whole bridge, so the compiled path spends
+            // the same counter `exec.rs` does and the two cannot disagree
+            // about what a wire call cost.
+            opc::WIRE_ENCODE => self.wire_encode(operand, reds),
+            opc::WIRE_DECODE => self.wire_decode(operand, reds),
             opc::ELEM_AT => self.elem_at(operand),
             opc::SEQ_DROP => self.seq_drop(),
             opc::ARRAY_CONCAT => self.seq_concat(),
