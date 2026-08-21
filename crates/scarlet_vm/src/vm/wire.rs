@@ -664,9 +664,15 @@ impl VM {
         bytes: &[u8],
         reds: &mut i32,
     ) -> Result<Value, Stop> {
+        // Every charge below is against `bytes.len()`, never `r.at`: the
+        // caller (`wire_decode`) already paid an O(len) copy of the whole
+        // input before this function runs, so that cost is owed however far
+        // the parse gets — including a padded buffer whose parse succeeds on
+        // a small prefix and only then refuses with `TrailingBytes`, which
+        // `r.at` would bill as though the copy had never happened.
         let mut r = Reader::new(bytes);
         if let Err(e) = read_header(&mut r, desc.fingerprint()) {
-            charge_wire(reds, r.at, 0);
+            charge_wire(reds, bytes.len(), 0);
             return Err(e.into());
         }
         let mut nodes: u64 = 0;
@@ -677,7 +683,7 @@ impl VM {
         // late. `nodes` is an out-parameter precisely so the error arm can see
         // it — charging a refusal by bytes alone would be blind to a
         // node-heavy payload in the same way the rejected bytes-only rule is.
-        charge_wire(reds, r.at, nodes);
+        charge_wire(reds, bytes.len(), nodes);
         let v = out?;
         // Reported rather than ignored: a caller that framed its own messages
         // and has extra bytes left has lost sync, and silently returning the
@@ -2113,6 +2119,46 @@ mod tests {
         assert!(
             1_000_000 - reds > 0,
             "a refusal that built ~600 elements must not be free"
+        );
+    }
+
+    /// `wire_decode` copies the whole input `Binary` before parsing starts
+    /// (`wire.rs:933`), so a buffer padded with trailing junk must be
+    /// charged for that copy even though the parse itself only touches a
+    /// tiny prefix before refusing with `TrailingBytes`. Charging by `r.at`
+    /// (bytes actually parsed) instead of `bytes.len()` billed this near
+    /// zero — found by a critic reviewing T-763 before it landed (T-778).
+    #[test]
+    fn a_padded_buffer_that_refuses_with_trailing_bytes_is_charged_for_the_whole_copy() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Int]);
+        let mut padded = encode_value(&d, &Value::small_int(7));
+        let parsed_len = padded.len();
+        padded.resize(parsed_len + 100_000, 0u8);
+        assert!(
+            parsed_len < padded.len() / 1000,
+            "the parsed prefix must be negligible next to the padding"
+        );
+
+        let mut reds = 1_000_000i32;
+        let out = vm
+            .decode_wire(&d, &padded, &mut reds)
+            .expect("decode reached the ABI");
+        let e = out.as_enum().expect("Result");
+        assert_eq!(e.variant_name(), "Err", "padding must refuse");
+        assert_eq!(
+            e.payload()[0]
+                .as_enum()
+                .expect("DecodeError")
+                .variant_name(),
+            "TrailingBytes",
+            "and it must refuse for exactly this reason"
+        );
+        let charged = 1_000_000 - reds;
+        assert_eq!(
+            charged,
+            (padded.len() as u64 / WIRE_WORK_PER_REDUCTION) as i32,
+            "billed for the whole copied buffer, not just the parsed prefix"
         );
     }
 }
