@@ -1354,6 +1354,14 @@ impl<'a, 'g> RefWalker<'a, 'g> {
                 });
             }
 
+            // Desugared away before this walk, same guarantee as
+            // `Statement::Backpass` below; a survivor is walked like the
+            // call it stands for.
+            E::PipeExpression(p) => {
+                self.expr(&p.left);
+                self.expr(&p.right);
+            }
+
             E::MatchExpression(me) => {
                 self.expr(&me.subject);
                 for arm in &me.arms {

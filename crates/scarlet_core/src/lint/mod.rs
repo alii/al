@@ -562,6 +562,10 @@ fn walk_expr<'a>(
             walk_expr(&o.expression, types, matches);
             walk_expr(&o.body, types, matches);
         }
+        ast::Expression::PipeExpression(p) => {
+            walk_expr(&p.left, types, matches);
+            walk_expr(&p.right, types, matches);
+        }
         ast::Expression::PropertyAccessExpression(p) => walk_expr(&p.left, types, matches),
         ast::Expression::RangeExpression(r) => {
             walk_expr(&r.start, types, matches);
@@ -706,6 +710,7 @@ fn is_extractor_body(expr: &ast::Expression) -> bool {
         | ast::Expression::MatchExpression(_)
         | ast::Expression::NumberLiteral(_)
         | ast::Expression::OrExpression(_)
+        | ast::Expression::PipeExpression(_)
         | ast::Expression::PropertyAccessExpression(_)
         | ast::Expression::RangeExpression(_)
         | ast::Expression::StringLiteral(_)

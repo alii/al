@@ -19,6 +19,7 @@ pub enum Kind {
     LogicalAnd,
     LogicalOr,
     BitwiseOr,
+    PuncPipe,
     Keyword(Keyword),
     PuncArrow,
     PuncBackArrow,
@@ -64,6 +65,7 @@ impl Kind {
             Kind::LogicalAnd,
             Kind::LogicalOr,
             Kind::BitwiseOr,
+            Kind::PuncPipe,
             Kind::PuncArrow,
             Kind::PuncBackArrow,
             Kind::PuncComma,
@@ -118,6 +120,7 @@ impl fmt::Display for Kind {
             Kind::LogicalAnd => "&&",
             Kind::LogicalOr => "||",
             Kind::BitwiseOr => "|",
+            Kind::PuncPipe => "|>",
             Kind::Keyword(kw) => kw.text(),
             Kind::PuncArrow => "->",
             Kind::PuncBackArrow => "<-",
@@ -185,6 +188,7 @@ mod tests {
                 Kind::LogicalAnd
                 | Kind::LogicalOr
                 | Kind::BitwiseOr
+                | Kind::PuncPipe
                 | Kind::Keyword(_)
                 | Kind::PuncArrow
                 | Kind::PuncBackArrow

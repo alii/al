@@ -595,6 +595,10 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             }
             E::BinaryLiteral(bl) => self.binary_literal(bl, own),
             E::ErrorNode(err) => elaborator_bug("error node", err.span),
+            // `crate::desugar` rewrites every pipe into a call before type
+            // checking (`compile_with`/`check_impl`), so elaboration — which
+            // only ever runs on that already-desugared tree — never sees one.
+            E::PipeExpression(p) => elaborator_bug("pipe expression", p.span),
         }
     }
 

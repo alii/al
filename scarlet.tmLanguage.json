@@ -583,6 +583,10 @@
           "name": "keyword.operator.logical.scrl"
         },
         {
+          "match": "(\\|>)",
+          "name": "keyword.operator.pipe.scrl"
+        },
+        {
           "match": "(\\|)",
           "name": "keyword.operator.pattern.scrl"
         },

@@ -268,6 +268,8 @@ suite! {
         http_response,
         // Backpassing: `x <- f(args)` desugars to a trailing callback.
         backpassing,
+        // The pipe operator: `x |> f(args)` desugars to `f(x, args)`.
+        pipe,
         // JSON: the SIMD parse, on-demand reads off the tape, typed decoding
         // with accumulated paths, and the three presence states — absent, null
         // and present — that a partial update turns on. Also pins the

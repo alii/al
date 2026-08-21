@@ -694,7 +694,7 @@ impl Parser {
     }
 
     fn parse_or_expression(&mut self) -> PResult<ast::Expression> {
-        let left = self.parse_binary_expression()?;
+        let left = self.parse_pipe_expression()?;
 
         if self.kind() == Kind::Keyword(Keyword::Or) {
             self.eat(Kind::Keyword(Keyword::Or))?;
@@ -717,6 +717,28 @@ impl Parser {
                 body: Box::new(body),
                 span,
             }));
+        }
+
+        Ok(left)
+    }
+
+    // `left |> right`: sugar for `right(left, ...)`, rewritten by
+    // `crate::desugar` before type checking (ast::PipeExpression's doc has
+    // the full story). Left-associative and looser than every binary
+    // operator, so a whole arithmetic/comparison/boolean expression is one
+    // pipeline stage — mirrors Gleam, where `|>` is the loosest operator.
+    fn parse_pipe_expression(&mut self) -> PResult<ast::Expression> {
+        let mut left = self.parse_binary_expression()?;
+
+        while self.kind() == Kind::PuncPipe {
+            self.eat(Kind::PuncPipe)?;
+            let right = self.parse_binary_expression()?;
+            let span = self.span_from(left.span());
+            left = ast::Expression::PipeExpression(ast::PipeExpression {
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            });
         }
 
         Ok(left)
@@ -2562,6 +2584,42 @@ mod tests {
             assert!(matches!(*r.end, ast::Expression::BinaryExpression(_)));
         } else {
             panic!("expected range expression");
+        }
+    }
+
+    #[test]
+    fn test_pipe_precedence() {
+        // `a |> f(x)`: the call already carries an argument.
+        let result = parse("a |> f(x)");
+        assert!(result.diagnostics.is_empty());
+        if let ast::Node::Expression(ast::Expression::PipeExpression(p)) = &result.ast.body[0] {
+            assert!(matches!(*p.left, ast::Expression::Identifier(_)));
+            assert!(matches!(
+                *p.right,
+                ast::Expression::FunctionCallExpression(_)
+            ));
+        } else {
+            panic!("expected pipe expression, got {:#?}", result.ast.body[0]);
+        }
+
+        // Left-associative chain: (a |> f) |> g.
+        let result = parse("a |> f |> g");
+        assert!(result.diagnostics.is_empty());
+        if let ast::Node::Expression(ast::Expression::PipeExpression(outer)) = &result.ast.body[0] {
+            assert!(matches!(*outer.left, ast::Expression::PipeExpression(_)));
+            assert!(matches!(*outer.right, ast::Expression::Identifier(_)));
+        } else {
+            panic!("expected pipe expression, got {:#?}", result.ast.body[0]);
+        }
+
+        // Tighter than `or`: the whole pipeline is `or`'s left operand, not
+        // just its last stage.
+        let result = parse("a |> f() or e -> g(e)");
+        assert!(result.diagnostics.is_empty());
+        if let ast::Node::Expression(ast::Expression::OrExpression(o)) = &result.ast.body[0] {
+            assert!(matches!(*o.expression, ast::Expression::PipeExpression(_)));
+        } else {
+            panic!("expected or expression, got {:#?}", result.ast.body[0]);
         }
     }
 

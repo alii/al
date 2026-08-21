@@ -665,6 +665,12 @@ impl Formatter {
                     self.expr(&o.body)
                 ]
             }
+            E::PipeExpression(p) => group(d![
+                self.expr(&p.left),
+                line(),
+                text("|> "),
+                self.expr(&p.right),
+            ]),
             E::FunctionExpression(f) => self.fn_expr(f),
             E::FunctionCallExpression(c) => {
                 let args: Vec<Doc> = c.arguments.iter().map(|a| self.call_arg(a)).collect();
@@ -1151,6 +1157,7 @@ fn starts_with_minus(e: &ast::Expression) -> bool {
         E::ArrayIndexExpression(a) => starts_with_minus(&a.expression),
         E::FunctionCallExpression(c) => starts_with_minus(&c.callee),
         E::OrExpression(o) => starts_with_minus(&o.expression),
+        E::PipeExpression(p) => starts_with_minus(&p.left),
         E::RangeExpression(r) => starts_with_minus(&r.start),
         _ => false,
     }
@@ -1871,6 +1878,28 @@ mod tests {
         // The second-pass form the bug used to emit, starting already hugged.
         let hugged = "update_bucket(limiter, key, fn(\n\theld,\n) Bucket(\n\tremaining: Known(0),\n\treset_at: clock.now(),\n\tlast_refill: clock.now(),\n\tcapacity: held.capacity,\n))\n";
         let out = fmt(hugged);
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn short_pipe_chain_stays_flat() {
+        let out = fmt("fn f() {\n\ta |> f() |> g()\n}\n");
+        assert_eq!(out, "fn f() {\n\ta |> f() |> g()\n}\n");
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn long_pipe_chain_breaks_one_stage_per_line() {
+        // Written already flat; over MAX_WIDTH so the formatter must re-break
+        // it rather than leave the pipeline exploding into nested calls
+        // (which was the whole cost this operator exists to avoid).
+        let out = fmt(
+            "fn f() {\n\tsome_long_starting_value_here_indeed |> first_transform_step_function() |> second_transform_step_function() |> third_and_final_transform_step_function()\n}\n",
+        );
+        assert!(
+            out.contains("\n\t|> second_transform_step_function()\n"),
+            "expected a broken pipe chain, got:\n{out}"
+        );
         assert_round_trips(&out);
     }
 }

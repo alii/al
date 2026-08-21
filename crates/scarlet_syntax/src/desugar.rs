@@ -19,15 +19,20 @@
 //! load-bearing.
 //! `crates/scarlet/tests/backpass_sequencing.rs` fails if that changes; T-211
 //! carries the argument.
+//!
+//! Also rewrites [`Expression::PipeExpression`] (`left |> right`) into a
+//! [`FunctionCallExpression`], `left` inserted as `right`'s first argument.
+//! Same reason: the formatter renders `|>` as written, so inference must
+//! never see one either.
 
 use crate::ast::*;
 
-/// Desugar every backpass in a parsed program, in place.
+/// Desugar every backpass and pipe in a parsed program, in place.
 pub fn desugar_program(block: &mut BlockExpression) {
     desugar_body(&mut block.body);
 }
 
-/// Desugar every backpass in `expr`, in place.
+/// Desugar every backpass and pipe in `expr`, in place.
 pub fn desugar_expression(expr: &mut Expression) {
     desugar_expr(expr);
 }
@@ -211,6 +216,10 @@ fn desugar_expr(e: &mut Expression) {
             desugar_expr(&mut o.expression);
             desugar_expr(&mut o.body);
         }
+        Expression::PipeExpression(p) => {
+            desugar_expr(&mut p.left);
+            desugar_expr(&mut p.right);
+        }
         Expression::PropertyAccessExpression(p) => desugar_expr(&mut p.left),
         Expression::RangeExpression(r) => {
             desugar_expr(&mut r.start);
@@ -222,6 +231,48 @@ fn desugar_expr(e: &mut Expression) {
             }
         }
         Expression::UnaryExpression(u) => desugar_expr(&mut u.expression),
+    }
+    // Runs after the match above has already desugared `left`/`right` (and
+    // so any pipe nested inside either of them), so a chain rewrites
+    // inside-out and each step only ever sees calls and already-final forms.
+    // Matching here (rather than inside a helper taking `&mut Expression`)
+    // is what lets `rewrite_pipe` take the already-narrowed `&mut
+    // PipeExpression` and build its replacement without a fallback branch
+    // for "not a pipe" — this crate denies `clippy::unreachable` outside
+    // tests, so that branch would need a real recovery, not a panic.
+    if let Expression::PipeExpression(p) = e {
+        *e = rewrite_pipe(p);
+    }
+}
+
+/// `left |> right` becomes `right(left, ...)` if `right` is itself a call
+/// (`left` becomes its first argument, ahead of whatever was already there),
+/// or `right(left)` otherwise, treating `right` as a one-argument function.
+fn rewrite_pipe(p: &mut PipeExpression) -> Expression {
+    let span = p.span;
+    // `left`/`right` are owned `Box<Expression>` fields reached only through
+    // `&mut`; swap in a throwaway placeholder to move them out, then build
+    // the replacement below. Never observed: the caller overwrites the whole
+    // `PipeExpression` node with what this function returns.
+    let placeholder = || {
+        Box::new(Expression::Identifier(Identifier {
+            name: String::new(),
+            span,
+        }))
+    };
+    let left = std::mem::replace(&mut p.left, placeholder());
+    let right = std::mem::replace(&mut p.right, placeholder());
+
+    match *right {
+        Expression::FunctionCallExpression(mut fc) => {
+            fc.arguments.insert(0, CallArg::Positional(*left));
+            Expression::FunctionCallExpression(fc)
+        }
+        right => Expression::FunctionCallExpression(FunctionCallExpression {
+            callee: Box::new(right),
+            arguments: vec![CallArg::Positional(*left)],
+            span,
+        }),
     }
 }
 
@@ -365,5 +416,91 @@ mod tests {
         assert_eq!(inner_body.body.len(), 1);
         let inner = trailing_lambda(&inner_body.body[0]);
         assert_eq!(inner.params[0].identifier.name, "b");
+    }
+
+    /// `fn f() { <body> }`'s body block, for a program whose first node is
+    /// exactly that one function declaration.
+    fn fn_body(block: &BlockExpression) -> &BlockExpression {
+        let Node::Statement(s) = &block.body[0] else {
+            panic!("expected fn decl");
+        };
+        let Statement::Declaration { decl, .. } = s.as_ref() else {
+            panic!("expected declaration");
+        };
+        let Declaration::Function(fd) = decl.as_ref() else {
+            panic!("expected function");
+        };
+        let FnBody::Block(Expression::BlockExpression(body)) = &fd.body else {
+            panic!("expected block body");
+        };
+        body
+    }
+
+    fn ident_name(e: &Expression) -> &str {
+        let Expression::Identifier(id) = e else {
+            panic!("expected identifier, got {e:?}");
+        };
+        &id.name
+    }
+
+    #[test]
+    fn pipe_into_call_prepends_argument() {
+        let block = parse_and_desugar("fn f() {\n\ta |> g(x)\n}\n");
+        let body = fn_body(&block);
+        let Node::Expression(Expression::FunctionCallExpression(fc)) = &body.body[0] else {
+            panic!("expected a call, got {:?}", body.body[0]);
+        };
+        assert_eq!(ident_name(&fc.callee), "g");
+        assert_eq!(fc.arguments.len(), 2, "piped value did not prepend");
+        let CallArg::Positional(first) = &fc.arguments[0] else {
+            panic!("expected the piped value as a positional argument");
+        };
+        assert_eq!(ident_name(first), "a");
+        let CallArg::Positional(second) = &fc.arguments[1] else {
+            panic!("expected g's own argument second");
+        };
+        assert_eq!(ident_name(second), "x");
+    }
+
+    #[test]
+    fn pipe_into_identifier_wraps_a_call() {
+        // No parens on the right: `right` is a plain function value, called
+        // with `left` as its only argument.
+        let block = parse_and_desugar("fn f() {\n\ta |> g\n}\n");
+        let body = fn_body(&block);
+        let Node::Expression(Expression::FunctionCallExpression(fc)) = &body.body[0] else {
+            panic!("expected a call, got {:?}", body.body[0]);
+        };
+        assert_eq!(ident_name(&fc.callee), "g");
+        assert_eq!(fc.arguments.len(), 1);
+        let CallArg::Positional(arg) = &fc.arguments[0] else {
+            panic!("expected a positional argument");
+        };
+        assert_eq!(ident_name(arg), "a");
+    }
+
+    #[test]
+    fn pipe_chain_desugars_inside_out() {
+        // a |> f |> g becomes g(f(a)): each stage wraps the one before it.
+        let block = parse_and_desugar("fn f() {\n\ta |> f |> g\n}\n");
+        let body = fn_body(&block);
+        let Node::Expression(Expression::FunctionCallExpression(outer)) = &body.body[0] else {
+            panic!("expected a call, got {:?}", body.body[0]);
+        };
+        assert_eq!(ident_name(&outer.callee), "g");
+        assert_eq!(outer.arguments.len(), 1);
+        let CallArg::Positional(Expression::FunctionCallExpression(inner)) = &outer.arguments[0]
+        else {
+            panic!(
+                "expected g's argument to be the inner call, got {:?}",
+                outer.arguments[0]
+            );
+        };
+        assert_eq!(ident_name(&inner.callee), "f");
+        assert_eq!(inner.arguments.len(), 1);
+        let CallArg::Positional(innermost) = &inner.arguments[0] else {
+            panic!("expected a positional argument");
+        };
+        assert_eq!(ident_name(innermost), "a");
     }
 }

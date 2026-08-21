@@ -3631,6 +3631,16 @@ impl Compiler {
             ast::Expression::FunctionCallExpression(fc) => self.compile_call(fc),
             ast::Expression::PropertyAccessExpression(pa) => self.compile_property_access(pa),
             ast::Expression::OrExpression(oe) => self.compile_or(oe),
+            ast::Expression::PipeExpression(p) => {
+                // Desugared away before type checking (`compile_with`/
+                // `check_impl` rewrite every pipe first), same guarantee as
+                // `Statement::Backpass`. Type both sides defensively so a
+                // survivor still surfaces its operands' own diagnostics
+                // instead of panicking.
+                self.compile_expr(&p.left);
+                self.compile_expr(&p.right);
+                self.engine.fresh_var()
+            }
             ast::Expression::ErrorNode(err) => self.error_node(err),
         }
     }

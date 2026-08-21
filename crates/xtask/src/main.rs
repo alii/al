@@ -157,6 +157,7 @@ enum OpGroup {
     Range,
     Comparison,
     Logical,
+    Pipe,
     PatternAlternation,
     Arithmetic,
     Assignment,
@@ -196,6 +197,7 @@ fn classify(kind: &Kind) -> TokenClass {
             TokenClass::Operator(OpGroup::Logical)
         }
         Kind::BitwiseOr => TokenClass::Operator(OpGroup::PatternAlternation),
+        Kind::PuncPipe => TokenClass::Operator(OpGroup::Pipe),
         Kind::PuncPlus | Kind::PuncMinus | Kind::PuncMul | Kind::PuncDiv | Kind::PuncMod => {
             TokenClass::Operator(OpGroup::Arithmetic)
         }
@@ -227,6 +229,7 @@ fn op_group_scope(group: OpGroup) -> &'static str {
         OpGroup::Range => "keyword.operator.spread.scrl",
         OpGroup::Comparison => "keyword.operator.comparison.scrl",
         OpGroup::Logical => "keyword.operator.logical.scrl",
+        OpGroup::Pipe => "keyword.operator.pipe.scrl",
         OpGroup::PatternAlternation => "keyword.operator.pattern.scrl",
         OpGroup::Arithmetic => "keyword.operator.arithmetic.scrl",
         OpGroup::Assignment => "keyword.operator.assignment.scrl",
@@ -248,8 +251,9 @@ fn regex_escape(s: &str) -> String {
 /// One alternation regex per operator group, longest spelling first so `<=`
 /// wins over `<` inside the same rule. Rule order across groups matters the
 /// same way: `Invalid` precedes `Arithmetic` so `++` wins over `+`, `Logical`
-/// precedes `PatternAlternation` so `||` wins over `|`, and `Comparison`
-/// precedes `Assignment` so `==` wins over `=`.
+/// precedes `PatternAlternation` so `||` wins over `|`, `Pipe` precedes
+/// `PatternAlternation` so `|>` wins over `|`, and `Comparison` precedes
+/// `Assignment` so `==` wins over `=`.
 fn operator_rules() -> Vec<Value> {
     const ORDER: &[OpGroup] = &[
         OpGroup::Invalid,
@@ -258,6 +262,7 @@ fn operator_rules() -> Vec<Value> {
         OpGroup::Range,
         OpGroup::Comparison,
         OpGroup::Logical,
+        OpGroup::Pipe,
         OpGroup::PatternAlternation,
         OpGroup::Arithmetic,
         OpGroup::Assignment,

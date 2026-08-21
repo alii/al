@@ -234,11 +234,13 @@ module.exports = grammar({
 
     // Expressions ------------------------------------------------------------
     // Precedence ladder from the parser's PRECEDENCE table, loosest first:
-    // or < || < && < == != < comparisons < .. < + - < * / % < unary < postfix.
+    // or < |> < || < && < == != < comparisons < .. < + - < * / % < unary <
+    // postfix.
 
     _expression: ($) =>
       choice(
         $.or_expression,
+        $.pipe_expression,
         $.binary_expression,
         $.range_expression,
         $.unary_expression,
@@ -256,14 +258,22 @@ module.exports = grammar({
         ),
       ),
 
+    // `left |> right`: sugar for calling `right` with `left` prepended as its
+    // first argument (crate::desugar rewrites it before type checking).
+    pipe_expression: ($) =>
+      prec.left(
+        2,
+        seq(field('left', $._expression), '|>', field('right', $._expression)),
+      ),
+
     binary_expression: ($) => {
       const table = [
-        [2, '||'],
-        [3, '&&'],
-        [4, choice('==', '!=')],
-        [5, choice('<', '>', '<=', '>=')],
-        [7, choice('+', '-')],
-        [8, choice('*', '/', '%')],
+        [3, '||'],
+        [4, '&&'],
+        [5, choice('==', '!=')],
+        [6, choice('<', '>', '<=', '>=')],
+        [8, choice('+', '-')],
+        [9, choice('*', '/', '%')],
       ];
       return choice(
         ...table.map(([precedence, operator]) =>
@@ -282,7 +292,7 @@ module.exports = grammar({
     // Endpoints are additive-precedence (`-5..5` is `(-5)..(5)`); no chaining.
     range_expression: ($) =>
       prec.left(
-        6,
+        7,
         seq(field('start', $._expression), '..', field('end', $._expression)),
       ),
 
@@ -291,7 +301,7 @@ module.exports = grammar({
     // binary subtraction does not.
     unary_expression: ($) =>
       prec(
-        9,
+        10,
         seq(
           field('operator', choice('!', '-', alias($._minus_line_start, '-'))),
           field('operand', $._expression),
@@ -310,7 +320,7 @@ module.exports = grammar({
     // instead of chaining (parser "P7").
     call_expression: ($) =>
       prec(
-        10,
+        11,
         seq(
           field('function', $._postfix_expression),
           token.immediate('('),

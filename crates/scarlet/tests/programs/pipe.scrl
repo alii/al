@@ -1,0 +1,39 @@
+// The pipe operator: `left |> right` calls `right` with `left` prepended as
+// its first argument (crate::desugar rewrites it before type checking, so
+// this pins the desugaring end to end, not just the parse). Covers a bare
+// identifier on the right, a call that already carries its own arguments, a
+// multi-stage chain, and that a pipeline binds tighter than `or` so the
+// whole chain is what gets unwrapped.
+
+fn double(n Int) Int {
+	n * 2
+}
+
+fn add(n Int, m Int) Int {
+	n + m
+}
+
+fn halve(n Int) Result(Int, Nil) {
+	if n % 2 == 0 {
+		Ok(n / 2)
+	} else {
+		Err(Nil)
+	}
+}
+
+fn chain(n Int) Int {
+	n |> double |> double |> add(1)
+}
+
+pub fn main() {
+	// Bare identifier on the right: `n |> double` is `double(n)`.
+	println(5 |> double)
+	// A call that already carries its own arguments: the piped value
+	// becomes the first, ahead of what was already there.
+	println(5 |> add(3))
+	// A multi-stage chain, left-associative: double(double(5)) + 1.
+	println(chain(5))
+	// Binds tighter than `or`, so the whole pipeline is unwrapped in one go.
+	println(10 |> halve or -1)
+	println(7 |> halve or -1)
+}

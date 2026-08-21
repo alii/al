@@ -379,7 +379,17 @@ impl Scanner {
                 _ => self.new_token(Kind::PuncLt),
             },
             b'/' => self.new_token(Kind::PuncDiv),
-            b'|' => self.punc2(b'|', Kind::LogicalOr, Kind::BitwiseOr),
+            b'|' => match self.peek_char() {
+                b'|' => {
+                    self.incr_pos();
+                    self.new_token(Kind::LogicalOr)
+                }
+                b'>' => {
+                    self.incr_pos();
+                    self.new_token(Kind::PuncPipe)
+                }
+                _ => self.new_token(Kind::BitwiseOr),
+            },
             b'=' => self.punc2(b'=', Kind::PuncEqualsComparator, Kind::PuncEquals),
             _ => {
                 // `ch` is a raw byte; `as char` would reinterpret it as

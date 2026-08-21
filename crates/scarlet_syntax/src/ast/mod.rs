@@ -510,6 +510,19 @@ pub struct BinaryExpression {
     pub span: Span,
 }
 
+/// `left |> right`: sugar for calling `right` with `left` as its first
+/// argument. Kept as its own node (rather than desugared at parse time) so
+/// the formatter renders the pipeline as written instead of the nested calls
+/// it stands for; [`crate::desugar`] rewrites it into a
+/// [`FunctionCallExpression`] before type checking, the same way it rewrites
+/// [`BackpassBinding`].
+#[derive(Debug, Clone)]
+pub struct PipeExpression {
+    pub left: Box<Expression>,
+    pub right: Box<Expression>,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone)]
 pub struct UnaryExpression {
     pub expression: Box<Expression>,
@@ -839,6 +852,7 @@ pub enum Expression {
     MatchExpression(MatchExpression),
     NumberLiteral(NumberLiteral),
     OrExpression(OrExpression),
+    PipeExpression(PipeExpression),
     PropertyAccessExpression(PropertyAccessExpression),
     RangeExpression(RangeExpression),
     StringLiteral(StringLiteral),
@@ -850,7 +864,8 @@ impl_span!(
     Expression: ArrayExpression, ArrayIndexExpression, BinaryExpression, BinaryLiteral,
     BlockExpression, ErrorNode, FunctionCallExpression, FunctionExpression, Identifier,
     IfExpression, InterpolatedString, MatchExpression, NumberLiteral, OrExpression,
-    PropertyAccessExpression, RangeExpression, StringLiteral, TupleExpression, UnaryExpression,
+    PipeExpression, PropertyAccessExpression, RangeExpression, StringLiteral, TupleExpression,
+    UnaryExpression,
 );
 
 #[derive(Debug, Clone)]
