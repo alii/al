@@ -1260,6 +1260,40 @@ run_case! {
          }\n",
         "3\n15\n",
     ),
+
+    // T-767: `array.map(bs, wire.decode)` reaches the VM through an eta wrapper,
+    // so its descriptor comes from `eta_wire_imm`'s `Op::WireDecode` arm and not
+    // from the direct-call spine. T-337 landed both arms and exercised only the
+    // encode one, leaving this path written and never run.
+    //
+    // HOW THE PAYLOAD IS PINNED, and the first attempt was wrong: a downstream
+    // `match` on the fold does NOT reach the wrapper. Measured — `rs =
+    // array.map(bs, wire.decode)` with an `Ok(S(n))` arm further down is still
+    // refused with "the type `wire.decode` produces here is not known", because
+    // inference does not flow back into the eta wrapper's return type. It is
+    // pinned here by `decode_all`'s monomorphic signature instead, which fixes
+    // `a` to `S` at the point the wrapper is minted.
+    //
+    // The output is the SUM of the decoded payloads, not a count: a descriptor
+    // that decoded to the wrong shape changes 7, where `array.length` would
+    // still read 2. `dis.rs` covers the missing-descriptor half; only running it
+    // can see a wrong one.
+    eta_wrapped_wire_decode_round_trips: (
+        "import scarlet/array\n\
+         import scarlet/wire\n\
+         type S { S(n Int) }\n\
+         fn decode_all(bs Array(Binary)) Array(Result(S, wire.DecodeError)) {\n\
+         \tarray.map(bs, wire.decode)\n\
+         }\n\
+         pub fn main() {\n\
+         \tbs = array.map([S(3), S(4)], wire.encode)\n\
+         \tprintln(array.fold(decode_all(bs), 0, fn(acc, r) match r {\n\
+         \t\tOk(S(n)) -> acc + n\n\
+         \t\tErr(_) -> 0 - 1\n\
+         \t}))\n\
+         }\n",
+        "7\n",
+    ),
 }
 
 #[test]

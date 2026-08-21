@@ -455,7 +455,17 @@ fn the_wire_fingerprint_is_stable_across_two_compiles() {
     );
 }
 
-const ETA_WIRE: &str = "import scarlet/array\nimport scarlet/wire\n\n                        type S { S(s String) }\n\n                        pub fn main() {\n\t                        _first = wire.encode(S('x'))\n\t                        bs = array.map([1, 2], wire.encode)\n\t                        println(array.length(bs))\n}\n";
+const ETA_WIRE: &str = "import scarlet/array\n\
+                        import scarlet/wire\n\
+                        type S { S(n Int) }\n\
+                        fn decode_all(bs Array(Binary)) Array(Result(S, wire.DecodeError)) {\n\
+                        \tarray.map(bs, wire.decode)\n\
+                        }\n\
+                        pub fn main() {\n\
+                        \t_first = wire.encode(S(1))\n\
+                        \tbs = array.map([S(1), S(2)], wire.encode)\n\
+                        \tprintln(array.length(decode_all(bs)))\n\
+                        }\n";
 
 /// `array.map(xs, wire.encode)` reaches the VM through an eta wrapper, and the
 /// wrapper is minted per use — so the descriptor has to be attached there and
@@ -478,10 +488,20 @@ fn an_eta_wrapped_wire_op_carries_a_descriptor() {
         .lines()
         .filter(|l| l.contains("WireEncode") || l.contains("WireDecode"))
         .collect();
+    // Counted per op, not pooled. `wire.len() >= 2` was satisfied by the two
+    // ENCODES alone, so this filter could name `WireDecode` and match none —
+    // which is exactly how T-337's decode arm shipped unexercised. T-767.
+    let encodes = wire.iter().filter(|l| l.contains("WireEncode")).count();
+    let decodes = wire.iter().filter(|l| l.contains("WireDecode")).count();
     assert!(
-        wire.len() >= 2,
-        "expected a direct wire call and an eta-wrapped one, got {}:\n{text}",
-        wire.len()
+        encodes >= 2,
+        "expected a direct wire.encode and an eta-wrapped one, got {encodes}:\n{text}"
+    );
+    assert!(
+        decodes >= 1,
+        "expected an eta-wrapped wire.decode, got {decodes}. A zero here means \
+         the fixture stopped covering the decode arm, not that the arm is \
+         fine:\n{text}"
     );
     for l in &wire {
         assert!(
