@@ -4058,7 +4058,7 @@ impl Compiler {
             let hint = param_of_arg[i].and_then(|p| params.get(p).cloned());
             let (arg_ty, arg_span) = match arg {
                 ast::CallArg::Positional(e) => (self.compile_expr_with_hint(e, hint), e.span()),
-                ast::CallArg::Labeled { label, value } => {
+                ast::CallArg::Labeled { label, value, .. } => {
                     if param_labels.is_none() {
                         self.error(
                             "Labelled arguments need a callee whose parameter names are known: \
@@ -4320,7 +4320,7 @@ impl Compiler {
             .enumerate()
             .filter_map(|(i, a)| match a {
                 ast::CallArg::Positional(e) => Some((None, (i, e), e.span())),
-                ast::CallArg::Labeled { label, value } => {
+                ast::CallArg::Labeled { label, value, .. } => {
                     Some((Some(label), (i, value), label.span))
                 }
                 ast::CallArg::Spread(_) => None,

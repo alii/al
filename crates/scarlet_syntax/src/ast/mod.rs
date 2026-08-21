@@ -582,6 +582,12 @@ pub enum CallArg {
     Labeled {
         label: Identifier,
         value: Expression,
+        /// True for punning sugar (`label:` with nothing after it), which the
+        /// parser desugars to `value: Identifier(label)` on the spot. Every
+        /// later pass sees an ordinary labeled argument either way; this flag
+        /// exists only so the formatter can render it back the way it was
+        /// written instead of guessing from `value`'s shape.
+        punned: bool,
     },
     Spread(Expression),
 }
@@ -590,7 +596,7 @@ impl CallArg {
     pub(crate) fn span(&self) -> Span {
         match self {
             CallArg::Positional(e) => e.span(),
-            CallArg::Labeled { label, value } => label.span.union(&value.span()),
+            CallArg::Labeled { label, value, .. } => label.span.union(&value.span()),
             CallArg::Spread(e) => e.span(),
         }
     }
@@ -967,6 +973,7 @@ mod tests {
                 span: span(3, 2, 3, 3),
             },
             value: err(span(3, 5, 3, 11)),
+            punned: false,
         };
         assert_eq!(labeled.span(), span(3, 2, 3, 11));
     }

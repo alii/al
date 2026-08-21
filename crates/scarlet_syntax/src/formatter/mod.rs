@@ -756,7 +756,15 @@ impl Formatter {
         };
         let arg = match a {
             ast::CallArg::Positional(e) => self.expr(e),
-            ast::CallArg::Labeled { label, value } => {
+            // A punned argument keeps its shorthand — the formatter does not
+            // expand `label:` to `label: label`, or the sugar would defeat
+            // its own point the first time a file gets formatted.
+            ast::CallArg::Labeled {
+                punned: true,
+                label,
+                ..
+            } => d![text(label.name.clone()), text(":")],
+            ast::CallArg::Labeled { label, value, .. } => {
                 d![text(label.name.clone()), text(": "), self.expr(value)]
             }
             ast::CallArg::Spread(e) => d![text(".."), self.expr(e)],
@@ -1652,6 +1660,42 @@ mod tests {
     fn labeled_and_final_call_argument_comments_survive() {
         let out = fmt("f(\n\ta,\n\t// why b\n\tlabel: b,\n)\n");
         assert!(out.contains("// why b"), "comment deleted:\n{out}");
+        assert_round_trips(&out);
+    }
+
+    /// A punned argument keeps its shorthand — the formatter does not expand
+    /// `now:` to `now: now`, or the sugar would defeat its own point the
+    /// first time a file gets formatted.
+    #[test]
+    fn punned_call_argument_keeps_its_shorthand() {
+        let out = fmt("f(now:, self:)\n");
+        assert!(out.contains("f(now:, self:)"), "shorthand lost:\n{out}");
+        assert_round_trips(&out);
+    }
+
+    /// The mirror of the test above: a labeled argument spelled out in full
+    /// is not collapsed into a pun just because its value happens to share
+    /// the label's name. `punned` is a fact the parser records at the site
+    /// that observed it, not one re-derived later by comparing spellings.
+    #[test]
+    fn spelled_out_argument_is_not_collapsed_into_a_pun() {
+        let out = fmt("f(now: now)\n");
+        assert!(
+            out.contains("f(now: now)"),
+            "expanded form was collapsed:\n{out}"
+        );
+        assert_round_trips(&out);
+    }
+
+    /// Punning composes with the other call-argument shapes: an ordinary
+    /// labeled argument and a record-update spread in the same call.
+    #[test]
+    fn punning_mixes_with_labeled_and_spread_arguments() {
+        let out = fmt("Segment(..s, from:, label: 'up')\n");
+        assert!(
+            out.contains("Segment(..s, from:, label: 'up')"),
+            "mixed call argument shapes not preserved:\n{out}"
+        );
         assert_round_trips(&out);
     }
 

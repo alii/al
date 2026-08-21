@@ -335,8 +335,10 @@ module.exports = grammar({
 
     spread_argument: ($) => seq('..', $._expression),
 
+    // A bare `label:` is punning sugar for `label: label` (crate::parser
+    // desugars it before anything downstream sees the argument).
     labeled_argument: ($) =>
-      prec(1, seq(field('label', $.identifier), ':', field('value', $._expression))),
+      prec(1, seq(field('label', $.identifier), ':', optional(field('value', $._expression)))),
 
     index_expression: ($) =>
       prec(

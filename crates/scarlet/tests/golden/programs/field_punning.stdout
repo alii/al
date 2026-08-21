@@ -1,0 +1,4 @@
+PASS punned fields build the constructor
+PASS punned form equals the spelled-out form
+PASS punning mixes with a spelled-out label
+PASS punning composes with record-update spread

@@ -217,6 +217,9 @@ suite! {
         exhaustive_match,
         tuples_and_records,
         enum_equality,
+        // Field punning on constructor calls: `f(now:, self:)` desugars to
+        // `f(now: now, self: self)` at parse time.
+        field_punning,
         // Evaluation: tail calls in constant stack, closure capture, and core
         // semantics.
         tco_and_closures,

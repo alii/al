@@ -918,8 +918,26 @@ impl Parser {
             {
                 let label = p.eat_identifier("Expected argument label")?;
                 p.eat(Kind::PuncColon)?;
-                let value = p.parse_expression()?;
-                Ok(ast::CallArg::Labeled { label, value })
+                // `label:` with nothing before the next `,` or `)` is
+                // punning sugar for `label: label` — desugar it here so
+                // every later pass sees an ordinary labeled argument, and
+                // remember that it was punned so the formatter can render
+                // it back the way it was written.
+                if matches!(p.kind(), Kind::PuncComma | Kind::PuncCloseParen) {
+                    let value = ast::Expression::Identifier(label.clone());
+                    Ok(ast::CallArg::Labeled {
+                        label,
+                        value,
+                        punned: true,
+                    })
+                } else {
+                    let value = p.parse_expression()?;
+                    Ok(ast::CallArg::Labeled {
+                        label,
+                        value,
+                        punned: false,
+                    })
+                }
             } else {
                 Ok(ast::CallArg::Positional(p.parse_expression()?))
             }

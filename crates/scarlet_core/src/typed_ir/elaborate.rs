@@ -959,7 +959,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                     let v = self.spill(v, &mut lets);
                     supplied.push((None, v));
                 }
-                ast::CallArg::Labeled { label, value } => {
+                ast::CallArg::Labeled { label, value, .. } => {
                     let sid = self.ctx.intern(&label.name);
                     let v = self.expr(value);
                     let v = self.spill(v, &mut lets);
@@ -1148,7 +1148,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                     };
                     supplied.push((None, v));
                 }
-                ast::CallArg::Labeled { label, value } => {
+                ast::CallArg::Labeled { label, value, .. } => {
                     let sid = self.ctx.intern(&label.name);
                     let v = self.expr(value);
                     let v = self.spill(v, &mut lets);
