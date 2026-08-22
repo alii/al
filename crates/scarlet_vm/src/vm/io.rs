@@ -959,6 +959,25 @@ pub(super) enum Drain {
     /// into the session's buffer rather than handed to the kernel. The caller
     /// re-runs with an EMPTY remainder: there is no plaintext left to send, so
     /// re-sending any would duplicate it.
+    ///
+    /// "Only for TLS" is a property of the flush impls, not a convention.
+    /// `ConnIo::Tcp` and `ConnIo::Port` both flush through what is ultimately
+    /// `std`'s `Ok(())` no-op, so a cleartext stream has no userspace queue to
+    /// leave owing: one that cannot take more bytes fails in [`drain_write`]
+    /// and comes back `Park`. Only `TlsIo::flush` has a queue to empty and can
+    /// answer `WouldBlock`. `a_full_cleartext_socket_parks_and_never_flushes`
+    /// holds that half down.
+    ///
+    /// The cleartext callers ([`VM::tcp_write`], [`VM::tcp_write_parts`]) still
+    /// carry the arm, and it is not dead weight. What keeps them off a
+    /// `ConnIo::Tls` is the Scarlet type system — `Socket` and `TlsSocket` are
+    /// distinct types over distinct `Connection`/`TlsConnection` handles — and
+    /// that is a guarantee of the language, which this crate must never depend
+    /// on. [`stream_entry`] checks only that a handle and its entry agree, so
+    /// nothing below the type system rejects a `Tls`-kinded handle reaching
+    /// them. Folding `Flushing` into `Done` is the one answer that is wrong
+    /// either way: it reports the write complete while the stream still owes
+    /// bytes, which is the deadlock [`drain_and_flush`] exists to prevent.
     Flushing,
 }
 
@@ -1091,6 +1110,9 @@ mod tests {
     //!
     //! Also the deadline invariants that a scheduled test can only witness
     //! probabilistically, driven here through the opcode instead.
+    //!
+    //! And the premise under [`Drain::Flushing`]: a full CLEARTEXT socket comes
+    //! back `Park`, which is what keeps that variant a TLS-only outcome.
 
     use std::net::SocketAddr;
     use std::os::fd::AsRawFd;
@@ -1368,6 +1390,92 @@ mod tests {
         assert_eq!(
             outer, "Ok",
             "a spent budget must not refuse work that needs no wait"
+        );
+    }
+
+    /// A cleartext socket whose peer has stopped reading fills up and comes
+    /// back [`Drain::Park`], never [`Drain::Flushing`]: flushing a
+    /// `ConnIo::Tcp` is `std`'s no-op, so there is no userspace queue for the
+    /// write to leave owing.
+    ///
+    /// This is the premise under `tcp_write`'s and `tcp_write_parts`' `Flushing`
+    /// arms being unreachable from a cleartext entry point, measured rather
+    /// than read off the flush impls. It does NOT witness those arms behaving
+    /// correctly if one ever does fire — nothing here reaches them — and it
+    /// says nothing about the TLS path, which `vm/tls.rs`'s tests cover.
+    ///
+    /// The verdict is the returned `Drain`, so a host whose buffers never fill
+    /// turns this RED rather than passing it through.
+    #[test]
+    fn a_full_cleartext_socket_parks_and_never_flushes() {
+        use std::sync::mpsc;
+        use std::thread;
+
+        /// One write per call, matching `vm/tls.rs`'s chunk: enough to fill a
+        /// peer with a small receive buffer in a few passes.
+        const CHUNK: usize = 60 * 1024;
+        /// Give up after this much. The peer never reads, so the socket must
+        /// fill long before it; not filling is a broken test, not a passing one.
+        const CHUNKS: usize = 256;
+
+        // A small receive buffer on the LISTENER, inherited by the accepted
+        // socket, so the writer's window stays small and the fill is quick and
+        // bounded — the same reason `vm/tls.rs`'s peer sets one.
+        let sock =
+            Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).expect("listener socket");
+        let _ = sock.set_recv_buffer_size(4096);
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("loopback address");
+        sock.bind(&addr.into()).expect("bind");
+        sock.listen(8).expect("listen");
+        let listener: TcpListener = sock.into();
+        let addr = listener.local_addr().expect("local_addr");
+
+        // The peer accepts and reads NOTHING, holding the connection open until
+        // the test drops `done`. Every byte sent from here on stops in the
+        // kernel's buffers. Dropping the socket early would end the fill with a
+        // reset instead, which is a different outcome than the one under test.
+        let (done, done_rx) = mpsc::channel::<()>();
+        let peer = thread::spawn(move || {
+            let Ok((sock, _)) = listener.accept() else {
+                return;
+            };
+            let _ = done_rx.recv();
+            drop(sock);
+        });
+
+        let tcp = TcpStream::connect(addr).expect("connect");
+        tcp.set_nonblocking(true).expect("non-blocking");
+        let mut conn = ConnIo::Tcp(tcp);
+
+        let chunk = vec![0x5au8; CHUNK];
+        let mut parked = false;
+        for _ in 0..CHUNKS {
+            match drain_and_flush(&mut conn, std::slice::from_ref(&chunk)).expect("write") {
+                Drain::Done => continue,
+                Drain::Park { .. } => {
+                    parked = true;
+                    break;
+                }
+                Drain::Flushing => panic!(
+                    "a cleartext stream reported `Flushing`. Flushing a \
+                     `ConnIo::Tcp` is `std`'s `Ok(())`, so a full cleartext \
+                     socket must fail in `drain_write` and come back `Park`. \
+                     `Drain::Flushing`'s \"only reachable for TLS\" no longer \
+                     holds, and `tcp_write`/`tcp_write_parts` answer this arm \
+                     by pushing an EMPTY remainder"
+                ),
+            }
+        }
+
+        drop(done);
+        let _ = peer.join();
+
+        assert!(
+            parked,
+            "{} bytes went to a peer that is not reading without the socket \
+             ever filling: this host's buffers are too large for this test to \
+             say anything about the flush",
+            CHUNKS * CHUNK
         );
     }
 }
