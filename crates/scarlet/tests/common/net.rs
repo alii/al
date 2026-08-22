@@ -153,6 +153,25 @@ pub fn spawn_al_server(proj: &Project, src: &str) -> AlServer {
 /// measured; the rest is headroom for platforms that admit more.
 const MAX_FILL_ATTEMPTS: usize = 16;
 
+/// What an overflow connect to a `listen(1)` socket meant.
+#[derive(Debug, PartialEq, Eq)]
+enum Overflow {
+    /// SYN dropped; the accept queue is full and a later connect can hang.
+    DroppedSyn,
+    /// Kernel RST'd (ECONNRESET). The connect was answered, so the
+    /// deadline-vs-kernel-floor tests have nothing to measure.
+    Reset,
+    Unexpected,
+}
+
+fn classify_overflow(err: &std::io::Error) -> Overflow {
+    match err.kind() {
+        ErrorKind::TimedOut | ErrorKind::WouldBlock => Overflow::DroppedSyn,
+        ErrorKind::ConnectionReset => Overflow::Reset,
+        _ => Overflow::Unexpected,
+    }
+}
+
 /// A listener that never accepts, filled until the platform stops answering.
 ///
 /// This is the peer an unbounded connect has no answer for: once the accept
@@ -167,11 +186,14 @@ const MAX_FILL_ATTEMPTS: usize = 16;
 /// made this test fail on Linux CI: the queue was still short, the connect
 /// under test completed, and nothing about the deadline was witnessed.
 ///
+/// Returns `None` when overflow is RST rather than a dropped SYN. A RST is
+/// an answer, so the bounded-connect tests cannot witness a deadline.
+///
 /// The listener is returned because dropping it closes the port outright. The
 /// fillers come with it because whether a closed-but-still-queued connection
 /// keeps its slot is platform-specific — on Darwin it does, measured — and
 /// holding them for the life of the test removes the question.
-pub fn full_accept_queue() -> (socket2::Socket, Vec<std::net::TcpStream>, u16) {
+pub fn full_accept_queue() -> Option<(socket2::Socket, Vec<std::net::TcpStream>, u16)> {
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("addr");
     let listener = socket2::Socket::new(
         socket2::Domain::IPV4,
@@ -196,10 +218,19 @@ pub fn full_accept_queue() -> (socket2::Socket, Vec<std::net::TcpStream>, u16) {
     for _ in 0..MAX_FILL_ATTEMPTS {
         match std::net::TcpStream::connect_timeout(&target, fill_timeout) {
             Ok(filler) => fillers.push(filler),
-            Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
-                return (listener, fillers, port);
-            }
-            Err(e) => panic!("filling the accept queue failed with {e:?}, not a dropped SYN"),
+            Err(e) => match classify_overflow(&e) {
+                Overflow::DroppedSyn => return Some((listener, fillers, port)),
+                Overflow::Reset => {
+                    eprintln!(
+                        "unmeasurable: kernel RST (ECONNRESET) filling a listen(1) queue \
+                         instead of a dropped SYN; no unanswered connect to bound"
+                    );
+                    return None;
+                }
+                Overflow::Unexpected => {
+                    panic!("filling the accept queue failed with {e:?}, not a dropped SYN")
+                }
+            },
         }
     }
     panic!(
@@ -207,6 +238,33 @@ pub fn full_accept_queue() -> (socket2::Socket, Vec<std::net::TcpStream>, u16) {
          does not drop the SYN when the accept queue is full, so there is no way here to \
          make a connect hang"
     );
+}
+
+#[test]
+fn classify_overflow_treats_rst_as_unmeasurable() {
+    let rst_kind = std::io::Error::new(ErrorKind::ConnectionReset, "reset");
+    assert_eq!(classify_overflow(&rst_kind), Overflow::Reset);
+    assert_eq!(
+        classify_overflow(&std::io::Error::new(ErrorKind::TimedOut, "t")),
+        Overflow::DroppedSyn
+    );
+    assert_eq!(
+        classify_overflow(&std::io::Error::new(ErrorKind::WouldBlock, "w")),
+        Overflow::DroppedSyn
+    );
+    assert_eq!(
+        classify_overflow(&std::io::Error::other("x")),
+        Overflow::Unexpected
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn classify_overflow_maps_econnreset_54() {
+    // The macOS 27 panic spelled `Os { code: 54, kind: ConnectionReset }`.
+    let rst = std::io::Error::from_raw_os_error(54);
+    assert_eq!(rst.kind(), ErrorKind::ConnectionReset);
+    assert_eq!(classify_overflow(&rst), Overflow::Reset);
 }
 
 /// The deadline the bounded connect tests are given, and the floor the kernel

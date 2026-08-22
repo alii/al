@@ -1144,11 +1144,15 @@ pub fn main() {
 ///
 /// Portability: this rests on a full accept queue dropping the SYN, which
 /// Linux and Darwin both do at queue depths they do not agree on — hence the
-/// observed fill in `full_accept_queue`. A platform that answers regardless
-/// panics there rather than reaching this assertion.
+/// observed fill in `full_accept_queue`. A platform that completes every
+/// connect panics there. A platform that RSTs instead of dropping returns
+/// unmeasurable: the kernel answered, so the deadline-vs-kernel-floor gap
+/// does not exist.
 #[test]
 fn connect_addr_within_times_out_against_a_full_accept_queue() {
-    let (_listener, _fillers, port) = full_accept_queue();
+    let Some((_listener, _fillers, port)) = full_accept_queue() else {
+        return;
+    };
 
     let src = format!(
         r#"import scarlet/net
@@ -1215,7 +1219,9 @@ pub fn main() {{
 /// hostname resolve, which is `resolve_within`'s own coverage above.
 #[test]
 fn connect_within_times_out_against_a_full_accept_queue() {
-    let (_listener, _fillers, port) = full_accept_queue();
+    let Some((_listener, _fillers, port)) = full_accept_queue() else {
+        return;
+    };
 
     let src = format!(
         r#"import scarlet/net

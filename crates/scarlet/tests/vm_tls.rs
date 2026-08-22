@@ -814,11 +814,14 @@ pub fn main() {{
 /// between the two constants produces this output.
 ///
 /// Portability: this rests on a full accept queue dropping the SYN. A platform
-/// that answers regardless panics inside `full_accept_queue` rather than
-/// reaching this assertion.
+/// that completes every connect panics inside `full_accept_queue`. A platform
+/// that RSTs instead of dropping returns unmeasurable: the kernel answered,
+/// so the deadline-vs-kernel-floor gap does not exist.
 #[test]
 fn tls_connect_within_times_out_against_a_peer_that_never_accepts() {
-    let (_listener, _fillers, port) = full_accept_queue();
+    let Some((_listener, _fillers, port)) = full_accept_queue() else {
+        return;
+    };
 
     let src = format!(
         r#"import scarlet/net/tls.{{Transport}}
