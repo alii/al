@@ -1,4 +1,7 @@
 import scarlet/binary
+// Aliased because `int` is also a combinator below, and a local binding
+// shadows an imported module of the same name.
+import scarlet/int as integer
 import scarlet/json
 // Aliased because `field` is also a combinator below, and a local binding
 // shadows an imported module of the same name. Callers of this module are
@@ -279,24 +282,17 @@ pub fn int_string() Decoder(Int) {
 	)
 }
 
-// `binary.parse_int` reads unsigned digits and treats `-` as a non-digit, so
-// the sign is peeled off before it. `byte_at` is -1 past the end, which is
-// what makes an empty string safe here: it takes the unsigned branch and
-// fails there.
-//
-// `-9223372036854775808` is the one `Int` this cannot read — its magnitude is
-// one past the positive range `parse_int` accepts — and it fails rather than
-// wrapping to a positive number.
+// `int.from_string` reaches `int.min_value`; composing `binary.parse_int`
+// with a sign peel cannot, because that magnitude has no positive Int.
+// `+` is refused here: JSON has no leading plus, and `int.from_string`
+// accepts one. `byte_at` is -1 past the end, so an empty string falls
+// through and fails in `from_string`.
 fn parse_signed(s String) Result(Int, Nil) {
-	b = binary.from_string(s)
-	// 45 is `-`.
-	if binary.byte_at(b, 0) == 45 {
-		match binary.parse_int(binary.drop_bytes(b, 1), binary.Dec) {
-			Ok(n) -> Ok(0 - n)
-			Err(Nil) -> Err(Nil)
-		}
+	// 43 is `+`.
+	if binary.byte_at(binary.from_string(s), 0) == 43 {
+		Err(Nil)
 	} else {
-		binary.parse_int(b, binary.Dec)
+		integer.from_string(s)
 	}
 }
 

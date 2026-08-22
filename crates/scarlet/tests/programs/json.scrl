@@ -462,6 +462,7 @@ pub fn main() {
 	line('quoted i64 min', shown('"-9223372036854775808"', decode.int_string()))
 	line('quoted snowfl ', shown('"1070000000000000001"', decode.int_string()))
 	line('quoted zero   ', shown('"-0"', decode.int_string()))
+	line('quoted plus   ', shown('"+5"', decode.int_string()))
 	line('quoted double ', shown('"--5"', decode.int_string()))
 	line('quoted sign   ', shown('"-"', decode.int_string()))
 	line('quoted empty  ', shown('""', decode.int_string()))

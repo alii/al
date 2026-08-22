@@ -102,9 +102,10 @@ required arraydecode error: .a: expected a member named "a", found an array
 -- quoted integers --
 quoted pos    5
 quoted neg    -5
-quoted i64 mindecode error: <root>: expected a quoted integer, found the string "-9223372036854775808"
+quoted i64 min-9223372036854775808
 quoted snowfl 1070000000000000001
 quoted zero   0
+quoted plus   decode error: <root>: expected a quoted integer, found the string "+5"
 quoted double decode error: <root>: expected a quoted integer, found the string "--5"
 quoted sign   decode error: <root>: expected a quoted integer, found the string "-"
 quoted empty  decode error: <root>: expected a quoted integer, found the string ""
