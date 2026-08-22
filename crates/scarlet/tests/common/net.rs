@@ -258,7 +258,11 @@ fn classify_overflow_treats_rst_as_unmeasurable() {
     );
 }
 
-#[cfg(unix)]
+// Darwin only: 54 is ECONNRESET there and nowhere else that CI runs — on Linux
+// errno 54 is EXFULL, so this pin went red on every Linux job. The kind-level
+// test above is the cross-platform half; this one freezes the exact number the
+// macOS 27 kernel answered with, so it is scoped to the platform that produced it.
+#[cfg(target_os = "macos")]
 #[test]
 fn classify_overflow_maps_econnreset_54() {
     // The macOS 27 panic spelled `Os { code: 54, kind: ConnectionReset }`.
