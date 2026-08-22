@@ -569,10 +569,11 @@ const FN_FIELD: &str = "import scarlet/wire\n\
 
 /// A record with a `fn` field, and the reason is **reconstructibility**.
 ///
-/// `Handler` is `pub` on purpose, so `ctors_public` is true and the visibility
-/// rule cannot be what refuses it. Found by planting: with a bare `type`, an
-/// implementation that refused every non-public type took this red for the
-/// wrong reason and looked like a working test.
+/// `Handler` is `pub` on purpose. Until 2026-08-22 a visibility rule stood in
+/// front of this one, and planting showed why the `pub` matters: with a bare
+/// `type`, an implementation that refused every non-public type took this red
+/// for the wrong reason and looked like a working test. That rule is gone —
+/// an opaque type from another module crosses now — and `pub` costs nothing.
 ///
 /// The negative assertion is the load-bearing one. "`fn(Int) Int` has no wire
 /// representation" is false — Erlang's `NEW_FUN_EXT`/`EXPORT_EXT` serialise
@@ -606,7 +607,8 @@ fn wire_refuses_a_fn_field_for_reconstructibility_not_for_want_of_bytes() {
 ///
 /// All three types are `pub` for the reason `FN_FIELD` is: the only rule that
 /// may refuse this program is the one about `Subject`, so the test witnesses
-/// that rule and not the visibility one standing in front of it.
+/// that rule and not the visibility one that stood in front of it until
+/// 2026-08-22.
 ///
 /// The reason is pinned in full, and it is not the one this arm shipped with.
 /// It read "the type is host-backed and has no representation outside this
@@ -703,62 +705,71 @@ mod unknown_payload {
     }
 }
 
-/// An opaque type from another module, refused in BOTH directions.
+/// An opaque type from another module crosses the wire in BOTH directions.
 ///
-/// The symmetry is the point and is why both halves are asserted rather than
-/// one: encoding refuses exactly what decoding refuses, so a program can never
-/// write bytes it is unable to read back. `Decimal`'s own fields are two
-/// `Int`s, so nothing but the visibility rule can be doing the refusing here.
+/// Decided 2026-08-22 (owner): a decoder rebuilds a value by constructor, and
+/// a module's invariants are that module's to re-check on the values it is
+/// handed — the visibility refusal that stood here is gone. The symmetry is
+/// still the point: encoding accepts exactly what decoding accepts, so both
+/// halves run rather than one. `Decimal`'s fields are two `Int`s and
+/// `scarlet/decimal` never exports its constructor, so nothing but the old
+/// rule could have refused these programs, and nothing but its removal can be
+/// admitting them. These go through `al run`, not `al check`: the descriptor
+/// accepting is half of it, and the decoder finding a template for a
+/// constructor this module cannot name is the other half.
 mod opaque_from_another_module {
-    use super::wire_rejects;
+    use crate::common::run_outputs;
 
-    const WANTED: &str = "the type's constructors are not visible here, and decoding builds \
-                          values by constructor without running the declaring module's code";
-
+    /// The value that comes back is the one that went in, by structural `==`
+    /// (which compares `units` and `scale`) and by the declaring module's own
+    /// reader.
     #[test]
-    fn encode_is_refused() {
-        let all = wire_rejects(
+    fn round_trips_with_equality() {
+        run_outputs(
             "import scarlet/decimal\n\
              import scarlet/wire\n\
+             fn report(d decimal.Decimal, back decimal.Decimal) {\n\
+             \tprintln(back == d)\n\
+             \tprintln(decimal.to_string(back))\n\
+             }\n\
              pub fn main() {\n\
-             \tprintln(wire.encode(decimal.new(1, 2)))\n\
+             \td = decimal.new(1999, 2)\n\
+             \tmatch wire.decode(wire.encode(d)) {\n\
+             \t\tOk(back) -> report(d, back)\n\
+             \t\tErr(_) -> println('err')\n\
+             \t}\n\
              }\n",
-            WANTED,
-        );
-        assert!(
-            all.contains("`wire.encode` cannot encode `Decimal`"),
-            "{all}"
+            "True\n19.99\n",
         );
     }
 
+    /// The decode half alone, with the payload type fixed only by the
+    /// declaring module's reader — the same way the refused version of this
+    /// test fixed it.
     #[test]
-    fn decode_is_refused_the_same_way() {
-        let all = wire_rejects(
+    fn decode_is_typed_by_the_declaring_modules_reader() {
+        run_outputs(
             "import scarlet/decimal\n\
              import scarlet/wire\n\
              pub fn main() {\n\
-             \tprintln(match wire.decode(<<1>>) {\n\
-             \t\tOk(d) -> decimal.units(d)\n\
-             \t\tErr(_) -> 0\n\
+             \tbytes = wire.encode(decimal.new(1, 2))\n\
+             \tprintln(match wire.decode(bytes) {\n\
+             \t\tOk(d) -> decimal.units(d) * 10 + decimal.scale(d)\n\
+             \t\tErr(_) -> 0 - 1\n\
              \t})\n\
              }\n",
-            WANTED,
-        );
-        assert!(
-            all.contains("`wire.decode` cannot decode `Decimal`"),
-            "{all}"
+            "12\n",
         );
     }
 }
 
 ok_case! {
-    /// THE CONTROL, and the reason the five refusals above mean anything: a
-    /// module may encode its OWN opaque type. Without this, an implementation
-    /// that refused every opaque type everywhere — or every user type, or
-    /// every `wire.encode` at all — passes all five and looks complete.
-    ///
-    /// `Token` is `opaque`, so `ctors_public` is false and only
-    /// `declared_here` can be admitting it.
+    /// The inside-the-module half of the opaque pair, kept as it was written
+    /// when it was THE CONTROL for a visibility rule: a module may encode its
+    /// OWN opaque type. That rule is gone (2026-08-22) and `Token` is admitted
+    /// the way every type is — by its constructors — so this now witnesses
+    /// that removing the rule did not take the declaring module's own case
+    /// with it.
     a_module_may_encode_its_own_opaque_type: (
         "import scarlet/binary\nimport scarlet/wire\npub opaque type Token {\n\tToken(id Int)\n}\npub fn main() {\n\tprintln(binary.byte_size(wire.encode(Token(1))))\n}\n"
     ),

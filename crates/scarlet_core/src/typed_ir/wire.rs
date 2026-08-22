@@ -16,6 +16,16 @@
 //! precisely what must not be allowed: a program that can write what it can
 //! never read has been handed a corruption it will find later, elsewhere.
 //!
+//! Decided 2026-08-22 (owner): every value is encodable — "Beam allows for
+//! everything to be encoded. There is nothing that shouldn't be." The one
+//! refusal that survives the ruling is [`Reason::TypeVariable`], a fact about
+//! inference rather than about a value. An opaque type from another module is
+//! described by its constructors like any other type, and that is in force
+//! here. A host-backed handle is to encode as a run-scoped identity and a
+//! closure as run identity, function index and self-described captures; those
+//! two are NOT YET built, so [`Reason::Bodiless`] and [`Reason::Function`]
+//! still refuse at this commit — staged, not settled.
+//!
 //! Type identity is always [`TypeId`], never `Con.name`: a user's `type Parsed`
 //! and `scarlet/http/h1.Parsed` share a name and are different types.
 
@@ -271,13 +281,11 @@ pub enum Nominal {
     /// looked through rather than refused — an alias to an encodable type is
     /// encodable.
     Alias(RTy),
+    /// Declared constructors, walked wherever the type is met. Visibility is
+    /// not consulted: an opaque type from another module crosses whenever its
+    /// fields do, and a decoder rebuilds it by constructor (decided
+    /// 2026-08-22, owner). Its invariants are that module's to re-check.
     Data {
-        /// `pub` and not `opaque`. False for a private type too, which is why
-        /// it is read together with `declared_here`.
-        ctors_public: bool,
-        /// Whether the module being compiled is the one that declared this
-        /// type. A module may always encode its own types.
-        declared_here: bool,
         ctors: Vec<CtorDecl>,
     },
     /// `pub type Name` with no body — host-backed. It declares no fields for
@@ -335,8 +343,10 @@ pub enum Reason {
     /// A `pub type Name` with no body. Named for the declaration rather than
     /// for a verdict about representability: it was `NoRepresentation`, and
     /// that name asserted the very thing `describe` had to stop saying.
+    ///
+    /// Decided 2026-08-22 (owner): these encode, as a run-scoped identity.
+    /// Not yet built, so this arm refuses until it is.
     Bodiless,
-    ConstructorsNotVisible,
 }
 
 impl Reason {
@@ -357,21 +367,18 @@ impl Reason {
             }
             // NOT "has no representation outside this program". Same
             // overstatement as the `fn` arm and the same refutation: Erlang
-            // writes a pid with `NEW_PID_EXT`, so a representation can exist,
-            // and the owner has said on #35 that pids and subjects should
-            // eventually cross the wire. What is missing is anything to write
-            // it FROM and anything to rebuild it WITH — a bodiless type
-            // declares no fields for the descriptor to walk and no
-            // constructor for a decoder to call. T-745 carries the wider
-            // question of whether "never" and "not yet" should refuse
-            // differently; this only stops the text asserting the false half.
+            // writes a pid with `NEW_PID_EXT`, so a representation can exist.
+            // Decided 2026-08-22 (owner), closing #35: Pid, Subject,
+            // Connection, TlsConnection and net.Server DO encode, as the
+            // identity of the run that minted them plus a kind and a number,
+            // usable only in that run and failing at use anywhere else. That
+            // is not yet built — there is no run identity to write and no
+            // handle node for the descriptor — so this arm still refuses, and
+            // the text names what is missing today, never that it is
+            // impossible.
             Reason::Bodiless => {
                 "the type is host-backed: it declares no fields to write and no constructor a \
                  decoder could call, so a peer cannot rebuild one"
-            }
-            Reason::ConstructorsNotVisible => {
-                "the type's constructors are not visible here, and decoding builds values by \
-                 constructor without running the declaring module's code"
             }
         }
     }
@@ -730,16 +737,7 @@ impl<C: WireCtx + ?Sized> Build<'_, C> {
                 self.walk(at, path)
             }
 
-            Nominal::Data {
-                ctors_public,
-                declared_here,
-                ctors,
-            } => {
-                if !ctors_public && !declared_here {
-                    return Err(self.refuse(t, Reason::ConstructorsNotVisible, path));
-                }
-                self.data(id, args, ctors, path)
-            }
+            Nominal::Data { ctors } => self.data(id, args, ctors, path),
         }
     }
 
@@ -916,16 +914,9 @@ mod tests {
             self.pool.mk_bound(i)
         }
 
-        /// Declare `type Name(params) { ... }`, `pub` and not opaque.
+        /// Declare `type Name(params) { ... }`.
         fn data(&mut self, id: TypeId, ctors: Vec<CtorDecl>) {
-            self.types.insert(
-                id,
-                Nominal::Data {
-                    ctors_public: true,
-                    declared_here: false,
-                    ctors,
-                },
-            );
+            self.types.insert(id, Nominal::Data { ctors });
         }
 
         fn ctor(
@@ -1133,35 +1124,37 @@ mod tests {
         assert_eq!(e.reason, Reason::Bodiless);
     }
 
+    /// `Decimal { units Int, scale Int }` is `opaque` in `scarlet/decimal`, and
+    /// this is the shape it reaches the builder in from ANY module: a
+    /// [`Nominal::Data`] carries its constructors and nothing about who may
+    /// call them. Until 2026-08-22 it carried two visibility bits and the
+    /// builder refused on them outside the declaring module; the ruling that
+    /// every value encodes removed the bits, so a refusal on visibility is no
+    /// longer expressible here. What this witnesses is the descriptor that
+    /// results — one constructor, both fields — and that it is the same one
+    /// the declaring module gets. The end-to-end half, a real `Decimal`
+    /// crossing from outside `scarlet/decimal`, is
+    /// `type_errors.rs::opaque_from_another_module`.
     #[test]
-    fn an_opaque_type_is_refused_outside_its_module_and_allowed_inside() {
+    fn an_opaque_type_is_described_by_its_constructors_from_any_module() {
         let mut f = Fixture::new();
         let int = f.int();
         let dec = TypeId(31);
-        let c = f.ctor(dec, "Decimal", 0, "Decimal", &[("units", int)]);
-
-        f.types.insert(
+        let c = f.ctor(
             dec,
-            Nominal::Data {
-                ctors_public: false,
-                declared_here: false,
-                ctors: vec![c.clone()],
-            },
+            "Decimal",
+            0,
+            "Decimal",
+            &[("units", int), ("scale", int)],
         );
+        f.data(dec, vec![c]);
         let t = f.con(dec, "Decimal", &[]);
-        assert_eq!(refusal(f.build(t)).reason, Reason::ConstructorsNotVisible);
-
-        // Same type, same bit, asked from the module that declared it.
-        f.types.insert(
-            dec,
-            Nominal::Data {
-                ctors_public: false,
-                declared_here: true,
-                ctors: vec![c],
-            },
-        );
         let d = desc(f.build(t));
-        assert!(matches!(d.node(d.root()), Some(Node::Data(_))));
+        let Some(Node::Data(vs)) = d.node(d.root()) else {
+            panic!("an opaque record must be described as a Data node");
+        };
+        assert_eq!(vs.len(), 1, "one constructor");
+        assert_eq!(vs[0].fields.len(), 2, "both fields walked");
     }
 
     /// `Socket { conn Connection, peer Address }` is not itself opaque — its
@@ -1632,18 +1625,10 @@ mod tests {
     /// tripwire that brings the author to this test, not a proof of coverage.
     #[test]
     fn no_refusal_claims_the_type_has_no_representation() {
-        const ALL: [Reason; 4] = [
-            Reason::Function,
-            Reason::TypeVariable,
-            Reason::Bodiless,
-            Reason::ConstructorsNotVisible,
-        ];
+        const ALL: [Reason; 3] = [Reason::Function, Reason::TypeVariable, Reason::Bodiless];
         for r in ALL {
             match r {
-                Reason::Function
-                | Reason::TypeVariable
-                | Reason::Bodiless
-                | Reason::ConstructorsNotVisible => {}
+                Reason::Function | Reason::TypeVariable | Reason::Bodiless => {}
             }
             let text = r.describe();
             assert!(

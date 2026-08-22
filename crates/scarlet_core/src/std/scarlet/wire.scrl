@@ -8,9 +8,29 @@
  * bad bytes are a DecodeError, never a wrong-shaped value and never a crash.
  *
  * That is also why encode is total and returns a plain Binary rather than a
- * Result. A type with no byte representation - one containing a fn, Subject,
- * Pid, Socket, Port, or an opaque type from another module - is a compile
- * error at the encode/decode call, not a runtime failure.
+ * Result: every value is encodable. The one refusal the ruling below leaves
+ * standing is about inference, not about a value - a type variable at
+ * `decode` with nothing to fix it is answered with "annotate the binding",
+ * because the descriptor is a function of the static type and a polymorphic
+ * one has none.
+ *
+ * Decided 2026-08-22 (owner): "Beam allows for everything to be encoded.
+ * There is nothing that shouldn't be." A closure encodes as the identity of
+ * the run that made it, its function index and its captures, each capture
+ * described inline. Pid, Subject, Connection, TlsConnection and net.Server
+ * encode as an identity - run, kind, number - that only the run that minted
+ * it can use: a foreign one decodes and compares, and fails at USE, the way
+ * a pid from another node does on BEAM. An opaque type from another module
+ * encodes and decodes by its constructors, and its invariants are that
+ * module's to re-check on the values it is handed. Issue #35 was closed on
+ * the same ruling.
+ *
+ * Implementation status at this commit: the opaque rule is in force - an
+ * opaque type crosses whenever its fields do, and the visibility refusal is
+ * gone. Closures and the five host-backed handles are NOT YET encodable: the
+ * compiler still refuses them at the call, staged behind a run identity, a
+ * handle node and a capture sub-format that do not exist yet. Not yet is the
+ * whole of it: none of them is refused because it never will be.
  *
  * Bytes are tied to a type's shape, not to its name. Two programs that declare
  * the same shape independently interoperate, and any change to the shape is a

@@ -1294,6 +1294,38 @@ run_case! {
          }\n",
         "7\n",
     ),
+
+    // An opaque type from another module crosses the wire (decided 2026-08-22,
+    // owner). `json.Doc` is `opaque { arena Binary, tape Binary, idx Int }`:
+    // the descriptor walks its three fields and the decoder rebuilds the
+    // cursor by a constructor this module cannot name. The rebuilt cursor is
+    // then READ through the parser's own natives, which is what says the
+    // three fields came back as the parser's encoding and not merely as three
+    // values of the right types — a `Doc` built wrong answers `None` or the
+    // wrong member, never 42.
+    an_opaque_json_doc_round_trips_through_wire: (
+        "import scarlet/json\n\
+         import scarlet/wire\n\
+         fn n_of(d json.Doc) Int {\n\
+         \tmatch json.field(d, 'n') {\n\
+         \t\tSome(v) -> json.int(v) or 0 - 1\n\
+         \t\tNone -> 0 - 2\n\
+         \t}\n\
+         }\n\
+         fn through_wire(doc json.Doc) Int {\n\
+         \tmatch wire.decode(wire.encode(doc)) {\n\
+         \t\tOk(back) -> n_of(back) + 1\n\
+         \t\tErr(_) -> 0 - 3\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(match json.parse('{\"m\": 7, \"n\": 41}') {\n\
+         \t\tOk(doc) -> through_wire(doc)\n\
+         \t\tErr(_) -> 0 - 4\n\
+         \t})\n\
+         }\n",
+        "42\n",
+    ),
 }
 
 #[test]

@@ -373,12 +373,7 @@ impl wire::WireCtx for Compiler {
         match info.body {
             TypeBody::External | TypeBody::Unresolved => wire::Nominal::Bodiless,
             TypeBody::Alias { target } => wire::Nominal::Alias(self.resolve_rty(pool, target)),
-            TypeBody::Custom {
-                variants,
-                ctors_public,
-                ..
-            } => {
-                let declared_here = self.type_declared_here(info);
+            TypeBody::Custom { variants, .. } => {
                 // Copied out of the arena first: interning a field type
                 // reborrows the engine.
                 let vs = self.engine.variants_of(variants).to_vec();
@@ -409,11 +404,7 @@ impl wire::WireCtx for Compiler {
                         )
                     })
                     .collect();
-                wire::Nominal::Data {
-                    ctors_public,
-                    declared_here,
-                    ctors,
-                }
+                wire::Nominal::Data { ctors }
             }
         }
     }
@@ -449,16 +440,5 @@ impl Compiler {
         } else {
             None
         }
-    }
-
-    /// Whether the module being compiled is the one that declared `info`, which
-    /// is what lets a module put its own opaque type on the wire.
-    ///
-    /// Compared as the interned path rather than as the `ArenaSlice`:
-    /// `intern_slice` appends unconditionally, so two slices spelling one path
-    /// are two different slices and would compare unequal.
-    fn type_declared_here(&mut self, info: TypeInfo) -> bool {
-        let here = self.current_module_slice();
-        self.engine.str_ids_of(here) == self.engine.str_ids_of(info.module)
     }
 }
