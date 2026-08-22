@@ -242,7 +242,10 @@ fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value) -> u64 {
                 // A `Range` is an `Array(Int)` value with no elements stored.
                 // Its elements are Ints by construction, with nothing under
                 // them to nest, so they are written here rather than boxed one
-                // at a time onto the work stack.
+                // at a time onto the work stack. Unbounded, like the other
+                // materializing path (`seq::from_int_range`, which carries
+                // why): `n` is whatever the range says, and encode has no
+                // refusal to make.
                 ValueView::Range(s, e) => {
                     debug_assert!(
                         matches!(desc.node(*elem), Some(WireNode::Int)),

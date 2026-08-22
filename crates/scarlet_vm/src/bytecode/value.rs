@@ -3251,6 +3251,11 @@ fn push_pairs(pending: &mut EqPending, a: &[Value], b: &[Value]) -> bool {
 /// Element count of the half-open range `s..e`, 0 for `e <= s` and saturating
 /// at `i64::MAX`. Shared by equality, hashing and the VM sequence ops so every
 /// Range/Array cross-path agrees on one length.
+///
+/// A length, not a ceiling. Precisely because every cross-path agrees on it,
+/// clamping it shortens a long range instead of refusing one;
+/// `seq::from_int_range` carries why ranges are unbounded and what bounding
+/// them would take.
 #[inline]
 pub fn range_len(s: i64, e: i64) -> i64 {
     e.saturating_sub(s).max(0)

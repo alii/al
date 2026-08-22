@@ -244,6 +244,28 @@ pub(crate) fn from_slice<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value
 /// Bulk build `start..end` as boxed integers: same tree shape as
 /// [`from_slice`], but elements go straight into arena leaves 32 at a time, so
 /// the Range→Array path never materializes an n-element host `Vec<Value>`.
+///
+/// **The length is unbounded on purpose, and [`range_len`] is not where to
+/// bound it.** A Range stores no elements, so `0..n` is two words until
+/// something materializes it, and only two paths in this crate do: here, and
+/// `vm::wire`'s `Array` arm, which writes a Range's elements straight into the
+/// encoder's output. Both walk `range_len(start, end)` elements with nothing
+/// capping the count — this one also allocating a node vector proportional to
+/// it before the loop — so an `n` past what the host can back is an allocation
+/// failure or an unbounded run, not an error a Scarlet program can see.
+///
+/// A ceiling needs a failure the walk can report, and of the three places that
+/// would have to report one only `vm::collections`'s `seq_root` can:
+/// `vm::native_shims`'s `seq_root_total` is a C-ABI shim whose only exit is
+/// `proof_violation`'s abort, and `vm::wire`'s encoder is total by
+/// construction. So it is a change to the encode surface — which T-747 and
+/// T-766 hold open — rather than a constant that can be added here.
+///
+/// Capping [`range_len`] instead shortens a long range rather than refusing
+/// one: it is the single length every Range/Array cross-path agrees on, so a
+/// clamp makes `array.len` lie and makes a Range hash equal to an array it is
+/// not. `vm::tests::range_index_and_len_do_not_overflow` and
+/// `value::tests::hashing_a_huge_range_is_constant_time` hold that line.
 pub(crate) fn from_int_range<A: Arena + ?Sized>(a: &mut A, start: i64, end: i64) -> Value {
     let n = range_len(start, end) as usize;
     if n == 0 {
