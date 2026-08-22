@@ -829,3 +829,52 @@ fn donation_skips_never_spawned_workers() {
         "with the only live peer too loaded to narrow the gap, nothing is picked"
     );
 }
+
+// Two runtimes in one process are two runs, so their identities differ. The
+// identity comes from the OS CSPRNG; this pins that it is drawn per runtime
+// rather than fixed or shared.
+#[test]
+fn two_runtimes_in_one_process_have_different_run_ids() {
+    let runtime = || {
+        let program = single_fn_program(|_f| vec![], vec![op(Op::Halt)], 0);
+        sched::Runtime::new(Arc::new(program), Vec::new(), 1).expect("runtime must construct")
+    };
+    let (a, _poll_a) = runtime();
+    let (b, _poll_b) = runtime();
+    assert_ne!(a.run_id(), b.run_id(), "each runtime is its own run");
+}
+
+// Every scheduler of one runtime reports the run identity the runtime holds:
+// it is a property of what the schedulers share, not of a VM or a thread.
+#[test]
+fn every_scheduler_of_one_runtime_agrees_on_the_run_id() {
+    let program = single_fn_program(|_f| vec![], vec![op(Op::Halt)], 0);
+    let (rt, poll0) =
+        sched::Runtime::new(Arc::new(program), Vec::new(), 3).expect("runtime must construct");
+    let vm0 = vm_for_runtime(Arc::clone(&rt), 0, poll0);
+    let vm1 = vm_for_runtime(
+        Arc::clone(&rt),
+        1,
+        mio::Poll::new().expect("poller must construct"),
+    );
+    let vm2 = vm_for_runtime(
+        Arc::clone(&rt),
+        2,
+        mio::Poll::new().expect("poller must construct"),
+    );
+    assert_eq!(
+        vm0.run_id(),
+        rt.run_id(),
+        "scheduler 0 reads the runtime's identity"
+    );
+    assert_eq!(
+        vm1.run_id(),
+        rt.run_id(),
+        "scheduler 1 reads the runtime's identity"
+    );
+    assert_eq!(
+        vm2.run_id(),
+        rt.run_id(),
+        "scheduler 2 reads the runtime's identity"
+    );
+}

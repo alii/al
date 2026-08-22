@@ -96,6 +96,7 @@ pub(crate) mod perf_map;
 mod poll;
 mod port;
 mod processes;
+mod run_id;
 mod sched;
 mod supervision;
 mod templates;
@@ -111,6 +112,7 @@ use migrate::Migrant;
 use native::NativePending;
 use poll::Wait;
 use processes::{Exit, Link};
+use run_id::RunId;
 use sched::{Inbound, Runtime, Seed};
 use templates::Templates;
 use text::{int_to_ascii, parse_uint_ascii};
@@ -481,7 +483,8 @@ pub struct VM {
 /// lazily on the first spawn, so tooling callers pay only one copy of the
 /// program tables and one OS poller.
 ///
-/// Fails only when scheduler 0's poller cannot be created.
+/// Fails only when scheduler 0's poller cannot be created or the OS cannot
+/// supply the run's identity ([`RunId::mint`]).
 ///
 /// `os.argv` is empty; use [`new_vm_with_argv`] to pass arguments.
 pub fn new_vm(program: Program) -> VmResult<VM> {
@@ -561,6 +564,15 @@ impl VM {
     /// it to resolve closure names.
     pub fn program(&self) -> &Program {
         &self.program
+    }
+
+    /// The identity of the run this scheduler belongs to: the same value on
+    /// every scheduler of one [`Runtime`].
+    // The wire encoder is this accessor's reader; until it is written, the
+    // scheduler-agreement test is its only caller.
+    #[allow(dead_code)]
+    pub(crate) fn run_id(&self) -> RunId {
+        self.runtime.run_id()
     }
 
     // The interpreter pushes the entry frame before the loop and never pops the

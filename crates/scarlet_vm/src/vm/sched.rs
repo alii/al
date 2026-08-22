@@ -25,6 +25,7 @@ use crate::heap::ProcHeap;
 use super::freeze::FrozenValue;
 use super::lock;
 use super::migrate::Migrant;
+use super::run_id::RunId;
 
 /// A spawned-but-not-yet-started process, the unit of cross-scheduler work
 /// distribution. `heap` is owned memory and `root` points only into it or the
@@ -302,6 +303,13 @@ pub(super) struct Runtime {
     /// failed. See [`super::supervision::Action::FailOwner`].
     unsupervised_failure: AtomicBool,
     next_pid: AtomicU64,
+    /// The identity of this run, minted once in [`Runtime::new`] and read by
+    /// every scheduler through [`Runtime::run_id`]. It lives here and not on
+    /// [`Program`]: the program is what the run executes, cloned into every
+    /// scheduler (and asserted `Send + Sync` for that, in `bytecode/mod.rs`),
+    /// while the runtime is the one object all schedulers share and already
+    /// carries the run's other state, `next_pid` above among it.
+    run_id: RunId,
     /// Per-scheduler shared slots, indexed by scheduler id.
     pub(super) slots: Vec<SchedSlot>,
     /// Rotates the start of every idle-peer scan so consecutive donations
@@ -328,9 +336,10 @@ impl Runtime {
     /// Build the runtime for `count` schedulers. No OS threads start here;
     /// worker pollers are created when their threads spawn.
     ///
-    /// The only failure is scheduler 0's poller. Its `mio::Poll` is returned
-    /// rather than stored, since a poller is owned by its scheduler thread;
-    /// only the waker goes into the shared slot table.
+    /// The failures are scheduler 0's poller and the run identity's entropy
+    /// source ([`RunId::mint`]). The `mio::Poll` is returned rather than
+    /// stored, since a poller is owned by its scheduler thread; only the
+    /// waker goes into the shared slot table.
     pub fn new(
         program: Arc<Program>,
         argv: Vec<String>,
@@ -338,6 +347,7 @@ impl Runtime {
     ) -> std::io::Result<(Arc<Runtime>, mio::Poll)> {
         let poll = mio::Poll::new()?;
         let waker = mio::Waker::new(poll.registry(), super::poll::WAKER_TOKEN)?;
+        let run_id = RunId::mint()?;
         let slots: Vec<SchedSlot> = (0..count).map(|i| SchedSlot::new(i == 0)).collect();
         let _ = slots[0].waker.set(Arc::new(waker));
         let runtime = Arc::new(Runtime {
@@ -353,6 +363,7 @@ impl Runtime {
             factory_keys: RwLock::new(HashMap::default()),
             unsupervised_failure: AtomicBool::new(false),
             next_pid: AtomicU64::new(1),
+            run_id,
             slots,
             submit_cursor: AtomicUsize::new(0),
             // The main process is live.
@@ -517,6 +528,11 @@ impl Runtime {
     /// Number of schedulers the runtime was built with (live or not).
     pub fn scheduler_count(&self) -> usize {
         self.slots.len()
+    }
+
+    /// The identity of this run. See [`RunId`].
+    pub fn run_id(&self) -> RunId {
+        self.run_id
     }
 
     /// Whether scheduler `i` has a live thread behind it.
