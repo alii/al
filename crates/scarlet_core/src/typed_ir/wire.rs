@@ -24,9 +24,11 @@
 //! here. So is the handle rule: `Pid`, `Subject`, `Connection`,
 //! `TlsConnection` and `net.Server` are described as an [`Node::Identity`],
 //! which the runtime writes as the run that minted the handle, its kind and
-//! its number. A closure is to encode as run identity, function index and
-//! self-described captures; that is NOT YET built, so [`Reason::Function`]
-//! still refuses at this commit — staged, not settled.
+//! its number. So is the closure rule: a function type is a
+//! [`Node::Closure`] over its parameter and return types, which the runtime
+//! writes as the run that made the closure, its function index and its
+//! captures — each capture carrying its own tag, because the static type
+//! fixes neither how many there are nor what they hold.
 //!
 //! Type identity is always [`TypeId`], never `Con.name`: a user's `type Parsed`
 //! and `scarlet/http/h1.Parsed` share a name and are different types.
@@ -119,6 +121,15 @@ pub enum Node {
     /// bytes would be a typed door onto a mailbox of the other type, so the
     /// fingerprint folds them and the runtime node drops them.
     Identity(HandleKind, Vec<NodeIdx>),
+    /// `fn(params...) ret`. The parameter and return nodes are part of the
+    /// SHAPE — `fn(Int) Int` and `fn(String) Int` must not share a
+    /// fingerprint, or a decoded function would be a typed door onto a body
+    /// expecting the other argument — and a parameter type that cannot cross
+    /// refuses through them. The bytes hold none of it: a closure is written
+    /// as function index plus self-described captures, and the runtime node
+    /// keeps only the parameter count, which a decoder checks against the
+    /// function the index names.
+    Closure(Vec<NodeIdx>, NodeIdx),
 }
 
 /// The descriptor of one type: a node table, the node the type itself is, and
@@ -209,6 +220,11 @@ impl Desc {
                 // The arguments are already folded into the fingerprint that
                 // travels with this; the walk needs only the kind.
                 Node::Identity(k, _) => RtNode::Identity(*k),
+                // Likewise the parameter and return types; the decoder needs
+                // the count alone, to check the function the bytes name.
+                Node::Closure(params, _) => RtNode::Closure {
+                    arity: params.len() as u32,
+                },
             })
             .collect();
         RtDesc::new(nodes, at(self.root), self.fingerprint())
@@ -348,16 +364,23 @@ pub enum Step {
     Key,
     Value,
     TupleElem(usize),
+    /// The `i`th parameter of a function type.
+    Param(usize),
+    /// A function type's return.
+    Return,
 }
 
 /// Why a type cannot cross the wire.
 ///
 /// Every arm names a way a peer cannot REBUILD the value. None of them claims
-/// the value has no byte representation — that criterion is wrong, and the
-/// `Function` arm below carries the refutation that establishes it.
+/// the value has no byte representation — that criterion is wrong. It was
+/// first got wrong for `fn`, which had a `Function` arm here until 2026-08-22
+/// saying a closure's captures were not fixed by its type; they are not, and
+/// the answer was to describe each capture inline rather than to refuse.
+/// Erlang writes funs (`NEW_FUN_EXT`) and pids (`NEW_PID_EXT`); both cross
+/// here now too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
-    Function,
     TypeVariable,
     /// A `pub type Name` with no body that the runtime cannot hand back by
     /// identity. Named for the declaration rather than for a verdict about
@@ -377,21 +400,12 @@ impl Reason {
     /// fails rather than the syntax that has it.
     fn describe(self) -> &'static str {
         match self {
-            // NOT "a function has no wire representation" — it has several, and
-            // Erlang writes one. What fails is reconstruction: a closure is a
-            // function index plus an untyped capture array, and the static type
-            // `fn(Int) Int` fixes neither. Every other type here works because
-            // its type fixes its layout; this is the one where it does not.
-            Reason::Function => {
-                "a closure's captures are not fixed by its type, so a decoder cannot rebuild one"
-            }
             Reason::TypeVariable => {
                 "the type is still polymorphic here, so its representation is not known"
             }
-            // NOT "has no representation outside this program". Same
-            // overstatement as the `fn` arm and the same refutation: Erlang
+            // NOT "has no representation outside this program". Erlang
             // writes a pid with `NEW_PID_EXT`, and the five stdlib handles
-            // now do encode, as `Node::Identity`. This text is for a bodiless
+            // do encode, as `Node::Identity`. This text is for a bodiless
             // type that is none of them, and it names what is missing rather
             // than claiming impossibility.
             Reason::Bodiless => {
@@ -431,6 +445,8 @@ impl WireRefusal {
                 Step::Key => "[key]".to_string(),
                 Step::Value => "[value]".to_string(),
                 Step::TupleElem(i) => format!("[{i}]"),
+                Step::Param(i) => format!("[param {i}]"),
+                Step::Return => "[return]".to_string(),
             })
             .collect::<Vec<_>>()
             .join(" -> ")
@@ -565,6 +581,8 @@ enum Key {
     /// Keyed on the kind rather than the `TypeId`: two programs' `Pid`s are
     /// one shape, exactly as their `Int`s are.
     Handle(HandleKind, SmallVec<[NodeIdx; 4]>),
+    /// Parameters then return, so `fn(Int) Int` twice is one node.
+    Fun(SmallVec<[NodeIdx; 4]>, NodeIdx),
 }
 
 /// Version of the fingerprint algorithm, folded in first so that a change to
@@ -575,9 +593,10 @@ enum Key {
 /// in every message, so an algorithm change that kept the version would show up
 /// at a peer as a `SchemaMismatch` on a type nobody had touched.
 ///
-/// 2 since kind tag 9 (an identity node) joined the algorithm; the format
-/// version byte in `scarlet_vm::vm::wire` moved with it.
-const FINGERPRINT_VERSION: u64 = 2;
+/// 3 since kind tag 10 (a closure node) joined the algorithm, as 2 was for
+/// tag 9 (an identity node); the format version byte in
+/// `scarlet_vm::vm::wire` moved with it both times.
+const FINGERPRINT_VERSION: u64 = 3;
 
 const FINGERPRINT_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -664,6 +683,17 @@ fn fingerprint_of<C: WireCtx + ?Sized>(cx: &C, nodes: &[Node], root: NodeIdx) ->
                 }
                 h
             }
+            // Parameter count, each parameter, then the return — as a
+            // `Tuple` folds its elements. The count is folded even though the
+            // indices imply it, so `fn(Int) Int` and `fn(Int, Int) Int` differ
+            // by more than one mixed word.
+            Node::Closure(params, ret) => {
+                let mut h = mix(mix(h, 10), params.len() as u64);
+                for p in params {
+                    h = mix(h, u64::from(p.0));
+                }
+                mix(h, u64::from(ret.0))
+            }
         };
     }
     h
@@ -739,7 +769,20 @@ impl<C: WireCtx + ?Sized> Build<'_, C> {
     fn walk(&mut self, t: RTy, path: &mut Vec<Step>) -> Result<NodeIdx, WireRefusal> {
         match self.pool.node(t) {
             ResolvedNode::Bound(_) => Err(self.refuse(t, Reason::TypeVariable, path)),
-            ResolvedNode::Fun { .. } => Err(self.refuse(t, Reason::Function, path)),
+            // Described like a tuple of its parameters and return: each is
+            // part of the shape and a level of structure a refusal can be
+            // reached through. The bytes carry none of them.
+            ResolvedNode::Fun { params, ret } => {
+                let params: SmallVec<[RTy; 4]> = self.pool.children(params).into();
+                let mut kids: SmallVec<[NodeIdx; 4]> = SmallVec::new();
+                for (i, p) in params.iter().enumerate() {
+                    kids.push(self.child(*p, Step::Param(i), path)?);
+                }
+                let r = self.child(ret, Step::Return, path)?;
+                Ok(self.intern(Key::Fun(kids.clone(), r), || {
+                    Node::Closure(kids.to_vec(), r)
+                }))
+            }
             ResolvedNode::Tuple { elems } => {
                 let elems: SmallVec<[RTy; 4]> = self.pool.children(elems).into();
                 let mut kids: SmallVec<[NodeIdx; 4]> = SmallVec::new();
@@ -909,6 +952,7 @@ mod tests {
     const ARRAY: TypeId = TypeId(4);
     const BINARY: TypeId = TypeId(5);
     const MAP: TypeId = TypeId(6);
+    const NATIVE: TypeId = TypeId(7);
 
     /// A hand-built type world: no inference engine, no module table, so a test
     /// states exactly the declarations it is about.
@@ -963,6 +1007,14 @@ mod tests {
 
         fn bound(&mut self, i: u32) -> RTy {
             self.pool.mk_bound(i)
+        }
+
+        /// `pub type Native` — a user-declared bodiless type, which no VM
+        /// table backs. The one refusal about a VALUE the ruling leaves, so
+        /// it is what the path tests are reached through.
+        fn native(&mut self) -> RTy {
+            self.types.insert(NATIVE, Nominal::Bodiless);
+            self.con(NATIVE, "Native", &[])
         }
 
         /// Declare `type Name(params) { ... }`.
@@ -1131,27 +1183,72 @@ mod tests {
         assert_eq!(d.node(vs[1].fields[0].node), Some(&Node::Int));
     }
 
-    // --- the encodability table, refusing direction ---
-
+    /// Refused until 2026-08-22 on the claim that a closure's captures are
+    /// not fixed by its type. They are not, and the answer was to describe
+    /// each capture inline: the type is now a node over its signature, and
+    /// the signature is the whole of what the descriptor holds.
     #[test]
-    fn a_function_is_refused_for_its_captures_not_for_its_bytes() {
+    fn a_function_describes_as_a_closure_over_its_signature() {
         let mut f = Fixture::new();
         let int = f.int();
-        let fun = f.pool.mk_fun(&[int], int);
-        let e = refusal(f.build(fun));
-        assert_eq!(e.reason, Reason::Function);
-        assert_eq!(e.ty, fun);
-        // The corrected rationale: `fn` is refused because a closure's captures
-        // are not fixed by its type, NOT because functions cannot be
-        // serialised. Erlang's NEW_FUN_EXT does serialise them.
-        assert!(
-            !Reason::Function
-                .describe()
-                .contains("no wire representation"),
-            "the refused-for-no-representation claim is false for `fn` and must not be quoted"
-        );
-        assert!(Reason::Function.describe().contains("captures"));
+        let s = f.string();
+        let fun = f.pool.mk_fun(&[int, s], int);
+        let d = desc(f.build(fun));
+        let Some(Node::Closure(params, ret)) = d.node(d.root()) else {
+            panic!("root is not a Closure: {:?}", d.node(d.root()))
+        };
+        let (params, ret) = (params.clone(), *ret);
+        assert_eq!(params.len(), 2);
+        assert_eq!(d.node(params[0]), Some(&Node::Int));
+        assert_eq!(d.node(params[1]), Some(&Node::String));
+        assert_eq!(d.node(ret), Some(&Node::Int));
+        assert_eq!(params[0], ret, "Int is one node, referenced twice");
+        assert_eq!(d.len(), 3, "Int, String and the closure");
+
+        // Interned on its signature, as a tuple is on its elements.
+        let again = f.pool.mk_fun(&[int, s], int);
+        let pair = f.pool.mk_tuple(&[fun, again]);
+        let d = desc(f.build(pair));
+        assert_eq!(d.len(), 4, "one closure node for two spellings of it");
     }
+
+    /// The signature is walked the way a tuple's elements are: a parameter or
+    /// return that cannot cross refuses, with a path step naming which.
+    #[test]
+    fn a_closure_refuses_through_its_parameter_and_return_with_a_path() {
+        let mut f = Fixture::new();
+        let int = f.int();
+        let native = f.native();
+
+        let bad_param = f.pool.mk_fun(&[int, native], int);
+        let at_param = refusal(f.build(bad_param));
+        assert_eq!(at_param.reason, Reason::Bodiless);
+        assert_eq!(
+            at_param.ty, native,
+            "the refusal names the parameter's type"
+        );
+
+        let bad_ret = f.pool.mk_fun(&[int], native);
+        let at_ret = refusal(f.build(bad_ret));
+        assert_eq!(at_ret.reason, Reason::Bodiless);
+
+        // A polymorphic parameter is the inference refusal, reached through
+        // the same step.
+        let a = f.bound(0);
+        let generic = f.pool.mk_fun(&[a], int);
+        let at_var = refusal(f.build(generic));
+        assert_eq!(at_var.reason, Reason::TypeVariable);
+        assert_eq!(at_var.path, vec![Step::Param(0)]);
+
+        let cx = Decls {
+            names: &f.names,
+            types: &f.types,
+        };
+        assert_eq!(at_param.path_text(&cx), "[param 1]");
+        assert_eq!(at_ret.path_text(&cx), "[return]");
+    }
+
+    // --- the encodability table, refusing direction ---
 
     #[test]
     fn a_type_variable_is_refused() {
@@ -1215,11 +1312,10 @@ mod tests {
         assert_eq!(args.len(), 1);
         assert_eq!(d.node(args[0]), Some(&Node::String));
 
-        let int = f.int();
-        let bad = f.pool.mk_fun(&[int], int);
+        let bad = f.native();
         let t = f.con(subj, "Subject", &[bad]);
         let e = refusal(f.build(t));
-        assert_eq!(e.reason, Reason::Function);
+        assert_eq!(e.reason, Reason::Bodiless);
         assert!(
             e.path.is_empty(),
             "a handle is a leaf: no path step for its argument"
@@ -1391,12 +1487,16 @@ mod tests {
     }
 
     // --- the path a refusal carries ---
+    //
+    // Each of these was reached through a `fn` field until 2026-08-22, when
+    // closures began to cross; `Native` — a user-declared bodiless type — is
+    // the refusal about a value that the ruling leaves, so it is the one the
+    // path machinery is witnessed through now.
 
     #[test]
     fn a_refusal_three_levels_down_names_the_full_field_path() {
         let mut f = Fixture::new();
-        let int = f.int();
-        let bad = f.pool.mk_fun(&[int], int);
+        let bad = f.native();
 
         let inner = TypeId(70);
         let ic = f.ctor(inner, "Inner", 0, "Inner", &[("f", bad)]);
@@ -1414,7 +1514,7 @@ mod tests {
         let outer_t = f.con(outer, "Outer", &[]);
 
         let e = refusal(f.build(outer_t));
-        assert_eq!(e.reason, Reason::Function);
+        assert_eq!(e.reason, Reason::Bodiless);
         assert_eq!(e.ty, bad, "the refusal names the offending sub-type");
 
         let cx = Decls {
@@ -1428,7 +1528,7 @@ mod tests {
     fn a_refusal_inside_a_container_names_the_position() {
         let mut f = Fixture::new();
         let int = f.int();
-        let bad = f.pool.mk_fun(&[int], int);
+        let bad = f.native();
         let arr = f.con(ARRAY, "Array", &[bad]);
         let m = f.con(MAP, "Map", &[int, arr]);
         let t = f.pool.mk_tuple(&[int, m]);
@@ -1447,7 +1547,7 @@ mod tests {
     fn a_path_step_names_its_variant() {
         let mut f = Fixture::new();
         let int = f.int();
-        let bad = f.pool.mk_fun(&[int], int);
+        let bad = f.native();
         let e_id = TypeId(80);
         let good = f.ctor(e_id, "Either", 0, "Left", &[("value", int)]);
         let evil = f.ctor(e_id, "Either", 1, "Right", &[("value", bad)]);
@@ -1478,14 +1578,31 @@ mod tests {
     #[test]
     fn an_alias_to_an_unencodable_type_refuses_at_the_target() {
         let mut f = Fixture::new();
-        let int = f.int();
-        let bad = f.pool.mk_fun(&[int], int);
+        let bad = f.native();
         let handler = TypeId(91);
         f.types.insert(handler, Nominal::Alias(bad));
-        let t = f.con(handler, "Handler", &[]);
+        let t = f.con(handler, "Handle", &[]);
         let e = refusal(f.build(t));
-        assert_eq!(e.reason, Reason::Function);
+        assert_eq!(e.reason, Reason::Bodiless);
         assert!(e.path.is_empty(), "an alias is a spelling, not a level");
+    }
+
+    /// An alias to a function type is looked through to a closure node, as
+    /// an alias to anything else is to its target.
+    #[test]
+    fn an_alias_to_a_function_type_describes_as_a_closure() {
+        let mut f = Fixture::new();
+        let int = f.int();
+        let fun = f.pool.mk_fun(&[int], int);
+        let handler = TypeId(91);
+        f.types.insert(handler, Nominal::Alias(fun));
+        let t = f.con(handler, "Handler", &[]);
+        let d = desc(f.build(t));
+        assert!(
+            matches!(d.node(d.root()), Some(Node::Closure(..))),
+            "{:?}",
+            d.node(d.root())
+        );
     }
 
     #[test]
@@ -1742,12 +1859,75 @@ mod tests {
     fn an_unused_type_argument_is_still_described() {
         let mut f = Fixture::new();
         let int = f.int();
-        let bad = f.pool.mk_fun(&[int], int);
+        let bad = f.native();
         let ph = TypeId(93);
         let c = f.ctor(ph, "Phantom", 0, "Phantom", &[("n", int)]);
         f.data(ph, vec![c]);
         let t = f.con(ph, "Phantom", &[bad]);
-        assert_eq!(refusal(f.build(t)).reason, Reason::Function);
+        assert_eq!(refusal(f.build(t)).reason, Reason::Bodiless);
+    }
+
+    /// The fingerprint excludes names, so the signature is what keeps
+    /// function types apart: a fold of the tag alone would make `decode` at
+    /// `fn(Int) Int` accept bytes written at `fn(String) Int`, and the
+    /// decoded closure would be a typed door onto a body expecting the other
+    /// argument. Each pair differs in exactly one thing.
+    #[test]
+    fn each_function_signature_gets_its_own_fingerprint() {
+        let mut f = Fixture::new();
+        let int = f.int();
+        let s = f.string();
+        let nil_id = TypeId(94);
+        let nil_c = f.ctor(nil_id, "Nil", 0, "Nil", &[]);
+        f.data(nil_id, vec![nil_c]);
+        let nil = f.con(nil_id, "Nil", &[]);
+        let fp_of = |f: &mut Fixture, t: RTy| desc(f.build(t)).fingerprint();
+
+        let int_int = f.pool.mk_fun(&[int], int);
+        let str_int = f.pool.mk_fun(&[s], int);
+        let int_str = f.pool.mk_fun(&[int], s);
+        let two_int = f.pool.mk_fun(&[int, int], int);
+        let nullary_nil = f.pool.mk_fun(&[], nil);
+
+        let (a, b) = (fp_of(&mut f, int_int), fp_of(&mut f, str_int));
+        assert_ne!(a, b, "fn(Int) Int vs fn(String) Int: other parameter");
+        assert_ne!(
+            a,
+            fp_of(&mut f, int_str),
+            "fn(Int) Int vs fn(Int) String: other return"
+        );
+        assert_ne!(
+            a,
+            fp_of(&mut f, two_int),
+            "fn(Int) Int vs fn(Int, Int) Int: other count"
+        );
+        assert_ne!(a, fp_of(&mut f, nullary_nil), "fn(Int) Int vs fn() Nil");
+        assert_ne!(
+            a,
+            fp_of(&mut f, int),
+            "fn(Int) Int vs Int: a closure is not its return"
+        );
+        assert_eq!(a, fp_of(&mut f, int_int), "stable");
+
+        // The sharp case: behind a tuple that interns Int and String first,
+        // `fn(Int) String` and `fn(String) Int` have IDENTICAL node tables
+        // and differ only in which index is a parameter and which the
+        // return. A fold of the closure's tag and count alone — without its
+        // indices — gives these two one fingerprint.
+        let to_str = f.pool.mk_fun(&[int], s);
+        let to_int = f.pool.mk_fun(&[s], int);
+        let t1 = f.pool.mk_tuple(&[int, s, to_str]);
+        let t2 = f.pool.mk_tuple(&[int, s, to_int]);
+        assert_eq!(
+            desc(f.build(t1)).len(),
+            desc(f.build(t2)).len(),
+            "premise: the two tables are the same size"
+        );
+        assert_ne!(
+            fp_of(&mut f, t1),
+            fp_of(&mut f, t2),
+            "(Int, String, fn(Int) String) vs (Int, String, fn(String) Int): same table, other indices"
+        );
     }
 
     /// THE CRITERION, asserted over every reason rather than one at a time.
@@ -1765,12 +1945,16 @@ mod tests {
     /// new `Reason` stops this file compiling until someone edits here — but
     /// they could satisfy the compiler without extending `ALL`. The match is a
     /// tripwire that brings the author to this test, not a proof of coverage.
+    ///
+    /// `ALL` was three until 2026-08-22; `Function` left it when closures
+    /// began to cross, which is the criterion winning rather than a case of
+    /// it being dropped.
     #[test]
     fn no_refusal_claims_the_type_has_no_representation() {
-        const ALL: [Reason; 3] = [Reason::Function, Reason::TypeVariable, Reason::Bodiless];
+        const ALL: [Reason; 2] = [Reason::TypeVariable, Reason::Bodiless];
         for r in ALL {
             match r {
-                Reason::Function | Reason::TypeVariable | Reason::Bodiless => {}
+                Reason::TypeVariable | Reason::Bodiless => {}
             }
             let text = r.describe();
             assert!(
@@ -1811,6 +1995,7 @@ mod tests {
                 Node::Array(NodeIdx(1)),
                 Node::Int,
                 Node::Identity(HandleKind::Subject, vec![NodeIdx(1)]),
+                Node::Closure(vec![NodeIdx(1), NodeIdx(1)], NodeIdx(2)),
             ],
             root: NodeIdx(0),
             fingerprint: 0xdead_beef_0bad_f00d,
@@ -1818,12 +2003,15 @@ mod tests {
         // Structural equality rather than accessor-by-accessor: the runtime
         // descriptor's readers are crate-private to `scarlet_vm`, and widening
         // them so a test could call them would add public surface for nothing.
-        // The identity's argument is dropped: it lives in the fingerprint.
+        // The identity's argument and the closure's signature are dropped:
+        // they live in the fingerprint. The parameter count survives, for the
+        // decoder's check against the function the bytes name.
         let want = RtDesc::new(
             vec![
                 RtNode::Array(RtIdx(1)),
                 RtNode::Int,
                 RtNode::Identity(HandleKind::Subject),
+                RtNode::Closure { arity: 2 },
             ],
             RtIdx(0),
             0xdead_beef_0bad_f00d,

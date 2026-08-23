@@ -159,6 +159,18 @@ pub enum WireNode {
     /// `Subject`'s message type is folded into the fingerprint by the front
     /// end and is not needed here, since the bytes hold only the mailbox id.
     Identity(HandleKind),
+    /// A function value, written as the identity of the run that made it,
+    /// its function index, and its captures each described inline — the
+    /// static type fixes neither the captures' count nor their kinds, so
+    /// they carry their own tags (`scarlet/wire.scrl`, "The capture
+    /// format"). `arity` is the static type's parameter count: a decoder
+    /// refuses an index whose function takes a different number, which is
+    /// the one way an in-range index could hand back a value of another
+    /// type. The parameter and return types themselves are folded into the
+    /// fingerprint by the front end and are not needed here.
+    Closure {
+        arity: u32,
+    },
 }
 
 /// The descriptor of one type: a node table, the node the type itself is, and

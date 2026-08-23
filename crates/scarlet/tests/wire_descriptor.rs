@@ -5,13 +5,16 @@
 //! truncates the pipeline before emission, so a refusal raised at emission
 //! would be invisible here and in an editor while still failing `al run` —
 //! the exact split this ticket exists to prevent. Nothing here runs a wire
-//! op: neither has a body yet.
+//! op; the round trips are `wire_handles.rs` and `wire_closures.rs`.
 
 use scarlet::bytecode::IncrementalSession;
 
 mod common;
 use common::parse;
 
+/// A record with a `fn` field. Refused on this path until 2026-08-22; it
+/// checks clean now that closures cross, and is kept as the control that
+/// says so.
 const HANDLER: &str = "import scarlet/wire\n\
                        type Handler {\n\
                        \tHandler(name String, run fn(Int) Int)\n\
@@ -19,6 +22,22 @@ const HANDLER: &str = "import scarlet/wire\n\
                        pub fn main() {\n\
                        \tprintln(wire.encode(Handler('h', fn(x) { x + 1 })))\n\
                        }\n";
+
+/// A record over a user-declared bodiless type, which no VM table backs: the
+/// one refusal about a value the ruling leaves, and so the fixture every
+/// refusal test here is reached through. `send` is never called — nothing
+/// can construct a `Native` — which is fine on a path that never runs.
+const NATIVE: &str = "import scarlet/wire\n\
+                      pub type Native\n\
+                      type Handler {\n\
+                      \tHandler(name String, raw Native)\n\
+                      }\n\
+                      fn send(h Handler) Binary {\n\
+                      \twire.encode(h)\n\
+                      }\n\
+                      pub fn main() {\n\
+                      \t_ = send\n\
+                      }\n";
 
 const EVENT: &str = "import scarlet/wire\n\
                      type Event {\n\
@@ -42,10 +61,10 @@ fn messages(r: &scarlet::bytecode::CompileResult) -> String {
 #[test]
 fn a_refusal_is_reported_on_the_session_check_path() {
     let mut s = IncrementalSession::new(&scarlet::STDLIB);
-    let r = s.check(&parse(HANDLER), None);
-    assert!(!r.success(), "a fn field must be refused");
+    let r = s.check(&parse(NATIVE), None);
+    assert!(!r.success(), "a bodiless field must be refused");
     assert!(
-        messages(&r).contains("a closure's captures are not fixed by its type"),
+        messages(&r).contains("the type is host-backed"),
         "got: {}",
         messages(&r)
     );
@@ -60,6 +79,15 @@ fn an_encodable_type_still_checks_clean_on_the_session_path() {
     assert!(r.success(), "{:?}", r.diagnostics);
 }
 
+/// A `fn` field is one of those now: it was this file's refusal fixture
+/// until 2026-08-22, and the same buffer checks clean on the same path.
+#[test]
+fn a_fn_field_checks_clean_on_the_session_path() {
+    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let r = s.check(&parse(HANDLER), None);
+    assert!(r.success(), "{:?}", r.diagnostics);
+}
+
 /// A session compiles the same buffer repeatedly, rewinding between edits.
 /// The descriptor is a constant of the program being built, so nothing has to
 /// be carried across a rewind — asserted by running the cycle rather than by
@@ -70,9 +98,9 @@ fn an_encodable_type_still_checks_clean_on_the_session_path() {
 fn a_session_re_checks_a_wire_call_across_an_edit() {
     let mut s = IncrementalSession::new(&scarlet::STDLIB);
     for _ in 0..2 {
-        let bad = s.check(&parse(HANDLER), None);
+        let bad = s.check(&parse(NATIVE), None);
         assert!(!bad.success());
-        let good = s.check(&parse(EVENT), None);
+        let good = s.check(&parse(HANDLER), None);
         assert!(good.success(), "{:?}", good.diagnostics);
     }
 }
@@ -144,16 +172,18 @@ fn a_handle_three_levels_down_checks_clean_on_the_session_path() {
 /// showing "cannot encode `Outer`" on a nine-field record, with the chain
 /// dropped somewhere between the builder and the diagnostic, is the failure
 /// that would otherwise show up only when someone tried to use it. The field
-/// at the bottom is a `fn`, the one refusal the ruling leaves for a value; it
-/// was a `Subject` until handles began to encode (`SUBJECT_DEEP` above).
+/// at the bottom is a user-declared bodiless type, the one refusal the ruling
+/// leaves for a value; it was a `Subject` until handles began to encode
+/// (`SUBJECT_DEEP` above) and a `fn` until closures did.
 #[test]
 fn the_refusal_path_survives_to_the_session_check_path() {
     let mut s = IncrementalSession::new(&scarlet::STDLIB);
     let r = s.check(
         &parse(
             "import scarlet/wire\n\
+             pub type Native\n\
              pub type Inner {\n\
-             \tInner(run fn(Int) Int)\n\
+             \tInner(raw Native)\n\
              }\n\
              pub type Middle {\n\
              \tMiddle(inner Inner)\n\
@@ -161,15 +191,21 @@ fn the_refusal_path_survives_to_the_session_check_path() {
              pub type Outer {\n\
              \tOuter(mid Middle)\n\
              }\n\
+             fn send(o Outer) Binary {\n\
+             \twire.encode(o)\n\
+             }\n\
              pub fn main() {\n\
-             \tprintln(wire.encode(Outer(Middle(Inner(fn(x) { x + 1 })))))\n\
+             \t_ = send\n\
              }\n",
         ),
         None,
     );
-    assert!(!r.success(), "a fn three levels down must be refused");
     assert!(
-        messages(&r).contains("Outer.mid -> Middle.inner -> Inner.run"),
+        !r.success(),
+        "a bodiless type three levels down must be refused"
+    );
+    assert!(
+        messages(&r).contains("Outer.mid -> Middle.inner -> Inner.raw"),
         "got: {}",
         messages(&r)
     );

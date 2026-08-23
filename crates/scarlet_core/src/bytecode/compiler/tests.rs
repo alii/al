@@ -1227,49 +1227,51 @@ mod wire_descriptors {
         );
     }
 
-    /// `fn` is refused for RECONSTRUCTIBILITY, not for want of a
-    /// representation — Erlang serialises funs and this one could be written
-    /// too; what no peer can do is rebuild the captures, which the static type
-    /// does not fix. The negative half is the point: the false rationale is
-    /// the one a golden would otherwise freeze.
+    /// A `fn` field was refused here until 2026-08-22, on the claim that a
+    /// closure's captures are not fixed by its type. They are not, and the
+    /// answer was to describe each capture inline: the program compiles and
+    /// carries a descriptor and the record's constructor like any other.
     #[test]
-    fn a_fn_field_is_refused_on_reconstructibility_not_representation() {
-        let msgs = errors(
+    fn a_fn_field_compiles_and_carries_a_descriptor() {
+        let p = emitted(
             "import scarlet/wire\n\
              type Handler {\n\
              \x20 Handler(name String, run fn(Int) Int)\n\
              }\n\
              wire.encode(Handler('h', fn(x) { x + 1 }))\n",
-            false,
         );
-        assert!(
-            msgs.contains("a closure's captures are not fixed by its type"),
-            "got: {msgs}"
-        );
-        assert!(
-            msgs.contains("Handler.run"),
-            "the refusal must name the field it was reached through: {msgs}"
-        );
-        assert!(
-            !msgs.contains("no wire representation"),
-            "the false rationale must not come back: {msgs}"
+        assert_eq!(operands(&p, Op::WireEncode).len(), 1, "one call, one op");
+        assert_eq!(p.wire_descs.len(), 1, "one type crossed, one descriptor");
+        assert_eq!(
+            p.wire_templates.len(),
+            1,
+            "Handler's one constructor is minted: {:?}",
+            p.wire_templates
         );
     }
 
     /// The arm that silently does not happen if the builder is run at
     /// emission instead: `check` never emits, so a diagnostic raised there is
-    /// invisible in an editor.
+    /// invisible in an editor. Reached through a user-declared bodiless type
+    /// — the one refusal about a value the ruling leaves; it was a `fn` field
+    /// until 2026-08-22.
     #[test]
     fn the_refusal_reaches_the_check_only_path() {
         let src = "import scarlet/wire\n\
+                   pub type Native\n\
                    type Handler {\n\
-                   \x20 Handler(run fn(Int) Int)\n\
+                   \x20 Handler(raw Native)\n\
                    }\n\
-                   wire.encode(Handler(fn(x) { x + 1 }))\n";
+                   fn send(h Handler) Binary { wire.encode(h) }\n\
+                   send\n";
         let checked = errors(src, true);
         assert!(
-            checked.contains("a closure's captures are not fixed by its type"),
+            checked.contains("the type is host-backed"),
             "check-only must report the refusal too, got: {checked}"
+        );
+        assert!(
+            checked.contains("Handler.raw"),
+            "the refusal must name the field it was reached through: {checked}"
         );
     }
 }

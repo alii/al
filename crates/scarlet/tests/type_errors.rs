@@ -567,36 +567,15 @@ const FN_FIELD: &str = "import scarlet/wire\n\
                         \tprintln(wire.encode(Handler('h', fn(x) { x + 1 })))\n\
                         }\n";
 
-/// A record with a `fn` field, and the reason is **reconstructibility**.
-///
-/// `Handler` is `pub` on purpose. Until 2026-08-22 a visibility rule stood in
-/// front of this one, and planting showed why the `pub` matters: with a bare
-/// `type`, an implementation that refused every non-public type took this red
-/// for the wrong reason and looked like a working test. That rule is gone —
-/// an opaque type from another module crosses now — and `pub` costs nothing.
-///
-/// The negative assertion is the load-bearing one. "`fn(Int) Int` has no wire
-/// representation" is false — Erlang's `NEW_FUN_EXT`/`EXPORT_EXT` serialise
-/// funs perfectly well, carrying no code, and they fail only when CALLED on a
-/// peer without the module. What Scarlet cannot do is rebuild one: a closure
-/// is a function index plus a flat untyped capture array, the descriptor is a
-/// function of the static type, and `fn(Int) Int` fixes neither. Asserting the
-/// false rationale here is what would make it permanent, which is the whole
-/// reason this ticket carries a correction block.
-#[test]
-fn wire_refuses_a_fn_field_for_reconstructibility_not_for_want_of_bytes() {
-    let all = wire_rejects(
-        FN_FIELD,
-        "a closure's captures are not fixed by its type, so a decoder cannot rebuild one",
-    );
-    assert!(
-        all.contains("Handler.run"),
-        "the refusal must name the field it was reached through:\n{all}"
-    );
-    assert!(
-        !all.contains("no wire representation"),
-        "the false rationale must not come back:\n{all}"
-    );
+ok_case! {
+    /// A record with a `fn` field checks clean. This program was THE refusal
+    /// fixture of this section until 2026-08-22, on the claim that a closure's
+    /// captures are not fixed by its type and so no decoder could rebuild one.
+    /// They are not fixed by it, and the answer was to describe each capture
+    /// inline rather than to refuse — so the fixture is kept, as the control
+    /// that says the refusal is gone. Its round trip, called through the
+    /// decoded copy, is `wire_closures.rs`.
+    a_fn_field_is_admitted_since_closures_cross: (FN_FIELD),
 }
 
 /// An unencodable type three levels down, and the assertion is the PATH.
@@ -605,23 +584,25 @@ fn wire_refuses_a_fn_field_for_reconstructibility_not_for_want_of_bytes() {
 /// "cannot encode `Outer`" leaves the reader to find which of nine fields it
 /// meant. The full chain is asserted, not merely that a refusal happened.
 ///
-/// All three types are `pub` for the reason `FN_FIELD` is: the only rule that
-/// may refuse this program is the one about `fn`, so the test witnesses that
-/// rule and not the visibility one that stood in front of it until 2026-08-22.
+/// All three types are `pub` so that the only rule that may refuse this
+/// program is the one about the bodiless type, and not the visibility one
+/// that stood in front of it until 2026-08-22.
 ///
-/// The field at the bottom was a `Subject(String)` until the same day, when
-/// the five stdlib handles began to cross the wire as identities; that
-/// program now runs, and its round trip is
-/// `wire_handles.rs::a_subject_three_levels_down_round_trips`. The path
-/// witness stays here over the one refusal the ruling leaves for a value,
-/// with the reason pinned in full so the false "no representation" wording
-/// cannot come back.
+/// The field at the bottom was a `Subject(String)` until that day, when the
+/// five stdlib handles began to cross the wire as identities, and a `fn`
+/// until closures did the same day; both programs now run
+/// (`wire_handles.rs::a_subject_three_levels_down_round_trips`,
+/// `wire_closures.rs`). What the ruling leaves for a value is a user-declared
+/// bodiless type, which no VM table backs, so the path witness stands on
+/// that — and `send` is never called, since nothing can construct a `Native`,
+/// which is fine on a path that never runs.
 #[test]
 fn wire_names_the_whole_field_path_down_to_the_refusing_type() {
     let all = wire_rejects(
         "import scarlet/wire\n\
+         pub type Native\n\
          pub type Inner {\n\
-         \tInner(run fn(Int) Int)\n\
+         \tInner(raw Native)\n\
          }\n\
          pub type Middle {\n\
          \tMiddle(inner Inner)\n\
@@ -629,18 +610,21 @@ fn wire_names_the_whole_field_path_down_to_the_refusing_type() {
          pub type Outer {\n\
          \tOuter(mid Middle)\n\
          }\n\
+         fn send(o Outer) Binary {\n\
+         \twire.encode(o)\n\
+         }\n\
          pub fn main() {\n\
-         \tprintln(wire.encode(Outer(Middle(Inner(fn(x) { x + 1 })))))\n\
+         \t_ = send\n\
          }\n",
-        "Outer.mid -> Middle.inner -> Inner.run",
+        "Outer.mid -> Middle.inner -> Inner.raw",
     );
     assert!(
-        all.contains("`fn(Int) Int`"),
+        all.contains("`Native`"),
         "the refusal names the offending sub-type, not the type the call named:\n{all}"
     );
     assert!(
-        all.contains("a closure's captures are not fixed by its type"),
-        "the reason must be given, and it must be the reconstructibility one:\n{all}"
+        all.contains("the type is host-backed"),
+        "the reason must be given, and it must name what is missing:\n{all}"
     );
     assert!(
         !all.contains("no representation"),

@@ -55,12 +55,35 @@
 //! refused with `OtherRun`, carrying both identities. A decoded handle IS the
 //! original — the same immediate word — so it compares equal to it and reaches
 //! the same mailbox, process or socket table entry.
+//!
+//! # A closure is its captures, described
+//!
+//! Everywhere else the descriptor drives both directions and the bytes hold
+//! only what it cannot supply. A closure breaks that: `fn(Int) Int` is the
+//! static type of every lambda with that signature, and the value is a
+//! function index over captures whose count and kinds the type does not fix.
+//! So the captures are a **self-describing island** inside the typed format —
+//! one tag byte per value, [`CaptureTag`], and the payload that tag's row in
+//! `wire.scrl`'s capture table specifies. The walk is the same iterative one:
+//! a capture's children are queued behind it on the same work stack, tagged.
+//!
+//! The row is gated on the run identity like a handle's: a function index
+//! means nothing in another program, and the run is the gate there is. The
+//! index and capture count are then judged against the program's own function
+//! table BEFORE a closure is built, because the table is what `Op::Call`
+//! indexes unchecked. What the decoder cannot judge is a capture against the
+//! body that will read it — the table holds no capture types — so a capture
+//! forged to another kind is found at use, by the body's typed instructions.
+//! The run identity is the trust boundary that makes that acceptable: only
+//! this run's own encoder writes these bytes.
 
 use std::sync::Arc;
 
 use crate::TypeId;
 use crate::abi::AbiSlot;
-use crate::bytecode::{MapBacking, SocketKind, SocketValue, Value, ValueView, hamt, hash_value};
+use crate::bytecode::{
+    ClosureRef, MapBacking, SocketKind, SocketValue, Value, ValueView, hamt, hash_value,
+};
 use crate::wire::{HandleKind, WireDesc, WireNode, WireNodeIdx};
 
 use super::map::env_entries;
@@ -73,10 +96,11 @@ use super::{VM, VmError, VmResult, bin_ref, range_len};
 /// change that left this alone would surface at a peer as a `SchemaMismatch`
 /// on a type nobody had touched.
 ///
-/// 2 since handles became encodable: the fingerprint gained kind tag 9 for an
-/// identity node, and the body gained the identity row. Version 1 bytes are
+/// 3 since closures became encodable: the fingerprint gained kind tag 10 for
+/// a closure node, and the body gained the closure row and the capture table.
+/// 2 was handles (kind tag 9, the identity row). Version 1 and 2 bytes are
 /// `NotWire` here.
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 
 /// Leading bytes of every encoded value, so bytes from somewhere else are
 /// `NotWire` rather than a misread.
@@ -89,6 +113,61 @@ const HEADER_LEN: usize = MAGIC.len() + 1 + 8;
 /// one-byte LEB128 id. The only fixed-width part is the run; the id is a
 /// varint like every other number in the body.
 const IDENTITY_MIN_BYTES: u64 = (RunId::WIDTH + 1 + 1) as u64;
+
+/// The fewest bytes a closure row occupies: the run, a one-byte function
+/// index and a one-byte capture count of zero. Each capture then costs at
+/// least its tag, which is the per-element minimum the capture counts are
+/// guarded by.
+const CLOSURE_MIN_BYTES: u64 = (RunId::WIDTH + 1 + 1) as u64;
+
+/// The byte in front of every capture, naming the form of the value that
+/// follows. A **stable wire surface**, listed in `wire.scrl`'s capture table:
+/// a tag keeps its number forever and a new one takes the next free number.
+///
+/// The numbers are the fingerprint's node kind tags where a node kind exists
+/// (`Int` is 1 there and here), so the two tables read as one; `Nil`, `Bool`
+/// and `Range` have no node kind — the first two are `Data` to the descriptor
+/// and immediates to the runtime, and a range is an `Array(Int)` that stores
+/// no elements — and take the numbers after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum CaptureTag {
+    Int = 1,
+    Float = 2,
+    String = 3,
+    Binary = 4,
+    Array = 5,
+    Map = 6,
+    Tuple = 7,
+    Data = 8,
+    Handle = 9,
+    Closure = 10,
+    Nil = 11,
+    Bool = 12,
+    Range = 13,
+}
+
+impl CaptureTag {
+    /// The tag a byte from the wire names, or `None` for a byte no tag has.
+    fn from_byte(b: u8) -> Option<CaptureTag> {
+        Some(match b {
+            1 => CaptureTag::Int,
+            2 => CaptureTag::Float,
+            3 => CaptureTag::String,
+            4 => CaptureTag::Binary,
+            5 => CaptureTag::Array,
+            6 => CaptureTag::Map,
+            7 => CaptureTag::Tuple,
+            8 => CaptureTag::Data,
+            9 => CaptureTag::Handle,
+            10 => CaptureTag::Closure,
+            11 => CaptureTag::Nil,
+            12 => CaptureTag::Bool,
+            13 => CaptureTag::Range,
+            _ => return None,
+        })
+    }
+}
 
 /// A socket's number on the wire: its 32-bit pattern, zero-extended. A
 /// scheduler index of 128 or more puts the sign bit on, so sign-extending
@@ -175,6 +254,15 @@ fn put_str(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
 }
 
+/// The identity row: `run 16B · kind u8 · id LEB128`. One writer for a
+/// described handle and for a handle met among a closure's captures, so the
+/// two cannot drift.
+fn put_identity(out: &mut Vec<u8>, run: RunId, kind: HandleKind, id: u64) {
+    out.extend_from_slice(&run.to_bytes());
+    out.push(kind as u8);
+    put_u64(out, id);
+}
+
 // --- the walk -------------------------------------------------------------
 
 /// Encode `root` under `desc`, header included.
@@ -210,13 +298,20 @@ fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value, run: RunId) -> u
     // queued beside it, so a 100k-deep chain costs O(1) entries here rather
     // than one per level. A 100k-wide container does cost one entry per
     // element — that is heap, which is the trade this exists to make.
-    let mut pending: Vec<(WireNodeIdx, Value)> = vec![(desc.root(), root.clone())];
+    let mut pending: Vec<Pending> = vec![Pending::Typed(desc.root(), root.clone())];
     // One per value visited, which is what the node half of the reduction
     // charge counts. Incremented before the arm so a `continue` still pays.
     let mut nodes: u64 = 0;
 
-    while let Some((at, v)) = pending.pop() {
+    while let Some(next) = pending.pop() {
         nodes += 1;
+        let (at, v) = match next {
+            Pending::Typed(at, v) => (at, v),
+            Pending::Tagged(v) => {
+                write_capture(out, &v, run, &mut pending);
+                continue;
+            }
+        };
         let Some(node) = desc.node(at) else {
             // Only an index from another descriptor reaches this, which the
             // builder cannot mint. Writing nothing keeps the walk total.
@@ -273,7 +368,7 @@ fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value, run: RunId) -> u
                             debug_assert!(false, "array element {i} below len is missing");
                             continue;
                         };
-                        pending.push((*elem, item));
+                        pending.push(Pending::Typed(*elem, item));
                     }
                 }
                 // A `Range` is an `Array(Int)` value with no elements stored.
@@ -310,8 +405,8 @@ fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value, run: RunId) -> u
                         // not depend on it — but two maps that are `==` are not
                         // promised the same bytes.
                         for (k, val_v) in entries.into_iter().rev() {
-                            pending.push((*val, val_v));
-                            pending.push((*key, k));
+                            pending.push(Pending::Typed(*val, val_v));
+                            pending.push(Pending::Typed(*key, k));
                         }
                     }
                     // The process environment, typed `Map(String, String)`. It
@@ -344,7 +439,7 @@ fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value, run: RunId) -> u
                 let fields = v.as_tuple().unwrap_or_default();
                 debug_assert_eq!(elems.len(), fields.len(), "descriptor fixes tuple arity");
                 for (n, f) in elems.iter().zip(fields).rev() {
-                    pending.push((*n, f.clone()));
+                    pending.push(Pending::Typed(*n, f.clone()));
                 }
             }
             WireNode::Data(ctors) => {
@@ -370,7 +465,7 @@ fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value, run: RunId) -> u
                 let payload = e.payload();
                 debug_assert_eq!(ctor.fields.len(), payload.len(), "descriptor fixes arity");
                 for (n, f) in ctor.fields.iter().zip(payload).rev() {
-                    pending.push((*n, f.clone()));
+                    pending.push(Pending::Typed(*n, f.clone()));
                 }
             }
             // The run, then the kind the VALUE carries, then the number. The
@@ -380,7 +475,6 @@ fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value, run: RunId) -> u
             // of a subject write the same bytes: the bytes are the mailbox id,
             // and ownership is not a property a copy can carry.
             WireNode::Identity(kind) => {
-                out.extend_from_slice(&run.to_bytes());
                 let (found, id) = match kind {
                     HandleKind::Pid => (*kind, v.as_pid()),
                     HandleKind::Subject => (*kind, v.as_subject()),
@@ -397,12 +491,178 @@ fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value, run: RunId) -> u
                     kind.admits(found),
                     "a {found:?} handle under a {kind:?} descriptor"
                 );
-                out.push(found as u8);
-                put_u64(out, id.unwrap_or(0));
+                put_identity(out, run, found, id.unwrap_or(0));
+            }
+            // The run, then the function index, the capture count and the
+            // captures — each self-described, because the descriptor ends
+            // here: the static type fixes neither how many there are nor what
+            // they hold. The arity is the decoder's to check; the encoder
+            // has no table to check it against and nothing to refuse with.
+            WireNode::Closure { .. } => {
+                out.extend_from_slice(&run.to_bytes());
+                match v.as_closure() {
+                    Some(cl) => push_closure(out, &cl, &mut pending),
+                    None => {
+                        debug_assert!(false, "descriptor says a closure");
+                        put_u64(out, 0);
+                        put_u64(out, 0);
+                    }
+                }
             }
         }
     }
     nodes
+}
+
+/// One entry of the encoder's work stack.
+enum Pending {
+    /// A value under a descriptor node, written as that node says.
+    Typed(WireNodeIdx, Value),
+    /// A capture word, or something reached through one: written behind a
+    /// [`CaptureTag`] naming its own form.
+    Tagged(Value),
+}
+
+/// `func_idx LEB128 · capture_count LEB128`, then the captures queued tagged,
+/// back to front so they pop in order. Shared by the described closure and a
+/// closure met among captures; only the first writes a run in front.
+fn push_closure(out: &mut Vec<u8>, cl: &ClosureRef<'_>, pending: &mut Vec<Pending>) {
+    // Zero-extended: an index is never negative, and a sign-extending write
+    // would spend ten bytes on one that somehow was.
+    put_u64(out, u64::from(cl.func_idx() as u32));
+    let captures = cl.captures();
+    put_u64(out, captures.len() as u64);
+    for c in captures.iter().rev() {
+        pending.push(Pending::Tagged(c.clone()));
+    }
+}
+
+/// One capture word, self-described: its [`CaptureTag`], then the payload
+/// that tag's row in `wire.scrl`'s capture table specifies. Children — a
+/// tuple's elements, a record's fields, a nested closure's captures — are
+/// queued tagged, back to front, so the walk stays iterative.
+///
+/// Total over `ValueView`: every form a word can hold has a row, which is the
+/// condition under which the compiler stopped refusing `fn`. A `BigInt` is
+/// `Int` — the view folds it — and `Range` is written as its bounds rather
+/// than as the array it equals, because there is no descriptor here to say
+/// the peer wanted an array.
+fn write_capture(out: &mut Vec<u8>, v: &Value, run: RunId, pending: &mut Vec<Pending>) {
+    match v.kind() {
+        ValueView::Nil => out.push(CaptureTag::Nil as u8),
+        ValueView::Bool(b) => {
+            out.push(CaptureTag::Bool as u8);
+            out.push(u8::from(b));
+        }
+        ValueView::Int(n) => {
+            out.push(CaptureTag::Int as u8);
+            put_i64(out, n);
+        }
+        ValueView::Float(f) => {
+            out.push(CaptureTag::Float as u8);
+            out.extend_from_slice(&f.to_bits().to_le_bytes());
+        }
+        ValueView::Str(s) => {
+            out.push(CaptureTag::String as u8);
+            put_str(out, s);
+        }
+        ValueView::Binary(b) => {
+            out.push(CaptureTag::Binary as u8);
+            put_u64(out, b.bit_len());
+            out.extend_from_slice(&b.to_aligned_vec());
+        }
+        ValueView::Range(s, e) => {
+            out.push(CaptureTag::Range as u8);
+            put_i64(out, s);
+            put_i64(out, e);
+        }
+        ValueView::Tuple(fields) => {
+            out.push(CaptureTag::Tuple as u8);
+            put_u64(out, fields.len() as u64);
+            for f in fields.iter().rev() {
+                pending.push(Pending::Tagged(f.clone()));
+            }
+        }
+        ValueView::Array(arr) => {
+            out.push(CaptureTag::Array as u8);
+            let n = arr.len();
+            put_u64(out, n as u64);
+            for i in (0..n).rev() {
+                let Some(item) = arr.get(i) else {
+                    debug_assert!(false, "array element {i} below len is missing");
+                    continue;
+                };
+                pending.push(Pending::Tagged(item));
+            }
+        }
+        ValueView::Map(m) => {
+            out.push(CaptureTag::Map as u8);
+            match m.backing() {
+                MapBacking::Hamt => {
+                    let entries = hamt::collect_entries(v);
+                    put_u64(out, entries.len() as u64);
+                    for (k, val) in entries.into_iter().rev() {
+                        pending.push(Pending::Tagged(val));
+                        pending.push(Pending::Tagged(k));
+                    }
+                }
+                // Both halves are strings and nothing is nested, so the
+                // entries are written in place, each behind its own tag.
+                MapBacking::Env => {
+                    let entries = env_entries();
+                    put_u64(out, entries.len() as u64);
+                    for (k, val) in entries {
+                        out.push(CaptureTag::String as u8);
+                        put_str(out, &k);
+                        out.push(CaptureTag::String as u8);
+                        put_str(out, &val);
+                    }
+                }
+            }
+        }
+        // Identity, names and labels, then the fields. The names travel
+        // because the program has no table from a constructor's identity back
+        // to them — `wire_templates` holds only the types a descriptor names
+        // — and a decoder rebuilds the cell from exactly these.
+        ValueView::Enum(e) => {
+            out.push(CaptureTag::Data as u8);
+            put_i64(out, i64::from(e.type_id().0));
+            put_u64(out, u64::from(e.variant_idx()));
+            put_str(out, e.enum_name());
+            put_str(out, e.variant_name());
+            let labels = e.field_labels();
+            put_u64(out, labels.len() as u64);
+            for l in labels {
+                put_str(out, l.as_str().unwrap_or_default());
+            }
+            let payload = e.payload();
+            put_u64(out, payload.len() as u64);
+            for f in payload.iter().rev() {
+                pending.push(Pending::Tagged(f.clone()));
+            }
+        }
+        ValueView::Closure(cl) => {
+            out.push(CaptureTag::Closure as u8);
+            push_closure(out, &cl, pending);
+        }
+        ValueView::Pid(id) => {
+            out.push(CaptureTag::Handle as u8);
+            put_identity(out, run, HandleKind::Pid, id);
+        }
+        ValueView::Subject(id) => {
+            out.push(CaptureTag::Handle as u8);
+            put_identity(out, run, HandleKind::Subject, id);
+        }
+        ValueView::Socket(s) => {
+            out.push(CaptureTag::Handle as u8);
+            put_identity(
+                out,
+                run,
+                HandleKind::of_socket(s.kind),
+                socket_id_to_wire(s.id),
+            );
+        }
+    }
 }
 
 // --- decoding -------------------------------------------------------------
@@ -533,6 +793,27 @@ impl<'a> Reader<'a> {
         let u = self.uleb()?;
         Ok(((u >> 1) as i64) ^ -((u & 1) as i64))
     }
+
+    /// `len LEB128 · UTF-8`, the inverse of [`put_str`]. The length is guarded
+    /// against the input before the bytes are taken, and the bytes are
+    /// validated; a refusal names the offset of the length.
+    fn str(&mut self) -> Result<&'a str, Refusal> {
+        let off = self.at;
+        let n = self.uleb()?;
+        let n = guard_count(n, 1, self.remaining(), off)?;
+        let bytes = self.take(n)?;
+        std::str::from_utf8(bytes).map_err(|_| Refusal::Malformed {
+            offset: off,
+            what: "string is not UTF-8",
+        })
+    }
+
+    /// The sixteen bytes of a run identity.
+    fn run(&mut self) -> Result<RunId, Refusal> {
+        let mut run = [0u8; RunId::WIDTH];
+        run.copy_from_slice(self.take(RunId::WIDTH)?);
+        Ok(RunId::from_bytes(run))
+    }
 }
 
 /// A node whose values occupy zero bytes has exactly one inhabitant — it is an
@@ -578,6 +859,7 @@ fn min_bytes(desc: &WireDesc) -> Vec<u64> {
                 WireNode::Array(_) | WireNode::Map(_, _) => 1,
                 WireNode::Float => 8,
                 WireNode::Identity(_) => IDENTITY_MIN_BYTES,
+                WireNode::Closure { .. } => CLOSURE_MIN_BYTES,
                 WireNode::Tuple(elems) => elems
                     .iter()
                     .fold(0u64, |a, e| a.saturating_add(at(&min, *e))),
@@ -634,6 +916,9 @@ fn guard_count(
 enum Step {
     /// Read a value of this node from the input.
     Read(WireNodeIdx),
+    /// Read a self-described value — a closure's capture, or something
+    /// reached through one — from the input: a [`CaptureTag`], then its row.
+    ReadCapture,
     /// Combine already-built values into one.
     Finish(Finish),
 }
@@ -650,6 +935,24 @@ enum Finish {
     Ctor {
         type_id: TypeId,
         variant_idx: u16,
+        arity: usize,
+    },
+    /// A closure over `captures` built values, for a function index already
+    /// judged against the program's table (see [`VM::read_closure_header`]).
+    Closure {
+        func_idx: i32,
+        captures: usize,
+    },
+    /// A constructor met among captures, rebuilt from the names its row
+    /// carried rather than through a template: `wire_templates` holds only
+    /// the constructors a descriptor names, and a capture may be of any type
+    /// the program has.
+    Record {
+        type_id: TypeId,
+        variant_idx: u16,
+        enum_name: String,
+        variant_name: String,
+        labels: Vec<String>,
         arity: usize,
     },
 }
@@ -831,17 +1134,7 @@ impl VM {
                             done.push(Value::float(f64::from_le_bytes(b)));
                         }
                         WireNode::String => {
-                            let off = r.at;
-                            let n = r.uleb()?;
-                            let n = guard_count(n, 1, r.remaining(), off)?;
-                            let bytes = r.take(n)?;
-                            let Ok(s) = std::str::from_utf8(bytes) else {
-                                return Err(Refusal::Malformed {
-                                    offset: off,
-                                    what: "string is not UTF-8",
-                                }
-                                .into());
-                            };
+                            let s = r.str()?;
                             let v = Value::str_in(&mut self.heap, s);
                             done.push(v);
                         }
@@ -923,8 +1216,7 @@ impl VM {
                         // wrote it; then the run, because another run's number
                         // is not ours to range-check; then the number.
                         WireNode::Identity(kind) => {
-                            let mut run = [0u8; RunId::WIDTH];
-                            run.copy_from_slice(r.take(RunId::WIDTH)?);
+                            let run = r.run()?;
                             let kind_off = r.at;
                             let found = HandleKind::from_byte(r.u8()?).filter(|f| kind.admits(*f));
                             let Some(found) = found else {
@@ -934,35 +1226,176 @@ impl VM {
                                 }
                                 .into());
                             };
-                            let id_off = r.at;
-                            let id = r.uleb()?;
-                            let (found_run, own) = (RunId::from_bytes(run), self.run_id());
-                            if found_run != own {
-                                return Err(Refusal::OtherRun {
-                                    expected: own,
-                                    found: found_run,
-                                }
-                                .into());
+                            let v = self.read_handle(r, run, found)?;
+                            done.push(v);
+                        }
+                        // The run first: a function index means nothing in
+                        // another program, so there is nothing to judge it
+                        // against until the run is known to be this one.
+                        // Then the index, arity and count against the table,
+                        // before any capture is read — see `read_closure_header`.
+                        WireNode::Closure { arity } => {
+                            let run = r.run()?;
+                            self.own_run(run)?;
+                            let (func_idx, captures) = self.read_closure_header(r, Some(*arity))?;
+                            work.push(Step::Finish(Finish::Closure { func_idx, captures }));
+                            for _ in 0..captures {
+                                work.push(Step::ReadCapture);
                             }
-                            let socket = |k| {
-                                socket_id_from_wire(id)
-                                    .map(|id| Value::socket(SocketValue { id, kind: k }))
+                        }
+                    }
+                }
+                // A capture: the tag says which row follows. Every count here
+                // is guarded at one byte per element — the tag each element
+                // must at least carry — so a forged count is refused before
+                // anything is allocated, as in the typed walk.
+                Step::ReadCapture => {
+                    *nodes += 1;
+                    let tag_off = r.at;
+                    let Some(tag) = CaptureTag::from_byte(r.u8()?) else {
+                        return Err(Refusal::Malformed {
+                            offset: tag_off,
+                            what: "capture tag is not in the table",
+                        }
+                        .into());
+                    };
+                    match tag {
+                        CaptureTag::Nil => done.push(Value::nil()),
+                        CaptureTag::Bool => {
+                            let off = r.at;
+                            let b = match r.u8()? {
+                                0 => false,
+                                1 => true,
+                                _ => {
+                                    return Err(Refusal::Malformed {
+                                        offset: off,
+                                        what: "bool is not 0 or 1",
+                                    }
+                                    .into());
+                                }
                             };
-                            let v = match found {
-                                HandleKind::Pid => Value::try_pid(id),
-                                HandleKind::Subject => Value::try_subject(id),
-                                HandleKind::Connection => socket(SocketKind::Connection),
-                                HandleKind::Listener => socket(SocketKind::Listener),
-                                HandleKind::Port => socket(SocketKind::Port),
-                                HandleKind::Tls => socket(SocketKind::Tls),
-                            };
-                            let Some(v) = v else {
+                            done.push(Value::bool(b));
+                        }
+                        CaptureTag::Int => {
+                            let n = r.ileb()?;
+                            let v = Value::int_in(&mut self.heap, n);
+                            done.push(v);
+                        }
+                        CaptureTag::Float => {
+                            let mut b = [0u8; 8];
+                            b.copy_from_slice(r.take(8)?);
+                            done.push(Value::float(f64::from_le_bytes(b)));
+                        }
+                        CaptureTag::String => {
+                            let s = r.str()?;
+                            let v = Value::str_in(&mut self.heap, s);
+                            done.push(v);
+                        }
+                        CaptureTag::Binary => {
+                            let off = r.at;
+                            let bit_len = r.uleb()?;
+                            let n = guard_count(bit_len.div_ceil(8), 1, r.remaining(), off)?;
+                            let mut buf = r.take(n)?.to_vec();
+                            let spare = (n as u64 * 8) - bit_len;
+                            if let Some(last) = buf.last_mut() {
+                                *last &= !0u8 << spare;
+                            }
+                            let v = Value::binary_bits_in(&mut self.heap, buf, bit_len);
+                            done.push(v);
+                        }
+                        CaptureTag::Range => {
+                            let s = r.ileb()?;
+                            let e = r.ileb()?;
+                            let v = Value::range_in(&mut self.heap, s, e);
+                            done.push(v);
+                        }
+                        CaptureTag::Tuple => {
+                            let off = r.at;
+                            let n = guard_count(r.uleb()?, 1, r.remaining(), off)?;
+                            work.push(Step::Finish(Finish::Tuple(n)));
+                            for _ in 0..n {
+                                work.push(Step::ReadCapture);
+                            }
+                        }
+                        CaptureTag::Array => {
+                            let off = r.at;
+                            let n = guard_count(r.uleb()?, 1, r.remaining(), off)?;
+                            work.push(Step::Finish(Finish::Array(n)));
+                            for _ in 0..n {
+                                work.push(Step::ReadCapture);
+                            }
+                        }
+                        CaptureTag::Map => {
+                            let off = r.at;
+                            let n = guard_count(r.uleb()?, 2, r.remaining(), off)?;
+                            work.push(Step::Finish(Finish::Map(n, off)));
+                            for _ in 0..n {
+                                work.push(Step::ReadCapture);
+                                work.push(Step::ReadCapture);
+                            }
+                        }
+                        CaptureTag::Data => {
+                            let id_off = r.at;
+                            let Ok(type_id) = i32::try_from(r.ileb()?) else {
                                 return Err(Refusal::Malformed {
                                     offset: id_off,
-                                    what: "handle id out of range",
+                                    what: "type id out of range",
                                 }
                                 .into());
                             };
+                            let variant_off = r.at;
+                            let Ok(variant_idx) = u16::try_from(r.uleb()?) else {
+                                return Err(Refusal::Malformed {
+                                    offset: variant_off,
+                                    what: "variant index out of range",
+                                }
+                                .into());
+                            };
+                            let enum_name = r.str()?.to_string();
+                            let variant_name = r.str()?.to_string();
+                            let off = r.at;
+                            let label_count = guard_count(r.uleb()?, 1, r.remaining(), off)?;
+                            let mut labels = Vec::with_capacity(label_count);
+                            for _ in 0..label_count {
+                                labels.push(r.str()?.to_string());
+                            }
+                            let off = r.at;
+                            let arity = guard_count(r.uleb()?, 1, r.remaining(), off)?;
+                            work.push(Step::Finish(Finish::Record {
+                                type_id: TypeId(type_id),
+                                variant_idx,
+                                enum_name,
+                                variant_name,
+                                labels,
+                                arity,
+                            }));
+                            for _ in 0..arity {
+                                work.push(Step::ReadCapture);
+                            }
+                        }
+                        // No run in front: the enclosing row's run already
+                        // gated everything under it.
+                        CaptureTag::Closure => {
+                            let (func_idx, captures) = self.read_closure_header(r, None)?;
+                            work.push(Step::Finish(Finish::Closure { func_idx, captures }));
+                            for _ in 0..captures {
+                                work.push(Step::ReadCapture);
+                            }
+                        }
+                        // The identity row, judged as a described handle is
+                        // — kind, run, id — except that with no descriptor
+                        // every kind in the table is admitted.
+                        CaptureTag::Handle => {
+                            let run = r.run()?;
+                            let kind_off = r.at;
+                            let Some(kind) = HandleKind::from_byte(r.u8()?) else {
+                                return Err(Refusal::Malformed {
+                                    offset: kind_off,
+                                    what: "handle kind is not in the table",
+                                }
+                                .into());
+                            };
+                            let v = self.read_handle(r, run, kind)?;
                             done.push(v);
                         }
                     }
@@ -1018,6 +1451,32 @@ impl VM {
                         let v = t.instantiate(&mut self.heap, &payload);
                         done.push(v);
                     }
+                    Finish::Closure { func_idx, captures } => {
+                        let captures = take_last(&mut done, captures)?;
+                        let v = Value::closure_in(&mut self.heap, func_idx, &captures);
+                        done.push(v);
+                    }
+                    Finish::Record {
+                        type_id,
+                        variant_idx,
+                        enum_name,
+                        variant_name,
+                        labels,
+                        arity,
+                    } => {
+                        let payload = take_last(&mut done, arity)?;
+                        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+                        let v = Value::enum_with_names_in(
+                            &mut self.heap,
+                            type_id,
+                            variant_idx,
+                            &enum_name,
+                            &variant_name,
+                            &labels,
+                            &payload,
+                        );
+                        done.push(v);
+                    }
                 },
             }
         }
@@ -1028,6 +1487,94 @@ impl VM {
                 "wire decoder ended with the wrong value count",
             )),
         }
+    }
+
+    /// `OtherRun` unless `found` is this run's identity.
+    fn own_run(&self, found: RunId) -> Result<(), Refusal> {
+        let own = self.run_id();
+        if found != own {
+            return Err(Refusal::OtherRun {
+                expected: own,
+                found,
+            });
+        }
+        Ok(())
+    }
+
+    /// The tail of an identity row, after the kind has been judged: the id,
+    /// then the run — another run's number is not ours to range-check — then
+    /// the handle of `kind` for it, or `Malformed` for a number the handle's
+    /// form cannot hold.
+    fn read_handle(
+        &self,
+        r: &mut Reader<'_>,
+        run: RunId,
+        kind: HandleKind,
+    ) -> Result<Value, Refusal> {
+        let id_off = r.at;
+        let id = r.uleb()?;
+        self.own_run(run)?;
+        let socket =
+            |k| socket_id_from_wire(id).map(|id| Value::socket(SocketValue { id, kind: k }));
+        let v = match kind {
+            HandleKind::Pid => Value::try_pid(id),
+            HandleKind::Subject => Value::try_subject(id),
+            HandleKind::Connection => socket(SocketKind::Connection),
+            HandleKind::Listener => socket(SocketKind::Listener),
+            HandleKind::Port => socket(SocketKind::Port),
+            HandleKind::Tls => socket(SocketKind::Tls),
+        };
+        v.ok_or(Refusal::Malformed {
+            offset: id_off,
+            what: "handle id out of range",
+        })
+    }
+
+    /// `func_idx LEB128 · capture_count LEB128`, judged against the program's
+    /// function table BEFORE anything is built. The table is what `Op::Call`
+    /// and `Op::PushCapture` index without checking: an index past it would
+    /// panic at `program.functions[..]` on the first call, and a count the
+    /// function does not expect would surface as a capture-index error or a
+    /// native proof violation. `arity` is the descriptor's parameter count,
+    /// checked against the function's so that an in-range index cannot hand
+    /// back a function of another type; a closure met among captures has no
+    /// descriptor and passes `None`.
+    ///
+    /// The count is also guarded at one byte per capture, the tag each must
+    /// carry, so the guard is not vacuous even though the table has already
+    /// bounded the count.
+    fn read_closure_header(
+        &self,
+        r: &mut Reader<'_>,
+        arity: Option<u32>,
+    ) -> Result<(i32, usize), Refusal> {
+        let idx_off = r.at;
+        let func_idx = r.uleb()?;
+        let func = i32::try_from(func_idx)
+            .ok()
+            .and_then(|i| Some((i, self.program.functions.get(usize::try_from(i).ok()?)?)));
+        let Some((func_idx, func)) = func else {
+            return Err(Refusal::Malformed {
+                offset: idx_off,
+                what: "closure function index out of range",
+            });
+        };
+        if arity.is_some_and(|a| i64::from(func.arity) != i64::from(a)) {
+            return Err(Refusal::Malformed {
+                offset: idx_off,
+                what: "closure function arity does not match the type",
+            });
+        }
+        let count_off = r.at;
+        let count = r.uleb()?;
+        if i64::from(func.capture_count) != i64::try_from(count).unwrap_or(i64::MAX) {
+            return Err(Refusal::Malformed {
+                offset: count_off,
+                what: "closure capture count does not match its function",
+            });
+        }
+        let captures = guard_count(count, 1, r.remaining(), count_off)?;
+        Ok((func_idx, captures))
     }
 }
 
@@ -1148,7 +1695,7 @@ mod tests {
     /// The eleven header bytes every value carries: `SW`, version, then the
     /// fingerprint little-endian.
     fn header() -> Vec<u8> {
-        let mut h = vec![b'S', b'W', 2];
+        let mut h = vec![b'S', b'W', 3];
         h.extend_from_slice(&0x0807_0605_0403_0201u64.to_le_bytes());
         h
     }
@@ -1897,6 +2444,15 @@ mod tests {
         v1.push(0);
         assert_eq!(refusal_of(&mut vm, &d, &v1).0, "NotWire");
 
+        // Version 2, written by whatever was built from master between
+        // c8c23db (handles, 2026-08-22) and closures landing. Its fingerprints
+        // folded FINGERPRINT_VERSION 2 and no kind tag 10, so the same
+        // argument holds: refuse the version rather than misread the shape.
+        let mut v2 = header();
+        v2[2] = 2;
+        v2.push(0);
+        assert_eq!(refusal_of(&mut vm, &d, &v2).0, "NotWire");
+
         // Magic alone. Kept because it is a real case, not because it
         // discriminates: see the note above.
         let mut bad_magic = header();
@@ -2385,6 +2941,565 @@ mod tests {
             WireNode::Identity(HandleKind::Pid),
         ]);
         assert_eq!(min_bytes(&d)[1], 18, "run 16, kind 1, id 1");
+        let mut bytes = header();
+        put_u64(&mut bytes, 1000);
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "count is larger than the remaining input can hold"
+        );
+    }
+
+    // --- closures --------------------------------------------------------
+
+    use crate::bytecode::Function;
+
+    /// Append a function the decoder can judge a closure against: `arity`
+    /// parameters and `captures` capture words. Never run — the decoder only
+    /// reads the table — so its code is the entry's `Halt`. Returns its index.
+    fn add_function(vm: &mut VM, arity: i32, captures: i32) -> i32 {
+        vm.program.functions.push(Function {
+            name: "lambda".into(),
+            arity,
+            locals: arity,
+            capture_count: captures,
+            code_start: 0,
+            code_len: 1,
+        });
+        (vm.program.functions.len() - 1) as i32
+    }
+
+    /// The closure row's fixed part as `vm` would write it, for a test that
+    /// forges what follows: header, this run, `func_idx`, then `count`.
+    fn closure_prefix(vm: &VM, func_idx: i32, count: u64) -> Vec<u8> {
+        let mut bytes = header();
+        bytes.extend_from_slice(&vm.run_id().to_bytes());
+        put_u64(&mut bytes, func_idx as u64);
+        put_u64(&mut bytes, count);
+        bytes
+    }
+
+    /// The closure row: the run, the function index, the capture count, then
+    /// each capture behind its tag — `Int` 7 is tag 1 then zigzag 14, `hi`
+    /// is tag 3 then its length and bytes.
+    #[test]
+    fn closure_is_run_then_index_then_count_then_tagged_captures() {
+        let mut vm = halt_test_vm();
+        let f = add_function(&mut vm, 1, 2);
+        let d = desc(vec![WireNode::Closure { arity: 1 }]);
+        let hi = Value::str_in(&mut vm.heap, "hi");
+        let cl = Value::closure_in(&mut vm.heap, f, &[Value::small_int(7), hi]);
+        let mut want = format_run().to_bytes().to_vec();
+        want.extend_from_slice(&[f as u8, 2]);
+        want.extend_from_slice(&[CaptureTag::Int as u8, 0x0e]);
+        want.extend_from_slice(&[CaptureTag::String as u8, 2, b'h', b'i']);
+        assert_eq!(body(&d, &cl), want);
+        assert_eq!(CLOSURE_MIN_BYTES, 18, "run 16, index 1, count 1");
+    }
+
+    /// Every tag in the table, written by the form it names. A `BigInt` is
+    /// `Int` — the view folds it — and every handle form is `Handle`.
+    #[test]
+    fn each_capture_form_writes_its_own_tag() {
+        let mut vm = halt_test_vm();
+        let closer = Arc::new(crate::bytecode::SubjectCloser(Box::new(|_| {})));
+        let big = Value::int_in(&mut vm.heap, i64::MAX);
+        let s = Value::str_in(&mut vm.heap, "s");
+        let bin = Value::binary_in(&mut vm.heap, vec![1]);
+        let range = Value::range_in(&mut vm.heap, 0, 2);
+        let tuple = Value::tuple_in(&mut vm.heap, &[]);
+        let arr = Value::array_in(&mut vm.heap, &[]);
+        let map = hamt::empty(&mut vm.heap);
+        let rec = Value::enum_with_names_in(&mut vm.heap, TypeId(3), 0, "Unit", "Unit", &[], &[]);
+        let leaf = add_function(&mut vm, 0, 0);
+        let nested = Value::closure_in(&mut vm.heap, leaf, &[]);
+        let owned = Value::owned_subject_in(&mut vm.heap, 9, &closer);
+        let socket = Value::socket(SocketValue {
+            id: 1,
+            kind: SocketKind::Listener,
+        });
+        let cases = [
+            (Value::nil(), CaptureTag::Nil),
+            (Value::bool(true), CaptureTag::Bool),
+            (Value::small_int(1), CaptureTag::Int),
+            (big, CaptureTag::Int),
+            (Value::float(1.0), CaptureTag::Float),
+            (s, CaptureTag::String),
+            (bin, CaptureTag::Binary),
+            (range, CaptureTag::Range),
+            (tuple, CaptureTag::Tuple),
+            (arr, CaptureTag::Array),
+            (map, CaptureTag::Map),
+            (rec, CaptureTag::Data),
+            (nested, CaptureTag::Closure),
+            (Value::pid(1), CaptureTag::Handle),
+            (Value::subject(1), CaptureTag::Handle),
+            (owned, CaptureTag::Handle),
+            (socket, CaptureTag::Handle),
+        ];
+        let f = add_function(&mut vm, 0, 1);
+        let d = desc(vec![WireNode::Closure { arity: 0 }]);
+        for (v, tag) in cases {
+            let cl = Value::closure_in(&mut vm.heap, f, &[v]);
+            let bytes = body(&d, &cl);
+            assert_eq!(bytes[CLOSURE_MIN_BYTES as usize], tag as u8, "{tag:?}");
+        }
+    }
+
+    /// Every form a capture word can hold, back by `==`, through one closure.
+    /// This is the totality condition under which the compiler stopped
+    /// refusing `fn`: `write_capture` matches `ValueView` exhaustively, and
+    /// this is the round trip for each arm. `Bool` and `Nil` are immediates
+    /// the typed walk never meets as such — they are `Data` to a descriptor —
+    /// so they have rows of their own here.
+    #[test]
+    fn a_closure_round_trips_every_capture_form() {
+        let mut vm = halt_test_vm();
+        let big = Value::int_in(&mut vm.heap, i64::MIN);
+        let s = Value::str_in(&mut vm.heap, "é€");
+        let bin = Value::binary_bits_in(&mut vm.heap, vec![0xab, 0xc0], 12);
+        let range = Value::range_in(&mut vm.heap, -2, 5);
+        let t = Value::str_in(&mut vm.heap, "t");
+        let tuple = Value::tuple_in(&mut vm.heap, &[Value::small_int(1), t]);
+        let items = [Value::small_int(1), Value::nil(), Value::bool(true)];
+        let arr = Value::array_in(&mut vm.heap, &items);
+        let mut map = hamt::empty(&mut vm.heap);
+        for (k, n) in [("one", 1i64), ("two", 2)] {
+            let kv = Value::str_in(&mut vm.heap, k);
+            let h = hash_value(&kv);
+            map = hamt::insert(&mut vm.heap, map, kv, Value::small_int(n), h);
+        }
+        let user = Value::str_in(&mut vm.heap, "ali");
+        let rec = Value::enum_with_names_in(
+            &mut vm.heap,
+            TypeId(9),
+            1,
+            "Event",
+            "Joined",
+            &["user", "at"],
+            &[user, Value::small_int(3)],
+        );
+        let inner = add_function(&mut vm, 2, 1);
+        let nested = Value::closure_in(&mut vm.heap, inner, &[Value::small_int(4)]);
+        let leaf = add_function(&mut vm, 0, 0);
+        let empty = Value::closure_in(&mut vm.heap, leaf, &[]);
+        let captures = vec![
+            Value::nil(),
+            Value::bool(true),
+            Value::bool(false),
+            Value::small_int(-64),
+            big,
+            Value::float(-0.5),
+            s,
+            bin,
+            range,
+            tuple,
+            arr,
+            map,
+            rec,
+            nested,
+            empty,
+            Value::pid(7),
+            Value::subject((7 << 28) | 3),
+            Value::socket(SocketValue {
+                id: -1,
+                kind: SocketKind::Tls,
+            }),
+        ];
+        let f = add_function(&mut vm, 0, captures.len() as i32);
+        let cl = Value::closure_in(&mut vm.heap, f, &captures);
+        let d = desc(vec![WireNode::Closure { arity: 0 }]);
+        round_trips(&mut vm, &d, &cl);
+
+        // By form as well as by `==`: `==` would hold for a range that came
+        // back as the array it equals, and for a record rebuilt under other
+        // labels.
+        let bytes = encode_in(&vm, &d, &cl);
+        let back = ok_of(&mut vm, &d, &bytes);
+        let back = back.as_closure().expect("a closure comes back");
+        assert_eq!(back.func_idx(), f);
+        assert_eq!(back.captures().len(), captures.len());
+        assert_eq!(back.captures()[8].as_range(), Some((-2, 5)));
+        assert!(back.captures()[13].as_closure().is_some());
+        let rec_back = back.captures()[12]
+            .as_enum()
+            .expect("a record comes back as one");
+        assert_eq!(rec_back.type_id(), TypeId(9));
+        assert_eq!(rec_back.variant_idx(), 1);
+        assert_eq!(rec_back.enum_name(), "Event");
+        assert_eq!(rec_back.variant_name(), "Joined");
+        let labels: Vec<&str> = rec_back
+            .field_labels()
+            .iter()
+            .map(|l| l.as_str().expect("a label is a Str"))
+            .collect();
+        assert_eq!(labels, ["user", "at"]);
+    }
+
+    /// A subject's owning box and its immediate write the same capture
+    /// bytes, and what comes back is the immediate, as for a described
+    /// subject: ownership is not a property a copy can carry.
+    #[test]
+    fn an_owned_subject_capture_decodes_to_the_immediate() {
+        let mut vm = halt_test_vm();
+        let f = add_function(&mut vm, 0, 1);
+        let d = desc(vec![WireNode::Closure { arity: 0 }]);
+        let closer = Arc::new(crate::bytecode::SubjectCloser(Box::new(|_| {})));
+        let owned = Value::owned_subject_in(&mut vm.heap, 9, &closer);
+        let with_owned = Value::closure_in(&mut vm.heap, f, &[owned]);
+        let with_plain = Value::closure_in(&mut vm.heap, f, &[Value::subject(9)]);
+        assert_eq!(body(&d, &with_owned), body(&d, &with_plain));
+        let bytes = encode_in(&vm, &d, &with_owned);
+        let back = ok_of(&mut vm, &d, &bytes);
+        let back = back.as_closure().expect("closure");
+        let cap = &back.captures()[0];
+        assert!(!cap.is_heap(), "a decoded subject is the non-owning form");
+        assert_eq!(cap.as_subject(), Some(9));
+    }
+
+    #[test]
+    fn a_zero_capture_closure_round_trips() {
+        let mut vm = halt_test_vm();
+        let f = add_function(&mut vm, 3, 0);
+        let d = desc(vec![WireNode::Closure { arity: 3 }]);
+        let cl = Value::closure_in(&mut vm.heap, f, &[]);
+        let mut want = format_run().to_bytes().to_vec();
+        want.extend_from_slice(&[f as u8, 0]);
+        assert_eq!(body(&d, &cl), want);
+        round_trips(&mut vm, &d, &cl);
+    }
+
+    /// A closure from another run is refused with both identities, this
+    /// run's first: its function index means nothing here.
+    #[test]
+    fn a_closure_from_another_run_is_refused_with_both_run_ids() {
+        let mut vm = halt_test_vm();
+        let f = add_function(&mut vm, 0, 0);
+        let d = desc(vec![WireNode::Closure { arity: 0 }]);
+        let cl = Value::closure_in(&mut vm.heap, f, &[]);
+        let foreign = encode_value(&d, &cl);
+        let (name, payload) = refusal_of(&mut vm, &d, &foreign);
+        assert_eq!(name, "OtherRun");
+        let runs: Vec<Vec<u8>> = payload
+            .iter()
+            .map(|v| bin_ref(v).full_bytes().into_owned())
+            .collect();
+        assert_eq!(
+            runs,
+            vec![
+                vm.run_id().to_bytes().to_vec(),
+                format_run().to_bytes().to_vec()
+            ]
+        );
+    }
+
+    /// `Op::Call` indexes `program.functions` unchecked, so a decoded index
+    /// past the table would panic on the first call. Judged at decode
+    /// instead, before anything is built — and so is an index past `i32`,
+    /// which the closure word could not even hold.
+    #[test]
+    fn a_closure_function_index_out_of_range_is_malformed_not_a_panic() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Closure { arity: 0 }]);
+        let past = vm.program.functions.len() as i32;
+        let bytes = closure_prefix(&vm, past, 0);
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[0].as_int().expect("Int payload"),
+            (HEADER_LEN + RunId::WIDTH) as i64
+        );
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "closure function index out of range"
+        );
+
+        let mut wide = header();
+        wide.extend_from_slice(&vm.run_id().to_bytes());
+        put_u64(&mut wide, u64::from(u32::MAX));
+        put_u64(&mut wide, 0);
+        assert_eq!(refusal_of(&mut vm, &d, &wide).0, "Malformed");
+    }
+
+    /// A count the function does not expect would surface as a capture-index
+    /// error or a native proof violation when the body ran; refused here.
+    /// Both directions — more and fewer — because a decoder that only guarded
+    /// against reading past the count would still pass the short ones.
+    #[test]
+    fn a_closure_capture_count_that_is_not_its_functions_is_malformed() {
+        let mut vm = halt_test_vm();
+        let f = add_function(&mut vm, 0, 2);
+        let d = desc(vec![WireNode::Closure { arity: 0 }]);
+        for claimed in [3u64, 1, 0] {
+            let mut bytes = closure_prefix(&vm, f, claimed);
+            for _ in 0..claimed {
+                bytes.push(CaptureTag::Nil as u8);
+            }
+            let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+            assert_eq!(name, "Malformed", "claimed {claimed}");
+            assert_eq!(
+                payload[0].as_int().expect("Int payload"),
+                (HEADER_LEN + RunId::WIDTH + 1) as i64,
+                "the offset is the count's"
+            );
+            assert_eq!(
+                payload[1].as_str().expect("Str payload"),
+                "closure capture count does not match its function"
+            );
+        }
+    }
+
+    /// An in-range index whose function takes another number of parameters
+    /// would decode to a value of another type; the descriptor's arity is
+    /// what catches it.
+    #[test]
+    fn a_closure_function_arity_that_is_not_the_types_is_malformed() {
+        let mut vm = halt_test_vm();
+        let two = add_function(&mut vm, 2, 0);
+        let cl = Value::closure_in(&mut vm.heap, two, &[]);
+        let at_one = desc(vec![WireNode::Closure { arity: 1 }]);
+        let bytes = encode_in(&vm, &at_one, &cl);
+        let (name, payload) = refusal_of(&mut vm, &at_one, &bytes);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "closure function arity does not match the type"
+        );
+        let at_two = desc(vec![WireNode::Closure { arity: 2 }]);
+        round_trips(&mut vm, &at_two, &cl);
+    }
+
+    #[test]
+    fn a_capture_tag_not_in_the_table_is_malformed() {
+        let mut vm = halt_test_vm();
+        let f = add_function(&mut vm, 0, 1);
+        let d = desc(vec![WireNode::Closure { arity: 0 }]);
+        for bad in [0u8, 14, 0xff] {
+            let mut bytes = closure_prefix(&vm, f, 1);
+            let tag_off = bytes.len();
+            bytes.push(bad);
+            let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+            assert_eq!(name, "Malformed", "tag {bad}");
+            assert_eq!(payload[0].as_int().expect("Int payload"), tag_off as i64);
+            assert_eq!(
+                payload[1].as_str().expect("Str payload"),
+                "capture tag is not in the table"
+            );
+        }
+    }
+
+    /// The format is canonical: a bool is 0 or 1 and nothing else.
+    #[test]
+    fn a_bool_capture_that_is_not_0_or_1_is_malformed() {
+        let mut vm = halt_test_vm();
+        let f = add_function(&mut vm, 0, 1);
+        let d = desc(vec![WireNode::Closure { arity: 0 }]);
+        let mut bytes = closure_prefix(&vm, f, 1);
+        bytes.push(CaptureTag::Bool as u8);
+        bytes.push(2);
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "bool is not 0 or 1"
+        );
+    }
+
+    /// A closure among captures is judged against the table exactly as the
+    /// described one is — index and count — with no run in front, since the
+    /// enclosing row's run already gated it.
+    #[test]
+    fn a_nested_closure_is_judged_against_the_table_too() {
+        let mut vm = halt_test_vm();
+        let outer = add_function(&mut vm, 0, 1);
+        let inner = add_function(&mut vm, 0, 0);
+        let d = desc(vec![WireNode::Closure { arity: 0 }]);
+        let leaf = Value::closure_in(&mut vm.heap, inner, &[]);
+        let cl = Value::closure_in(&mut vm.heap, outer, &[leaf]);
+        let good = encode_in(&vm, &d, &cl);
+        // Header, the described row, the tag, then the nested index and count.
+        let nested_idx = HEADER_LEN + CLOSURE_MIN_BYTES as usize + 1;
+        assert_eq!(
+            good[nested_idx], inner as u8,
+            "premise: the nested index sits here"
+        );
+        assert_eq!(
+            good.len(),
+            nested_idx + 2,
+            "no run in front of a nested closure"
+        );
+        round_trips(&mut vm, &d, &cl);
+
+        let mut bad_idx = good.clone();
+        bad_idx[nested_idx] = 99;
+        let (name, payload) = refusal_of(&mut vm, &d, &bad_idx);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "closure function index out of range"
+        );
+
+        let mut bad_count = good;
+        bad_count[nested_idx + 1] = 1;
+        bad_count.push(CaptureTag::Nil as u8);
+        let (name, payload) = refusal_of(&mut vm, &d, &bad_count);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "closure capture count does not match its function"
+        );
+    }
+
+    /// A handle among captures is the identity row, judged kind, run, id —
+    /// with every kind in the table admitted, since there is no descriptor to
+    /// say which.
+    #[test]
+    fn a_handle_capture_is_judged_like_an_identity() {
+        let mut vm = halt_test_vm();
+        let f = add_function(&mut vm, 0, 1);
+        let d = desc(vec![WireNode::Closure { arity: 0 }]);
+        let cl = Value::closure_in(&mut vm.heap, f, &[Value::pid(3)]);
+        let good = encode_in(&vm, &d, &cl);
+        let row = HEADER_LEN + CLOSURE_MIN_BYTES as usize + 1;
+        assert_eq!(
+            good[row + RunId::WIDTH],
+            HandleKind::Pid as u8,
+            "premise: the kind sits here"
+        );
+
+        let mut bad_kind = good.clone();
+        bad_kind[row + RunId::WIDTH] = 0xff;
+        let (name, payload) = refusal_of(&mut vm, &d, &bad_kind);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "handle kind is not in the table"
+        );
+
+        let mut other_run = good.clone();
+        other_run[row..row + RunId::WIDTH].copy_from_slice(&format_run().to_bytes());
+        assert_eq!(refusal_of(&mut vm, &d, &other_run).0, "OtherRun");
+
+        let mut wide = good[..row + RunId::WIDTH + 1].to_vec();
+        put_u64(&mut wide, 1 << 48);
+        let (name, payload) = refusal_of(&mut vm, &d, &wide);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "handle id out of range"
+        );
+
+        // A kind no descriptor could have said is still a kind.
+        let port = Value::socket(SocketValue {
+            id: 4,
+            kind: SocketKind::Port,
+        });
+        let cl = Value::closure_in(&mut vm.heap, f, &[port]);
+        round_trips(&mut vm, &d, &cl);
+    }
+
+    /// Every count inside a capture is guarded at a byte per element before
+    /// anything is allocated, as the typed walk's are.
+    #[test]
+    fn a_forged_count_inside_a_capture_is_refused_before_allocation() {
+        let mut vm = halt_test_vm();
+        let f = add_function(&mut vm, 0, 1);
+        let d = desc(vec![WireNode::Closure { arity: 0 }]);
+        for tag in [CaptureTag::Array, CaptureTag::Tuple, CaptureTag::Map] {
+            let mut bytes = closure_prefix(&vm, f, 1);
+            bytes.push(tag as u8);
+            let off = bytes.len();
+            put_u64(&mut bytes, 1u64 << 40);
+            let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+            assert_eq!(name, "Malformed", "{tag:?}");
+            assert_eq!(payload[0].as_int().expect("Int payload"), off as i64);
+            assert_eq!(
+                payload[1].as_str().expect("Str payload"),
+                "count is larger than the remaining input can hold"
+            );
+        }
+        // A record's label count, after a well-formed identity and names.
+        let mut bytes = closure_prefix(&vm, f, 1);
+        bytes.push(CaptureTag::Data as u8);
+        put_i64(&mut bytes, 9);
+        put_u64(&mut bytes, 0);
+        put_str(&mut bytes, "Event");
+        put_str(&mut bytes, "Joined");
+        let off = bytes.len();
+        put_u64(&mut bytes, 1u64 << 40);
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(name, "Malformed");
+        assert_eq!(payload[0].as_int().expect("Int payload"), off as i64);
+    }
+
+    /// A record whose identity the cell could not hold is refused rather
+    /// than truncated into some other type's.
+    #[test]
+    fn a_record_capture_with_an_identity_out_of_range_is_malformed() {
+        let mut vm = halt_test_vm();
+        let f = add_function(&mut vm, 0, 1);
+        let d = desc(vec![WireNode::Closure { arity: 0 }]);
+
+        let mut bytes = closure_prefix(&vm, f, 1);
+        bytes.push(CaptureTag::Data as u8);
+        put_i64(&mut bytes, i64::from(i32::MAX) + 1);
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "type id out of range"
+        );
+
+        let mut bytes = closure_prefix(&vm, f, 1);
+        bytes.push(CaptureTag::Data as u8);
+        put_i64(&mut bytes, 9);
+        put_u64(&mut bytes, 1 << 16);
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "variant index out of range"
+        );
+    }
+
+    /// A closure capturing a closure capturing a closure, 100k deep: both
+    /// walks carry their own work stack, so nesting costs heap rather than
+    /// native frames. Encode and decode both, at the depth a recursive
+    /// implementation was measured to overflow at.
+    #[test]
+    fn wire_closure_deep_nesting_is_iterative() {
+        let mut vm = halt_test_vm();
+        let wrap = add_function(&mut vm, 0, 1);
+        let leaf = add_function(&mut vm, 0, 0);
+        let d = desc(vec![WireNode::Closure { arity: 0 }]);
+        const DEPTH: usize = 100_000;
+        let mut v = Value::closure_in(&mut vm.heap, leaf, &[]);
+        for _ in 0..DEPTH {
+            v = Value::closure_in(&mut vm.heap, wrap, &[v]);
+        }
+        let bytes = encode_in(&vm, &d, &v);
+        // The described row, then DEPTH nested rows of tag, index and count.
+        assert_eq!(
+            bytes.len(),
+            HEADER_LEN + CLOSURE_MIN_BYTES as usize + 3 * DEPTH
+        );
+        let back = ok_of(&mut vm, &d, &bytes);
+        assert!(values_equal(&v, &back));
+    }
+
+    /// A closure's minimum is its fixed part — run, index, count — and the
+    /// count guard uses it: a short input claiming a thousand closures is
+    /// refused up front. With the arm reading zero this would pass the guard
+    /// and be discovered as `Truncated` at the first run.
+    #[test]
+    fn a_forged_count_of_closures_is_refused_by_the_closure_minimum() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![
+            WireNode::Array(WireNodeIdx(1)),
+            WireNode::Closure { arity: 0 },
+        ]);
+        assert_eq!(min_bytes(&d)[1], 18, "run 16, index 1, count 1");
         let mut bytes = header();
         put_u64(&mut bytes, 1000);
         let (name, payload) = refusal_of(&mut vm, &d, &bytes);
