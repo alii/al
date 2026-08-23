@@ -48,6 +48,30 @@ impl EnumTemplate {
         t
     }
 
+    /// A nullary constructor whose value is the immediate `word` rather than
+    /// a cell: the prelude's `True` and `False`, which `Op::PushTrue` and
+    /// `Op::PushFalse` push and no `Construct` ever allocates. Whoever asks
+    /// this template for its pre-built value gets the same bits the
+    /// interpreter pushes, so a `wire` decoder rebuilding `True` hands back
+    /// the immediate and not a cell the rest of the VM would not recognise.
+    pub fn unboxed(
+        fb: &mut FrozenBuilder,
+        type_id: TypeId,
+        variant_idx: u16,
+        type_name: &str,
+        variant_name: &str,
+        word: Value,
+    ) -> Self {
+        EnumTemplate {
+            type_id,
+            variant_idx,
+            enum_name: fb.str(type_name).into_value(),
+            variant_name: fb.str(variant_name).into_value(),
+            labels: fb.tuple(Vec::new()).into_value(),
+            nullary: Some(word),
+        }
+    }
+
     /// Build an instance carrying `payload` in `a`.
     #[inline]
     pub(crate) fn instantiate<A: Arena + ?Sized>(&self, a: &mut A, payload: &[Value]) -> Value {

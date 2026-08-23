@@ -28,7 +28,12 @@
 //! [`Node::Closure`] over its parameter and return types, which the runtime
 //! writes as the run that made the closure, its function index and its
 //! captures — each capture carrying its own tag, because the static type
-//! fixes neither how many there are nor what they hold.
+//! fixes neither how many there are nor what they hold. And a type no value
+//! has — a `pub type Name` with no body that is none of the five handles — is
+//! a [`Node::Uninhabited`] rather than a refusal: nothing can be written or
+//! read for it, and it is met only in a position the walk never takes, a
+//! phantom argument or a field of a constructor no value is. Refusing it
+//! refused `Tagged(Native)` over an `Int` field, whose bytes are the `Int`.
 //!
 //! Type identity is always [`TypeId`], never `Con.name`: a user's `type Parsed`
 //! and `scarlet/http/h1.Parsed` share a name and are different types.
@@ -58,7 +63,7 @@ use crate::types::StrId;
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
-fn wire_bug(why: &'static str) -> ! {
+pub(crate) fn wire_bug(why: &'static str) -> ! {
     panic!(
         "internal compiler error: {why} is well-typed but has no wire descriptor. \
          Report this as a compiler bug."
@@ -130,6 +135,11 @@ pub enum Node {
     /// keeps only the parameter count, which a decoder checks against the
     /// function the index names.
     Closure(Vec<NodeIdx>, NodeIdx),
+    /// A type no value has ([`Nominal::Uninhabited`]). One node for every
+    /// such type, as `Int` is one node: the fingerprint excludes names and
+    /// there is no structure to tell two apart. Never written or read — it
+    /// stands where the walk never goes.
+    Uninhabited,
 }
 
 /// The descriptor of one type: a node table, the node the type itself is, and
@@ -225,6 +235,7 @@ impl Desc {
                 Node::Closure(params, _) => RtNode::Closure {
                     arity: params.len() as u32,
                 },
+                Node::Uninhabited => RtNode::Uninhabited,
             })
             .collect();
         RtDesc::new(nodes, at(self.root), self.fingerprint())
@@ -322,11 +333,13 @@ pub enum Nominal {
     /// `net.Server`. Resolved by module identity in `Compiler::nominal`, never
     /// by name, so a user's `type Pid` is not one.
     Handle(HandleKind),
-    /// `pub type Name` with no body that is not a [`Nominal::Handle`]. It
-    /// declares no fields for the descriptor to walk, no constructor a decoder
-    /// could call, and the runtime has no identity to hand back for it, so
-    /// nothing can be rebuilt from whatever bytes were written.
-    Bodiless,
+    /// `pub type Name` with no body that is not a [`Nominal::Handle`]. No
+    /// Scarlet expression builds a value of it — it declares no constructor
+    /// and no VM table hands one out — so there is nothing to write and
+    /// nothing to read, and it describes as [`Node::Uninhabited`]. It was a
+    /// refusal (`Reason::Bodiless`) until 2026-08-22, which refused
+    /// `Tagged(Native)` for a node that no value ever reaches.
+    Uninhabited,
 }
 
 /// What the descriptor builder must ask about a nominal type.
@@ -372,27 +385,19 @@ pub enum Step {
 
 /// Why a type cannot cross the wire.
 ///
-/// Every arm names a way a peer cannot REBUILD the value. None of them claims
-/// the value has no byte representation — that criterion is wrong. It was
-/// first got wrong for `fn`, which had a `Function` arm here until 2026-08-22
-/// saying a closure's captures were not fixed by its type; they are not, and
-/// the answer was to describe each capture inline rather than to refuse.
-/// Erlang writes funs (`NEW_FUN_EXT`) and pids (`NEW_PID_EXT`); both cross
-/// here now too.
+/// One arm, and it is a fact about inference rather than about a value: the
+/// descriptor is a function of the static type, and a polymorphic type has
+/// none. Every arm about a VALUE has left this enum under the 2026-08-22
+/// ruling that everything encodes. `Function` went first — it said a
+/// closure's captures were not fixed by its type, which is true, and the
+/// answer was to describe each capture inline. `Bodiless` went last: a type
+/// no value has is a node the walk never reaches, not a reason to refuse the
+/// record around it. None of them ever claimed the value had no byte
+/// representation — that criterion is wrong, and Erlang writes funs
+/// (`NEW_FUN_EXT`) and pids (`NEW_PID_EXT`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     TypeVariable,
-    /// A `pub type Name` with no body that the runtime cannot hand back by
-    /// identity. Named for the declaration rather than for a verdict about
-    /// representability: it was `NoRepresentation`, and that name asserted the
-    /// very thing `describe` had to stop saying.
-    ///
-    /// Decided 2026-08-22 (owner): the five stdlib handles encode, as a
-    /// run-scoped identity, and since that landed they never reach this arm
-    /// ([`Nominal::Handle`] answers for them). What still does: a bodiless
-    /// type declared outside the stdlib, which no VM table backs, and the
-    /// compiler's own unresolved-type states.
-    Bodiless,
 }
 
 impl Reason {
@@ -402,15 +407,6 @@ impl Reason {
         match self {
             Reason::TypeVariable => {
                 "the type is still polymorphic here, so its representation is not known"
-            }
-            // NOT "has no representation outside this program". Erlang
-            // writes a pid with `NEW_PID_EXT`, and the five stdlib handles
-            // do encode, as `Node::Identity`. This text is for a bodiless
-            // type that is none of them, and it names what is missing rather
-            // than claiming impossibility.
-            Reason::Bodiless => {
-                "the type is host-backed: it declares no fields to write and no constructor a \
-                 decoder could call, so a peer cannot rebuild one"
             }
         }
     }
@@ -454,12 +450,14 @@ impl WireRefusal {
 
     /// The diagnostic this refusal reports at a `wire` call site.
     ///
-    /// An unresolved type is worded as an instruction rather than as a
-    /// property: it is the one refusal a programmer clears by writing an
-    /// annotation instead of by not putting the type on the wire. Every other
-    /// reason names the property that fails, and the path says where — a
-    /// refusal three levels into a record that says only "cannot encode"
-    /// leaves the reader to find which field it meant.
+    /// An unresolved type at the root is worded as an instruction rather
+    /// than as a property: the programmer clears it by writing an annotation
+    /// instead of by not putting the type on the wire. Reached through a
+    /// path — `decode` at `Box(a)` with `a` unknown, or a generic function
+    /// encoding `Outer(a)` — the refusal names the property and the path
+    /// says where the unknown is, because a refusal three levels into a
+    /// record that says only "cannot encode" leaves the reader to find
+    /// which field it meant.
     pub(crate) fn message<C: WireCtx + ?Sized>(
         &self,
         cx: &C,
@@ -583,6 +581,8 @@ enum Key {
     Handle(HandleKind, SmallVec<[NodeIdx; 4]>),
     /// Parameters then return, so `fn(Int) Int` twice is one node.
     Fun(SmallVec<[NodeIdx; 4]>, NodeIdx),
+    /// Every type no value has, as one node: there is nothing to key on.
+    Uninhabited,
 }
 
 /// Version of the fingerprint algorithm, folded in first so that a change to
@@ -595,7 +595,10 @@ enum Key {
 ///
 /// 3 since kind tag 10 (a closure node) joined the algorithm, as 2 was for
 /// tag 9 (an identity node); the format version byte in
-/// `scarlet_vm::vm::wire` moved with it both times.
+/// `scarlet_vm::vm::wire` moved with it both times. Kind tag 14 (an
+/// uninhabited node) joined under 3 without a bump: a change bumps when it
+/// alters a fingerprint some peer already holds, and types that describe as
+/// tag 14 had no fingerprint before — they refused.
 const FINGERPRINT_VERSION: u64 = 3;
 
 const FINGERPRINT_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -694,6 +697,11 @@ fn fingerprint_of<C: WireCtx + ?Sized>(cx: &C, nodes: &[Node], root: NodeIdx) ->
                 }
                 mix(h, u64::from(ret.0))
             }
+            // The tag alone: an uninhabited type has no structure. 14 and
+            // not 11: the capture format numbers its tags from this table
+            // and takes 11–13 for Nil, Bool and Range, which have no node
+            // kind, so the two tables stay one number space.
+            Node::Uninhabited => mix(h, 14),
         };
     }
     h
@@ -793,25 +801,27 @@ impl<C: WireCtx + ?Sized> Build<'_, C> {
             }
             ResolvedNode::Con { id, args, .. } => {
                 let args: SmallVec<[RTy; 4]> = self.pool.children(args).into();
-                self.con(t, id, &args, path)
+                self.con(id, &args, path)
             }
         }
     }
 
     fn con(
         &mut self,
-        t: RTy,
         id: TypeId,
         args: &[RTy],
         path: &mut Vec<Step>,
     ) -> Result<NodeIdx, WireRefusal> {
         match self.cx.nominal(self.pool, id) {
-            Nominal::Bodiless => Err(self.refuse(t, Reason::Bodiless, path)),
+            // No value, so no structure and no arguments worth walking: a
+            // `pub type Name` has none to be applied to.
+            Nominal::Uninhabited => Ok(self.intern(Key::Uninhabited, || Node::Uninhabited)),
 
             // The arguments are walked for the same reason `data` walks a
             // phantom parameter: encodability is a property of the type, and
-            // `Subject(fn(Int) Int)` refuses at the `fn` like `Phantom(fn)`
-            // does. No path step — a handle is a leaf the way `Int` is.
+            // `Subject(a)` with `a` unknown refuses at the `a` like
+            // `Phantom(a)` does. No path step — a handle is a leaf the way
+            // `Int` is.
             Nominal::Handle(kind) => {
                 let mut arg_nodes: SmallVec<[NodeIdx; 4]> = SmallVec::new();
                 for a in args {
@@ -879,10 +889,11 @@ impl<C: WireCtx + ?Sized> Build<'_, C> {
         let mut arg_nodes: SmallVec<[NodeIdx; 4]> = SmallVec::new();
         for a in args {
             // A type argument is described even when no constructor mentions
-            // it. `Phantom(a)` still refuses at `a`, so the same type is
-            // encodable or not regardless of which constructors it happens to
-            // have — the alternative makes encodability depend on a body the
-            // caller cannot see.
+            // it. `Phantom(a)` with `a` unknown still refuses at `a`, so the
+            // same type is encodable or not regardless of which constructors
+            // it happens to have — the alternative makes encodability depend
+            // on a body the caller cannot see. `Phantom(Native)` describes:
+            // the argument is a node no value reaches, not a refusal.
             arg_nodes.push(self.walk(*a, path)?);
         }
 
@@ -1010,10 +1021,11 @@ mod tests {
         }
 
         /// `pub type Native` — a user-declared bodiless type, which no VM
-        /// table backs. The one refusal about a VALUE the ruling leaves, so
-        /// it is what the path tests are reached through.
+        /// table backs and no expression builds. Described as uninhabited
+        /// since 2026-08-22; until then the one refusal about a VALUE, and
+        /// what the path tests were reached through.
         fn native(&mut self) -> RTy {
-            self.types.insert(NATIVE, Nominal::Bodiless);
+            self.types.insert(NATIVE, Nominal::Uninhabited);
             self.con(NATIVE, "Native", &[])
         }
 
@@ -1069,9 +1081,9 @@ mod tests {
         fn nominal(&mut self, _pool: &mut ResolvedPool, id: TypeId) -> Nominal {
             match self.types.get(&id) {
                 Some(n) => n.clone(),
-                // An id the test never declared is host-backed, which is what
-                // an undeclared id means in a real compile too.
-                None => Nominal::Bodiless,
+                // A real compile aborts on an undeclared id (`wire_bug`); a
+                // test that reaches one has a typo, and is told so.
+                None => panic!("the fixture declares no type {id:?}"),
             }
         }
 
@@ -1213,32 +1225,24 @@ mod tests {
     }
 
     /// The signature is walked the way a tuple's elements are: a parameter or
-    /// return that cannot cross refuses, with a path step naming which.
+    /// return that cannot cross refuses, with a path step naming which. The
+    /// unknown type is the one refusal left to reach them through.
     #[test]
     fn a_closure_refuses_through_its_parameter_and_return_with_a_path() {
         let mut f = Fixture::new();
         let int = f.int();
-        let native = f.native();
-
-        let bad_param = f.pool.mk_fun(&[int, native], int);
-        let at_param = refusal(f.build(bad_param));
-        assert_eq!(at_param.reason, Reason::Bodiless);
-        assert_eq!(
-            at_param.ty, native,
-            "the refusal names the parameter's type"
-        );
-
-        let bad_ret = f.pool.mk_fun(&[int], native);
-        let at_ret = refusal(f.build(bad_ret));
-        assert_eq!(at_ret.reason, Reason::Bodiless);
-
-        // A polymorphic parameter is the inference refusal, reached through
-        // the same step.
         let a = f.bound(0);
-        let generic = f.pool.mk_fun(&[a], int);
-        let at_var = refusal(f.build(generic));
-        assert_eq!(at_var.reason, Reason::TypeVariable);
-        assert_eq!(at_var.path, vec![Step::Param(0)]);
+
+        let bad_param = f.pool.mk_fun(&[int, a], int);
+        let at_param = refusal(f.build(bad_param));
+        assert_eq!(at_param.reason, Reason::TypeVariable);
+        assert_eq!(at_param.ty, a, "the refusal names the parameter's type");
+        assert_eq!(at_param.path, vec![Step::Param(1)]);
+
+        let bad_ret = f.pool.mk_fun(&[int], a);
+        let at_ret = refusal(f.build(bad_ret));
+        assert_eq!(at_ret.reason, Reason::TypeVariable);
+        assert_eq!(at_ret.path, vec![Step::Return]);
 
         let cx = Decls {
             names: &f.names,
@@ -1246,6 +1250,16 @@ mod tests {
         };
         assert_eq!(at_param.path_text(&cx), "[param 1]");
         assert_eq!(at_ret.path_text(&cx), "[return]");
+
+        // An uninhabited parameter is not a refusal: the closure describes,
+        // with the node where the parameter is.
+        let native = f.native();
+        let phantom = f.pool.mk_fun(&[native], int);
+        let d = desc(f.build(phantom));
+        let Some(Node::Closure(params, _)) = d.node(d.root()) else {
+            panic!("root is not a Closure: {:?}", d.node(d.root()))
+        };
+        assert_eq!(d.node(params[0]), Some(&Node::Uninhabited));
     }
 
     // --- the encodability table, refusing direction ---
@@ -1262,16 +1276,56 @@ mod tests {
         );
     }
 
-    /// A bodiless type that is none of the five handles: the runtime has no
-    /// table to hand a value of it back from, so it still refuses.
+    /// A bodiless type that is none of the five handles: no expression builds
+    /// a value of it and no table hands one back, so it is a node no value
+    /// reaches rather than a refusal. Refused as `Bodiless` until 2026-08-22.
+    /// Two such types are one node, as two `Int`s are: the fingerprint
+    /// excludes names and there is no structure to tell them apart.
     #[test]
-    fn a_bodiless_type_that_is_not_a_handle_is_refused() {
+    fn a_bodiless_type_that_is_not_a_handle_describes_as_uninhabited() {
         let mut f = Fixture::new();
-        let native = TypeId(30);
-        f.types.insert(native, Nominal::Bodiless);
-        let t = f.con(native, "Native", &[]);
-        let e = refusal(f.build(t));
-        assert_eq!(e.reason, Reason::Bodiless);
+        let native = f.native();
+        let d = desc(f.build(native));
+        assert_eq!(d.node(d.root()), Some(&Node::Uninhabited));
+        assert_eq!(d.len(), 1);
+
+        let other = TypeId(30);
+        f.types.insert(other, Nominal::Uninhabited);
+        let other_t = f.con(other, "Other", &[]);
+        let pair = f.pool.mk_tuple(&[native, other_t]);
+        let d = desc(f.build(pair));
+        assert_eq!(d.len(), 2, "one uninhabited node and the tuple");
+    }
+
+    /// `Tagged(Native)` over an `Int` field: the descriptor builds, the
+    /// argument is a node in the table, and the record's one field is the
+    /// `Int`. This is the program the old refusal turned away — its bytes
+    /// are the `Int`'s, and the argument is never written or read.
+    #[test]
+    fn a_record_over_a_phantom_uninhabited_argument_builds_a_descriptor() {
+        let mut f = Fixture::new();
+        let int = f.int();
+        let native = f.native();
+        let tagged = TypeId(31);
+        let c = f.ctor(tagged, "Tagged", 0, "Tagged", &[("value", int)]);
+        f.data(tagged, vec![c]);
+        let t = f.con(tagged, "Tagged", &[native]);
+        let d = desc(f.build(t));
+        let Some(Node::Data(vs)) = d.node(d.root()) else {
+            panic!("root is not Data: {:?}", d.node(d.root()))
+        };
+        assert_eq!(vs.len(), 1);
+        assert_eq!(vs[0].fields.len(), 1);
+        assert_eq!(d.node(vs[0].fields[0].node), Some(&Node::Int));
+        assert_eq!(d.len(), 3, "Uninhabited, the record and Int");
+        assert!(
+            d.nodes.contains(&Node::Uninhabited),
+            "the argument is in the table, on no path the walk takes"
+        );
+
+        // And it is its own shape: `Tagged(Native)` is not `Tagged(Int)`.
+        let at_int = f.con(tagged, "Tagged", &[int]);
+        assert_ne!(d.fingerprint(), desc(f.build(at_int)).fingerprint());
     }
 
     /// A handle is a leaf node of its kind, one per kind per type-argument
@@ -1312,10 +1366,10 @@ mod tests {
         assert_eq!(args.len(), 1);
         assert_eq!(d.node(args[0]), Some(&Node::String));
 
-        let bad = f.native();
-        let t = f.con(subj, "Subject", &[bad]);
+        let a = f.bound(0);
+        let t = f.con(subj, "Subject", &[a]);
         let e = refusal(f.build(t));
-        assert_eq!(e.reason, Reason::Bodiless);
+        assert_eq!(e.reason, Reason::TypeVariable);
         assert!(
             e.path.is_empty(),
             "a handle is a leaf: no path step for its argument"
@@ -1489,14 +1543,22 @@ mod tests {
     // --- the path a refusal carries ---
     //
     // Each of these was reached through a `fn` field until 2026-08-22, when
-    // closures began to cross; `Native` — a user-declared bodiless type — is
-    // the refusal about a value that the ruling leaves, so it is the one the
-    // path machinery is witnessed through now.
+    // closures began to cross, then through `Native` until a bodiless type
+    // became a node the same day. What is left to reach them through is the
+    // unknown type, and that is the diagnostic the path serves now: it says
+    // where the unknown is. One limit, stated so nobody looks for the
+    // program that reaches it: `data` walks a type's ARGUMENTS before its
+    // fields, and a field can only hold a variable the type was applied to,
+    // so a real compile refuses `Outer(a)` at the argument with no path. A
+    // `Field` step is therefore reached only by this fixture, which can
+    // declare a non-generic constructor over a bound variable; the
+    // positional steps — element, key, value, tuple, parameter, return — are
+    // the ones a program produces (`type_errors.rs`, `wire_descriptor.rs`).
 
     #[test]
     fn a_refusal_three_levels_down_names_the_full_field_path() {
         let mut f = Fixture::new();
-        let bad = f.native();
+        let bad = f.bound(0);
 
         let inner = TypeId(70);
         let ic = f.ctor(inner, "Inner", 0, "Inner", &[("f", bad)]);
@@ -1514,7 +1576,7 @@ mod tests {
         let outer_t = f.con(outer, "Outer", &[]);
 
         let e = refusal(f.build(outer_t));
-        assert_eq!(e.reason, Reason::Bodiless);
+        assert_eq!(e.reason, Reason::TypeVariable);
         assert_eq!(e.ty, bad, "the refusal names the offending sub-type");
 
         let cx = Decls {
@@ -1528,12 +1590,13 @@ mod tests {
     fn a_refusal_inside_a_container_names_the_position() {
         let mut f = Fixture::new();
         let int = f.int();
-        let bad = f.native();
+        let bad = f.bound(0);
         let arr = f.con(ARRAY, "Array", &[bad]);
         let m = f.con(MAP, "Map", &[int, arr]);
         let t = f.pool.mk_tuple(&[int, m]);
 
         let e = refusal(f.build(t));
+        assert_eq!(e.reason, Reason::TypeVariable);
         let cx = Decls {
             names: &f.names,
             types: &f.types,
@@ -1547,7 +1610,7 @@ mod tests {
     fn a_path_step_names_its_variant() {
         let mut f = Fixture::new();
         let int = f.int();
-        let bad = f.native();
+        let bad = f.bound(0);
         let e_id = TypeId(80);
         let good = f.ctor(e_id, "Either", 0, "Left", &[("value", int)]);
         let evil = f.ctor(e_id, "Either", 1, "Right", &[("value", bad)]);
@@ -1575,16 +1638,26 @@ mod tests {
         assert_eq!(d.node(d.root()), Some(&Node::Int));
     }
 
+    /// `type Id(a) = a` at an unknown `a` refuses at the target; an alias to
+    /// an uninhabited type is looked through to the node, as an alias to
+    /// anything else is to its target.
     #[test]
     fn an_alias_to_an_unencodable_type_refuses_at_the_target() {
         let mut f = Fixture::new();
-        let bad = f.native();
-        let handler = TypeId(91);
-        f.types.insert(handler, Nominal::Alias(bad));
-        let t = f.con(handler, "Handle", &[]);
+        let a = f.bound(0);
+        let id = TypeId(91);
+        f.types.insert(id, Nominal::Alias(a));
+        let t = f.con(id, "Id", &[a]);
         let e = refusal(f.build(t));
-        assert_eq!(e.reason, Reason::Bodiless);
+        assert_eq!(e.reason, Reason::TypeVariable);
         assert!(e.path.is_empty(), "an alias is a spelling, not a level");
+
+        let native = f.native();
+        let handle = TypeId(92);
+        f.types.insert(handle, Nominal::Alias(native));
+        let t = f.con(handle, "Handle", &[]);
+        let d = desc(f.build(t));
+        assert_eq!(d.node(d.root()), Some(&Node::Uninhabited));
     }
 
     /// An alias to a function type is looked through to a closure node, as
@@ -1855,16 +1928,20 @@ mod tests {
 
     /// A phantom parameter still has to be encodable: encodability is a
     /// property of the type, not of which parameters its constructors read.
+    /// `Phantom(a)` with `a` unknown refuses at `a`, with no path step — an
+    /// argument is not a field, and it is walked before any field is.
     #[test]
     fn an_unused_type_argument_is_still_described() {
         let mut f = Fixture::new();
         let int = f.int();
-        let bad = f.native();
+        let a = f.bound(0);
         let ph = TypeId(93);
         let c = f.ctor(ph, "Phantom", 0, "Phantom", &[("n", int)]);
         f.data(ph, vec![c]);
-        let t = f.con(ph, "Phantom", &[bad]);
-        assert_eq!(refusal(f.build(t)).reason, Reason::Bodiless);
+        let t = f.con(ph, "Phantom", &[a]);
+        let e = refusal(f.build(t));
+        assert_eq!(e.reason, Reason::TypeVariable);
+        assert!(e.path.is_empty());
     }
 
     /// The fingerprint excludes names, so the signature is what keeps
@@ -1930,6 +2007,69 @@ mod tests {
         );
     }
 
+    /// The fingerprint excludes names, so the tag is what keeps an
+    /// uninhabited type apart from the scalars and from `Nil` — a
+    /// one-constructor `Data` type that also occupies zero bytes on the
+    /// wire. Same table size, other tag.
+    #[test]
+    fn an_uninhabited_type_gets_its_own_fingerprint() {
+        let mut f = Fixture::new();
+        let native = f.native();
+        let int = f.int();
+        let nil_id = TypeId(94);
+        let nil_c = f.ctor(nil_id, "Nil", 0, "Nil", &[]);
+        f.data(nil_id, vec![nil_c]);
+        let nil = f.con(nil_id, "Nil", &[]);
+        let fp_of = |f: &mut Fixture, t: RTy| desc(f.build(t)).fingerprint();
+
+        let fp_native = fp_of(&mut f, native);
+        assert_ne!(fp_native, fp_of(&mut f, int), "Native vs Int");
+        assert_ne!(
+            fp_native,
+            fp_of(&mut f, nil),
+            "Native vs Nil: both zero bytes, other tag"
+        );
+        assert_eq!(fp_native, fp_of(&mut f, native), "stable");
+    }
+
+    /// The number itself, computed from `wire.scrl`'s specification by hand
+    /// rather than through `mix`: the basis mixed with version 3, then one
+    /// node, then root 0, then tag 14 alone. A second implementation
+    /// produces this, and `wire_uninhabited.rs` writes it into a header
+    /// from Scarlet and decodes against it — so the two instruments agree.
+    #[test]
+    fn the_uninhabited_fingerprint_is_the_tag_alone() {
+        let mut f = Fixture::new();
+        let native = f.native();
+        assert_eq!(desc(f.build(native)).fingerprint(), 0xf5c9_9787_f8eb_c4ff);
+    }
+
+    /// The diagnostic the path serves now that the unknown type is the one
+    /// refusal: at the root it is an instruction, and through a path it
+    /// names the unknown and where it is.
+    #[test]
+    fn a_type_variable_through_a_path_is_reported_with_the_path() {
+        let mut f = Fixture::new();
+        let int = f.int();
+        let a = f.bound(0);
+        let t = f.pool.mk_tuple(&[int, a]);
+        let through = refusal(f.build(t));
+        let root = refusal(f.build(a));
+        let cx = Decls {
+            names: &f.names,
+            types: &f.types,
+        };
+        assert_eq!(
+            through.message(&cx, &f.pool, WireOp::Decode),
+            "`wire.decode` cannot decode `a`: the type is still polymorphic here, so its \
+             representation is not known (through [1])"
+        );
+        assert_eq!(
+            root.message(&cx, &f.pool, WireOp::Decode),
+            "the type `wire.decode` produces here is not known; annotate the binding"
+        );
+    }
+
     /// THE CRITERION, asserted over every reason rather than one at a time.
     ///
     /// A golden pins the text a refusal has today; this pins the property all
@@ -1947,14 +2087,15 @@ mod tests {
     /// tripwire that brings the author to this test, not a proof of coverage.
     ///
     /// `ALL` was three until 2026-08-22; `Function` left it when closures
-    /// began to cross, which is the criterion winning rather than a case of
-    /// it being dropped.
+    /// began to cross and `Bodiless` when a type no value has became a node,
+    /// which is the criterion winning twice rather than two cases of it
+    /// being dropped.
     #[test]
     fn no_refusal_claims_the_type_has_no_representation() {
-        const ALL: [Reason; 2] = [Reason::TypeVariable, Reason::Bodiless];
+        const ALL: [Reason; 1] = [Reason::TypeVariable];
         for r in ALL {
             match r {
-                Reason::TypeVariable | Reason::Bodiless => {}
+                Reason::TypeVariable => {}
             }
             let text = r.describe();
             assert!(
@@ -1996,6 +2137,7 @@ mod tests {
                 Node::Int,
                 Node::Identity(HandleKind::Subject, vec![NodeIdx(1)]),
                 Node::Closure(vec![NodeIdx(1), NodeIdx(1)], NodeIdx(2)),
+                Node::Uninhabited,
             ],
             root: NodeIdx(0),
             fingerprint: 0xdead_beef_0bad_f00d,
@@ -2012,6 +2154,7 @@ mod tests {
                 RtNode::Int,
                 RtNode::Identity(HandleKind::Subject),
                 RtNode::Closure { arity: 2 },
+                RtNode::Uninhabited,
             ],
             RtIdx(0),
             0xdead_beef_0bad_f00d,

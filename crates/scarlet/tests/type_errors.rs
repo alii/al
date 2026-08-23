@@ -581,55 +581,61 @@ ok_case! {
 /// An unencodable type three levels down, and the assertion is the PATH.
 ///
 /// This is the case the path machinery exists for: a refusal that says only
-/// "cannot encode `Outer`" leaves the reader to find which of nine fields it
+/// "cannot encode" leaves the reader to find which of nine positions it
 /// meant. The full chain is asserted, not merely that a refusal happened.
 ///
-/// All three types are `pub` so that the only rule that may refuse this
-/// program is the one about the bodiless type, and not the visibility one
-/// that stood in front of it until 2026-08-22.
-///
-/// The field at the bottom was a `Subject(String)` until that day, when the
-/// five stdlib handles began to cross the wire as identities, and a `fn`
-/// until closures did the same day; both programs now run
-/// (`wire_handles.rs::a_subject_three_levels_down_round_trips`,
-/// `wire_closures.rs`). What the ruling leaves for a value is a user-declared
-/// bodiless type, which no VM table backs, so the path witness stands on
-/// that — and `send` is never called, since nothing can construct a `Native`,
-/// which is fine on a path that never runs.
+/// The type at the bottom was a `Subject(String)` until 2026-08-22, when the
+/// five stdlib handles began to cross the wire as identities; a `fn` until
+/// closures did the same day; and a user-declared bodiless type until that
+/// became a node no value reaches, later the same day. All three programs
+/// now run or check clean. What the ruling leaves is the unknown type, so
+/// the path witness stands on a generic function encoding its parameter —
+/// and on a positional shape, because a `Data` node's type arguments are
+/// walked before its fields: `Outer(a)` refuses at the argument with no
+/// path, and a field can hold nothing a type was not applied to.
 #[test]
-fn wire_names_the_whole_field_path_down_to_the_refusing_type() {
+fn wire_names_the_whole_path_down_to_the_refusing_type() {
     let all = wire_rejects(
         "import scarlet/wire\n\
-         pub type Native\n\
-         pub type Inner {\n\
-         \tInner(raw Native)\n\
-         }\n\
-         pub type Middle {\n\
-         \tMiddle(inner Inner)\n\
-         }\n\
-         pub type Outer {\n\
-         \tOuter(mid Middle)\n\
-         }\n\
-         fn send(o Outer) Binary {\n\
+         fn send(o (Int, Map(String, Array(a)))) Binary {\n\
          \twire.encode(o)\n\
          }\n\
          pub fn main() {\n\
          \t_ = send\n\
          }\n",
-        "Outer.mid -> Middle.inner -> Inner.raw",
+        "[1] -> [value] -> [element]",
     );
     assert!(
-        all.contains("`Native`"),
+        all.contains("cannot encode `a`"),
         "the refusal names the offending sub-type, not the type the call named:\n{all}"
     );
     assert!(
-        all.contains("the type is host-backed"),
-        "the reason must be given, and it must name what is missing:\n{all}"
+        all.contains("the type is still polymorphic here"),
+        "the reason must be given:\n{all}"
     );
     assert!(
         !all.contains("no representation"),
         "the corrected rationale must not regress:\n{all}"
     );
+}
+
+const TAGGED_NATIVE: &str = "import scarlet/wire\n\
+                             pub type Native\n\
+                             type Tagged(t) {\n\
+                             \tTagged(value Int)\n\
+                             }\n\
+                             fn tag(n Int) Tagged(Native) {\n\
+                             \tTagged(n)\n\
+                             }\n\
+                             pub fn main() {\n\
+                             \tprintln(wire.encode(tag(7)))\n\
+                             }\n";
+
+ok_case! {
+    /// `Tagged(Native)` over an `Int` field checks clean. Refused until
+    /// 2026-08-22 at the phantom argument, for a node no value reaches: the
+    /// bytes are the `Int`'s. Its round trip is `wire_uninhabited.rs`.
+    a_phantom_of_a_bodiless_type_is_admitted: (TAGGED_NATIVE),
 }
 
 /// `decode` with nothing to fix its payload, and `decode` inside a generic

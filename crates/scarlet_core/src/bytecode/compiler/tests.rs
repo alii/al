@@ -1252,11 +1252,30 @@ mod wire_descriptors {
 
     /// The arm that silently does not happen if the builder is run at
     /// emission instead: `check` never emits, so a diagnostic raised there is
-    /// invisible in an editor. Reached through a user-declared bodiless type
-    /// — the one refusal about a value the ruling leaves; it was a `fn` field
-    /// until 2026-08-22.
+    /// invisible in an editor. Reached through the unknown type — the one
+    /// refusal the ruling leaves; it was a `fn` field until 2026-08-22 and a
+    /// user-declared bodiless type until later that day.
     #[test]
     fn the_refusal_reaches_the_check_only_path() {
+        let src = "import scarlet/wire\n\
+                   fn send(xs Array(a)) Binary { wire.encode(xs) }\n\
+                   send\n";
+        let checked = errors(src, true);
+        assert!(
+            checked.contains("the type is still polymorphic here"),
+            "check-only must report the refusal too, got: {checked}"
+        );
+        assert!(
+            checked.contains("[element]"),
+            "the refusal must name the position it was reached through: {checked}"
+        );
+    }
+
+    /// A record over a user-declared bodiless type compiles and carries a
+    /// descriptor: the field is a node no value reaches, not a refusal.
+    /// This program was the refusal fixture above until 2026-08-22.
+    #[test]
+    fn a_bodiless_field_compiles_and_carries_a_descriptor() {
         let src = "import scarlet/wire\n\
                    pub type Native\n\
                    type Handler {\n\
@@ -1264,14 +1283,29 @@ mod wire_descriptors {
                    }\n\
                    fn send(h Handler) Binary { wire.encode(h) }\n\
                    send\n";
-        let checked = errors(src, true);
-        assert!(
-            checked.contains("the type is host-backed"),
-            "check-only must report the refusal too, got: {checked}"
-        );
-        assert!(
-            checked.contains("Handler.raw"),
-            "the refusal must name the field it was reached through: {checked}"
+        assert_eq!(errors(src, true), "", "check-only admits it");
+        let p = emitted(src);
+        assert_eq!(p.wire_descs.len(), 1, "one type crossed, one descriptor");
+    }
+
+    /// The prelude's `True` and `False` are minted unboxed: the pre-built
+    /// value a decoder hands back is the immediate `Op::PushTrue` and
+    /// `Op::PushFalse` push, in the declared order — `True` 0, `False` 1 —
+    /// which is the tag the encoder writes. Every other constructor minted
+    /// here is a cell, so the two are the only entries whose value is not.
+    #[test]
+    fn bools_constructors_mint_unboxed_templates() {
+        let p = emitted("import scarlet/wire\nwire.encode(True)\n");
+        let mut unboxed: Vec<(u16, bool)> = p
+            .wire_templates
+            .keys()
+            .filter_map(|&(tid, vi)| Some((vi, p.wire_nullary(tid, vi)?.as_bool()?)))
+            .collect();
+        unboxed.sort();
+        assert_eq!(
+            unboxed,
+            vec![(0, true), (1, false)],
+            "True is 0 and False is 1, as scarlet.scrl declares them"
         );
     }
 }

@@ -40,6 +40,14 @@
  * between two runs of ONE binary, which needs a program hash beside the run
  * identity and is clustering work.
  *
+ * A type no value has - a `pub type Name` with no body that is none of the
+ * five handles - is described rather than refused (2026-08-22, closing the
+ * last refusal about a value): an uninhabited node, never written and never
+ * read, that stands only where the walk never goes - the phantom argument
+ * of Tagged(Native), the element of an empty Array(Native), the payload of
+ * a None. The bytes of such a record are its other fields', which is what
+ * the refusal was turning away.
+ *
  * A decoded Subject is a handle to the mailbox and never a second owner of
  * it: only the process that called `subject()` can receive, and the mailbox
  * is reclaimed on that owner's terms whatever copies exist, exactly as for a
@@ -86,7 +94,13 @@
  * the same whatever it carries. Closure 10 then the parameter count, each
  * parameter's index, then the return's index - so fn(Int) Int and
  * fn(String) Int differ, and fn(Int) Int and fn() Int differ, though a
- * closure's bytes hold none of its signature.
+ * closure's bytes hold none of its signature. Uninhabited 14, the tag alone:
+ * a type no value has has no structure, and every such type is one node, as
+ * every Int is. 11, 12 and 13 are not node kinds and are not free: the
+ * capture format below numbers its tags from this table and holds them for
+ * Nil, Bool and Range, so that the two tables are one number space and a
+ * number means one thing wherever it is read. The next free number in
+ * either table is 15.
  *
  * The handle kind is one byte, and the table is a stable wire surface: a
  * kind keeps its number forever and a new one takes the next free number.
@@ -121,11 +135,20 @@
  * VERSION above with it - the same byte "The byte format" below reads. The
  * fingerprint travels in every message: an algorithm change that left the
  * version alone would surface at a peer as a SchemaMismatch on a type nobody
- * had touched.
+ * had touched. "Changing" is exactly that: a change that alters an output
+ * some peer already holds - a tag renumbered, a fold reordered, a word added
+ * to an existing row - bumps. A change that only ADDS an output, giving a
+ * fingerprint or a byte layout to a type that had none because it refused,
+ * does not: no number any peer holds moves, so nothing can be misread.
  *
  * Version history. 1 had kind tags 1-8 and no identity row. 2 (2026-08-22)
  * added Identity 9 and the identity row below. 3 (2026-08-22) added Closure
- * 10, the closure row and the capture format. Version 1 was written by the
+ * 10, the closure row and the capture format; later the same day, and
+ * without a bump by the rule above, Uninhabited 14 - a type no value has
+ * describes instead of refusing, and no fingerprint a version-3 peer holds
+ * moved. 3 also fixes Bool under the typed encoder, which never produced
+ * valid bytes before (a debug panic, or a body with nothing in it); no
+ * version bump because no valid output changed. Version 1 was written by the
  * canary builds tagged 0.0.1-canary.20260820.2050 through
  * 0.0.1-canary.20260822.2154 - it was not confined to unreleased trees.
  * Version 2 was written by whatever was built from master between c8c23db
@@ -173,6 +196,13 @@
  *           table the closure runs, zero-extended; `capture_count` is the
  *           number of words it closed over, which the static type does not
  *           fix and the bytes therefore must
+ *   Uninhabited  nothing. No value of the type exists, so the node is never
+ *           written: it stands only where the walk never goes, and a decoder
+ *           steered into one by a forged count or variant tag reports
+ *           Malformed at that byte. To the count guard it costs one byte -
+ *           a row that cannot exist is one byte it will never have - so a
+ *           count of them the input cannot cover is refused before anything
+ *           is queued, rather than capped as a zero-cost element would be
  *
  * A count is checked against the bytes actually remaining before anything is
  * allocated - a short input claiming a huge count is Malformed(offset, what),
@@ -210,9 +240,12 @@
  * - a tag keeps its number forever and a new one takes the next free number
  * - and they are the fingerprint's node kind numbers where a node kind
  * exists, so the two tables read as one. Nil, Bool and Range have no node
- * kind (the first two are Data to a descriptor and immediates to the
- * runtime; a range is an Array(Int) that stores no elements) and take the
- * numbers after.
+ * kind (Bool is Data to a descriptor and an immediate to the runtime; Nil
+ * here is the runtime's own nil word, which the prelude's Nil - a
+ * one-constructor cell, Data to both - is not; a range is an Array(Int)
+ * that stores no elements) and take the numbers after, 11 to 13. The node
+ * kind added since, Uninhabited, took 14 rather than reuse them, so a new
+ * tag in either table takes 15.
  *
  *    1  Int      zigzag LEB128. One row for both runtime forms: a boxed
  *                integer is an Int outside 48 bits and nothing more

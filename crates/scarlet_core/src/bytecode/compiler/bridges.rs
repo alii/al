@@ -360,22 +360,26 @@ impl wire::WireCtx for Compiler {
     fn nominal(&mut self, pool: &mut ResolvedPool, id: TypeId) -> wire::Nominal {
         // The structural primitives answer first. `Int`, `Array`, `Map` and
         // the rest are declared with no body, so reading the body would report
-        // every one of them as host-backed and refuse `Int`.
+        // every one of them as uninhabited and write nothing for an `Int`.
         if let Some(b) = self.wire_builtin(id) {
             return wire::Nominal::Builtin(b);
         }
         let Some(info) = self.env.lookup_type_info_by_id(id) else {
-            // Every type the check walk admitted has a registered head.
-            // Answering `Bodiless` if one ever does not refuses the call
-            // rather than inventing a shape for it.
-            return wire::Nominal::Bodiless;
+            // Every type the check walk admitted has a registered head, so
+            // this is the builder's own abort, not a shape: until 2026-08-22
+            // it answered the refusal a bodiless type got, and now that a
+            // bodiless type describes as uninhabited the same answer would
+            // write nothing for a value that exists.
+            wire::wire_bug("a type with no registered declaration")
         };
         match info.body {
             TypeBody::External => match self.wire_handle(id) {
                 Some(kind) => wire::Nominal::Handle(kind),
-                None => wire::Nominal::Bodiless,
+                None => wire::Nominal::Uninhabited,
             },
-            TypeBody::Unresolved => wire::Nominal::Bodiless,
+            // Reading a body in this state is a compiler bug (`TypeBody`),
+            // and the argument above applies.
+            TypeBody::Unresolved => wire::wire_bug("a type whose body is not yet hydrated"),
             TypeBody::Alias { target } => wire::Nominal::Alias(self.resolve_rty(pool, target)),
             TypeBody::Custom { variants, .. } => {
                 // Copied out of the arena first: interning a field type

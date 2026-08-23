@@ -84,7 +84,7 @@ use crate::abi::AbiSlot;
 use crate::bytecode::{
     ClosureRef, MapBacking, SocketKind, SocketValue, Value, ValueView, hamt, hash_value,
 };
-use crate::wire::{HandleKind, WireDesc, WireNode, WireNodeIdx};
+use crate::wire::{HandleKind, WireCtor, WireDesc, WireNode, WireNodeIdx};
 
 use super::map::env_entries;
 use super::run_id::RunId;
@@ -100,6 +100,13 @@ use super::{VM, VmError, VmResult, bin_ref, range_len};
 /// a closure node, and the body gained the closure row and the capture table.
 /// 2 was handles (kind tag 9, the identity row). Version 1 and 2 bytes are
 /// `NotWire` here.
+///
+/// Still 3 after the uninhabited node (kind tag 14) and the `Bool` fix under
+/// the typed walk: neither moved a fingerprint or a byte any version-3 peer
+/// holds — the first gave a descriptor to types that previously had none,
+/// and the second made `True`/`False` produce bytes where before they
+/// produced a panic or a truncated body. A bump is owed only by a change to
+/// an EXISTING output.
 const VERSION: u8 = 3;
 
 /// Leading bytes of every encoded value, so bytes from somewhere else are
@@ -119,6 +126,13 @@ const IDENTITY_MIN_BYTES: u64 = (RunId::WIDTH + 1 + 1) as u64;
 /// least its tag, which is the per-element minimum the capture counts are
 /// guarded by.
 const CLOSURE_MIN_BYTES: u64 = (RunId::WIDTH + 1 + 1) as u64;
+
+/// The pre-built value of a `wire` constructor, by identity
+/// (`Program::wire_nullary`). The encoder's one question to the program: a
+/// value the descriptor calls `Data` that is not a cell is an unboxed
+/// constructor — the prelude's `True`/`False` — and its position in the
+/// constructor list is the one whose template pre-builds exactly that word.
+type Prebuilt<'a> = &'a dyn Fn(TypeId, u16) -> Option<Value>;
 
 /// The byte in front of every capture, naming the form of the value that
 /// follows. A **stable wire surface**, listed in `wire.scrl`'s capture table:
@@ -280,20 +294,32 @@ fn put_identity(out: &mut Vec<u8>, run: RunId, kind: HandleKind, id: u64) {
 ///
 /// `run` is the identity written beside every handle; it is this run's, and
 /// it is a parameter rather than read here so the walk stays a function of
-/// its inputs.
-fn encode_value(desc: &WireDesc, root: &Value, run: RunId) -> (Vec<u8>, u64) {
+/// its inputs. So is `prebuilt`, the program's answer for an unboxed
+/// constructor (see [`Prebuilt`]).
+fn encode_value(
+    desc: &WireDesc,
+    root: &Value,
+    run: RunId,
+    prebuilt: Prebuilt<'_>,
+) -> (Vec<u8>, u64) {
     let mut out = Vec::with_capacity(HEADER_LEN);
     out.extend_from_slice(&MAGIC);
     out.push(VERSION);
     out.extend_from_slice(&desc.fingerprint().to_le_bytes());
-    let nodes = write_body(&mut out, desc, root, run);
+    let nodes = write_body(&mut out, desc, root, run, prebuilt);
     (out, nodes)
 }
 
 /// The body half of [`encode_value`]: the value under `desc.root`, with no
 /// header. Split out because the header is written once and the walk is the
 /// part with an invariant worth naming.
-fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value, run: RunId) -> u64 {
+fn write_body(
+    out: &mut Vec<u8>,
+    desc: &WireDesc,
+    root: &Value,
+    run: RunId,
+    prebuilt: Prebuilt<'_>,
+) -> u64 {
     // A container pushes its children and they are popped before anything
     // queued beside it, so a 100k-deep chain costs O(1) entries here rather
     // than one per level. A 100k-wide container does cost one entry per
@@ -444,7 +470,26 @@ fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value, run: RunId) -> u
             }
             WireNode::Data(ctors) => {
                 let Some(e) = v.as_enum() else {
-                    debug_assert!(false, "descriptor says Data");
+                    // Not a cell: an unboxed constructor, which the runtime
+                    // holds as an immediate under a descriptor that says
+                    // `Data` — the prelude's `True` and `False`. Its tag is
+                    // the position of the constructor whose template
+                    // pre-builds exactly this word, the word `Op::PushTrue`
+                    // pushes; an immediate's bits are its value, so the
+                    // comparison is exact, and a cell's pointer never
+                    // matches because a cell is what `v` is not. It has no
+                    // fields to queue.
+                    let unboxed = |c: &WireCtor| {
+                        prebuilt(c.type_id, c.variant_idx)
+                            .is_some_and(|w| !w.is_heap() && w.to_bits() == v.to_bits())
+                    };
+                    let Some(tag) = ctors.iter().position(unboxed) else {
+                        debug_assert!(false, "descriptor says Data");
+                        continue;
+                    };
+                    if ctors.len() > 1 {
+                        put_u64(out, tag as u64);
+                    }
                     continue;
                 };
                 let tag = e.variant_idx() as usize;
@@ -509,6 +554,12 @@ fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value, run: RunId) -> u
                     }
                 }
             }
+            // No value of the type exists, so a well-typed program never
+            // queues one here: the node is reached only in a position the
+            // walk never descends into (a phantom argument, a field of a
+            // constructor no value is). Nothing is written, and nothing is
+            // asserted about `v` — there is no right value for it to be.
+            WireNode::Uninhabited => {}
         }
     }
     nodes
@@ -860,6 +911,13 @@ fn min_bytes(desc: &WireDesc) -> Vec<u64> {
                 WireNode::Float => 8,
                 WireNode::Identity(_) => IDENTITY_MIN_BYTES,
                 WireNode::Closure { .. } => CLOSURE_MIN_BYTES,
+                // A row that cannot exist is one byte it will never have.
+                // Zero would make `Array(Uninhabited)` a zero-cost element
+                // type, so a forged count up to `MAX_ZERO_COST_ELEMS` would
+                // pass the guard and queue that many reads before the first
+                // one refused; at one, any count the input cannot cover is
+                // refused before anything is queued.
+                WireNode::Uninhabited => 1,
                 WireNode::Tuple(elems) => elems
                     .iter()
                     .fold(0u64, |a, e| a.saturating_add(at(&min, *e))),
@@ -1243,6 +1301,17 @@ impl VM {
                                 work.push(Step::ReadCapture);
                             }
                         }
+                        // The encoder never writes one, so bytes that steer
+                        // the walk here — a `Some` tag over a phantom, a
+                        // non-zero count of them — claim a value that cannot
+                        // exist.
+                        WireNode::Uninhabited => {
+                            return Err(Refusal::Malformed {
+                                offset: r.at,
+                                what: "no value of this type can exist",
+                            }
+                            .into());
+                        }
                     }
                 }
                 // A capture: the tag says which row follows. Every count here
@@ -1448,7 +1517,15 @@ impl VM {
                         let Some(t) = self.program.templates.get(idx).cloned() else {
                             return Err(Stop::Internal("a wire template index is out of range"));
                         };
-                        let v = t.instantiate(&mut self.heap, &payload);
+                        // A nullary constructor is its pre-built value, as it
+                        // is when the interpreter pushes one — and for an
+                        // unboxed constructor that value is the immediate
+                        // `Op::PushTrue` pushes, which no cell could stand
+                        // in for.
+                        let v = match t.nullary() {
+                            Some(w) if payload.is_empty() => w.clone(),
+                            _ => t.instantiate(&mut self.heap, &payload),
+                        };
                         done.push(v);
                     }
                     Finish::Closure { func_idx, captures } => {
@@ -1602,7 +1679,8 @@ impl VM {
     pub(super) fn wire_encode(&mut self, operand: i32, reds: &mut i32) -> VmResult<()> {
         let desc = self.wire_desc(operand, "wire.encode")?;
         let v = self.pop()?;
-        let (bytes, nodes) = encode_value(&desc, &v, self.run_id());
+        let prebuilt = |t, i| self.program.wire_nullary(t, i).cloned();
+        let (bytes, nodes) = encode_value(&desc, &v, self.run_id(), &prebuilt);
         charge_wire(reds, bytes.len(), nodes);
         let out = Value::binary_in(&mut self.heap, bytes);
         self.stack.push(out);
@@ -1641,18 +1719,21 @@ mod tests {
         ])
     }
 
-    /// The bytes only, written as [`format_run`]. Shadows
-    /// [`super::encode_value`], which also reports the nodes it walked for the
-    /// reduction charge; every byte-format test below wants the first half and
-    /// none of them wants the second.
+    /// The bytes only, written as [`format_run`] and with no program to ask
+    /// about unboxed constructors. Shadows [`super::encode_value`], which
+    /// also reports the nodes it walked for the reduction charge; every
+    /// byte-format test below wants the first half and none of them wants
+    /// the second.
     fn encode_value(desc: &WireDesc, root: &Value) -> Vec<u8> {
-        super::encode_value(desc, root, format_run()).0
+        super::encode_value(desc, root, format_run(), &|_, _| None).0
     }
 
     /// The bytes as `vm` itself would write them: its own run identity, so
-    /// the same VM can decode a handle out of them.
+    /// the same VM can decode a handle out of them, and its own templates,
+    /// so an unboxed constructor finds its tag.
     fn encode_in(vm: &VM, desc: &WireDesc, root: &Value) -> Vec<u8> {
-        super::encode_value(desc, root, vm.run_id()).0
+        let prebuilt = |t, i| vm.program.wire_nullary(t, i).cloned();
+        super::encode_value(desc, root, vm.run_id(), &prebuilt).0
     }
 
     /// Reductions spent by one `wire.encode` through the op, budget-in minus
@@ -1667,10 +1748,8 @@ mod tests {
         vm.stack.pop();
         1_000_000 - reds
     }
-    // Only the tests build a constructor by hand; the walks match on one.
     use crate::bytecode::values_equal;
     use crate::template::EnumTemplate;
-    use crate::wire::WireCtor;
 
     fn variant_of(v: &Value) -> String {
         v.as_enum()
@@ -3508,6 +3587,180 @@ mod tests {
             payload[1].as_str().expect("Str payload"),
             "count is larger than the remaining input can hold"
         );
+    }
+
+    // --- uninhabited -----------------------------------------------------
+
+    /// `Tagged(Native)`: a record whose descriptor carries a node for a type
+    /// no value has, in phantom position. The node is in the table and on no
+    /// path the walk takes, so the record's one `Int` field is the whole
+    /// body and the value round trips.
+    #[test]
+    fn a_record_over_a_phantom_uninhabited_type_round_trips() {
+        let mut vm = vm_with_ctors(&[(TypeId(12), 0, "Tagged", "Tagged", &["value"])]);
+        let d = desc(vec![
+            WireNode::Data(vec![WireCtor {
+                type_id: TypeId(12),
+                variant_idx: 0,
+                fields: vec![WireNodeIdx(1)],
+            }]),
+            WireNode::Int,
+            WireNode::Uninhabited,
+        ]);
+        let v = Value::enum_with_names_in(
+            &mut vm.heap,
+            TypeId(12),
+            0,
+            "Tagged",
+            "Tagged",
+            &["value"],
+            &[Value::small_int(7)],
+        );
+        assert_eq!(
+            body(&d, &v),
+            vec![0x0e],
+            "the Int alone; the phantom writes nothing"
+        );
+        round_trips(&mut vm, &d, &v);
+    }
+
+    /// Reading one is refused where the walk meets it, because the only
+    /// bytes that lead there claim a value that cannot exist — and it is
+    /// refused, never a panic, whatever the descriptor around it. The empty
+    /// array is the one inhabitant of `Array(Uninhabited)` and decodes.
+    #[test]
+    fn an_uninhabited_node_is_malformed_to_read_and_the_empty_array_decodes() {
+        let mut vm = halt_test_vm();
+        let bare = desc(vec![WireNode::Uninhabited]);
+        let (name, payload) = refusal_of(&mut vm, &bare, &header());
+        assert_eq!(name, "Malformed");
+        assert_eq!(payload[0].as_int().expect("Int payload"), HEADER_LEN as i64);
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "no value of this type can exist"
+        );
+
+        let arr = desc(vec![WireNode::Array(WireNodeIdx(1)), WireNode::Uninhabited]);
+        let mut empty = header();
+        put_u64(&mut empty, 0);
+        match ok_of(&mut vm, &arr, &empty).kind() {
+            ValueView::Array(a) => assert_eq!(a.len(), 0),
+            _ => panic!("expected an Array"),
+        }
+        // One element, with a byte behind the count to cover it: past the
+        // guard, and refused at the element rather than built.
+        let mut one = header();
+        put_u64(&mut one, 1);
+        one.push(0);
+        let (name, payload) = refusal_of(&mut vm, &arr, &one);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[0].as_int().expect("Int payload"),
+            (HEADER_LEN + 1) as i64
+        );
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "no value of this type can exist"
+        );
+    }
+
+    /// The minimum is one byte, not zero, so a forged count of uninhabited
+    /// elements fails the count guard before a single read is queued. With
+    /// the arm at zero the count is capped at `MAX_ZERO_COST_ELEMS` instead:
+    /// the guard passes, a thousand reads are queued, and the first refuses
+    /// with the element's text — which is why this asserts the guard's text
+    /// and offset, which that path cannot produce.
+    #[test]
+    fn a_forged_count_of_uninhabited_elements_is_refused_by_the_guard() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Array(WireNodeIdx(1)), WireNode::Uninhabited]);
+        assert_eq!(
+            min_bytes(&d)[1],
+            1,
+            "a row that cannot exist is one byte it will never have"
+        );
+        let mut bytes = header();
+        put_u64(&mut bytes, 1000);
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(name, "Malformed");
+        assert_eq!(payload[0].as_int().expect("Int payload"), HEADER_LEN as i64);
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "count is larger than the remaining input can hold"
+        );
+    }
+
+    // --- unboxed constructors --------------------------------------------
+
+    /// A VM whose `wire_templates` hold the prelude's `Bool` the way
+    /// `Compiler::mint_wire_templates` mints it: two unboxed constructors,
+    /// `True` at 0 and `False` at 1 as `scarlet.scrl` declares them, each
+    /// pre-building the immediate `Op::PushTrue`/`Op::PushFalse` pushes.
+    fn vm_with_bool(bool_id: TypeId) -> VM {
+        let mut vm = halt_test_vm();
+        for (idx, name, b) in [(0u16, "True", true), (1, "False", false)] {
+            let t =
+                EnumTemplate::unboxed(&mut vm.frozen, bool_id, idx, "Bool", name, Value::bool(b));
+            let i = vm.program.templates.push(t);
+            vm.program.wire_templates.insert((bool_id, idx), i);
+        }
+        vm
+    }
+
+    /// `Bool` as the descriptor builder describes it: `Data` over two
+    /// nullary constructors in declared order.
+    fn bool_ctors(bool_id: TypeId) -> WireNode {
+        WireNode::Data(vec![
+            WireCtor {
+                type_id: bool_id,
+                variant_idx: 0,
+                fields: Vec::new(),
+            },
+            WireCtor {
+                type_id: bool_id,
+                variant_idx: 1,
+                fields: Vec::new(),
+            },
+        ])
+    }
+
+    /// `True` and `False` are immediates under a two-constructor `Data`
+    /// descriptor. The encoder writes the tag of the constructor whose
+    /// template pre-builds the word — `True` is 0 because the prelude
+    /// declares it first, not because of anything about the bit — and the
+    /// decoder hands the immediate back rather than a cell. Before this the
+    /// `Data` arm asserted a cell and `wire.encode(True)` panicked in debug
+    /// (`descriptor says Data`, measured on 890b3dd); in release it wrote
+    /// nothing and `decode` reported `Truncated`.
+    #[test]
+    fn a_bool_writes_its_declared_tag_and_decodes_to_the_immediate() {
+        let bool_id = TypeId(5);
+        let mut vm = vm_with_bool(bool_id);
+        let d = desc(vec![bool_ctors(bool_id)]);
+        assert_eq!(encode_in(&vm, &d, &Value::bool(true))[HEADER_LEN..], [0]);
+        assert_eq!(encode_in(&vm, &d, &Value::bool(false))[HEADER_LEN..], [1]);
+        for b in [true, false] {
+            let bytes = encode_in(&vm, &d, &Value::bool(b));
+            let back = ok_of(&mut vm, &d, &bytes);
+            assert!(
+                !back.is_heap(),
+                "a decoded Bool is the immediate, not a cell"
+            );
+            assert_eq!(back.as_bool(), Some(b));
+        }
+    }
+
+    /// The same through a container, where the `Data` node is an element
+    /// and not the root: count, then one tag byte per element.
+    #[test]
+    fn an_array_of_bools_round_trips_as_tags() {
+        let bool_id = TypeId(5);
+        let mut vm = vm_with_bool(bool_id);
+        let d = desc(vec![WireNode::Array(WireNodeIdx(1)), bool_ctors(bool_id)]);
+        let items = [Value::bool(true), Value::bool(false), Value::bool(true)];
+        let arr = Value::array_in(&mut vm.heap, &items);
+        assert_eq!(encode_in(&vm, &d, &arr)[HEADER_LEN..], [3, 0, 1, 0]);
+        round_trips(&mut vm, &d, &arr);
     }
 
     // --- the reduction charge --------------------------------------------

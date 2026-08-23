@@ -1227,6 +1227,15 @@ impl Program {
     pub fn abi_nullary(&self, slot: crate::abi::AbiSlot) -> Option<&Value> {
         self.templates.get(self.abi.get(slot)?)?.nullary()
     }
+
+    /// The pre-built value of the `wire` constructor `(type_id, variant_idx)`:
+    /// a nullary constructor's frozen cell, or the immediate of an unboxed
+    /// one (`EnumTemplate::unboxed`). `None` for a constructor with fields,
+    /// or one this program minted no template for.
+    pub fn wire_nullary(&self, type_id: crate::TypeId, variant_idx: u16) -> Option<&Value> {
+        let idx = *self.wire_templates.get(&(type_id, variant_idx))?;
+        self.templates.get(idx)?.nullary()
+    }
 }
 
 // Worker scheduler threads clone the shared program, so it must stay

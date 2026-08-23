@@ -12,9 +12,11 @@
 //! silently mis-built value.
 
 use scarlet_vm::abi::AbiSlot;
+use scarlet_vm::bytecode::Value;
 use scarlet_vm::template::EnumTemplate;
 use scarlet_vm::tivec::TiVec;
 
+use crate::core_ir::emit::EmitCtx;
 use crate::module::ModuleKey;
 use crate::span::Span;
 
@@ -285,28 +287,49 @@ impl Compiler {
     /// (`Compiler::wire_descs`), including the ones an imported module's own
     /// toplevel produced: they accumulate across module inits and are drained
     /// once, here, after `bind_abi`.
+    ///
+    /// The prelude's `True` and `False` are minted unboxed: the descriptor
+    /// says `Data`, but the runtime holds a `Bool` as an immediate and never
+    /// as a cell (`EmitCtx::bool_variant`, which is why `Construct` is never
+    /// emitted for them). The template's value is the word `Op::PushTrue`
+    /// pushes, so a decoder rebuilding `True` hands back what a constructed
+    /// `Bool` is, and the encoder finds the tag of an immediate by the word
+    /// its constructor pre-builds.
     pub(super) fn mint_wire_templates(&mut self, descs: &[crate::typed_ir::wire::Desc]) {
         for desc in descs {
             for variant in desc.variants() {
-                let key = (variant.variant.type_id, variant.variant.variant_idx);
+                let (type_id, variant_idx) = (variant.variant.type_id, variant.variant.variant_idx);
+                let key = (type_id, variant_idx);
                 if self.program.wire_templates.contains_key(&key) {
                     continue;
                 }
                 let type_name = self.engine.str(variant.variant.type_name);
                 let ctor_name = self.engine.str(variant.name);
-                let labels: Vec<&str> = variant
-                    .fields
-                    .iter()
-                    .map(|f| self.engine.str(f.label))
-                    .collect();
-                let tpl = EnumTemplate::build(
-                    &mut self.frozen,
-                    variant.variant.type_id,
-                    variant.variant.variant_idx,
-                    type_name,
-                    ctor_name,
-                    &labels,
-                );
+                let tpl = match self.bool_variant(type_id, variant_idx) {
+                    Some(b) => EnumTemplate::unboxed(
+                        &mut self.frozen,
+                        type_id,
+                        variant_idx,
+                        type_name,
+                        ctor_name,
+                        Value::bool(b),
+                    ),
+                    None => {
+                        let labels: Vec<&str> = variant
+                            .fields
+                            .iter()
+                            .map(|f| self.engine.str(f.label))
+                            .collect();
+                        EnumTemplate::build(
+                            &mut self.frozen,
+                            type_id,
+                            variant_idx,
+                            type_name,
+                            ctor_name,
+                            &labels,
+                        )
+                    }
+                };
                 let idx = self.program.templates.push(tpl);
                 self.program.wire_templates.insert(key, idx);
             }

@@ -171,6 +171,13 @@ pub enum WireNode {
     Closure {
         arity: u32,
     },
+    /// A type no value has: a `pub type Name` with no body that is not one
+    /// of the handle kinds. It can only stand in a descriptor where nothing
+    /// is ever written or read — a phantom type argument, or a constructor
+    /// field no value ever reaches — so the encoder has no value to meet it
+    /// with, and a decoder that is steered into one has been handed bytes
+    /// claiming a value that cannot exist.
+    Uninhabited,
 }
 
 /// The descriptor of one type: a node table, the node the type itself is, and
