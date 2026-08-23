@@ -42,6 +42,7 @@
 //! exchange the walks index a `Vec` and match an enum. That is the trade.
 
 use crate::TypeId;
+use crate::bytecode::SocketKind;
 
 /// Index into a [`WireDesc`]'s node table. Only meaningful for the descriptor
 /// that minted it.
@@ -70,6 +71,78 @@ pub struct WireCtor {
     pub fields: Vec<WireNodeIdx>,
 }
 
+/// What a host-backed handle on the wire is a handle *to*. Written as one
+/// byte after the run identity, and this enumeration is that byte: a
+/// **stable wire surface**, so a variant keeps its number forever and a new
+/// one takes the next free number. Deliberately not a [`TypeId`], which is
+/// minted per compile and means nothing to a peer.
+///
+/// The four socket kinds carry [`SocketKind`]'s own discriminants, checked
+/// below, so the byte on the wire is the number the handle's kind field
+/// holds. `Pid` and `Subject` are not sockets and sit after them; they are
+/// not added to `SocketKind` because a `Pid` has no table to index.
+///
+/// A descriptor names the kind its *static type* has. `Port` is the one
+/// kind no static type names: `scarlet/os/port.Port`'s stream field is a
+/// `Connection`, so its descriptor says `Connection` while the value's kind
+/// field says `Port`. The encoder therefore writes the kind the VALUE carries
+/// and the decoder accepts a `Port` byte under a `Connection` descriptor
+/// ([`HandleKind::admits`]); rebuilding from the descriptor's kind instead
+/// would hand back a handle the port table does not hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum HandleKind {
+    Connection = 0,
+    Listener = 1,
+    Port = 2,
+    Tls = 3,
+    Pid = 4,
+    Subject = 5,
+}
+
+impl HandleKind {
+    /// The kind a byte from the wire names, or `None` for a byte no kind has.
+    pub(crate) fn from_byte(b: u8) -> Option<HandleKind> {
+        Some(match b {
+            0 => HandleKind::Connection,
+            1 => HandleKind::Listener,
+            2 => HandleKind::Port,
+            3 => HandleKind::Tls,
+            4 => HandleKind::Pid,
+            5 => HandleKind::Subject,
+            _ => return None,
+        })
+    }
+
+    /// The wire kind of a socket handle's kind field.
+    pub(crate) fn of_socket(k: SocketKind) -> HandleKind {
+        match k {
+            SocketKind::Connection => HandleKind::Connection,
+            SocketKind::Listener => HandleKind::Listener,
+            SocketKind::Port => HandleKind::Port,
+            SocketKind::Tls => HandleKind::Tls,
+        }
+    }
+
+    /// Whether a handle whose byte says `found` may stand where a descriptor
+    /// says `self`. Equal kinds always; `Connection` also admits `Port`,
+    /// because that is the one static type two runtime kinds share (see the
+    /// type doc). `Tls` admits only `Tls`: the type system keeps `Socket` and
+    /// `TlsSocket` apart, and the wire keeps them apart too.
+    pub(crate) fn admits(self, found: HandleKind) -> bool {
+        self == found || (self == HandleKind::Connection && found == HandleKind::Port)
+    }
+}
+
+/// The socket arms' bytes and [`SocketKind`]'s discriminants are two
+/// spellings of one number; neither may drift from the other.
+const _: () = {
+    assert!(HandleKind::Connection as u8 == SocketKind::Connection as u8);
+    assert!(HandleKind::Listener as u8 == SocketKind::Listener as u8);
+    assert!(HandleKind::Port as u8 == SocketKind::Port as u8);
+    assert!(HandleKind::Tls as u8 == SocketKind::Tls as u8);
+};
+
 /// One node of a [`WireDesc`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WireNode {
@@ -81,6 +154,11 @@ pub enum WireNode {
     Map(WireNodeIdx, WireNodeIdx),
     Tuple(Vec<WireNodeIdx>),
     Data(Vec<WireCtor>),
+    /// A host-backed handle, written as the identity of the run that minted
+    /// it, its kind and its number. The kind is the static type's; a
+    /// `Subject`'s message type is folded into the fingerprint by the front
+    /// end and is not needed here, since the bytes hold only the mailbox id.
+    Identity(HandleKind),
 }
 
 /// The descriptor of one type: a node table, the node the type itself is, and

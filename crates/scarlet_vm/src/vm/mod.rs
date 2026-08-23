@@ -567,11 +567,9 @@ impl VM {
     }
 
     /// The identity of the run this scheduler belongs to: the same value on
-    /// every scheduler of one [`Runtime`].
-    // The wire encoder is this accessor's reader; until it is written, the
-    // scheduler-agreement test is its only caller.
-    #[allow(dead_code)]
-    pub(crate) fn run_id(&self) -> RunId {
+    /// every scheduler of one [`Runtime`]. The wire encoder writes it beside
+    /// every handle and the decoder judges a handle's run against it.
+    fn run_id(&self) -> RunId {
         self.runtime.run_id()
     }
 

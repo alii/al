@@ -371,7 +371,11 @@ impl wire::WireCtx for Compiler {
             return wire::Nominal::Bodiless;
         };
         match info.body {
-            TypeBody::External | TypeBody::Unresolved => wire::Nominal::Bodiless,
+            TypeBody::External => match self.wire_handle(id) {
+                Some(kind) => wire::Nominal::Handle(kind),
+                None => wire::Nominal::Bodiless,
+            },
+            TypeBody::Unresolved => wire::Nominal::Bodiless,
             TypeBody::Alias { target } => wire::Nominal::Alias(self.resolve_rty(pool, target)),
             TypeBody::Custom { variants, .. } => {
                 // Copied out of the arena first: interning a field type
@@ -440,5 +444,48 @@ impl Compiler {
         } else {
             None
         }
+    }
+
+    /// The five host-backed stdlib types the wire format writes as an
+    /// identity, or `None` for a bodiless type that is not one of them.
+    ///
+    /// Identity is the declaring module's own binding, resolved through the
+    /// module table exactly as `restricted_generalization_cons` resolves
+    /// `Subject`, and never a name: a user's `pub type Pid` is a different
+    /// type and stays bodiless. `Port` is absent on purpose — it is a record
+    /// over a `Connection`, and the runtime kind its stream carries is the
+    /// value's to write (see `scarlet_vm::wire::HandleKind`).
+    fn wire_handle(&mut self, id: TypeId) -> Option<wire::HandleKind> {
+        const HANDLES: &[(&[&str], &str, wire::HandleKind)] = &[
+            (&["scarlet", "process"], "Pid", wire::HandleKind::Pid),
+            (
+                &["scarlet", "process"],
+                "Subject",
+                wire::HandleKind::Subject,
+            ),
+            (
+                &["scarlet", "net", "socket"],
+                "Connection",
+                wire::HandleKind::Connection,
+            ),
+            (&["scarlet", "net"], "Server", wire::HandleKind::Listener),
+            (
+                &["scarlet", "net", "tls"],
+                "TlsConnection",
+                wire::HandleKind::Tls,
+            ),
+        ];
+        for &(module, name, kind) in HANDLES {
+            let key = ModuleKey::of(&module.iter().map(|s| s.to_string()).collect());
+            // A module this compile cannot resolve declares no type a value
+            // of `id` could have, so a miss here is not a miss on `id`.
+            let Some(iface) = self.module_table.get_or_hydrate(&key) else {
+                continue;
+            };
+            if iface.types.get(name).is_some_and(|et| et.info.id == id) {
+                return Some(kind);
+            }
+        }
+        None
     }
 }

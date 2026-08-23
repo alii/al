@@ -21,10 +21,12 @@
 //! refusal that survives the ruling is [`Reason::TypeVariable`], a fact about
 //! inference rather than about a value. An opaque type from another module is
 //! described by its constructors like any other type, and that is in force
-//! here. A host-backed handle is to encode as a run-scoped identity and a
-//! closure as run identity, function index and self-described captures; those
-//! two are NOT YET built, so [`Reason::Bodiless`] and [`Reason::Function`]
-//! still refuse at this commit — staged, not settled.
+//! here. So is the handle rule: `Pid`, `Subject`, `Connection`,
+//! `TlsConnection` and `net.Server` are described as an [`Node::Identity`],
+//! which the runtime writes as the run that minted the handle, its kind and
+//! its number. A closure is to encode as run identity, function index and
+//! self-described captures; that is NOT YET built, so [`Reason::Function`]
+//! still refuses at this commit — staged, not settled.
 //!
 //! Type identity is always [`TypeId`], never `Con.name`: a user's `type Parsed`
 //! and `scarlet/http/h1.Parsed` share a name and are different types.
@@ -33,6 +35,7 @@ use std::collections::HashMap;
 
 use smallvec::SmallVec;
 
+pub use scarlet_vm::wire::HandleKind;
 use scarlet_vm::wire::{
     WireCtor as RtCtor, WireDesc as RtDesc, WireNode as RtNode, WireNodeIdx as RtIdx,
 };
@@ -109,6 +112,13 @@ pub enum Node {
     /// Constructors in declared order: a variant's position here is the tag the
     /// peer receives, so reordering a type's constructors is a wire break.
     Data(Vec<WireVariant>),
+    /// A host-backed handle: the kind its static type names, and the nodes of
+    /// its type arguments. The arguments are on the wire nowhere — a
+    /// `Subject`'s bytes are its mailbox id whatever it carries — but they are
+    /// part of the SHAPE: a `Subject(Int)` decoded from `Subject(String)`
+    /// bytes would be a typed door onto a mailbox of the other type, so the
+    /// fingerprint folds them and the runtime node drops them.
+    Identity(HandleKind, Vec<NodeIdx>),
 }
 
 /// The descriptor of one type: a node table, the node the type itself is, and
@@ -196,6 +206,9 @@ impl Desc {
                         })
                         .collect(),
                 ),
+                // The arguments are already folded into the fingerprint that
+                // travels with this; the walk needs only the kind.
+                Node::Identity(k, _) => RtNode::Identity(*k),
             })
             .collect();
         RtDesc::new(nodes, at(self.root), self.fingerprint())
@@ -288,8 +301,14 @@ pub enum Nominal {
     Data {
         ctors: Vec<CtorDecl>,
     },
-    /// `pub type Name` with no body — host-backed. It declares no fields for
-    /// the descriptor to walk and no constructor a decoder could call, so
+    /// One of the five stdlib handle types, which the runtime can hand back
+    /// by identity: `Pid`, `Subject`, `Connection`, `TlsConnection` and
+    /// `net.Server`. Resolved by module identity in `Compiler::nominal`, never
+    /// by name, so a user's `type Pid` is not one.
+    Handle(HandleKind),
+    /// `pub type Name` with no body that is not a [`Nominal::Handle`]. It
+    /// declares no fields for the descriptor to walk, no constructor a decoder
+    /// could call, and the runtime has no identity to hand back for it, so
     /// nothing can be rebuilt from whatever bytes were written.
     Bodiless,
 }
@@ -340,12 +359,16 @@ pub enum Step {
 pub enum Reason {
     Function,
     TypeVariable,
-    /// A `pub type Name` with no body. Named for the declaration rather than
-    /// for a verdict about representability: it was `NoRepresentation`, and
-    /// that name asserted the very thing `describe` had to stop saying.
+    /// A `pub type Name` with no body that the runtime cannot hand back by
+    /// identity. Named for the declaration rather than for a verdict about
+    /// representability: it was `NoRepresentation`, and that name asserted the
+    /// very thing `describe` had to stop saying.
     ///
-    /// Decided 2026-08-22 (owner): these encode, as a run-scoped identity.
-    /// Not yet built, so this arm refuses until it is.
+    /// Decided 2026-08-22 (owner): the five stdlib handles encode, as a
+    /// run-scoped identity, and since that landed they never reach this arm
+    /// ([`Nominal::Handle`] answers for them). What still does: a bodiless
+    /// type declared outside the stdlib, which no VM table backs, and the
+    /// compiler's own unresolved-type states.
     Bodiless,
 }
 
@@ -367,15 +390,10 @@ impl Reason {
             }
             // NOT "has no representation outside this program". Same
             // overstatement as the `fn` arm and the same refutation: Erlang
-            // writes a pid with `NEW_PID_EXT`, so a representation can exist.
-            // Decided 2026-08-22 (owner), closing #35: Pid, Subject,
-            // Connection, TlsConnection and net.Server DO encode, as the
-            // identity of the run that minted them plus a kind and a number,
-            // usable only in that run and failing at use anywhere else. That
-            // is not yet built — there is no run identity to write and no
-            // handle node for the descriptor — so this arm still refuses, and
-            // the text names what is missing today, never that it is
-            // impossible.
+            // writes a pid with `NEW_PID_EXT`, and the five stdlib handles
+            // now do encode, as `Node::Identity`. This text is for a bodiless
+            // type that is none of them, and it names what is missing rather
+            // than claiming impossibility.
             Reason::Bodiless => {
                 "the type is host-backed: it declares no fields to write and no constructor a \
                  decoder could call, so a peer cannot rebuild one"
@@ -544,6 +562,9 @@ enum Key {
     Map(NodeIdx, NodeIdx),
     Tuple(SmallVec<[NodeIdx; 4]>),
     Nominal(TypeId, SmallVec<[NodeIdx; 4]>),
+    /// Keyed on the kind rather than the `TypeId`: two programs' `Pid`s are
+    /// one shape, exactly as their `Int`s are.
+    Handle(HandleKind, SmallVec<[NodeIdx; 4]>),
 }
 
 /// Version of the fingerprint algorithm, folded in first so that a change to
@@ -553,7 +574,10 @@ enum Key {
 /// module doc says so as a rule rather than as a note: the fingerprint travels
 /// in every message, so an algorithm change that kept the version would show up
 /// at a peer as a `SchemaMismatch` on a type nobody had touched.
-const FINGERPRINT_VERSION: u64 = 1;
+///
+/// 2 since kind tag 9 (an identity node) joined the algorithm; the format
+/// version byte in `scarlet_vm::vm::wire` moved with it.
+const FINGERPRINT_VERSION: u64 = 2;
 
 const FINGERPRINT_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -623,6 +647,20 @@ fn fingerprint_of<C: WireCtx + ?Sized>(cx: &C, nodes: &[Node], root: NodeIdx) ->
                         h = mix_str(h, &cx.name(f.label));
                         h = mix(h, u64::from(f.node.0));
                     }
+                }
+                h
+            }
+            // The kind byte is folded, not just the tag: the fingerprint
+            // excludes names, so without it every handle type would be one
+            // shape and `decode` at `Pid` would accept `Connection` bytes.
+            // Then the arguments, as a `Data` node folds its fields — a
+            // `Subject(Int)` and a `Subject(String)` are two doors onto two
+            // kinds of mailbox.
+            Node::Identity(k, args) => {
+                let mut h = mix(mix(h, 9), u64::from(*k as u8));
+                h = mix(h, args.len() as u64);
+                for a in args {
+                    h = mix(h, u64::from(a.0));
                 }
                 h
             }
@@ -726,6 +764,19 @@ impl<C: WireCtx + ?Sized> Build<'_, C> {
     ) -> Result<NodeIdx, WireRefusal> {
         match self.cx.nominal(self.pool, id) {
             Nominal::Bodiless => Err(self.refuse(t, Reason::Bodiless, path)),
+
+            // The arguments are walked for the same reason `data` walks a
+            // phantom parameter: encodability is a property of the type, and
+            // `Subject(fn(Int) Int)` refuses at the `fn` like `Phantom(fn)`
+            // does. No path step — a handle is a leaf the way `Int` is.
+            Nominal::Handle(kind) => {
+                let mut arg_nodes: SmallVec<[NodeIdx; 4]> = SmallVec::new();
+                for a in args {
+                    arg_nodes.push(self.walk(*a, path)?);
+                }
+                let key = Key::Handle(kind, arg_nodes.clone());
+                Ok(self.intern(key, || Node::Identity(kind, arg_nodes.to_vec())))
+            }
 
             Nominal::Builtin(b) => self.builtin(b, args, path),
 
@@ -1114,14 +1165,65 @@ mod tests {
         );
     }
 
+    /// A bodiless type that is none of the five handles: the runtime has no
+    /// table to hand a value of it back from, so it still refuses.
     #[test]
-    fn a_bodiless_type_is_refused() {
+    fn a_bodiless_type_that_is_not_a_handle_is_refused() {
         let mut f = Fixture::new();
-        let pid = TypeId(30);
-        f.types.insert(pid, Nominal::Bodiless);
-        let t = f.con(pid, "Pid", &[]);
+        let native = TypeId(30);
+        f.types.insert(native, Nominal::Bodiless);
+        let t = f.con(native, "Native", &[]);
         let e = refusal(f.build(t));
         assert_eq!(e.reason, Reason::Bodiless);
+    }
+
+    /// A handle is a leaf node of its kind, one per kind per type-argument
+    /// list — `Pid` twice is one node, like `Int` twice is.
+    #[test]
+    fn a_handle_type_describes_as_an_identity_of_its_kind() {
+        let mut f = Fixture::new();
+        let pid = TypeId(30);
+        f.types.insert(pid, Nominal::Handle(HandleKind::Pid));
+        let t = f.con(pid, "Pid", &[]);
+        let d = desc(f.build(t));
+        assert_eq!(
+            d.node(d.root()),
+            Some(&Node::Identity(HandleKind::Pid, Vec::new()))
+        );
+        assert_eq!(d.len(), 1);
+
+        let again = f.con(pid, "Pid", &[]);
+        let pair = f.pool.mk_tuple(&[t, again]);
+        let d = desc(f.build(pair));
+        assert_eq!(d.len(), 2, "one Pid node and the tuple");
+    }
+
+    /// `Subject(msg)`'s argument is described, for the reason a phantom
+    /// parameter is: it is part of the shape, and a `Subject` of something
+    /// unencodable is refused at that something.
+    #[test]
+    fn a_handle_describes_its_type_arguments_and_refuses_through_them() {
+        let mut f = Fixture::new();
+        let subj = TypeId(31);
+        f.types.insert(subj, Nominal::Handle(HandleKind::Subject));
+        let s = f.string();
+        let t = f.con(subj, "Subject", &[s]);
+        let d = desc(f.build(t));
+        let Some(Node::Identity(HandleKind::Subject, args)) = d.node(d.root()) else {
+            panic!("root is not a Subject identity: {:?}", d.node(d.root()))
+        };
+        assert_eq!(args.len(), 1);
+        assert_eq!(d.node(args[0]), Some(&Node::String));
+
+        let int = f.int();
+        let bad = f.pool.mk_fun(&[int], int);
+        let t = f.con(subj, "Subject", &[bad]);
+        let e = refusal(f.build(t));
+        assert_eq!(e.reason, Reason::Function);
+        assert!(
+            e.path.is_empty(),
+            "a handle is a leaf: no path step for its argument"
+        );
     }
 
     /// `Decimal { units Int, scale Int }` is `opaque` in `scarlet/decimal`, and
@@ -1157,14 +1259,16 @@ mod tests {
         assert_eq!(vs[0].fields.len(), 2, "both fields walked");
     }
 
-    /// `Socket { conn Connection, peer Address }` is not itself opaque — its
-    /// constructors are public. It is unencodable because `Connection` is
-    /// host-backed, and the refusal has to say so at the field.
+    /// `Socket { conn Connection, peer Address }` is a public record over a
+    /// host-backed field. Until 2026-08-22 it refused at `Socket.conn` with
+    /// `Bodiless`; now the field is an identity node and the record is a
+    /// `Data` node over it, so the whole record crosses.
     #[test]
-    fn a_public_struct_over_a_host_backed_field_refuses_at_that_field() {
+    fn a_public_struct_over_a_handle_field_describes_the_field_as_an_identity() {
         let mut f = Fixture::new();
         let conn_id = TypeId(40);
-        f.types.insert(conn_id, Nominal::Bodiless);
+        f.types
+            .insert(conn_id, Nominal::Handle(HandleKind::Connection));
         let conn = f.con(conn_id, "Connection", &[]);
 
         let sock = TypeId(41);
@@ -1172,14 +1276,16 @@ mod tests {
         f.data(sock, vec![c]);
 
         let t = f.con(sock, "Socket", &[]);
-        let e = refusal(f.build(t));
-        assert_eq!(e.reason, Reason::Bodiless);
-        assert_eq!(e.ty, conn);
-        let cx = Decls {
-            names: &f.names,
-            types: &f.types,
+        let d = desc(f.build(t));
+        let Some(Node::Data(vs)) = d.node(d.root()) else {
+            panic!("root is not Data: {:?}", d.node(d.root()))
         };
-        assert_eq!(e.path_text(&cx), "Socket.conn");
+        assert_eq!(vs.len(), 1);
+        assert_eq!(vs[0].fields.len(), 1);
+        assert_eq!(
+            d.node(vs[0].fields[0].node),
+            Some(&Node::Identity(HandleKind::Connection, Vec::new()))
+        );
     }
 
     // --- instantiation ---
@@ -1594,6 +1700,42 @@ mod tests {
         );
     }
 
+    /// The fingerprint excludes names, so the kind byte is what keeps the
+    /// handle types apart — a fold of the tag alone would make `decode` at
+    /// `Pid` accept `Connection` bytes — and the argument fold is what keeps
+    /// `Subject(Int)` from being a typed door onto a `Subject(String)`
+    /// mailbox. Each pair differs in exactly one thing.
+    #[test]
+    fn each_handle_kind_and_argument_gets_its_own_fingerprint() {
+        let mut f = Fixture::new();
+        let (pid, subj, conn) = (TypeId(30), TypeId(31), TypeId(32));
+        f.types.insert(pid, Nominal::Handle(HandleKind::Pid));
+        f.types.insert(subj, Nominal::Handle(HandleKind::Subject));
+        f.types
+            .insert(conn, Nominal::Handle(HandleKind::Connection));
+        let s = f.string();
+        let i = f.int();
+        let fp_of = |f: &mut Fixture, t: RTy| desc(f.build(t)).fingerprint();
+
+        let pid_t = f.con(pid, "Pid", &[]);
+        let conn_t = f.con(conn, "Connection", &[]);
+        let subj_s = f.con(subj, "Subject", &[s]);
+        let subj_i = f.con(subj, "Subject", &[i]);
+
+        let (fp_pid, fp_conn) = (fp_of(&mut f, pid_t), fp_of(&mut f, conn_t));
+        let (fp_s, fp_i) = (fp_of(&mut f, subj_s), fp_of(&mut f, subj_i));
+        assert_ne!(
+            fp_pid, fp_conn,
+            "Pid vs Connection: same arguments, other kind"
+        );
+        assert_ne!(fp_pid, fp_s, "Pid vs Subject(String)");
+        assert_ne!(
+            fp_s, fp_i,
+            "Subject(String) vs Subject(Int): same kind, other argument"
+        );
+        assert_eq!(fp_pid, fp_of(&mut f, pid_t), "stable");
+    }
+
     /// A phantom parameter still has to be encodable: encodability is a
     /// property of the type, not of which parameters its constructors read.
     #[test]
@@ -1665,15 +1807,24 @@ mod tests {
     #[test]
     fn to_runtime_carries_the_fingerprint_and_preserves_indices() {
         let d = Desc {
-            nodes: vec![Node::Array(NodeIdx(1)), Node::Int],
+            nodes: vec![
+                Node::Array(NodeIdx(1)),
+                Node::Int,
+                Node::Identity(HandleKind::Subject, vec![NodeIdx(1)]),
+            ],
             root: NodeIdx(0),
             fingerprint: 0xdead_beef_0bad_f00d,
         };
         // Structural equality rather than accessor-by-accessor: the runtime
         // descriptor's readers are crate-private to `scarlet_vm`, and widening
         // them so a test could call them would add public surface for nothing.
+        // The identity's argument is dropped: it lives in the fingerprint.
         let want = RtDesc::new(
-            vec![RtNode::Array(RtIdx(1)), RtNode::Int],
+            vec![
+                RtNode::Array(RtIdx(1)),
+                RtNode::Int,
+                RtNode::Identity(HandleKind::Subject),
+            ],
             RtIdx(0),
             0xdead_beef_0bad_f00d,
         );

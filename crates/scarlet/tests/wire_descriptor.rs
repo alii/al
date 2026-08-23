@@ -111,22 +111,49 @@ fn the_repl_reports_an_unconstrained_decode() {
     );
 }
 
+/// A `Subject` three levels down a record. Refused until 2026-08-22, and the
+/// refusal's path was what this test pinned; now the handle is an identity
+/// node and the whole record checks clean — on the session path, where a
+/// descriptor built during elaboration has to be reachable without emission.
+const SUBJECT_DEEP: &str = "import scarlet/process\n\
+                            import scarlet/wire\n\
+                            pub type Inner {\n\
+                            \tInner(reply process.Subject(String))\n\
+                            }\n\
+                            pub type Middle {\n\
+                            \tMiddle(inner Inner)\n\
+                            }\n\
+                            pub type Outer {\n\
+                            \tOuter(mid Middle)\n\
+                            }\n\
+                            pub fn main() {\n\
+                            \tprintln(wire.encode(Outer(Middle(Inner(process.subject())))))\n\
+                            }\n";
+
+#[test]
+fn a_handle_three_levels_down_checks_clean_on_the_session_path() {
+    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let r = s.check(&parse(SUBJECT_DEEP), None);
+    assert!(r.success(), "{:?}", r.diagnostics);
+}
+
 /// The refusal's FIELD PATH has to survive to the LSP too (T-342 case 2).
 ///
 /// `a_refusal_is_reported_on_the_session_check_path` above pins that *a*
 /// refusal arrives; this pins that the useful half arrives with it. An editor
 /// showing "cannot encode `Outer`" on a nine-field record, with the chain
 /// dropped somewhere between the builder and the diagnostic, is the failure
-/// that would otherwise show up only when someone tried to use it.
+/// that would otherwise show up only when someone tried to use it. The field
+/// at the bottom is a `fn`, the one refusal the ruling leaves for a value; it
+/// was a `Subject` until handles began to encode (`SUBJECT_DEEP` above).
 #[test]
 fn the_refusal_path_survives_to_the_session_check_path() {
     let mut s = IncrementalSession::new(&scarlet::STDLIB);
     let r = s.check(
         &parse(
-            "import scarlet/process\n\
-             import scarlet/wire\n\
+            "import scarlet/wire\n\
              pub type Inner {\n\
-             \tInner(reply process.Subject(String))\n\
+             \tInner(run fn(Int) Int)\n\
              }\n\
              pub type Middle {\n\
              \tMiddle(inner Inner)\n\
@@ -135,14 +162,14 @@ fn the_refusal_path_survives_to_the_session_check_path() {
              \tOuter(mid Middle)\n\
              }\n\
              pub fn main() {\n\
-             \tprintln(wire.encode(Outer(Middle(Inner(process.subject())))))\n\
+             \tprintln(wire.encode(Outer(Middle(Inner(fn(x) { x + 1 })))))\n\
              }\n",
         ),
         None,
     );
-    assert!(!r.success(), "a Subject three levels down must be refused");
+    assert!(!r.success(), "a fn three levels down must be refused");
     assert!(
-        messages(&r).contains("Outer.mid -> Middle.inner -> Inner.reply"),
+        messages(&r).contains("Outer.mid -> Middle.inner -> Inner.run"),
         "got: {}",
         messages(&r)
     );

@@ -201,10 +201,13 @@ pub enum AbiSlot {
     WireMalformed,
     /// A complete value followed by more bytes — `[count Int]`
     WireTrailingBytes,
+    /// A handle minted by another run — `[expected Binary, found Binary]`,
+    /// the two 16-byte run identities, the reader's own first.
+    WireOtherRun,
 }
 
 impl AbiSlot {
-    pub(crate) const COUNT: usize = AbiSlot::WireTrailingBytes as usize + 1;
+    pub(crate) const COUNT: usize = AbiSlot::WireOtherRun as usize + 1;
 
     pub(crate) const ALL: [AbiSlot; AbiSlot::COUNT] = {
         use AbiSlot::*;
@@ -304,6 +307,7 @@ impl AbiSlot {
             WireSchemaMismatch,
             WireMalformed,
             WireTrailingBytes,
+            WireOtherRun,
         ]
     };
 
@@ -405,6 +409,7 @@ impl AbiSlot {
             WireSchemaMismatch => "WireSchemaMismatch",
             WireMalformed => "WireMalformed",
             WireTrailingBytes => "WireTrailingBytes",
+            WireOtherRun => "WireOtherRun",
         }
     }
 
@@ -445,7 +450,8 @@ impl AbiSlot {
             | H1Header
             | H1HeadFlags
             | WireSchemaMismatch
-            | WireMalformed => 2,
+            | WireMalformed
+            | WireOtherRun => 2,
             H1ChunkedDone | CrashSliceOutOfBounds | CrashTypeMismatch | TlsSocket => 3,
             H1ParsedDone | H1RespDone => 6,
         }
@@ -760,6 +766,7 @@ pub(crate) fn slots_for(op: Op) -> &'static [AbiSlot] {
             S::WireSchemaMismatch,
             S::WireMalformed,
             S::WireTrailingBytes,
+            S::WireOtherRun,
         ],
         // `arr[i]`, `binary.index_of`, `binary.parse_int` and
         // `int.from_string` answer with an `Option`; `binary.to_string` and

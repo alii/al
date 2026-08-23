@@ -1660,6 +1660,21 @@ impl Value {
         Value(HDR_PID | (id & PAYLOAD))
     }
 
+    /// [`Value::pid`] for an id that did not come from the runtime's own
+    /// counter — the wire decoder's. `None` when the 48-bit payload cannot
+    /// hold it: masking would name some other process.
+    #[inline]
+    pub(crate) fn try_pid(id: u64) -> Option<Value> {
+        (id <= PAYLOAD).then(|| Value::pid(id))
+    }
+
+    /// [`Value::subject`] for an id from outside the runtime, as
+    /// [`Value::try_pid`] is for pids. The result is the non-owning form.
+    #[inline]
+    pub(crate) fn try_subject(id: u64) -> Option<Value> {
+        (id <= PAYLOAD).then(|| Value::subject(id))
+    }
+
     // These allocate but never collect, so process-heap callers must have
     // ensured capacity. Worst-case sizes are documented for `ensure`.
 

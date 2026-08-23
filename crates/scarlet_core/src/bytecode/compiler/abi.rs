@@ -140,6 +140,7 @@ const BINDINGS: &[Binding] = &[
     (AbiSlot::WireSchemaMismatch, WIRE, "DecodeError",   "SchemaMismatch"),
     (AbiSlot::WireMalformed,      WIRE, "DecodeError",   "Malformed"),
     (AbiSlot::WireTrailingBytes,  WIRE, "DecodeError",   "TrailingBytes"),
+    (AbiSlot::WireOtherRun,       WIRE, "DecodeError",   "OtherRun"),
 ];
 
 impl Compiler {

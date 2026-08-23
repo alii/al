@@ -599,33 +599,29 @@ fn wire_refuses_a_fn_field_for_reconstructibility_not_for_want_of_bytes() {
     );
 }
 
-/// A host-backed type three levels down, and the assertion is the PATH.
+/// An unencodable type three levels down, and the assertion is the PATH.
 ///
 /// This is the case the path machinery exists for: a refusal that says only
 /// "cannot encode `Outer`" leaves the reader to find which of nine fields it
 /// meant. The full chain is asserted, not merely that a refusal happened.
 ///
 /// All three types are `pub` for the reason `FN_FIELD` is: the only rule that
-/// may refuse this program is the one about `Subject`, so the test witnesses
-/// that rule and not the visibility one that stood in front of it until
-/// 2026-08-22.
+/// may refuse this program is the one about `fn`, so the test witnesses that
+/// rule and not the visibility one that stood in front of it until 2026-08-22.
 ///
-/// The reason is pinned in full, and it is not the one this arm shipped with.
-/// It read "the type is host-backed and has no representation outside this
-/// program" — the same overstatement this ticket had to correct for `fn`, by
-/// the same refutation (Erlang writes a pid with `NEW_PID_EXT`), and the owner
-/// has said on #35 that pids and subjects should eventually cross the wire.
-/// Writing that into a golden is how it would have stopped being cheap to
-/// change, so it was corrected in `typed_ir/wire.rs` first and the corrected
-/// text is what is frozen here. T-745 carries what remains: whether "never"
-/// and "not yet" should refuse differently at all.
+/// The field at the bottom was a `Subject(String)` until the same day, when
+/// the five stdlib handles began to cross the wire as identities; that
+/// program now runs, and its round trip is
+/// `wire_handles.rs::a_subject_three_levels_down_round_trips`. The path
+/// witness stays here over the one refusal the ruling leaves for a value,
+/// with the reason pinned in full so the false "no representation" wording
+/// cannot come back.
 #[test]
 fn wire_names_the_whole_field_path_down_to_the_refusing_type() {
     let all = wire_rejects(
-        "import scarlet/process\n\
-         import scarlet/wire\n\
+        "import scarlet/wire\n\
          pub type Inner {\n\
-         \tInner(reply process.Subject(String))\n\
+         \tInner(run fn(Int) Int)\n\
          }\n\
          pub type Middle {\n\
          \tMiddle(inner Inner)\n\
@@ -634,16 +630,16 @@ fn wire_names_the_whole_field_path_down_to_the_refusing_type() {
          \tOuter(mid Middle)\n\
          }\n\
          pub fn main() {\n\
-         \tprintln(wire.encode(Outer(Middle(Inner(process.subject())))))\n\
+         \tprintln(wire.encode(Outer(Middle(Inner(fn(x) { x + 1 })))))\n\
          }\n",
-        "Outer.mid -> Middle.inner -> Inner.reply",
+        "Outer.mid -> Middle.inner -> Inner.run",
     );
     assert!(
-        all.contains("`Subject(String)`"),
+        all.contains("`fn(Int) Int`"),
         "the refusal names the offending sub-type, not the type the call named:\n{all}"
     );
     assert!(
-        all.contains("no constructor a decoder could call"),
+        all.contains("a closure's captures are not fixed by its type"),
         "the reason must be given, and it must be the reconstructibility one:\n{all}"
     );
     assert!(

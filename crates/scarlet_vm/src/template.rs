@@ -558,6 +558,14 @@ pub(crate) mod test_fixture {
             "TrailingBytes",
             &["count"],
         ),
+        (
+            S::WireOtherRun,
+            7424,
+            5,
+            "DecodeError",
+            "OtherRun",
+            &["expected", "found"],
+        ),
     ];
 
     /// Intern every fixture constructor into `fb` and bind its slot.

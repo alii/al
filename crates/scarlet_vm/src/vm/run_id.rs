@@ -28,8 +28,9 @@ pub(crate) struct RunId(u128);
 
 impl RunId {
     /// Width in bytes of [`to_bytes`](Self::to_bytes) and
-    /// [`from_bytes`](Self::from_bytes).
-    const WIDTH: usize = 16;
+    /// [`from_bytes`](Self::from_bytes). The wire decoder reads exactly this
+    /// many bytes for a handle's run.
+    pub(crate) const WIDTH: usize = 16;
 
     /// Draw a fresh identity from the OS CSPRNG, the source `Op::RandomBytes`
     /// reads. Fails only when the OS cannot supply randomness. There is
@@ -41,15 +42,10 @@ impl RunId {
         Ok(RunId(u128::from_be_bytes(bytes)))
     }
 
-    // The wire header is the reader of these two; until it is written, the
-    // tests below are their only callers. Marked one at a time rather than
-    // on the `impl` block, so a method added later is not silently covered.
-    #[allow(dead_code)]
     pub(crate) fn to_bytes(self) -> [u8; Self::WIDTH] {
         self.0.to_be_bytes()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn from_bytes(bytes: [u8; Self::WIDTH]) -> RunId {
         RunId(u128::from_be_bytes(bytes))
     }

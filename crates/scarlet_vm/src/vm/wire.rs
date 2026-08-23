@@ -22,7 +22,7 @@
 //! two ways a decode can stop are kept apart by [`Stop`], because a refusal is
 //! the peer's fault and an internal error is ours.
 //!
-//! What is already fixed here is the outcome vocabulary. `DecodeError`'s five
+//! What is already fixed here is the outcome vocabulary. `DecodeError`'s six
 //! constructors are bound as [`AbiSlot`](crate::abi::AbiSlot)s, so the decoder
 //! builds its refusals the same way every other stdlib error is built, and a
 //! renamed constructor is a compile diagnostic rather than a mis-built value.
@@ -45,15 +45,26 @@
 //! reachable from user code. The walk carries its own work stack, the same rule
 //! [`values_equal`](crate::bytecode::values_equal) and the JSON encoder already
 //! follow. `wire_encode_deep_chain_is_iterative` below is what holds it.
+//!
+//! # A handle is an identity
+//!
+//! A `Pid`, a `Subject` or a socket handle is a number that means something
+//! only to the run that minted it. It goes on the wire as that run's
+//! [`RunId`], the handle's [`HandleKind`] and the number, and a decoder
+//! rebuilds it only when the run is its own: a handle from another run is
+//! refused with `OtherRun`, carrying both identities. A decoded handle IS the
+//! original — the same immediate word — so it compares equal to it and reaches
+//! the same mailbox, process or socket table entry.
 
 use std::sync::Arc;
 
 use crate::TypeId;
 use crate::abi::AbiSlot;
-use crate::bytecode::{MapBacking, Value, ValueView, hamt, hash_value};
-use crate::wire::{WireDesc, WireNode, WireNodeIdx};
+use crate::bytecode::{MapBacking, SocketKind, SocketValue, Value, ValueView, hamt, hash_value};
+use crate::wire::{HandleKind, WireDesc, WireNode, WireNodeIdx};
 
 use super::map::env_entries;
+use super::run_id::RunId;
 use super::{VM, VmError, VmResult, bin_ref, range_len};
 
 /// Format version, written as the third header byte and folded into every
@@ -61,7 +72,11 @@ use super::{VM, VmError, VmResult, bin_ref, range_len};
 /// move together: the fingerprint travels in every message, so an algorithm
 /// change that left this alone would surface at a peer as a `SchemaMismatch`
 /// on a type nobody had touched.
-const VERSION: u8 = 1;
+///
+/// 2 since handles became encodable: the fingerprint gained kind tag 9 for an
+/// identity node, and the body gained the identity row. Version 1 bytes are
+/// `NotWire` here.
+const VERSION: u8 = 2;
 
 /// Leading bytes of every encoded value, so bytes from somewhere else are
 /// `NotWire` rather than a misread.
@@ -69,6 +84,24 @@ const MAGIC: [u8; 2] = *b"SW";
 
 /// `MAGIC` · `VERSION` · fingerprint u64.
 const HEADER_LEN: usize = MAGIC.len() + 1 + 8;
+
+/// The fewest bytes an identity row occupies: the run, the kind byte, and a
+/// one-byte LEB128 id. The only fixed-width part is the run; the id is a
+/// varint like every other number in the body.
+const IDENTITY_MIN_BYTES: u64 = (RunId::WIDTH + 1 + 1) as u64;
+
+/// A socket's number on the wire: its 32-bit pattern, zero-extended. A
+/// scheduler index of 128 or more puts the sign bit on, so sign-extending
+/// would write nine bytes for what is four bits of information.
+fn socket_id_to_wire(id: i32) -> u64 {
+    u64::from(id as u32)
+}
+
+/// The inverse of [`socket_id_to_wire`]: `None` past `u32::MAX`, which no
+/// encoder writes.
+fn socket_id_from_wire(id: u64) -> Option<i32> {
+    u32::try_from(id).ok().map(|x| x as i32)
+}
 
 /// Units of wire work that cost one reduction, where a unit is **one byte
 /// moved or one node walked**.
@@ -156,19 +189,23 @@ fn put_str(out: &mut Vec<u8>, s: &str) {
 ///
 /// Iterative: children go onto an explicit work stack, so nesting depth costs
 /// heap rather than native frames.
-fn encode_value(desc: &WireDesc, root: &Value) -> (Vec<u8>, u64) {
+///
+/// `run` is the identity written beside every handle; it is this run's, and
+/// it is a parameter rather than read here so the walk stays a function of
+/// its inputs.
+fn encode_value(desc: &WireDesc, root: &Value, run: RunId) -> (Vec<u8>, u64) {
     let mut out = Vec::with_capacity(HEADER_LEN);
     out.extend_from_slice(&MAGIC);
     out.push(VERSION);
     out.extend_from_slice(&desc.fingerprint().to_le_bytes());
-    let nodes = write_body(&mut out, desc, root);
+    let nodes = write_body(&mut out, desc, root, run);
     (out, nodes)
 }
 
 /// The body half of [`encode_value`]: the value under `desc.root`, with no
 /// header. Split out because the header is written once and the walk is the
 /// part with an invariant worth naming.
-fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value) -> u64 {
+fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value, run: RunId) -> u64 {
     // A container pushes its children and they are popped before anything
     // queued beside it, so a 100k-deep chain costs O(1) entries here rather
     // than one per level. A 100k-wide container does cost one entry per
@@ -336,6 +373,33 @@ fn write_body(out: &mut Vec<u8>, desc: &WireDesc, root: &Value) -> u64 {
                     pending.push((*n, f.clone()));
                 }
             }
+            // The run, then the kind the VALUE carries, then the number. The
+            // value's kind and not the descriptor's because `Connection` is
+            // the static type of both a TCP stream and a port's stdio stream,
+            // and only the kind field tells the two tables apart. Both forms
+            // of a subject write the same bytes: the bytes are the mailbox id,
+            // and ownership is not a property a copy can carry.
+            WireNode::Identity(kind) => {
+                out.extend_from_slice(&run.to_bytes());
+                let (found, id) = match kind {
+                    HandleKind::Pid => (*kind, v.as_pid()),
+                    HandleKind::Subject => (*kind, v.as_subject()),
+                    HandleKind::Connection
+                    | HandleKind::Listener
+                    | HandleKind::Port
+                    | HandleKind::Tls => match v.as_socket() {
+                        Some(s) => (HandleKind::of_socket(s.kind), Some(socket_id_to_wire(s.id))),
+                        None => (*kind, None),
+                    },
+                };
+                debug_assert!(id.is_some(), "descriptor says a {kind:?} handle");
+                debug_assert!(
+                    kind.admits(found),
+                    "a {found:?} handle under a {kind:?} descriptor"
+                );
+                out.push(found as u8);
+                put_u64(out, id.unwrap_or(0));
+            }
         }
     }
     nodes
@@ -366,6 +430,14 @@ enum Refusal {
     },
     TrailingBytes {
         count: usize,
+    },
+    /// A handle minted by a run that is not this one. Not a `SchemaMismatch`:
+    /// two runs of one binary have identical fingerprints, so the type check
+    /// cannot see this, and the two run identities are what a log line needs.
+    /// `expected` is this run's, `found` is the one in the bytes.
+    OtherRun {
+        expected: RunId,
+        found: RunId,
     },
 }
 
@@ -505,6 +577,7 @@ fn min_bytes(desc: &WireDesc) -> Vec<u64> {
                 WireNode::Int | WireNode::String | WireNode::Binary => 1,
                 WireNode::Array(_) | WireNode::Map(_, _) => 1,
                 WireNode::Float => 8,
+                WireNode::Identity(_) => IDENTITY_MIN_BYTES,
                 WireNode::Tuple(elems) => elems
                     .iter()
                     .fold(0u64, |a, e| a.saturating_add(at(&min, *e))),
@@ -639,6 +712,11 @@ impl VM {
             Refusal::TrailingBytes { count } => {
                 let c = Value::int_in(&mut self.heap, count as i64);
                 self.abi_make(AbiSlot::WireTrailingBytes, &[c])
+            }
+            Refusal::OtherRun { expected, found } => {
+                let e = Value::binary_in(&mut self.heap, expected.to_bytes().to_vec());
+                let f = Value::binary_in(&mut self.heap, found.to_bytes().to_vec());
+                self.abi_make(AbiSlot::WireOtherRun, &[e, f])
             }
         }
     }
@@ -840,6 +918,53 @@ impl VM {
                                 work.push(Step::Read(*f));
                             }
                         }
+                        // Judged in the order the bytes can be wrong: a kind
+                        // the type does not admit is a forgery whatever run
+                        // wrote it; then the run, because another run's number
+                        // is not ours to range-check; then the number.
+                        WireNode::Identity(kind) => {
+                            let mut run = [0u8; RunId::WIDTH];
+                            run.copy_from_slice(r.take(RunId::WIDTH)?);
+                            let kind_off = r.at;
+                            let found = HandleKind::from_byte(r.u8()?).filter(|f| kind.admits(*f));
+                            let Some(found) = found else {
+                                return Err(Refusal::Malformed {
+                                    offset: kind_off,
+                                    what: "handle kind does not match the type",
+                                }
+                                .into());
+                            };
+                            let id_off = r.at;
+                            let id = r.uleb()?;
+                            let (found_run, own) = (RunId::from_bytes(run), self.run_id());
+                            if found_run != own {
+                                return Err(Refusal::OtherRun {
+                                    expected: own,
+                                    found: found_run,
+                                }
+                                .into());
+                            }
+                            let socket = |k| {
+                                socket_id_from_wire(id)
+                                    .map(|id| Value::socket(SocketValue { id, kind: k }))
+                            };
+                            let v = match found {
+                                HandleKind::Pid => Value::try_pid(id),
+                                HandleKind::Subject => Value::try_subject(id),
+                                HandleKind::Connection => socket(SocketKind::Connection),
+                                HandleKind::Listener => socket(SocketKind::Listener),
+                                HandleKind::Port => socket(SocketKind::Port),
+                                HandleKind::Tls => socket(SocketKind::Tls),
+                            };
+                            let Some(v) = v else {
+                                return Err(Refusal::Malformed {
+                                    offset: id_off,
+                                    what: "handle id out of range",
+                                }
+                                .into());
+                            };
+                            done.push(v);
+                        }
                     }
                 }
                 Step::Finish(f) => match f {
@@ -930,7 +1055,7 @@ impl VM {
     pub(super) fn wire_encode(&mut self, operand: i32, reds: &mut i32) -> VmResult<()> {
         let desc = self.wire_desc(operand, "wire.encode")?;
         let v = self.pop()?;
-        let (bytes, nodes) = encode_value(&desc, &v);
+        let (bytes, nodes) = encode_value(&desc, &v, self.run_id());
         charge_wire(reds, bytes.len(), nodes);
         let out = Value::binary_in(&mut self.heap, bytes);
         self.stack.push(out);
@@ -959,11 +1084,28 @@ mod tests {
     use super::super::halt_test_vm;
     use super::*;
 
-    /// The bytes only. Shadows [`super::encode_value`], which also reports the
-    /// nodes it walked for the reduction charge; every byte-format test below
-    /// wants the first half and none of them wants the second.
+    /// A run identity with sixteen distinct bytes, for the byte-format tests,
+    /// which have no VM and want a row they can read. Not any VM's own, so a
+    /// test that decodes these bytes in a VM is asserting `OtherRun`.
+    fn format_run() -> RunId {
+        RunId::from_bytes([
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ])
+    }
+
+    /// The bytes only, written as [`format_run`]. Shadows
+    /// [`super::encode_value`], which also reports the nodes it walked for the
+    /// reduction charge; every byte-format test below wants the first half and
+    /// none of them wants the second.
     fn encode_value(desc: &WireDesc, root: &Value) -> Vec<u8> {
-        super::encode_value(desc, root).0
+        super::encode_value(desc, root, format_run()).0
+    }
+
+    /// The bytes as `vm` itself would write them: its own run identity, so
+    /// the same VM can decode a handle out of them.
+    fn encode_in(vm: &VM, desc: &WireDesc, root: &Value) -> Vec<u8> {
+        super::encode_value(desc, root, vm.run_id()).0
     }
 
     /// Reductions spent by one `wire.encode` through the op, budget-in minus
@@ -1006,7 +1148,7 @@ mod tests {
     /// The eleven header bytes every value carries: `SW`, version, then the
     /// fingerprint little-endian.
     fn header() -> Vec<u8> {
-        let mut h = vec![b'S', b'W', 1];
+        let mut h = vec![b'S', b'W', 2];
         h.extend_from_slice(&0x0807_0605_0403_0201u64.to_le_bytes());
         h
     }
@@ -1379,6 +1521,23 @@ mod tests {
             .expect("bound");
         assert_eq!(variant_of(&trailing), "TrailingBytes");
         assert_eq!(payload(&trailing)[0].as_int().expect("Int payload"), 3);
+
+        let own = vm.run_id();
+        let mine = Value::binary_in(&mut vm.heap, own.to_bytes().to_vec());
+        let theirs = Value::binary_in(&mut vm.heap, format_run().to_bytes().to_vec());
+        let other_run = vm
+            .abi_make(AbiSlot::WireOtherRun, &[mine, theirs])
+            .expect("bound");
+        assert_eq!(variant_of(&other_run), "OtherRun");
+        let runs: Vec<Vec<u8>> = payload(&other_run)
+            .iter()
+            .map(|v| bin_ref(v).full_bytes().into_owned())
+            .collect();
+        assert_eq!(
+            runs,
+            vec![own.to_bytes().to_vec(), format_run().to_bytes().to_vec()],
+            "payload order is normative: this run, then the bytes' run"
+        );
     }
 
     /// The whole path, through the ops rather than through the walks: a
@@ -1474,9 +1633,10 @@ mod tests {
 
     /// Encode then decode, and assert the value survived. `values_equal` is
     /// Scarlet's own `==`, so this asserts what a program would observe rather
-    /// than that two heap graphs happen to match.
+    /// than that two heap graphs happen to match. Encoded as `vm`'s own run,
+    /// since a handle from any other run is refused.
     fn round_trips(vm: &mut VM, d: &WireDesc, v: &Value) {
-        let bytes = encode_value(d, v);
+        let bytes = encode_in(vm, d, v);
         let back = ok_of(vm, d, &bytes);
         assert!(
             values_equal(v, &back),
@@ -1726,6 +1886,16 @@ mod tests {
         bad_version[2] = VERSION + 1;
         bad_version.push(0);
         assert_eq!(refusal_of(&mut vm, &d, &bad_version).0, "NotWire");
+
+        // Version 1, which the canary builds from 0.0.1-canary.20260820.2050
+        // to 0.0.1-canary.20260822.2154 wrote. Its fingerprints were computed
+        // under a different algorithm, so reading it as 2 would turn every
+        // old message into a `SchemaMismatch` on a type nobody touched;
+        // refusing the version is the honest answer.
+        let mut v1 = header();
+        v1[2] = 1;
+        v1.push(0);
+        assert_eq!(refusal_of(&mut vm, &d, &v1).0, "NotWire");
 
         // Magic alone. Kept because it is a real case, not because it
         // discriminates: see the note above.
@@ -2016,6 +2186,213 @@ mod tests {
         let m = min_bytes(&list_desc());
         assert_eq!(m[0], 1, "tag byte, then Nil's zero fields");
         assert_eq!(m[1], 1, "zigzag LEB128 of 0");
+    }
+
+    // --- handles ---------------------------------------------------------
+
+    /// A handle's row in the format table: the run, the kind byte, the id.
+    #[test]
+    fn identity_is_run_then_kind_then_id() {
+        let d = desc(vec![WireNode::Identity(HandleKind::Pid)]);
+        let mut want = format_run().to_bytes().to_vec();
+        want.push(4);
+        want.push(7);
+        assert_eq!(body(&d, &Value::pid(7)), want);
+        // The id is a varint like every other number in the body.
+        let mut wide = format_run().to_bytes().to_vec();
+        wide.push(4);
+        wide.extend_from_slice(&[0x80, 0x01]);
+        assert_eq!(body(&d, &Value::pid(128)), wide);
+    }
+
+    /// Ownership is not a property a copy can carry, so the owning box and
+    /// the non-owning immediate write the same bytes, and what comes back is
+    /// the immediate: a decoded subject is a handle to the mailbox, never a
+    /// second owner of it.
+    #[test]
+    fn both_forms_of_a_subject_encode_alike_and_decode_to_the_immediate() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Identity(HandleKind::Subject)]);
+        let closer = Arc::new(crate::bytecode::SubjectCloser(Box::new(|_| {})));
+        let owned = Value::owned_subject_in(&mut vm.heap, 9, &closer);
+        let plain = Value::subject(9);
+        assert!(owned.is_heap(), "premise: the owning form is a box");
+        assert_eq!(body(&d, &owned), body(&d, &plain));
+
+        let bytes = encode_in(&vm, &d, &owned);
+        let back = ok_of(&mut vm, &d, &bytes);
+        assert!(!back.is_heap(), "a decoded subject is the non-owning form");
+        assert_eq!(back.as_subject(), Some(9));
+        assert!(values_equal(&plain, &back));
+    }
+
+    /// The kind byte is the VALUE's. `Port.conn` is typed `Connection` and
+    /// holds a `SocketKind::Port` handle, so the descriptor says `Connection`
+    /// and the byte must say `Port` — and the port must come back as a port.
+    #[test]
+    fn a_socket_writes_the_kind_the_value_carries_and_gets_it_back() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Identity(HandleKind::Connection)]);
+        let port = Value::socket(SocketValue {
+            id: 4,
+            kind: SocketKind::Port,
+        });
+        let bytes = body(&d, &port);
+        assert_eq!(bytes[RunId::WIDTH], HandleKind::Port as u8);
+        round_trips(&mut vm, &d, &port);
+        let bytes = encode_in(&vm, &d, &port);
+        let back = ok_of(&mut vm, &d, &bytes);
+        assert_eq!(back.as_socket().map(|s| s.kind), Some(SocketKind::Port));
+    }
+
+    /// Every kind round trips to a value `==` to the original, including a
+    /// socket whose scheduler byte sets the sign bit.
+    #[test]
+    fn handles_of_every_kind_round_trip_in_their_own_run() {
+        let mut vm = halt_test_vm();
+        let pid = desc(vec![WireNode::Identity(HandleKind::Pid)]);
+        for id in [0u64, 1, 12345, (1 << 48) - 1] {
+            round_trips(&mut vm, &pid, &Value::pid(id));
+        }
+        let subject = desc(vec![WireNode::Identity(HandleKind::Subject)]);
+        round_trips(&mut vm, &subject, &Value::subject((7 << 28) | 3));
+        for (kind, wire_kind) in [
+            (SocketKind::Connection, HandleKind::Connection),
+            (SocketKind::Listener, HandleKind::Listener),
+            (SocketKind::Tls, HandleKind::Tls),
+        ] {
+            let d = desc(vec![WireNode::Identity(wire_kind)]);
+            for id in [0i32, 5, (200 << 24) | 9, i32::MIN, -1] {
+                round_trips(&mut vm, &d, &Value::socket(SocketValue { id, kind }));
+            }
+        }
+    }
+
+    /// The arm this ticket exists for: a handle from another run is refused
+    /// with both identities, this run's first.
+    #[test]
+    fn a_handle_from_another_run_is_refused_with_both_run_ids() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Identity(HandleKind::Pid)]);
+        let foreign = encode_value(&d, &Value::pid(3));
+        assert_ne!(
+            format_run(),
+            vm.run_id(),
+            "premise: the bytes are another run's"
+        );
+
+        let (name, payload) = refusal_of(&mut vm, &d, &foreign);
+        assert_eq!(name, "OtherRun");
+        let runs: Vec<Vec<u8>> = payload
+            .iter()
+            .map(|v| bin_ref(v).full_bytes().into_owned())
+            .collect();
+        assert_eq!(
+            runs,
+            vec![
+                vm.run_id().to_bytes().to_vec(),
+                format_run().to_bytes().to_vec()
+            ]
+        );
+    }
+
+    /// A kind the descriptor's type does not admit is a forgery whatever run
+    /// wrote it — judged before the run, so it is `Malformed` even on a
+    /// foreign handle. `Tls` under `Connection` is the case that matters:
+    /// the type system keeps the two sockets apart and the wire must too.
+    #[test]
+    fn a_handle_kind_the_type_does_not_admit_is_malformed() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![WireNode::Identity(HandleKind::Subject)]);
+        let mut bytes = encode_in(&vm, &d, &Value::subject(9));
+        bytes[HEADER_LEN + RunId::WIDTH] = HandleKind::Pid as u8;
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[0].as_int().expect("Int payload"),
+            (HEADER_LEN + RunId::WIDTH) as i64
+        );
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "handle kind does not match the type"
+        );
+
+        let conn = desc(vec![WireNode::Identity(HandleKind::Connection)]);
+        let mut tls = encode_in(
+            &vm,
+            &conn,
+            &Value::socket(SocketValue {
+                id: 1,
+                kind: SocketKind::Connection,
+            }),
+        );
+        tls[HEADER_LEN + RunId::WIDTH] = HandleKind::Tls as u8;
+        assert_eq!(refusal_of(&mut vm, &conn, &tls).0, "Malformed");
+
+        // And a byte no kind has, with the run forged too: still the kind.
+        let mut nobody = encode_value(&d, &Value::subject(9));
+        nobody[HEADER_LEN + RunId::WIDTH] = 0xff;
+        assert_eq!(refusal_of(&mut vm, &d, &nobody).0, "Malformed");
+    }
+
+    /// An id the value form cannot hold is refused, not masked and not a
+    /// panic: 2^48 for an immediate, 2^32 for a socket.
+    #[test]
+    fn a_handle_id_out_of_range_is_malformed_not_a_panic() {
+        let mut vm = halt_test_vm();
+        let pid = desc(vec![WireNode::Identity(HandleKind::Pid)]);
+        let mut bytes = header();
+        bytes.extend_from_slice(&vm.run_id().to_bytes());
+        bytes.push(HandleKind::Pid as u8);
+        put_u64(&mut bytes, 1 << 48);
+        let (name, payload) = refusal_of(&mut vm, &pid, &bytes);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "handle id out of range"
+        );
+        assert_eq!(
+            payload[0].as_int().expect("Int payload"),
+            (HEADER_LEN + RunId::WIDTH + 1) as i64
+        );
+
+        let conn = desc(vec![WireNode::Identity(HandleKind::Listener)]);
+        let mut bytes = header();
+        bytes.extend_from_slice(&vm.run_id().to_bytes());
+        bytes.push(HandleKind::Listener as u8);
+        put_u64(&mut bytes, 1 << 32);
+        assert_eq!(refusal_of(&mut vm, &conn, &bytes).0, "Malformed");
+        // The largest socket id does decode, so the bound is exact.
+        let mut ok = header();
+        ok.extend_from_slice(&vm.run_id().to_bytes());
+        ok.push(HandleKind::Listener as u8);
+        put_u64(&mut ok, u64::from(u32::MAX));
+        assert_eq!(
+            ok_of(&mut vm, &conn, &ok).as_socket().map(|s| s.id),
+            Some(-1)
+        );
+    }
+
+    /// An identity's minimum is its fixed run and kind plus a one-byte id,
+    /// and the count guard uses it: a short input claiming a thousand pids is
+    /// refused up front. With the arm reading zero this would pass the guard
+    /// and be discovered as `Truncated` several allocations later.
+    #[test]
+    fn a_forged_count_of_handles_is_refused_by_the_identity_minimum() {
+        let mut vm = halt_test_vm();
+        let d = desc(vec![
+            WireNode::Array(WireNodeIdx(1)),
+            WireNode::Identity(HandleKind::Pid),
+        ]);
+        assert_eq!(min_bytes(&d)[1], 18, "run 16, kind 1, id 1");
+        let mut bytes = header();
+        put_u64(&mut bytes, 1000);
+        let (name, payload) = refusal_of(&mut vm, &d, &bytes);
+        assert_eq!(name, "Malformed");
+        assert_eq!(
+            payload[1].as_str().expect("Str payload"),
+            "count is larger than the remaining input can hold"
+        );
     }
 
     // --- the reduction charge --------------------------------------------
