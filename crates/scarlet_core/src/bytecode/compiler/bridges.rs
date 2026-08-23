@@ -364,21 +364,18 @@ impl wire::WireCtx for Compiler {
         if let Some(b) = self.wire_builtin(id) {
             return wire::Nominal::Builtin(b);
         }
-        let Some(info) = self.env.lookup_type_info_by_id(id) else {
-            // Every type the check walk admitted has a registered head, so
-            // this is the builder's own abort, not a shape: until 2026-08-22
-            // it answered the refusal a bodiless type got, and now that a
-            // bodiless type describes as uninhabited the same answer would
-            // write nothing for a value that exists.
-            wire::wire_bug("a type with no registered declaration")
-        };
+        let info = self.env.declaration(id);
         match info.body {
             TypeBody::External => match self.wire_handle(id) {
                 Some(kind) => wire::Nominal::Handle(kind),
                 None => wire::Nominal::Uninhabited,
             },
-            // Reading a body in this state is a compiler bug (`TypeBody`),
-            // and the argument above applies.
+            // A body is attached by the pass that declares it — `External`
+            // in Pass 1, `Alias` in Pass 2, `Custom` in Pass 4 — and an
+            // imported declaration is exported only after its own body is.
+            // Elaboration, the only caller, starts once every pass has run,
+            // so a body still in this state is the checker's bug; describing
+            // it as anything would write nothing for a value that exists.
             TypeBody::Unresolved => wire::wire_bug("a type whose body is not yet hydrated"),
             TypeBody::Alias { target } => wire::Nominal::Alias(self.resolve_rty(pool, target)),
             TypeBody::Custom { variants, .. } => {

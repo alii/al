@@ -96,17 +96,11 @@ use super::{VM, VmError, VmResult, bin_ref, range_len};
 /// change that left this alone would surface at a peer as a `SchemaMismatch`
 /// on a type nobody had touched.
 ///
-/// 3 since closures became encodable: the fingerprint gained kind tag 10 for
-/// a closure node, and the body gained the closure row and the capture table.
-/// 2 was handles (kind tag 9, the identity row). Version 1 and 2 bytes are
-/// `NotWire` here.
-///
-/// Still 3 after the uninhabited node (kind tag 14) and the `Bool` fix under
-/// the typed walk: neither moved a fingerprint or a byte any version-3 peer
-/// holds — the first gave a descriptor to types that previously had none,
-/// and the second made `True`/`False` produce bytes where before they
-/// produced a panic or a truncated body. A bump is owed only by a change to
-/// an EXISTING output.
+/// `scarlet_core::typed_ir::wire::FINGERPRINT_VERSION` is this same number.
+/// A bump is owed only by a change to an EXISTING output — a fingerprint or
+/// a byte some peer already holds; a change that only adds an output (the
+/// uninhabited node, kind tag 14, under 3) does not move it. Bytes carrying
+/// a version this runtime does not read are `NotWire`.
 const VERSION: u8 = 3;
 
 /// Leading bytes of every encoded value, so bytes from somewhere else are
@@ -2513,20 +2507,16 @@ mod tests {
         bad_version.push(0);
         assert_eq!(refusal_of(&mut vm, &d, &bad_version).0, "NotWire");
 
-        // Version 1, which the canary builds from 0.0.1-canary.20260820.2050
-        // to 0.0.1-canary.20260822.2154 wrote. Its fingerprints were computed
-        // under a different algorithm, so reading it as 2 would turn every
-        // old message into a `SchemaMismatch` on a type nobody touched;
-        // refusing the version is the honest answer.
+        // A version this runtime does not read. Its fingerprints were
+        // computed under a different algorithm, so reading it as 3 would turn
+        // every such message into a `SchemaMismatch` on a type nobody
+        // touched; refusing the version is the honest answer.
         let mut v1 = header();
         v1[2] = 1;
         v1.push(0);
         assert_eq!(refusal_of(&mut vm, &d, &v1).0, "NotWire");
 
-        // Version 2, written by whatever was built from master between
-        // c8c23db (handles, 2026-08-22) and closures landing. Its fingerprints
-        // folded FINGERPRINT_VERSION 2 and no kind tag 10, so the same
-        // argument holds: refuse the version rather than misread the shape.
+        // The other unread version, for the same reason.
         let mut v2 = header();
         v2[2] = 2;
         v2.push(0);

@@ -180,8 +180,8 @@ fn a_zero_capture_closure_round_trips_and_is_called() {
     );
 }
 
-/// A record with a `fn` field — `type_errors.rs`'s refusal fixture until
-/// 2026-08-22 — crosses with its closure, and the closure still runs.
+/// A record with a `fn` field crosses with its closure, and the closure
+/// still runs.
 #[test]
 fn a_record_with_a_fn_field_round_trips_and_the_field_is_called() {
     run_outputs(

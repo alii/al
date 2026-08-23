@@ -703,6 +703,25 @@ impl TypeEnv {
         self.type_info_by_id.get(&id).copied()
     }
 
+    /// The declaration `id` was minted for. Total for every id a type node
+    /// carries: [`register_type_head`](Self::register_type_head) mints an id
+    /// and stores its `TypeInfo` in the same step; a declaration from another
+    /// module is stored by the import, or seeded from the precompiled stdlib
+    /// below the session watermark, before a scheme naming it is bound; and
+    /// the by-id registry shrinks only through
+    /// [`truncate_to`](Self::truncate_to), which the session runs only after
+    /// evicting every module compiled past that watermark. An id that misses
+    /// was never registered — the pass-ordering bug
+    /// [`set_type_body`](Self::set_type_body) refuses, not a state a compile
+    /// reaches.
+    #[allow(clippy::panic)]
+    pub fn declaration(&self, id: TypeId) -> TypeInfo {
+        *self
+            .type_info_by_id
+            .get(&id)
+            .unwrap_or_else(|| panic!("declaration: type id {id} was never registered"))
+    }
+
     pub fn suggest_name(&self, name: &str) -> Option<String> {
         let mut best: Option<&String> = None;
         // rustc's heuristic: accept distance <= max(len, 3) / 3. `best_dist` is

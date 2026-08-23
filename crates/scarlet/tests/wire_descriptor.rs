@@ -12,9 +12,8 @@ use scarlet::bytecode::IncrementalSession;
 mod common;
 use common::parse;
 
-/// A record with a `fn` field. Refused on this path until 2026-08-22; it
-/// checks clean now that closures cross, and is kept as the control that
-/// says so.
+/// A record with a `fn` field: closures cross, so it checks clean, and it is
+/// the control that says no refusal fires on one.
 const HANDLER: &str = "import scarlet/wire\n\
                        type Handler {\n\
                        \tHandler(name String, run fn(Int) Int)\n\
@@ -23,11 +22,10 @@ const HANDLER: &str = "import scarlet/wire\n\
                        \tprintln(wire.encode(Handler('h', fn(x) { x + 1 })))\n\
                        }\n";
 
-/// A record over a user-declared bodiless type, which no VM table backs.
-/// Refused on this path until 2026-08-22, when a type no value has became a
-/// node no value reaches; it checks clean now and is kept as the control
-/// that says so. `send` is never called — nothing can construct a `Native`
-/// — which is fine on a path that never runs.
+/// A record over a user-declared bodiless type, which no VM table backs: a
+/// type no value has is a node no value reaches, so it checks clean, and it
+/// is the control that says so. `send` is never called — nothing can
+/// construct a `Native` — which is fine on a path that never runs.
 const NATIVE: &str = "import scarlet/wire\n\
                       pub type Native\n\
                       type Handler {\n\
@@ -40,9 +38,9 @@ const NATIVE: &str = "import scarlet/wire\n\
                       \t_ = send\n\
                       }\n";
 
-/// A generic function encoding its parameter: the one refusal the ruling
-/// leaves, about inference rather than a value, and so the fixture every
-/// refusal test here is reached through.
+/// A generic function encoding its parameter: the one refusal, about
+/// inference rather than a value, and so the fixture every refusal test here
+/// is reached through.
 const GENERIC: &str = "import scarlet/wire\n\
                        fn send(xs Array(a)) Binary {\n\
                        \twire.encode(xs)\n\
@@ -50,6 +48,20 @@ const GENERIC: &str = "import scarlet/wire\n\
                        pub fn main() {\n\
                        \t_ = send\n\
                        }\n";
+
+/// A record whose field is a stdlib type this program never names or imports:
+/// `Port`'s stream is a `scarlet/net/socket.Connection`. On this path the
+/// stdlib is the precompiled blob, so `Connection`'s declaration is answered
+/// from the by-id registry the session seeds at construction, not from
+/// anything `import scarlet/os/port` brought in.
+const PORT: &str = "import scarlet/os/port\n\
+                    import scarlet/wire\n\
+                    fn send(p port.Port) Binary {\n\
+                    \twire.encode(p)\n\
+                    }\n\
+                    pub fn main() {\n\
+                    \t_ = send\n\
+                    }\n";
 
 const EVENT: &str = "import scarlet/wire\n\
                      type Event {\n\
@@ -83,8 +95,7 @@ fn a_refusal_is_reported_on_the_session_check_path() {
 }
 
 /// A field of a type no value has is a node no value reaches, and the record
-/// around it checks clean: this buffer was the refusal fixture above until
-/// 2026-08-22.
+/// around it checks clean.
 #[test]
 fn a_bodiless_field_checks_clean_on_the_session_path() {
     let mut s = IncrementalSession::new(&scarlet::STDLIB);
@@ -101,12 +112,21 @@ fn an_encodable_type_still_checks_clean_on_the_session_path() {
     assert!(r.success(), "{:?}", r.diagnostics);
 }
 
-/// A `fn` field is one of those now: it was this file's refusal fixture
-/// until 2026-08-22, and the same buffer checks clean on the same path.
+/// A `fn` field is one of those: the same buffer checks clean on the same
+/// path.
 #[test]
 fn a_fn_field_checks_clean_on_the_session_path() {
     let mut s = IncrementalSession::new(&scarlet::STDLIB);
     let r = s.check(&parse(HANDLER), None);
+    assert!(r.success(), "{:?}", r.diagnostics);
+}
+
+/// A stdlib type reached only through a field of an imported type is
+/// described from the seeded registry, and the record checks clean.
+#[test]
+fn a_stdlib_type_reached_only_through_a_field_checks_clean_on_the_session_path() {
+    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let r = s.check(&parse(PORT), None);
     assert!(r.success(), "{:?}", r.diagnostics);
 }
 
@@ -161,9 +181,8 @@ fn the_repl_reports_an_unconstrained_decode() {
     );
 }
 
-/// A `Subject` three levels down a record. Refused until 2026-08-22, and the
-/// refusal's path was what this test pinned; now the handle is an identity
-/// node and the whole record checks clean — on the session path, where a
+/// A `Subject` three levels down a record: the handle is an identity node
+/// and the whole record checks clean — on the session path, where a
 /// descriptor built during elaboration has to be reachable without emission.
 const SUBJECT_DEEP: &str = "import scarlet/process\n\
                             import scarlet/wire\n\
@@ -187,19 +206,16 @@ fn a_handle_three_levels_down_checks_clean_on_the_session_path() {
     assert!(r.success(), "{:?}", r.diagnostics);
 }
 
-/// The refusal's PATH has to survive to the LSP too (T-342 case 2).
+/// The refusal's PATH has to survive to the LSP too.
 ///
 /// `a_refusal_is_reported_on_the_session_check_path` above pins that *a*
 /// refusal arrives; this pins that the useful half arrives with it. An editor
 /// showing "cannot encode" on a nine-position shape, with the chain dropped
 /// somewhere between the builder and the diagnostic, is the failure that
 /// would otherwise show up only when someone tried to use it. The type at
-/// the bottom is the unknown one, the one refusal the ruling leaves; it was
-/// a `Subject` until handles began to encode (`SUBJECT_DEEP` above), a `fn`
-/// until closures did, and a user-declared bodiless type until that became a
-/// node no value reaches. The shape is positional because a `Data` node's
-/// arguments are walked before its fields, so `Outer(a)` refuses at the
-/// argument with no path.
+/// the bottom is the unknown one, the one refusal. The shape is positional
+/// because a `Data` node's arguments are walked before its fields, so
+/// `Outer(a)` refuses at the argument with no path.
 #[test]
 fn the_refusal_path_survives_to_the_session_check_path() {
     let mut s = IncrementalSession::new(&scarlet::STDLIB);

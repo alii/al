@@ -89,9 +89,8 @@ fn a_subject_round_trips_and_a_message_sent_through_the_copy_arrives() {
     );
 }
 
-/// The fixture `type_errors.rs` refused until 2026-08-22, run: a `Subject`
-/// three levels down a public record crosses with the record, and the
-/// identity at the bottom is still the mailbox it was.
+/// A `Subject` three levels down a public record crosses with the record,
+/// and the identity at the bottom is still the mailbox it was.
 #[test]
 fn a_subject_three_levels_down_round_trips() {
     run_outputs(

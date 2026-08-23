@@ -8,45 +8,37 @@
  * bad bytes are a DecodeError, never a wrong-shaped value and never a crash.
  *
  * That is also why encode is total and returns a plain Binary rather than a
- * Result: every value is encodable. The one refusal the ruling below leaves
- * standing is about inference, not about a value - a type variable at
- * `decode` with nothing to fix it is answered with "annotate the binding",
- * because the descriptor is a function of the static type and a polymorphic
- * one has none.
+ * Result: every value is encodable. The one refusal is about inference, not
+ * about a value - a type variable at `decode` with nothing to fix it is
+ * answered with "annotate the binding", because the descriptor is a function
+ * of the static type and a polymorphic one has none.
  *
- * Decided 2026-08-22 (owner): "Beam allows for everything to be encoded.
- * There is nothing that shouldn't be." A closure encodes as the identity of
- * the run that made it, its function index and its captures, each capture
- * described inline. Pid, Subject, Connection, TlsConnection and net.Server
- * encode as an identity - run, kind, number - that only the run that minted
- * it can use, the way a pid from another node is recognisably foreign on
- * BEAM. An opaque type from another module encodes and decodes by its
- * constructors, and its invariants are that module's to re-check on the
- * values it is handed. Issue #35 was closed on the same ruling.
- *
- * Implementation status at this commit: all three rules are in force. An
- * opaque type crosses whenever its fields do. The five handles cross as
- * identities, and a handle decoded in the run that minted it IS that handle
- * - `==` to the original, reaching the same process, mailbox or socket; a
- * handle from another run is refused at decode with OtherRun (below),
- * carrying both run identities. A closure crosses as the run that made it,
- * its function index and its captures, each capture carrying its own tag
- * ("The capture format" below), and decodes in that run to a closure `==`
- * to the original, running the same body over the same captures; from
- * another run it is OtherRun too, because a function index names a row in
- * one program's table and nothing else. The ruling's fail-at-USE reading -
- * a foreign handle or closure that decodes and is only found dead when used
- * - is a later relaxation, not this one. So is letting a closure cross
- * between two runs of ONE binary, which needs a program hash beside the run
- * identity and is clustering work.
+ * Everything encodes, as on BEAM, and the criterion throughout is
+ * reconstructibility - never whether a value "has bytes". An opaque type
+ * from another module crosses whenever its fields do, by its constructors,
+ * and its invariants are that module's to re-check on the values it is
+ * handed. Pid, Subject, Connection, TlsConnection and net.Server cross as
+ * an identity - run, kind, number - that only the run that minted it can
+ * use, the way a pid from another node is recognisably foreign on BEAM: a
+ * handle decoded in the run that minted it IS that handle, `==` to the
+ * original and reaching the same process, mailbox or socket, and a handle
+ * from another run is refused at decode with OtherRun (below), carrying
+ * both run identities. A closure crosses as the run that made it, its
+ * function index and its captures, each capture carrying its own tag ("The
+ * capture format" below), and decodes in that run to a closure `==` to the
+ * original, running the same body over the same captures; from another run
+ * it is OtherRun too, because a function index names a row in one program's
+ * table and nothing else. A foreign handle or closure is refused at decode,
+ * never admitted and found dead at use; and a closure does not cross
+ * between two runs of one binary, which would need a program hash beside
+ * the run identity.
  *
  * A type no value has - a `pub type Name` with no body that is none of the
- * five handles - is described rather than refused (2026-08-22, closing the
- * last refusal about a value): an uninhabited node, never written and never
- * read, that stands only where the walk never goes - the phantom argument
- * of Tagged(Native), the element of an empty Array(Native), the payload of
- * a None. The bytes of such a record are its other fields', which is what
- * the refusal was turning away.
+ * five handles - is described rather than refused: an uninhabited node,
+ * never written and never read, that stands only where the walk never goes
+ * - the phantom argument of Tagged(Native), the element of an empty
+ * Array(Native), the payload of a None. The bytes of such a record are its
+ * other fields'.
  *
  * A decoded Subject is a handle to the mailbox and never a second owner of
  * it: only the process that called `subject()` can receive, and the mailbox
@@ -141,19 +133,16 @@
  * fingerprint or a byte layout to a type that had none because it refused,
  * does not: no number any peer holds moves, so nothing can be misread.
  *
- * Version history. 1 had kind tags 1-8 and no identity row. 2 (2026-08-22)
- * added Identity 9 and the identity row below. 3 (2026-08-22) added Closure
- * 10, the closure row and the capture format; later the same day, and
- * without a bump by the rule above, Uninhabited 14 - a type no value has
- * describes instead of refusing, and no fingerprint a version-3 peer holds
- * moved. 3 also fixes Bool under the typed encoder, which never produced
- * valid bytes before (a debug panic, or a body with nothing in it); no
- * version bump because no valid output changed. Version 1 was written by the
- * canary builds tagged 0.0.1-canary.20260820.2050 through
- * 0.0.1-canary.20260822.2154 - it was not confined to unreleased trees.
- * Version 2 was written by whatever was built from master between c8c23db
- * and this change landing. Bytes from either are NotWire to a version 3
- * reader rather than misread.
+ * Version history, as what a reader of the bytes needs to know:
+ *
+ *   1  kind tags 1-8, no identity row. Written by the canary builds
+ *      0.0.1-canary.20260820.2050 through 0.0.1-canary.20260822.2154.
+ *   2  Identity 9 and the identity row.
+ *   3  Closure 10, the closure row and the capture format. Added under 3
+ *      without a bump, by the rule above: Uninhabited 14, and Bool under the
+ *      typed encoder (a 3 writer without it produced no valid Bool bytes).
+ *
+ * Bytes from 1 or 2 are NotWire to a 3 reader rather than misread.
  *
  * # The byte format
  *
@@ -243,9 +232,9 @@
  * kind (Bool is Data to a descriptor and an immediate to the runtime; Nil
  * here is the runtime's own nil word, which the prelude's Nil - a
  * one-constructor cell, Data to both - is not; a range is an Array(Int)
- * that stores no elements) and take the numbers after, 11 to 13. The node
- * kind added since, Uninhabited, took 14 rather than reuse them, so a new
- * tag in either table takes 15.
+ * that stores no elements) and take the numbers after, 11 to 13.
+ * Uninhabited is 14 rather than a reuse of them, so a new tag in either
+ * table takes 15.
  *
  *    1  Int      zigzag LEB128. One row for both runtime forms: a boxed
  *                integer is an Int outside 48 bits and nothing more

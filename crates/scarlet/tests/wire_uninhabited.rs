@@ -2,9 +2,7 @@
 //! `pub type Native` with no body that is none of the five handles is an
 //! uninhabited node in a descriptor: never written, never read, and met only
 //! where the walk never goes — the phantom argument of `Tagged(Native)`, the
-//! element of an empty `Array(Native)`, the payload of a `None`. Until
-//! 2026-08-22 the compiler refused every one of these programs at the `wire`
-//! call, for a node no value reaches.
+//! element of an empty `Array(Native)`, the payload of a `None`.
 //!
 //! The decoder's half is that bytes steering it into the node are refused as
 //! `Malformed` and never a panic. The only way to reach one is to forge a
@@ -15,9 +13,8 @@ mod common;
 
 use common::run_outputs;
 
-/// `Tagged(Native)` over an `Int`: the refusal this change closes. The body
-/// is the `Int` alone — one byte, zigzag 7 — and the value round trips to
-/// `==` with its field intact.
+/// `Tagged(Native)` over an `Int`. The body is the `Int` alone — one byte,
+/// zigzag 7 — and the value round trips to `==` with its field intact.
 #[test]
 fn a_record_with_a_phantom_bodiless_argument_round_trips() {
     run_outputs(

@@ -1,17 +1,14 @@
 //! `Bool` across the typed wire, end to end through `al run`. `True` and
 //! `False` are a two-constructor `Data` type to the descriptor and an
-//! immediate to the runtime, and until 2026-08-22 the typed encoder's `Data`
-//! arm asserted a cell: `wire.encode(True)` panicked in debug (`descriptor
-//! says Data`, `vm/wire.rs:447`, measured on 890b3dd with rc 101 for both
-//! polarities) and in release wrote no body, so `decode` reported
-//! `Truncated`. Inside a closure's captures `Bool` always worked — it has a
-//! tag of its own there (`wire_closures.rs`) — so this is the typed path
-//! alone.
+//! immediate to the runtime, so the typed encoder's `Data` arm must meet an
+//! unboxed constructor and find its tag through the pre-built word; a
+//! cell-only arm panics in debug and writes no body in release, and `decode`
+//! then reports `Truncated`. Inside a closure's captures `Bool` has a tag of
+//! its own (`wire_closures.rs`), so this is the typed path alone.
 //!
 //! `Nil` is the control: the prelude's `Nil` is a frozen cell at runtime
 //! (`Op::PushNil` pushes the `Unit` ABI slot's pre-built constructor), so it
-//! took the ordinary `Data` path all along and round-tripped before this
-//! change, at zero body bytes.
+//! takes the ordinary `Data` path, at zero body bytes.
 
 mod common;
 

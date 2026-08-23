@@ -568,13 +568,11 @@ const FN_FIELD: &str = "import scarlet/wire\n\
                         }\n";
 
 ok_case! {
-    /// A record with a `fn` field checks clean. This program was THE refusal
-    /// fixture of this section until 2026-08-22, on the claim that a closure's
-    /// captures are not fixed by its type and so no decoder could rebuild one.
-    /// They are not fixed by it, and the answer was to describe each capture
-    /// inline rather than to refuse — so the fixture is kept, as the control
-    /// that says the refusal is gone. Its round trip, called through the
-    /// decoded copy, is `wire_closures.rs`.
+    /// A record with a `fn` field checks clean: a closure's captures are not
+    /// fixed by its type, and each is described inline at encode time rather
+    /// than refused. This is the control that says no refusal fires on a
+    /// `fn` field; its round trip, called through the decoded copy, is
+    /// `wire_closures.rs`.
     a_fn_field_is_admitted_since_closures_cross: (FN_FIELD),
 }
 
@@ -584,15 +582,11 @@ ok_case! {
 /// "cannot encode" leaves the reader to find which of nine positions it
 /// meant. The full chain is asserted, not merely that a refusal happened.
 ///
-/// The type at the bottom was a `Subject(String)` until 2026-08-22, when the
-/// five stdlib handles began to cross the wire as identities; a `fn` until
-/// closures did the same day; and a user-declared bodiless type until that
-/// became a node no value reaches, later the same day. All three programs
-/// now run or check clean. What the ruling leaves is the unknown type, so
-/// the path witness stands on a generic function encoding its parameter —
-/// and on a positional shape, because a `Data` node's type arguments are
-/// walked before its fields: `Outer(a)` refuses at the argument with no
-/// path, and a field can hold nothing a type was not applied to.
+/// The unknown type is the one refusal, so the path witness stands on a
+/// generic function encoding its parameter — and on a positional shape,
+/// because a `Data` node's type arguments are walked before its fields:
+/// `Outer(a)` refuses at the argument with no path, and a field can hold
+/// nothing a type was not applied to.
 #[test]
 fn wire_names_the_whole_path_down_to_the_refusing_type() {
     let all = wire_rejects(
@@ -632,9 +626,9 @@ const TAGGED_NATIVE: &str = "import scarlet/wire\n\
                              }\n";
 
 ok_case! {
-    /// `Tagged(Native)` over an `Int` field checks clean. Refused until
-    /// 2026-08-22 at the phantom argument, for a node no value reaches: the
-    /// bytes are the `Int`'s. Its round trip is `wire_uninhabited.rs`.
+    /// `Tagged(Native)` over an `Int` field checks clean: the phantom
+    /// argument is a node no value reaches, and the bytes are the `Int`'s.
+    /// Its round trip is `wire_uninhabited.rs`.
     a_phantom_of_a_bodiless_type_is_admitted: (TAGGED_NATIVE),
 }
 
@@ -693,16 +687,15 @@ mod unknown_payload {
 
 /// An opaque type from another module crosses the wire in BOTH directions.
 ///
-/// Decided 2026-08-22 (owner): a decoder rebuilds a value by constructor, and
-/// a module's invariants are that module's to re-check on the values it is
-/// handed — the visibility refusal that stood here is gone. The symmetry is
-/// still the point: encoding accepts exactly what decoding accepts, so both
-/// halves run rather than one. `Decimal`'s fields are two `Int`s and
-/// `scarlet/decimal` never exports its constructor, so nothing but the old
-/// rule could have refused these programs, and nothing but its removal can be
-/// admitting them. These go through `al run`, not `al check`: the descriptor
-/// accepting is half of it, and the decoder finding a template for a
-/// constructor this module cannot name is the other half.
+/// A decoder rebuilds a value by constructor, and a module's invariants are
+/// that module's to re-check on the values it is handed; visibility is not
+/// consulted. The symmetry is the point: encoding accepts exactly what
+/// decoding accepts, so both halves run rather than one. `Decimal`'s fields
+/// are two `Int`s and `scarlet/decimal` never exports its constructor, so
+/// only a visibility rule could refuse these programs. These go through
+/// `al run`, not `al check`: the descriptor accepting is half of it, and the
+/// decoder finding a template for a constructor this module cannot name is
+/// the other half.
 mod opaque_from_another_module {
     use crate::common::run_outputs;
 
@@ -730,8 +723,7 @@ mod opaque_from_another_module {
     }
 
     /// The decode half alone, with the payload type fixed only by the
-    /// declaring module's reader — the same way the refused version of this
-    /// test fixed it.
+    /// declaring module's reader.
     #[test]
     fn decode_is_typed_by_the_declaring_modules_reader() {
         run_outputs(
@@ -750,12 +742,8 @@ mod opaque_from_another_module {
 }
 
 ok_case! {
-    /// The inside-the-module half of the opaque pair, kept as it was written
-    /// when it was THE CONTROL for a visibility rule: a module may encode its
-    /// OWN opaque type. That rule is gone (2026-08-22) and `Token` is admitted
-    /// the way every type is — by its constructors — so this now witnesses
-    /// that removing the rule did not take the declaring module's own case
-    /// with it.
+    /// The inside-the-module half of the opaque pair: a module encodes its
+    /// OWN opaque type the way every type is encoded, by its constructors.
     a_module_may_encode_its_own_opaque_type: (
         "import scarlet/binary\nimport scarlet/wire\npub opaque type Token {\n\tToken(id Int)\n}\npub fn main() {\n\tprintln(binary.byte_size(wire.encode(Token(1))))\n}\n"
     ),

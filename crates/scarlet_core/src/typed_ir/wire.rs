@@ -16,24 +16,21 @@
 //! precisely what must not be allowed: a program that can write what it can
 //! never read has been handed a corruption it will find later, elsewhere.
 //!
-//! Decided 2026-08-22 (owner): every value is encodable — "Beam allows for
-//! everything to be encoded. There is nothing that shouldn't be." The one
-//! refusal that survives the ruling is [`Reason::TypeVariable`], a fact about
-//! inference rather than about a value. An opaque type from another module is
-//! described by its constructors like any other type, and that is in force
-//! here. So is the handle rule: `Pid`, `Subject`, `Connection`,
-//! `TlsConnection` and `net.Server` are described as an [`Node::Identity`],
-//! which the runtime writes as the run that minted the handle, its kind and
-//! its number. So is the closure rule: a function type is a
+//! Every value is encodable. The one refusal is [`Reason::TypeVariable`], a
+//! fact about inference rather than about a value. An opaque type from
+//! another module is described by its constructors like any other type.
+//! `Pid`, `Subject`, `Connection`, `TlsConnection` and `net.Server` are
+//! described as an [`Node::Identity`], which the runtime writes as the run
+//! that minted the handle, its kind and its number. A function type is a
 //! [`Node::Closure`] over its parameter and return types, which the runtime
 //! writes as the run that made the closure, its function index and its
 //! captures — each capture carrying its own tag, because the static type
-//! fixes neither how many there are nor what they hold. And a type no value
-//! has — a `pub type Name` with no body that is none of the five handles — is
-//! a [`Node::Uninhabited`] rather than a refusal: nothing can be written or
-//! read for it, and it is met only in a position the walk never takes, a
-//! phantom argument or a field of a constructor no value is. Refusing it
-//! refused `Tagged(Native)` over an `Int` field, whose bytes are the `Int`.
+//! fixes neither how many there are nor what they hold. A type no value has —
+//! a `pub type Name` with no body that is none of the five handles — is a
+//! [`Node::Uninhabited`]: nothing can be written or read for it, and it is
+//! met only in a position the walk never takes, a phantom argument or a field
+//! of a constructor no value is, so `Tagged(Native)` over an `Int` field
+//! describes and its bytes are the `Int`.
 //!
 //! Type identity is always [`TypeId`], never `Con.name`: a user's `type Parsed`
 //! and `scarlet/http/h1.Parsed` share a name and are different types.
@@ -323,8 +320,8 @@ pub enum Nominal {
     Alias(RTy),
     /// Declared constructors, walked wherever the type is met. Visibility is
     /// not consulted: an opaque type from another module crosses whenever its
-    /// fields do, and a decoder rebuilds it by constructor (decided
-    /// 2026-08-22, owner). Its invariants are that module's to re-check.
+    /// fields do, and a decoder rebuilds it by constructor. Its invariants
+    /// are that module's to re-check.
     Data {
         ctors: Vec<CtorDecl>,
     },
@@ -336,9 +333,7 @@ pub enum Nominal {
     /// `pub type Name` with no body that is not a [`Nominal::Handle`]. No
     /// Scarlet expression builds a value of it — it declares no constructor
     /// and no VM table hands one out — so there is nothing to write and
-    /// nothing to read, and it describes as [`Node::Uninhabited`]. It was a
-    /// refusal (`Reason::Bodiless`) until 2026-08-22, which refused
-    /// `Tagged(Native)` for a node that no value ever reaches.
+    /// nothing to read, and it describes as [`Node::Uninhabited`].
     Uninhabited,
 }
 
@@ -387,14 +382,12 @@ pub enum Step {
 ///
 /// One arm, and it is a fact about inference rather than about a value: the
 /// descriptor is a function of the static type, and a polymorphic type has
-/// none. Every arm about a VALUE has left this enum under the 2026-08-22
-/// ruling that everything encodes. `Function` went first — it said a
-/// closure's captures were not fixed by its type, which is true, and the
-/// answer was to describe each capture inline. `Bodiless` went last: a type
+/// none. No arm is about a value, because every value encodes: a closure's
+/// captures are not fixed by its type, so each is described inline; a type
 /// no value has is a node the walk never reaches, not a reason to refuse the
-/// record around it. None of them ever claimed the value had no byte
-/// representation — that criterion is wrong, and Erlang writes funs
-/// (`NEW_FUN_EXT`) and pids (`NEW_PID_EXT`).
+/// record around it. The criterion is reconstructibility, never whether a
+/// byte representation exists — Erlang writes funs (`NEW_FUN_EXT`) and pids
+/// (`NEW_PID_EXT`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     TypeVariable,
@@ -593,12 +586,10 @@ enum Key {
 /// in every message, so an algorithm change that kept the version would show up
 /// at a peer as a `SchemaMismatch` on a type nobody had touched.
 ///
-/// 3 since kind tag 10 (a closure node) joined the algorithm, as 2 was for
-/// tag 9 (an identity node); the format version byte in
-/// `scarlet_vm::vm::wire` moved with it both times. Kind tag 14 (an
-/// uninhabited node) joined under 3 without a bump: a change bumps when it
-/// alters a fingerprint some peer already holds, and types that describe as
-/// tag 14 had no fingerprint before — they refused.
+/// The format version byte in `scarlet_vm::vm::wire` is this same number.
+/// A change bumps it when it alters a fingerprint some peer already holds;
+/// a change that only gives a fingerprint to a type that had none — kind
+/// tag 14, an uninhabited node, is one — does not.
 const FINGERPRINT_VERSION: u64 = 3;
 
 const FINGERPRINT_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -1021,9 +1012,7 @@ mod tests {
         }
 
         /// `pub type Native` — a user-declared bodiless type, which no VM
-        /// table backs and no expression builds. Described as uninhabited
-        /// since 2026-08-22; until then the one refusal about a VALUE, and
-        /// what the path tests were reached through.
+        /// table backs and no expression builds. Described as uninhabited.
         fn native(&mut self) -> RTy {
             self.types.insert(NATIVE, Nominal::Uninhabited);
             self.con(NATIVE, "Native", &[])
@@ -1195,10 +1184,9 @@ mod tests {
         assert_eq!(d.node(vs[1].fields[0].node), Some(&Node::Int));
     }
 
-    /// Refused until 2026-08-22 on the claim that a closure's captures are
-    /// not fixed by its type. They are not, and the answer was to describe
-    /// each capture inline: the type is now a node over its signature, and
-    /// the signature is the whole of what the descriptor holds.
+    /// A closure's captures are not fixed by its type, so each is described
+    /// inline at encode time: the type is a node over its signature, and the
+    /// signature is the whole of what the descriptor holds.
     #[test]
     fn a_function_describes_as_a_closure_over_its_signature() {
         let mut f = Fixture::new();
@@ -1278,9 +1266,9 @@ mod tests {
 
     /// A bodiless type that is none of the five handles: no expression builds
     /// a value of it and no table hands one back, so it is a node no value
-    /// reaches rather than a refusal. Refused as `Bodiless` until 2026-08-22.
-    /// Two such types are one node, as two `Int`s are: the fingerprint
-    /// excludes names and there is no structure to tell them apart.
+    /// reaches rather than a refusal. Two such types are one node, as two
+    /// `Int`s are: the fingerprint excludes names and there is no structure
+    /// to tell them apart.
     #[test]
     fn a_bodiless_type_that_is_not_a_handle_describes_as_uninhabited() {
         let mut f = Fixture::new();
@@ -1379,14 +1367,11 @@ mod tests {
     /// `Decimal { units Int, scale Int }` is `opaque` in `scarlet/decimal`, and
     /// this is the shape it reaches the builder in from ANY module: a
     /// [`Nominal::Data`] carries its constructors and nothing about who may
-    /// call them. Until 2026-08-22 it carried two visibility bits and the
-    /// builder refused on them outside the declaring module; the ruling that
-    /// every value encodes removed the bits, so a refusal on visibility is no
-    /// longer expressible here. What this witnesses is the descriptor that
-    /// results — one constructor, both fields — and that it is the same one
-    /// the declaring module gets. The end-to-end half, a real `Decimal`
-    /// crossing from outside `scarlet/decimal`, is
-    /// `type_errors.rs::opaque_from_another_module`.
+    /// call them, so a refusal on visibility is not expressible here. What
+    /// this witnesses is the descriptor that results — one constructor, both
+    /// fields — and that it is the same one the declaring module gets. The
+    /// end-to-end half, a real `Decimal` crossing from outside
+    /// `scarlet/decimal`, is `type_errors.rs::opaque_from_another_module`.
     #[test]
     fn an_opaque_type_is_described_by_its_constructors_from_any_module() {
         let mut f = Fixture::new();
@@ -1410,8 +1395,7 @@ mod tests {
     }
 
     /// `Socket { conn Connection, peer Address }` is a public record over a
-    /// host-backed field. Until 2026-08-22 it refused at `Socket.conn` with
-    /// `Bodiless`; now the field is an identity node and the record is a
+    /// host-backed field: the field is an identity node and the record is a
     /// `Data` node over it, so the whole record crosses.
     #[test]
     fn a_public_struct_over_a_handle_field_describes_the_field_as_an_identity() {
@@ -1542,12 +1526,10 @@ mod tests {
 
     // --- the path a refusal carries ---
     //
-    // Each of these was reached through a `fn` field until 2026-08-22, when
-    // closures began to cross, then through `Native` until a bodiless type
-    // became a node the same day. What is left to reach them through is the
-    // unknown type, and that is the diagnostic the path serves now: it says
-    // where the unknown is. One limit, stated so nobody looks for the
-    // program that reaches it: `data` walks a type's ARGUMENTS before its
+    // The unknown type is the one refusal, so it is what every path here is
+    // reached through, and the diagnostic the path serves is "where the
+    // unknown is". One limit, stated so nobody looks for the program that
+    // reaches it: `data` walks a type's ARGUMENTS before its
     // fields, and a field can only hold a variable the type was applied to,
     // so a real compile refuses `Outer(a)` at the argument with no path. A
     // `Field` step is therefore reached only by this fixture, which can
@@ -2044,9 +2026,8 @@ mod tests {
         assert_eq!(desc(f.build(native)).fingerprint(), 0xf5c9_9787_f8eb_c4ff);
     }
 
-    /// The diagnostic the path serves now that the unknown type is the one
-    /// refusal: at the root it is an instruction, and through a path it
-    /// names the unknown and where it is.
+    /// The diagnostic the path serves: at the root it is an instruction, and
+    /// through a path it names the unknown and where it is.
     #[test]
     fn a_type_variable_through_a_path_is_reported_with_the_path() {
         let mut f = Fixture::new();
@@ -2073,23 +2054,17 @@ mod tests {
     /// THE CRITERION, asserted over every reason rather than one at a time.
     ///
     /// A golden pins the text a refusal has today; this pins the property all
-    /// of them must have, so a seventh refusal added next year is covered
-    /// without anyone remembering to widen a test. The property is the one
-    /// #35's `fn` rationale got wrong and T-342 exists to stop recurring:
-    /// **the criterion is reconstructibility, never the existence of a byte
-    /// encoding.** Erlang writes funs (`NEW_FUN_EXT`) and pids
-    /// (`NEW_PID_EXT`); they fail at the far end, not at the wire.
+    /// of them must have, so a refusal added next year is covered without
+    /// anyone remembering to widen a test. The property: **the criterion is
+    /// reconstructibility, never the existence of a byte encoding.** Erlang
+    /// writes funs (`NEW_FUN_EXT`) and pids (`NEW_PID_EXT`); they fail at
+    /// the far end, not at the wire.
     ///
     /// WHAT THIS DOES NOT WITNESS, said plainly rather than implied: it cannot
     /// prove `ALL` lists every variant. The `match` below is exhaustive, so a
     /// new `Reason` stops this file compiling until someone edits here — but
     /// they could satisfy the compiler without extending `ALL`. The match is a
     /// tripwire that brings the author to this test, not a proof of coverage.
-    ///
-    /// `ALL` was three until 2026-08-22; `Function` left it when closures
-    /// began to cross and `Bodiless` when a type no value has became a node,
-    /// which is the criterion winning twice rather than two cases of it
-    /// being dropped.
     #[test]
     fn no_refusal_claims_the_type_has_no_representation() {
         const ALL: [Reason; 1] = [Reason::TypeVariable];
@@ -2100,8 +2075,7 @@ mod tests {
             let text = r.describe();
             assert!(
                 !text.contains("no representation"),
-                "{r:?} claims the type has no representation, which is the criterion \
-                 #35 got wrong: {text}"
+                "{r:?} claims the type has no representation, which is not the criterion: {text}"
             );
             assert!(
                 !text.contains("cannot be represented"),

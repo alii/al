@@ -1107,12 +1107,10 @@ mod wire_descriptors {
     /// that witnesses the node table's contents rather than just that some
     /// number was attached.
     ///
-    /// **The operand indexes `Program.wire_descs`, not the constant pool.**
-    /// Until T-732 it named a pooled `Int` holding the shape fingerprint,
-    /// because the node table had no runtime form; it now names the table
-    /// directly and the fingerprint rides inside the descriptor. Asserting
-    /// against `constants` here would still find *a* value and would say
-    /// nothing about wire.
+    /// **The operand indexes `Program.wire_descs`, not the constant pool**,
+    /// and the fingerprint rides inside the descriptor. Asserting against
+    /// `constants` here would still find *a* value and would say nothing
+    /// about wire.
     #[test]
     fn an_encode_carries_a_descriptor_and_mints_that_type_s_constructors() {
         let p = emitted(&format!("{EVENT}b = wire.encode(Left('a'))\nb\n"));
@@ -1227,9 +1225,8 @@ mod wire_descriptors {
         );
     }
 
-    /// A `fn` field was refused here until 2026-08-22, on the claim that a
-    /// closure's captures are not fixed by its type. They are not, and the
-    /// answer was to describe each capture inline: the program compiles and
+    /// A closure's captures are not fixed by its type and are described
+    /// inline at encode time, so a record with a `fn` field compiles and
     /// carries a descriptor and the record's constructor like any other.
     #[test]
     fn a_fn_field_compiles_and_carries_a_descriptor() {
@@ -1252,9 +1249,8 @@ mod wire_descriptors {
 
     /// The arm that silently does not happen if the builder is run at
     /// emission instead: `check` never emits, so a diagnostic raised there is
-    /// invisible in an editor. Reached through the unknown type — the one
-    /// refusal the ruling leaves; it was a `fn` field until 2026-08-22 and a
-    /// user-declared bodiless type until later that day.
+    /// invisible in an editor. Reached through the unknown type, the one
+    /// refusal.
     #[test]
     fn the_refusal_reaches_the_check_only_path() {
         let src = "import scarlet/wire\n\
@@ -1273,7 +1269,6 @@ mod wire_descriptors {
 
     /// A record over a user-declared bodiless type compiles and carries a
     /// descriptor: the field is a node no value reaches, not a refusal.
-    /// This program was the refusal fixture above until 2026-08-22.
     #[test]
     fn a_bodiless_field_compiles_and_carries_a_descriptor() {
         let src = "import scarlet/wire\n\
@@ -1286,6 +1281,32 @@ mod wire_descriptors {
         assert_eq!(errors(src, true), "", "check-only admits it");
         let p = emitted(src);
         assert_eq!(p.wire_descs.len(), 1, "one type crossed, one descriptor");
+    }
+
+    /// A descriptor is built for a type this program never names or imports:
+    /// `Port`'s stream is a `scarlet/net/socket.Connection`, and nothing here
+    /// imports `scarlet/net/socket`. This harness compiles the stdlib from
+    /// source, so `Connection` was registered by `scarlet/net/socket`'s own
+    /// compile in this env and its by-id entry outlived that module's frame;
+    /// the import of `scarlet/os/port` brought in `Port` alone. That is one
+    /// of the two ways a declaration the builder meets is registered, and
+    /// `wire_descriptor.rs` witnesses the other, the seeded stdlib.
+    #[test]
+    fn a_stdlib_type_reached_only_through_a_field_is_described() {
+        let src = "import scarlet/os/port
+                   import scarlet/wire
+                   fn send(p port.Port) Binary { wire.encode(p) }
+                   send
+";
+        assert_eq!(errors(src, true), "", "check-only admits it");
+        let p = emitted(src);
+        assert_eq!(p.wire_descs.len(), 1, "one type crossed, one descriptor");
+        assert_eq!(
+            p.wire_templates.len(),
+            1,
+            "Port's one constructor is minted and Connection, an identity, mints none: {:?}",
+            p.wire_templates
+        );
     }
 
     /// The prelude's `True` and `False` are minted unboxed: the pre-built
